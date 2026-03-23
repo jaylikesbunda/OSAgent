@@ -693,20 +693,7 @@ async fn delete_workspace(
 
 async fn browse_workspace_path(
 ) -> Result<Json<WorkspaceBrowseResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let picked = tokio::task::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .set_title("Choose workspace folder")
-            .pick_folder()
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to open folder picker: {}", e),
-            }),
-        )
-    })?;
+    let picked = pick_workspace_folder().await?;
 
     let path = picked.ok_or_else(|| {
         (
@@ -720,6 +707,34 @@ async fn browse_workspace_path(
     Ok(Json(WorkspaceBrowseResponse {
         path: path.to_string_lossy().to_string(),
     }))
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+async fn pick_workspace_folder() -> Result<Option<PathBuf>, (StatusCode, Json<ErrorResponse>)> {
+    tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Choose workspace folder")
+            .pick_folder()
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to open folder picker: {}", e),
+            }),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn pick_workspace_folder() -> Result<Option<PathBuf>, (StatusCode, Json<ErrorResponse>)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ErrorResponse {
+            error: "Workspace folder picker is not available on this platform".to_string(),
+        }),
+    ))
 }
 
 async fn get_session_workspace(
