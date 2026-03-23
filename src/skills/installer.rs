@@ -1,6 +1,6 @@
 use crate::error::OSAgentError;
 use crate::skills::bundle::{get_icons_base_dir, get_skills_base_dir, BundleManifest, SkillBundle};
-use crate::skills::config::{get_config_base_dir, SkillConfig, SkillConfigStore};
+use crate::skills::config::{get_config_base_dir, SkillConfigStore};
 use crate::skills::store::{SkillInfo, SkillStore};
 use std::path::PathBuf;
 

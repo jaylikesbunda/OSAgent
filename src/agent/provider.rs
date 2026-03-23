@@ -1,5 +1,6 @@
 use crate::config::ProviderConfig;
 use crate::error::{OSAgentError, Result};
+use crate::oauth::{extract_account_id, OAuthStorage, OAuthTokenEntry};
 use crate::storage::models::{Message, ToolCall};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -15,6 +16,8 @@ use super::model_catalog::ModelCatalog;
 const MAX_RETRIES: u32 = 4;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 const MAX_TOOL_SCHEMA_TOKENS: usize = 8_000;
+const OPENAI_CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -87,9 +90,16 @@ pub struct StreamEvent {
     pub done: bool,
 }
 
+struct ResolvedRequestAuth {
+    request_url: String,
+    api_key: String,
+    extra_headers: Vec<(String, String)>,
+}
+
 pub struct OpenAICompatibleProvider {
     client: reqwest::Client,
     config: ProviderConfig,
+    oauth_storage: Option<OAuthStorage>,
     context_window: RwLock<Option<usize>>,
     context_window_attempted: RwLock<bool>,
     model_override: RwLock<Option<String>>,
@@ -104,6 +114,14 @@ impl OpenAICompatibleProvider {
     pub fn with_catalog(
         config: ProviderConfig,
         catalog: Option<Arc<ModelCatalog>>,
+    ) -> Result<Self> {
+        Self::with_catalog_and_oauth(config, catalog, None)
+    }
+
+    pub fn with_catalog_and_oauth(
+        config: ProviderConfig,
+        catalog: Option<Arc<ModelCatalog>>,
+        oauth_storage: Option<OAuthStorage>,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3600))
@@ -134,6 +152,7 @@ impl OpenAICompatibleProvider {
         Ok(Self {
             client,
             config,
+            oauth_storage,
             context_window: RwLock::new(None),
             context_window_attempted: RwLock::new(false),
             model_override: RwLock::new(None),
@@ -184,6 +203,175 @@ impl OpenAICompatibleProvider {
 }
 
 impl OpenAICompatibleProvider {
+    fn oauth_enabled(&self) -> bool {
+        self.config.auth_type.as_deref() == Some("oauth")
+    }
+
+    fn completion_url(base_url: &str) -> String {
+        let trimmed = base_url.trim_end_matches('/');
+        if trimmed.ends_with("/chat/completions") {
+            trimmed.to_string()
+        } else {
+            format!("{}/chat/completions", trimmed)
+        }
+    }
+
+    fn oauth_entry(&self) -> Result<Option<OAuthTokenEntry>> {
+        let Some(storage) = &self.oauth_storage else {
+            return Ok(None);
+        };
+        storage
+            .get_token(&self.config.provider_type)
+            .map_err(|e| OSAgentError::Provider(format!("Failed to load OAuth token: {}", e)))
+    }
+
+    fn save_oauth_entry(&self, entry: OAuthTokenEntry) -> Result<()> {
+        let Some(storage) = &self.oauth_storage else {
+            return Ok(());
+        };
+        storage
+            .set_token(&self.config.provider_type, entry)
+            .map_err(|e| OSAgentError::Provider(format!("Failed to save OAuth token: {}", e)))
+    }
+
+    fn oauth_expired(entry: &OAuthTokenEntry) -> bool {
+        entry
+            .expires_at
+            .map(|expires_at| expires_at <= chrono::Utc::now().timestamp() + 30)
+            .unwrap_or(false)
+    }
+
+    async fn refresh_openai_oauth(&self, entry: &OAuthTokenEntry) -> Result<OAuthTokenEntry> {
+        let refresh_token = entry.refresh_token.as_ref().ok_or_else(|| {
+            OSAgentError::Provider("OpenAI OAuth token is missing a refresh token".to_string())
+        })?;
+
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            access_token: String,
+            #[serde(default)]
+            refresh_token: String,
+            #[serde(default)]
+            expires_in: Option<i64>,
+            #[serde(default)]
+            id_token: Option<String>,
+        }
+
+        let response = self
+            .client
+            .post("https://auth.openai.com/oauth/token")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(
+                [
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token.as_str()),
+                    ("client_id", OPENAI_CODEX_CLIENT_ID),
+                ]
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+                .collect::<Vec<_>>()
+                .join("&"),
+            )
+            .send()
+            .await
+            .map_err(OSAgentError::Http)?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(OSAgentError::Provider(format!(
+                "Failed to refresh OpenAI OAuth token: {} {}",
+                status,
+                body
+            )));
+        }
+
+        let data: TokenResponse = response.json().await.map_err(OSAgentError::Http)?;
+        let refreshed = OAuthTokenEntry {
+            access_token: data.access_token.clone(),
+            refresh_token: if data.refresh_token.trim().is_empty() {
+                entry.refresh_token.clone()
+            } else {
+                Some(data.refresh_token)
+            },
+            expires_at: data
+                .expires_in
+                .map(|secs| chrono::Utc::now().timestamp() + secs),
+            scopes: entry.scopes.clone(),
+            account_id: extract_account_id(data.id_token.as_deref(), Some(&data.access_token))
+                .or_else(|| entry.account_id.clone()),
+        };
+        self.save_oauth_entry(refreshed.clone())?;
+        Ok(refreshed)
+    }
+
+    async fn resolve_oauth_entry(&self) -> Result<Option<OAuthTokenEntry>> {
+        let Some(entry) = self.oauth_entry()? else {
+            return Ok(None);
+        };
+
+        if self.config.provider_type == "openai" && Self::oauth_expired(&entry) {
+            return self.refresh_openai_oauth(&entry).await.map(Some);
+        }
+
+        Ok(Some(entry))
+    }
+
+    async fn resolve_request_auth(&self) -> Result<ResolvedRequestAuth> {
+        let mut request_url = Self::completion_url(&self.config.base_url);
+        let mut api_key = self.config.api_key.clone();
+        let mut extra_headers = Vec::new();
+
+        if let Some(headers) = &self.config.custom_headers {
+            for (key, value) in headers {
+                extra_headers.push((key.clone(), value.clone()));
+            }
+        }
+
+        if !self.oauth_enabled() {
+            return Ok(ResolvedRequestAuth {
+                request_url,
+                api_key,
+                extra_headers,
+            });
+        }
+
+        let Some(entry) = self.resolve_oauth_entry().await? else {
+            return Ok(ResolvedRequestAuth {
+                request_url,
+                api_key,
+                extra_headers,
+            });
+        };
+
+        api_key = entry.access_token.clone();
+        match self.config.provider_type.as_str() {
+            "openai" => {
+                request_url = OPENAI_CODEX_API_ENDPOINT.to_string();
+                if let Some(account_id) = entry.account_id.clone() {
+                    extra_headers.push(("ChatGPT-Account-Id".to_string(), account_id));
+                }
+                extra_headers.push(("originator".to_string(), "osagent".to_string()));
+            }
+            "github-copilot" => {
+                request_url = "https://api.githubcopilot.com/chat/completions".to_string();
+                extra_headers.push(("Editor-Version".to_string(), "OSAgent/1.0".to_string()));
+                extra_headers.push(("User-Agent".to_string(), "OSAgent/1.0".to_string()));
+                extra_headers.push((
+                    "Openai-Intent".to_string(),
+                    "conversation-edits".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        Ok(ResolvedRequestAuth {
+            request_url,
+            api_key,
+            extra_headers,
+        })
+    }
+
     fn should_send_tools(messages: &[Message], tools: &[ToolDefinition]) -> bool {
         if tools.is_empty() {
             return false;
@@ -425,7 +613,8 @@ impl OpenAICompatibleProvider {
             serde_json::to_string_pretty(&request_body).unwrap_or_default()
         );
 
-        let api_key = &self.config.api_key;
+        let request_auth = self.resolve_request_auth().await?;
+        let api_key = &request_auth.api_key;
         let api_key_preview = if api_key.len() > 10 {
             format!("{}...{}", &api_key[..7], &api_key[api_key.len() - 4..])
         } else if api_key.is_empty() {
@@ -436,13 +625,13 @@ impl OpenAICompatibleProvider {
 
         info!(
             "Sending request to {} with model {}, API key: {}",
-            self.config.base_url, self.config.model, api_key_preview
+            request_auth.request_url, self.config.model, api_key_preview
         );
 
         let response = {
             let mut req = self
                 .client
-                .post(format!("{}/chat/completions", self.config.base_url))
+                .post(&request_auth.request_url)
                 .header("Content-Type", "application/json")
                 .timeout(Duration::from_secs(3600));
 
@@ -456,6 +645,10 @@ impl OpenAICompatibleProvider {
                 req = req
                     .header("HTTP-Referer", "https://osagent.local")
                     .header("X-Title", "OSA");
+            }
+
+            for (key, value) in &request_auth.extra_headers {
+                req = req.header(key, value);
             }
 
             req.json(&request_body).send().await.map_err(|e| {
@@ -519,54 +712,46 @@ impl OpenAICompatibleProvider {
             choice["finish_reason"]
         );
 
-        let tool_calls = if let Some(calls) = message["tool_calls"].as_array() {
-            Some(
-                calls
-                    .iter()
-                    .filter_map(|call| {
-                        let id = call["id"].as_str()?.to_string();
-                        let name = call["function"]["name"].as_str()?.to_string();
-                        let arguments = call["function"]["arguments"]
-                            .as_str()
-                            .and_then(|s| serde_json::from_str(s).ok())
-                            .unwrap_or(serde_json::json!({}));
+        let tool_calls = message["tool_calls"].as_array().map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let id = call["id"].as_str()?.to_string();
+                    let name = call["function"]["name"].as_str()?.to_string();
+                    let arguments = call["function"]["arguments"]
+                        .as_str()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or(serde_json::json!({}));
 
-                        Some(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        })
+                    Some(ToolCall {
+                        id,
+                        name,
+                        arguments,
                     })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+                })
+                .collect()
+        });
 
         let finish_reason = choice["finish_reason"]
             .as_str()
             .unwrap_or("stop")
             .to_string();
 
-        let usage = if let Some(usage_obj) = response_json.get("usage") {
-            Some(TokenUsage {
-                input: usage_obj["prompt_tokens"].as_u64().unwrap_or(0) as usize,
-                output: usage_obj["completion_tokens"].as_u64().unwrap_or(0) as usize,
-                total: usage_obj["total_tokens"].as_u64().unwrap_or(0) as usize,
-                cached_read: usage_obj
-                    .get("cached_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize),
-                cached_write: None,
-                reasoning: usage_obj
-                    .get("completion_tokens_details")
-                    .and_then(|v| v.get("reasoning_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize),
-            })
-        } else {
-            None
-        };
+        let usage = response_json.get("usage").map(|usage_obj| TokenUsage {
+            input: usage_obj["prompt_tokens"].as_u64().unwrap_or(0) as usize,
+            output: usage_obj["completion_tokens"].as_u64().unwrap_or(0) as usize,
+            total: usage_obj["total_tokens"].as_u64().unwrap_or(0) as usize,
+            cached_read: usage_obj
+                .get("cached_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            cached_write: None,
+            reasoning: usage_obj
+                .get("completion_tokens_details")
+                .and_then(|v| v.get("reasoning_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+        });
 
         Ok(ProviderResponse {
             content,
@@ -594,6 +779,7 @@ impl Provider for OpenAICompatibleProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
+        let request_auth = self.resolve_request_auth().await?;
         let request_body = serde_json::json!({
             "model": self.config.model,
             "messages": self.build_messages(messages),
@@ -602,12 +788,24 @@ impl Provider for OpenAICompatibleProvider {
             "stream": true,
         });
 
-        let event_source = self
+        let mut req = self
             .client
-            .post(format!("{}/chat/completions", self.config.base_url))
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .post(&request_auth.request_url)
             .header("Content-Type", "application/json")
-            .json(&request_body)
+            .json(&request_body);
+
+        if !request_auth.api_key.is_empty() {
+            req = req.header(
+                "Authorization",
+                format!("Bearer {}", request_auth.api_key.as_str()),
+            );
+        }
+
+        for (key, value) in &request_auth.extra_headers {
+            req = req.header(key, value);
+        }
+
+        let event_source = req
             .eventsource()
             .map_err(|e| OSAgentError::Parse(e.to_string()))?;
 

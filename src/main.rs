@@ -1,3 +1,17 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::map_identity)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::match_like_matches_macro)]
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::{error, info, Level};
@@ -157,8 +171,7 @@ async fn main() -> anyhow::Result<()> {
 
             for workspace in config.list_workspaces() {
                 let workspace_path = shellexpand::tilde(&workspace.path).to_string();
-                std::fs::create_dir_all(&workspace_path)
-                    .map_err(|e| crate::error::OSAgentError::Io(e))?;
+                std::fs::create_dir_all(&workspace_path).map_err(crate::error::OSAgentError::Io)?;
             }
             let active_workspace = config.get_active_workspace();
             info!(

@@ -3,8 +3,7 @@ use crate::error::{OSAgentError, Result};
 use crate::workflow::artifact_store::ArtifactStore;
 use crate::workflow::coordination::{
     Capability, CapabilityType, CoordinatedContext, EscalationPolicy, JobCard, JobInput, JobResult,
-    JobStatus, MessageType, OutputSchema, OutputVerification, ResultType, StructuredMessage,
-    TaskType,
+    JobStatus, MessageType, OutputSchema, ResultType, StructuredMessage, TaskType,
 };
 use crate::workflow::db::WorkflowDb;
 use crate::workflow::events::WorkflowEvent;
@@ -186,7 +185,7 @@ impl SafeWorkflowCoordinator {
             let input_data = coordinated_context.shared_state.clone();
             let job_result = self
                 .execute_node_safe(
-                    &node,
+                    node,
                     &input_data,
                     &job_id,
                     &mut coordinated_context,

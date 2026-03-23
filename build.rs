@@ -59,10 +59,8 @@ fn main() {
             fs::write(target_path, empty).ok();
             fs::write(&snapshot_path, empty).ok();
         }
-    } else {
-        if let Ok(existing) = fs::read(&snapshot_path) {
-            fs::write(target_path, &existing).ok();
-        }
+    } else if let Ok(existing) = fs::read(&snapshot_path) {
+        fs::write(target_path, &existing).ok();
     }
 
     println!("cargo:rerun-if-changed=build.rs");

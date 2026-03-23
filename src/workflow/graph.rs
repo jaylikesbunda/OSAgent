@@ -13,6 +13,12 @@ pub struct ValidationError {
     pub message: String,
 }
 
+impl Default for GraphValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GraphValidator {
     pub fn new() -> Self {
         Self { errors: Vec::new() }
@@ -226,7 +232,7 @@ pub fn parse_litegraph_json(json_str: &str) -> Result<WorkflowGraph> {
         let pos = node_val.get("pos");
         let position = if let Some(pos_arr) = pos.and_then(|p| p.as_array()) {
             Position {
-                x: pos_arr.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                x: pos_arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
                 y: pos_arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
             }
         } else {
@@ -253,14 +259,8 @@ pub fn parse_litegraph_json(json_str: &str) -> Result<WorkflowGraph> {
     for (link_idx, link_val) in links_array.iter().enumerate() {
         if let Some(link_arr) = link_val.as_array() {
             if link_arr.len() >= 4 {
-                let source_idx = link_arr
-                    .get(1)
-                    .and_then(|v| v.as_u64())
-                    .and_then(|v| Some(v as usize));
-                let target_idx = link_arr
-                    .get(3)
-                    .and_then(|v| v.as_u64())
-                    .and_then(|v| Some(v as usize));
+                let source_idx = link_arr.get(1).and_then(|v| v.as_u64()).map(|v| v as usize);
+                let target_idx = link_arr.get(3).and_then(|v| v.as_u64()).map(|v| v as usize);
 
                 if let (Some(src_idx), Some(tgt_idx)) = (source_idx, target_idx) {
                     if let (Some(source_id), Some(target_id)) =

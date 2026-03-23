@@ -6,6 +6,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL, Engine as _};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -21,11 +22,11 @@ pub struct PkcePair {
 pub fn generate_pkce_pair() -> PkcePair {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill(&mut bytes);
-    let verifier = BASE64_URL.encode(&bytes);
+    let verifier = BASE64_URL.encode(bytes);
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     let hash = hasher.finalize();
-    let challenge = BASE64_URL.encode(&hash);
+    let challenge = BASE64_URL.encode(hash);
     PkcePair {
         verifier,
         challenge,
@@ -35,7 +36,7 @@ pub fn generate_pkce_pair() -> PkcePair {
 pub fn generate_oauth_state() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill(&mut bytes);
-    BASE64_URL.encode(&bytes)
+    BASE64_URL.encode(bytes)
 }
 
 #[derive(Error, Debug)]
@@ -58,6 +59,50 @@ pub struct OAuthTokenEntry {
     pub refresh_token: Option<String>,
     pub expires_at: Option<i64>,
     pub scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+pub fn parse_jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = BASE64_URL.decode(payload).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn account_id_from_claims(claims: &Value) -> Option<String> {
+    claims
+        .get("chatgpt_account_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            claims
+                .get("https://api.openai.com/auth")
+                .and_then(|v| v.get("chatgpt_account_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            claims
+                .get("organizations")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+pub fn extract_account_id(id_token: Option<&str>, access_token: Option<&str>) -> Option<String> {
+    id_token
+        .and_then(parse_jwt_claims)
+        .as_ref()
+        .and_then(account_id_from_claims)
+        .or_else(|| {
+            access_token
+                .and_then(parse_jwt_claims)
+                .as_ref()
+                .and_then(account_id_from_claims)
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,7 +239,7 @@ impl OAuthStorage {
 
         let json = serde_json::to_string_pretty(entries)?;
 
-        let data_to_write = if let Some(_) = self.encryption_key {
+        let data_to_write = if self.encryption_key.is_some() {
             self.encrypt(&json)?
         } else {
             json

@@ -93,7 +93,7 @@ impl LspTransport {
 
         stdin
             .write_all(message.as_bytes())
-            .map_err(|e| OSAgentError::Io(e))?;
+            .map_err(OSAgentError::Io)?;
 
         self.process.stdin = Some(stdin);
 

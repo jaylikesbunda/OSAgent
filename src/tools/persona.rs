@@ -6,6 +6,12 @@ use serde_json::{json, Value};
 
 pub struct PersonaTool;
 
+impl Default for PersonaTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PersonaTool {
     pub fn new() -> Self {
         Self

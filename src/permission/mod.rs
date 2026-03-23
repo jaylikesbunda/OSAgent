@@ -5,16 +5,12 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PermissionAction {
     Allow,
     Deny,
+    #[default]
     Ask,
-}
-
-impl Default for PermissionAction {
-    fn default() -> Self {
-        Self::Ask
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

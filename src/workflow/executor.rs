@@ -358,7 +358,7 @@ You cannot spawn additional subagents."#
     }
 
     async fn wait_for_subagent(&self, session_id: &str) -> Result<String> {
-        let (status, result) = self
+        let (_status, result) = self
             .subagent_manager
             .wait_for_subagent(session_id, 300)
             .await?;

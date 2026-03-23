@@ -3,7 +3,6 @@ use crate::external::ExternalPermissionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,15 +86,11 @@ pub struct WorkspaceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WorkspacePermission {
     ReadOnly,
+    #[default]
     ReadWrite,
-}
-
-impl Default for WorkspacePermission {
-    fn default() -> Self {
-        Self::ReadWrite
-    }
 }
 
 impl WorkspacePermission {
@@ -106,6 +101,7 @@ impl WorkspacePermission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct TelegramConfig {
     pub enabled: bool,
     pub bot_token: String,
@@ -114,6 +110,7 @@ pub struct TelegramConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
@@ -236,16 +233,9 @@ impl Default for UpdateConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ExperimentalConfig {
     pub workflows_enabled: bool,
-}
-
-impl Default for ExperimentalConfig {
-    fn default() -> Self {
-        Self {
-            workflows_enabled: false,
-        }
-    }
 }
 
 impl Default for ServerConfig {
@@ -305,26 +295,6 @@ impl Default for AgentConfig {
             checkpoint_interval: 5,
             memory_enabled: false,
             memory_file: default_memory_file(),
-        }
-    }
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bot_token: String::new(),
-            allowed_users: vec![],
-        }
-    }
-}
-
-impl Default for DiscordConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            token: String::new(),
-            allowed_users: vec![],
         }
     }
 }
@@ -963,31 +933,23 @@ pub fn setup_wizard(path: &str) -> Result<()> {
 
 fn prompt_input(prompt: &str) -> Result<String> {
     print!("{}", prompt);
-    std::io::Write::flush(&mut std::io::stdout()).map_err(|_| {
-        OSAgentError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "flush error",
-        ))
-    })?;
+    std::io::Write::flush(&mut std::io::stdout())
+        .map_err(|_| OSAgentError::Io(std::io::Error::other("flush error")))?;
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
-        .map_err(|e| OSAgentError::Io(e))?;
+        .map_err(OSAgentError::Io)?;
     Ok(input)
 }
 
 fn prompt_password(prompt: &str) -> Result<String> {
     print!("{}", prompt);
-    std::io::Write::flush(&mut std::io::stdout()).map_err(|_| {
-        OSAgentError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "flush error",
-        ))
-    })?;
+    std::io::Write::flush(&mut std::io::stdout())
+        .map_err(|_| OSAgentError::Io(std::io::Error::other("flush error")))?;
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
-        .map_err(|e| OSAgentError::Io(e))?;
+        .map_err(OSAgentError::Io)?;
     Ok(input.trim().to_string())
 }
 

@@ -1,8 +1,6 @@
 use crate::error::{OSAgentError, Result};
 use crate::workflow::types::*;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 pub struct WorkflowDb {
     db_path: PathBuf,
@@ -14,8 +12,7 @@ impl WorkflowDb {
     }
 
     pub fn init_tables(&self) -> Result<()> {
-        let conn =
-            rusqlite::Connection::open(&self.db_path).map_err(|e| OSAgentError::Storage(e))?;
+        let conn = rusqlite::Connection::open(&self.db_path).map_err(OSAgentError::Storage)?;
 
         conn.execute(
             r#"
@@ -97,8 +94,7 @@ impl WorkflowDb {
     }
 
     fn with_conn<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> Result<T>) -> Result<T> {
-        let conn =
-            rusqlite::Connection::open(&self.db_path).map_err(|e| OSAgentError::Storage(e))?;
+        let conn = rusqlite::Connection::open(&self.db_path).map_err(OSAgentError::Storage)?;
         f(&conn)
     }
 
@@ -106,8 +102,7 @@ impl WorkflowDb {
         &self,
         f: impl FnOnce(&mut rusqlite::Connection) -> Result<T>,
     ) -> Result<T> {
-        let mut conn =
-            rusqlite::Connection::open(&self.db_path).map_err(|e| OSAgentError::Storage(e))?;
+        let mut conn = rusqlite::Connection::open(&self.db_path).map_err(OSAgentError::Storage)?;
         f(&mut conn)
     }
 

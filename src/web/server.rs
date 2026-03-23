@@ -65,11 +65,11 @@ pub async fn run_with_agent(
     config: Config,
     agent: Arc<AgentRuntime>,
     config_path: PathBuf,
-    mut shutdown_rx: Option<watch::Receiver<bool>>,
+    shutdown_rx: Option<watch::Receiver<bool>>,
 ) -> crate::error::Result<()> {
     for workspace in config.list_workspaces() {
         std::fs::create_dir_all(shellexpand::tilde(&workspace.path).to_string())
-            .map_err(|e| crate::error::OSAgentError::Io(e))?;
+            .map_err(crate::error::OSAgentError::Io)?;
     }
 
     let api_routes = create_router(config.clone(), agent.clone(), config_path);

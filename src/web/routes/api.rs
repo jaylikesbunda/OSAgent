@@ -1,4 +1,4 @@
-use crate::agent::memory::{MemoryEntry, MemoryStatus};
+use crate::agent::memory::MemoryEntry;
 use crate::agent::persona::{ActivePersona, PersonaOption};
 use crate::agent::runtime::AgentRuntime;
 use crate::config::{Config, DiscordConfig, WorkspaceConfig, WorkspacePermission};
@@ -19,16 +19,28 @@ use axum::{
     extract::{Extension, Json, Path, Query},
     http::StatusCode,
     response::{sse::Event, Sse},
-    routing::{delete, get, patch, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+
+#[derive(Clone)]
+struct PendingPkceSession {
+    provider_id: String,
+    code_verifier: String,
+    redirect_uri: String,
+}
+
+fn oauth_pkce_sessions() -> &'static dashmap::DashMap<String, PendingPkceSession> {
+    static STORE: OnceLock<dashmap::DashMap<String, PendingPkceSession>> = OnceLock::new();
+    STORE.get_or_init(dashmap::DashMap::new)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -452,22 +464,23 @@ async fn change_password(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let config = agent.get_config().await;
 
-    if config.server.password_enabled && !config.server.password.is_empty() {
-        if !auth::verify_password(&payload.old_password, &config.server.password).map_err(|e| {
+    if config.server.password_enabled
+        && !config.server.password.is_empty()
+        && !auth::verify_password(&payload.old_password, &config.server.password).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     error: e.to_string(),
                 }),
             )
-        })? {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Current password is incorrect".to_string(),
-                }),
-            ));
-        }
+        })?
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Current password is incorrect".to_string(),
+            }),
+        ));
     }
 
     let new_hash = auth::hash_password(&payload.new_password).map_err(|e| {
@@ -1853,7 +1866,7 @@ async fn get_agent_mode(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let config = agent.get_config().await;
+    let _config = agent.get_config().await;
     Ok(Json(serde_json::json!({
         "mode": "build",
         "available_modes": ["build", "plan"]
@@ -1861,7 +1874,7 @@ async fn get_agent_mode(
 }
 
 async fn set_agent_mode(
-    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(_agent): Extension<Arc<AgentRuntime>>,
     Path(_id): Path<String>,
     Json(payload): Json<SetAgentModeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
@@ -2019,7 +2032,9 @@ async fn get_providers(
         .providers
         .iter()
         .map(|p| {
-            let api_key_preview = if p.api_key.is_empty() {
+            let api_key_preview = if p.auth_type.as_deref() == Some("oauth") {
+                "(oauth)".to_string()
+            } else if p.api_key.is_empty() {
                 String::new()
             } else if p.api_key.len() > 10 {
                 format!(
@@ -2085,17 +2100,40 @@ async fn add_provider(
         ));
     }
 
+    let config_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
+    let oauth_storage =
+        crate::oauth::OAuthStorage::new(crate::oauth::get_oauth_storage_path(&config_dir));
+    let stored_oauth = oauth_storage.get_token(&payload.provider_id).ok().flatten();
+    let has_oauth = payload
+        .oauth_data
+        .as_ref()
+        .and_then(|d| d.oauth_token.as_ref())
+        .is_some()
+        || stored_oauth.is_some();
+    let preset = crate::agent::provider_presets::get_preset(&payload.provider_id);
+    let default_model = if payload.provider_id == "openai" && has_oauth {
+        Some("gpt-5.3-codex".to_string())
+    } else {
+        preset
+            .as_ref()
+            .and_then(|provider| provider.models.first().map(|model| model.id.clone()))
+    };
+
     let provider_config = crate::config::ProviderConfig {
         provider_type: payload.provider_id.clone(),
         api_key: payload.api_key.unwrap_or_default(),
-        base_url: payload.base_url.unwrap_or_default(),
-        model: payload.model.unwrap_or_default(),
+        base_url: payload
+            .base_url
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| preset.as_ref().map(|p| p.base_url.clone()))
+            .unwrap_or_default(),
+        model: payload
+            .model
+            .filter(|value| !value.trim().is_empty())
+            .or(default_model)
+            .unwrap_or_default(),
         fallbacks: vec![],
-        auth_type: payload
-            .oauth_data
-            .as_ref()
-            .and_then(|d| d.oauth_token.as_ref())
-            .map(|_| "oauth".to_string()),
+        auth_type: has_oauth.then(|| "oauth".to_string()),
         oauth_client_id: payload
             .oauth_data
             .as_ref()
@@ -2287,9 +2325,9 @@ pub struct OAuthStartPayload {
 }
 
 async fn oauth_start(
-    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(_agent): Extension<Arc<AgentRuntime>>,
     Path(provider_id): Path<String>,
-    Json(payload): Json<OAuthStartPayload>,
+    Json(_payload): Json<OAuthStartPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let provider = get_oauth_provider(&provider_id).ok_or_else(|| {
         (
@@ -2331,16 +2369,43 @@ async fn oauth_start(
         let base_url =
             std::env::var("OSA_BASE_URL").unwrap_or_else(|_| "http://localhost:8765".to_string());
         let redirect_uri = format!("{}/api/oauth/{}/callback", base_url, provider_id);
+        oauth_pkce_sessions().insert(
+            state.clone(),
+            PendingPkceSession {
+                provider_id: provider_id.clone(),
+                code_verifier: verifier.clone(),
+                redirect_uri: redirect_uri.clone(),
+            },
+        );
 
-        let scopes_str = provider.scopes.join(" ");
+        let mut params = vec![
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri.clone()),
+            ("response_type", "code".to_string()),
+            ("scope", provider.scopes.join(" ")),
+            ("state", state.clone()),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256".to_string()),
+        ];
+
+        if provider_id == "openai" {
+            params.push(("id_token_add_organizations", "true".to_string()));
+            params.push(("codex_cli_simplified_flow", "true".to_string()));
+            params.push(("originator", "osagent".to_string()));
+        }
+
         let auth_url = format!(
-            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+            "{}?{}",
             provider.authorization_url,
-            urlencoding::encode(&client_id),
-            urlencoding::encode(&redirect_uri),
-            urlencoding::encode(&scopes_str),
-            urlencoding::encode(&state),
-            urlencoding::encode(&challenge),
+            params
+                .into_iter()
+                .map(|(key, value)| format!(
+                    "{}={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(&value)
+                ))
+                .collect::<Vec<_>>()
+                .join("&")
         );
 
         Ok(Json(serde_json::json!({
@@ -2426,7 +2491,7 @@ async fn oauth_start(
 }
 
 async fn oauth_device_code(
-    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(_agent): Extension<Arc<AgentRuntime>>,
     Extension(config_path): Extension<PathBuf>,
     Path(provider_id): Path<String>,
     Json(payload): Json<serde_json::Value>,
@@ -2466,7 +2531,7 @@ async fn oauth_device_code(
     );
 
     let client = reqwest::Client::new();
-    let token_url: &str = provider.token_url.as_ref();
+    let token_url: &str = provider.token_url;
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -2526,6 +2591,7 @@ async fn oauth_device_code(
         refresh_token: refresh_token.map(String::from),
         expires_at: expires_in.map(|e| chrono::Utc::now().timestamp() + e),
         scopes: Some(provider.scopes.iter().map(|s| s.to_string()).collect()),
+        account_id: None,
     };
     storage.set_token(&provider_id, entry).map_err(|e| {
         (
@@ -2684,8 +2750,10 @@ pub struct OAuthAuthorizePayload {
 
 #[derive(Debug, Deserialize)]
 pub struct OAuthCallbackQuery {
-    pub code: String,
-    pub state: String,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
 }
 
 async fn oauth_callback(
@@ -2694,24 +2762,63 @@ async fn oauth_callback(
     Path(provider_id): Path<String>,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> axum::response::Html<String> {
-    let code = params.code.clone();
+    let popup_error = |message: String| {
+        axum::response::Html(format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><title>OAuth Error</title></head>
+<body>
+<script>
+if (window.opener) {{
+    window.opener.oauthCallback({{ error: "{}" }});
+    window.close();
+}} else {{
+    document.body.innerHTML = "<h1>OAuth Error</h1><p>{}</p><p>You can close this window.</p>";
+}}
+</script>
+</body>
+</html>"#,
+            message.replace('"', "&quot;"),
+            message.replace('"', "&quot;")
+        ))
+    };
+
+    if let Some(error) = params.error.clone() {
+        return popup_error(params.error_description.clone().unwrap_or(error));
+    }
+
+    let code = match params.code.clone() {
+        Some(code) if !code.trim().is_empty() => code,
+        _ => return popup_error("Missing authorization code".to_string()),
+    };
+    let state = match params.state.clone() {
+        Some(state) if !state.trim().is_empty() => state,
+        _ => return popup_error("Missing OAuth state".to_string()),
+    };
+    let Some((_, pending)) = oauth_pkce_sessions().remove(&state) else {
+        return popup_error("OAuth session expired or invalid state".to_string());
+    };
+    if pending.provider_id != provider_id {
+        return popup_error("OAuth state/provider mismatch".to_string());
+    }
 
     let config = agent.get_config().await;
     let provider_config = config
         .providers
         .iter()
         .find(|p| p.provider_type == provider_id);
+    let Some(default_provider) = get_oauth_provider(&provider_id) else {
+        return popup_error(format!("Unknown OAuth provider: {}", provider_id));
+    };
 
-    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) =
-        provider_config
-    {
+    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) = provider_config {
         let client_id = provider
             .oauth_client_id
             .clone()
             .or_else(|| {
                 std::env::var(format!("{}_OAUTH_CLIENT_ID", provider_id.to_uppercase())).ok()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| default_provider.client_id.to_string());
         let client_secret = provider
             .oauth_client_secret
             .clone()
@@ -2723,73 +2830,43 @@ async fn oauth_callback(
                 .ok()
             })
             .unwrap_or_default();
-        let token_url =
-            provider
-                .oauth_token_url
-                .clone()
-                .unwrap_or_else(|| match provider_id.as_str() {
-                    "openai" => "https://oauth.openai.com/api/token".to_string(),
-                    "anthropic" => "https://auth.anthropic.com/oauth/token".to_string(),
-                    "google_ai" => "https://oauth2.googleapis.com/token".to_string(),
-                    _ => "https://oauth.openai.com/api/token".to_string(),
-                });
+        let token_url = provider
+            .oauth_token_url
+            .clone()
+            .unwrap_or_else(|| default_provider.token_url.to_string());
         (client_id, client_secret, token_url)
     } else {
         let client_id = std::env::var(format!("{}_OAUTH_CLIENT_ID", provider_id.to_uppercase()))
-            .unwrap_or_default();
+            .unwrap_or_else(|_| default_provider.client_id.to_string());
         let client_secret = std::env::var(format!(
             "{}_OAUTH_CLIENT_SECRET",
             provider_id.to_uppercase()
         ))
         .unwrap_or_default();
-        let token_url = match provider_id.as_str() {
-            "openai" => "https://oauth.openai.com/api/token".to_string(),
-            "anthropic" => "https://auth.anthropic.com/oauth/token".to_string(),
-            "google_ai" => "https://oauth2.googleapis.com/token".to_string(),
-            _ => "https://oauth.openai.com/api/token".to_string(),
-        };
+        let token_url = default_provider.token_url.to_string();
         (client_id, client_secret, token_url)
     };
 
-    if client_id.is_empty() || client_secret.is_empty() {
-        return axum::response::Html(r#"<!DOCTYPE html>
-<html>
-<head><title>OAuth Error</title></head>
-<body>
-<script>
-if (window.opener) {
-    window.opener.oauthCallback({ error: "OAuth credentials not configured" });
-    window.close();
-} else {
-    document.body.innerHTML = "<h1>OAuth Error</h1><p>OAuth credentials not configured</p><p>You can close this window.</p>";
-}
-</script>
-</body>
-</html>"#.to_string());
+    if client_id.is_empty() {
+        return popup_error("OAuth client ID not configured".to_string());
     }
 
-    let redirect_uri: String = provider_config
-        .as_ref()
-        .and_then(|p| p.redirect_url.clone())
-        .unwrap_or_else(|| {
-            format!(
-                "{}/api/oauth/{}/callback",
-                std::env::var("OSA_BASE_URL")
-                    .unwrap_or_else(|_| "http://localhost:8765".to_string()),
-                provider_id
-            )
-        });
+    let redirect_uri = pending.redirect_uri;
+    let mut form = vec![
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("client_id".to_string(), client_id.clone()),
+        ("code".to_string(), code),
+        ("redirect_uri".to_string(), redirect_uri),
+        ("code_verifier".to_string(), pending.code_verifier),
+    ];
+    if !client_secret.trim().is_empty() {
+        form.push(("client_secret".to_string(), client_secret));
+    }
 
     let client = reqwest::Client::new();
     let token_response = client
         .post(&token_url)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("client_id", &client_id),
-            ("client_secret", &client_secret),
-            ("code", &code),
-            ("redirect_uri", &redirect_uri),
-        ])
+        .form(&form)
         .send()
         .await;
 
@@ -2819,7 +2896,11 @@ if (window.opener) {
                 access_token: access_token.to_string(),
                 refresh_token: refresh_token.map(|s| s.to_string()),
                 expires_at,
-                scopes: None,
+                scopes: Some(default_provider.scopes.iter().map(|scope| scope.to_string()).collect()),
+                account_id: crate::oauth::extract_account_id(
+                    token_data.get("id_token").and_then(|v| v.as_str()),
+                    Some(access_token),
+                ),
             };
 
             let _ = oauth_storage.set_token(&provider_id, token_entry);
@@ -2844,41 +2925,9 @@ if (window.opener) {{
         }
         Ok(response) => {
             let error_text = response.text().await.unwrap_or_default();
-            axum::response::Html(format!(
-                r#"<!DOCTYPE html>
-<html>
-<head><title>OAuth Error</title></head>
-<body>
-<script>
-if (window.opener) {{
-    window.opener.oauthCallback({{ error: "OAuth token exchange failed: {}" }});
-    window.close();
-}} else {{
-    document.body.innerHTML = "<h1>OAuth Error</h1><p>Token exchange failed</p><p>You can close this window.</p>";
-}}
-</script>
-</body>
-</html>"#,
-                error_text.replace("\"", "&quot;")
-            ))
+            popup_error(format!("OAuth token exchange failed: {}", error_text))
         }
-        Err(e) => axum::response::Html(format!(
-            r#"<!DOCTYPE html>
-<html>
-<head><title>OAuth Error</title></head>
-<body>
-<script>
-if (window.opener) {{
-    window.opener.oauthCallback({{ error: "Network error: {}" }});
-    window.close();
-}} else {{
-    document.body.innerHTML = "<h1>OAuth Error</h1><p>Network error</p><p>You can close this window.</p>";
-}}
-</script>
-</body>
-</html>"#,
-            e
-        )),
+        Err(e) => popup_error(format!("Network error: {}", e)),
     }
 }
 
@@ -2894,10 +2943,17 @@ async fn oauth_status(
 
     let token_info = oauth_storage.get_token(&provider_id).ok().flatten();
     let token_info_clone = token_info.clone();
-    let is_configured = config
+    let provider_config = config
         .providers
         .iter()
-        .any(|p| p.provider_type == provider_id && !p.api_key.is_empty());
+        .find(|p| p.provider_type == provider_id);
+    let is_configured = provider_config
+        .map(|provider| {
+            !provider.api_key.is_empty()
+                || provider.auth_type.as_deref() == Some("oauth")
+                || token_info_clone.is_some()
+        })
+        .unwrap_or_else(|| token_info_clone.is_some());
 
     let status = if is_configured {
         if let Some(info) = token_info {
@@ -2926,6 +2982,7 @@ async fn oauth_status(
         "status": status,
         "configured": is_configured,
         "expires_at": token_info_clone.as_ref().and_then(|v| v.expires_at),
+        "account": token_info_clone.as_ref().and_then(|v| v.account_id.clone()),
     })))
 }
 
@@ -2971,17 +3028,23 @@ async fn oauth_refresh(
         .providers
         .iter()
         .find(|p| p.provider_type == provider_id);
+    let provider_defaults = get_oauth_provider(&provider_id).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("OAuth not supported for provider: {}", provider_id),
+            }),
+        )
+    })?;
 
-    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) =
-        provider_config
-    {
+    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) = provider_config {
         let client_id = provider
             .oauth_client_id
             .clone()
             .or_else(|| {
                 std::env::var(format!("{}_OAUTH_CLIENT_ID", provider_id.to_uppercase())).ok()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| provider_defaults.client_id.to_string());
         let client_secret = provider
             .oauth_client_secret
             .clone()
@@ -2993,57 +3056,44 @@ async fn oauth_refresh(
                 .ok()
             })
             .unwrap_or_default();
-        let token_url = if let Some(ref url) = provider.oauth_token_url {
-            url.clone()
-        } else {
-            match provider_id.as_str() {
-                "openai" => "https://oauth.openai.com/api/token".to_string(),
-                "anthropic" => "https://auth.anthropic.com/oauth/token".to_string(),
-                "google_ai" => "https://oauth2.googleapis.com/token".to_string(),
-                _ => {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse {
-                            error: format!("OAuth not supported for provider: {}", provider_id),
-                        }),
-                    ))
-                }
-            }
-        };
+        let token_url = provider
+            .oauth_token_url
+            .clone()
+            .unwrap_or_else(|| provider_defaults.token_url.to_string());
         (client_id, client_secret, token_url)
     } else {
         let client_id = std::env::var(format!("{}_OAUTH_CLIENT_ID", provider_id.to_uppercase()))
-            .unwrap_or_default();
+            .unwrap_or_else(|_| provider_defaults.client_id.to_string());
         let client_secret = std::env::var(format!(
             "{}_OAUTH_CLIENT_SECRET",
             provider_id.to_uppercase()
         ))
         .unwrap_or_default();
-        let token_url = match provider_id.as_str() {
-            "openai" => "https://oauth.openai.com/api/token".to_string(),
-            "anthropic" => "https://auth.anthropic.com/oauth/token".to_string(),
-            "google_ai" => "https://oauth2.googleapis.com/token".to_string(),
-            _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!("OAuth not supported for provider: {}", provider_id),
-                    }),
-                ));
-            }
-        };
+        let token_url = provider_defaults.token_url.to_string();
         (client_id, client_secret, token_url)
     };
 
+    if client_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "OAuth client ID not configured".to_string(),
+            }),
+        ));
+    }
+
     let client = reqwest::Client::new();
+    let mut form = vec![
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("client_id".to_string(), client_id.clone()),
+        ("refresh_token".to_string(), refresh_token.to_string()),
+    ];
+    if !client_secret.trim().is_empty() {
+        form.push(("client_secret".to_string(), client_secret));
+    }
     let token_response = client
         .post(&token_url)
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("client_id", &client_id),
-            ("client_secret", &client_secret),
-            ("refresh_token", refresh_token),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|e| {
@@ -3100,6 +3150,11 @@ async fn oauth_refresh(
             .or(token_info.refresh_token),
         expires_at,
         scopes: token_info.scopes,
+        account_id: crate::oauth::extract_account_id(
+            token_data.get("id_token").and_then(|v| v.as_str()),
+            Some(access_token),
+        )
+        .or(token_info.account_id),
     };
 
     if let Err(e) = oauth_storage.set_token(&provider_id, new_token_entry) {
@@ -3165,10 +3220,10 @@ async fn oauth_revoke(
                     .unwrap_or_default();
                 let revoke_url = provider
                     .oauth_token_url
-                    .as_ref()
-                    .map(|u| u.replace("/token", "/revoke"))
-                    .unwrap_or_else(|| match provider_id.as_str() {
-                        "openai" => "https://oauth.openai.com/revoke".to_string(),
+                        .as_ref()
+                        .map(|u| u.replace("/token", "/revoke"))
+                        .unwrap_or_else(|| match provider_id.as_str() {
+                        "openai" => "https://auth.openai.com/oauth/revoke".to_string(),
                         "anthropic" => "https://auth.anthropic.com/oauth/revoke".to_string(),
                         "google_ai" => "https://oauth2.googleapis.io/revoke".to_string(),
                         _ => "".to_string(),
@@ -3184,7 +3239,7 @@ async fn oauth_revoke(
                 ))
                 .unwrap_or_default();
                 let revoke_url = match provider_id.as_str() {
-                    "openai" => "https://oauth.openai.com/revoke",
+                    "openai" => "https://auth.openai.com/oauth/revoke",
                     "anthropic" => "https://auth.anthropic.com/oauth/revoke",
                     "google_ai" => "https://oauth2.googleapis.io/revoke",
                     _ => "",

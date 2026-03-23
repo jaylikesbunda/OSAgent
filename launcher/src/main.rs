@@ -1,14 +1,32 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use base64::{
+    engine::general_purpose::STANDARD as BASE64,
+    engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL,
+    Engine,
+};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{
     CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu,
     SystemTrayMenuItem, Window, WindowEvent,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
 
@@ -85,6 +103,468 @@ pub struct AgentStatus {
     pub config_path: String,
 }
 
+#[derive(Clone, Serialize)]
+pub struct SetupState {
+    pub needs_setup: bool,
+    pub has_config: bool,
+    pub config_path: String,
+    pub workspace_path: String,
+    pub provider_type: String,
+    pub provider_supported: bool,
+    pub password_enabled: bool,
+    pub password_configured: bool,
+    pub api_key_configured: bool,
+    pub osagent_found: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LauncherOAuthTokenEntry {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: Option<i64>,
+    scopes: Option<Vec<String>>,
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+struct LauncherOAuthStorage {
+    storage_path: PathBuf,
+    encryption_key: Option<[u8; 32]>,
+}
+
+impl LauncherOAuthStorage {
+    fn new(storage_path: PathBuf) -> Self {
+        Self {
+            storage_path,
+            encryption_key: Self::derive_key(),
+        }
+    }
+
+    fn derive_key() -> Option<[u8; 32]> {
+        let machine_id = Self::machine_id()?;
+        let mut hasher = Sha256::new();
+        hasher.update(machine_id.as_bytes());
+        hasher.update(b"osagent_oauth_salt_v1");
+        let result = hasher.finalize();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&result[..32]);
+        Some(key)
+    }
+
+    fn machine_id() -> Option<String> {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("COMPUTERNAME").ok()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::env::var("HOSTNAME").ok()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::env::var("HOSTNAME").ok().or_else(|| {
+                std::fs::read_to_string("/etc/machine-id")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            })
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            std::env::var("HOSTNAME").ok()
+        }
+    }
+
+    fn encrypt(&self, data: &str) -> Result<String, String> {
+        let key = self
+            .encryption_key
+            .ok_or_else(|| "No encryption key available".to_string())?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, data.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let mut combined = nonce_bytes.to_vec();
+        combined.extend(ciphertext);
+        Ok(BASE64.encode(combined))
+    }
+
+    fn decrypt(&self, data: &str) -> Result<String, String> {
+        let key = self
+            .encryption_key
+            .ok_or_else(|| "No encryption key available".to_string())?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+        let combined = BASE64.decode(data).map_err(|e| e.to_string())?;
+        if combined.len() < 12 {
+            return Err("Encrypted token data is too short".to_string());
+        }
+        let (nonce_bytes, ciphertext) = combined.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| e.to_string())?;
+        String::from_utf8(plaintext).map_err(|e| e.to_string())
+    }
+
+    fn load(&self) -> Result<HashMap<String, LauncherOAuthTokenEntry>, String> {
+        if !self.storage_path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let raw = fs::read_to_string(&self.storage_path).map_err(|e| e.to_string())?;
+        if raw.trim_start().starts_with('{') {
+            return serde_json::from_str(&raw).map_err(|e| e.to_string());
+        }
+
+        let decrypted = self.decrypt(&raw)?;
+        serde_json::from_str(&decrypted).map_err(|e| e.to_string())
+    }
+
+    fn save(&self, entries: &HashMap<String, LauncherOAuthTokenEntry>) -> Result<(), String> {
+        if let Some(parent) = self.storage_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+        let content = if self.encryption_key.is_some() {
+            self.encrypt(&json)?
+        } else {
+            json
+        };
+        fs::write(&self.storage_path, content).map_err(|e| e.to_string())
+    }
+
+    fn set_token(&self, provider_id: &str, entry: LauncherOAuthTokenEntry) -> Result<(), String> {
+        let mut entries = self.load()?;
+        entries.insert(provider_id.to_string(), entry);
+        self.save(&entries)
+    }
+}
+
+const OPENAI_OAUTH_PORT: u16 = 1455;
+
+fn oauth_storage_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or(config_path)
+        .join("oauth_tokens.json")
+}
+
+fn generate_pkce_verifier() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill(&mut bytes);
+    BASE64_URL.encode(bytes)
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let hash = hasher.finalize();
+    BASE64_URL.encode(hash)
+}
+
+fn oauth_state() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill(&mut bytes);
+    BASE64_URL.encode(bytes)
+}
+
+fn parse_jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = BASE64_URL.decode(payload).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn extract_account_id(id_token: Option<&str>, access_token: Option<&str>) -> Option<String> {
+    let from_claims = |claims: &Value| {
+        claims
+            .get("chatgpt_account_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                claims
+                    .get("https://api.openai.com/auth")
+                    .and_then(|v| v.get("chatgpt_account_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                claims
+                    .get("organizations")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.first())
+                    .and_then(|item| item.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+    };
+
+    id_token
+        .and_then(parse_jwt_claims)
+        .as_ref()
+        .and_then(from_claims)
+        .or_else(|| access_token.and_then(parse_jwt_claims).as_ref().and_then(from_claims))
+}
+
+async fn write_oauth_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    let html = format!(
+        "<!doctype html><html><head><title>{}</title></head><body><h1>{}</h1><p>{}</p><script>setTimeout(() => window.close(), 1500)</script></body></html>",
+        title, title, body
+    );
+    let response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        html.len(),
+        html
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn wait_for_oauth_callback(
+    listener: TcpListener,
+    expected_state: &str,
+) -> Result<String, String> {
+    let accepted = tokio::time::timeout(Duration::from_secs(300), listener.accept())
+        .await
+        .map_err(|_| "OAuth callback timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let (mut stream, _) = accepted;
+    let mut buffer = vec![0u8; 8192];
+    let size = stream.read(&mut buffer).await.map_err(|e| e.to_string())?;
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| "Invalid OAuth callback request".to_string())?;
+    let url = reqwest::Url::parse(&format!("http://127.0.0.1{}", path))
+        .map_err(|e| format!("Invalid OAuth callback URL: {}", e))?;
+
+    if let Some(error) = url.query_pairs().find_map(|(k, v)| (k == "error").then(|| v.to_string())) {
+        let msg = url
+            .query_pairs()
+            .find_map(|(k, v)| (k == "error_description").then(|| v.to_string()))
+            .unwrap_or(error);
+        let _ = write_oauth_response(&mut stream, "400 Bad Request", "Authorization failed", &msg).await;
+        return Err(msg);
+    }
+
+    let state = url
+        .query_pairs()
+        .find_map(|(k, v)| (k == "state").then(|| v.to_string()))
+        .ok_or_else(|| "Missing OAuth state".to_string())?;
+    if state != expected_state {
+        let _ = write_oauth_response(
+            &mut stream,
+            "400 Bad Request",
+            "Authorization failed",
+            "Invalid OAuth state.",
+        )
+        .await;
+        return Err("Invalid OAuth state".to_string());
+    }
+
+    let code = url
+        .query_pairs()
+        .find_map(|(k, v)| (k == "code").then(|| v.to_string()))
+        .ok_or_else(|| "Missing authorization code".to_string())?;
+    let _ = write_oauth_response(
+        &mut stream,
+        "200 OK",
+        "Authorization successful",
+        "You can close this window and return to OSAgent Launcher.",
+    )
+    .await;
+    Ok(code)
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(default)]
+struct ExistingConfig {
+    server: ExistingServerConfig,
+    providers: Vec<ExistingProviderConfig>,
+    default_provider: String,
+    default_model: String,
+    provider: ExistingProviderConfig,
+    agent: ExistingAgentConfig,
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(default)]
+struct ExistingServerConfig {
+    bind: String,
+    port: u16,
+    password: String,
+    password_enabled: bool,
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(default)]
+struct ExistingProviderConfig {
+    provider_type: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+    auth_type: String,
+    oauth_client_id: String,
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(default)]
+struct ExistingAgentConfig {
+    workspace: String,
+    active_workspace: Option<String>,
+    workspaces: Vec<ExistingWorkspaceConfig>,
+}
+
+#[derive(Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct ExistingWorkspaceConfig {
+    id: String,
+    name: String,
+    path: String,
+    description: Option<String>,
+    permission: Option<String>,
+    created_at: String,
+    last_used: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetupConfigPayload {
+    provider_type: String,
+    model: String,
+    auth_mode: String,
+    api_key: String,
+    workspace_path: String,
+    password_enabled: bool,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct ProviderValidationPayload {
+    provider_type: String,
+    api_key: String,
+}
+
+#[derive(Deserialize)]
+struct SetupOAuthStartPayload {
+    provider_type: String,
+}
+
+#[derive(Serialize)]
+struct ProviderValidationResult {
+    ok: bool,
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SetupProviderModel {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SetupProviderOAuth {
+    flow_type: String,
+    client_id_configured: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct SetupProviderInfo {
+    id: String,
+    name: String,
+    description: String,
+    base_url: String,
+    key_label: String,
+    key_placeholder: String,
+    key_help: String,
+    api_key_required: bool,
+    default_model: String,
+    models: Vec<SetupProviderModel>,
+    oauth: Option<SetupProviderOAuth>,
+}
+
+#[derive(Serialize)]
+struct SetupOAuthStartResult {
+    opened: bool,
+    auth_url: String,
+    connected: bool,
+}
+
+struct ProviderPreset {
+    id: String,
+    name: String,
+    description: String,
+    base_url: String,
+    key_label: String,
+    key_placeholder: String,
+    key_help: String,
+    api_key_required: bool,
+    default_model: String,
+    models: Vec<(String, String)>,
+    oauth_flow_type: Option<String>,
+    oauth_client_id: Option<String>,
+    oauth_authorization_url: Option<String>,
+    oauth_token_url: Option<String>,
+    oauth_device_code_url: Option<String>,
+    oauth_scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceCodeStartPayload {
+    provider_type: String,
+}
+
+#[derive(Serialize)]
+struct DeviceCodeStartResult {
+    user_code: String,
+    verification_uri: String,
+    device_code: String,
+    interval: u64,
+}
+
+#[derive(Deserialize)]
+struct DeviceCodePollPayload {
+    provider_type: String,
+    device_code: String,
+}
+
+#[derive(Serialize)]
+struct DeviceCodePollResult {
+    status: String, // "pending", "success", "error"
+    access_token: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotProvider {
+    id: String,
+    name: String,
+    #[serde(default)]
+    api: String,
+    #[serde(default)]
+    doc: String,
+    #[serde(default)]
+    models: BTreeMap<String, SnapshotModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotModel {
+    id: String,
+    name: String,
+    #[serde(default)]
+    family: String,
+}
+
+type SnapshotCatalog = BTreeMap<String, SnapshotProvider>;
+
 // --- Helper Functions ---
 
 fn get_osagent_path() -> PathBuf {
@@ -123,6 +603,955 @@ fn get_config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".osagent")
         .join("config.toml")
+}
+
+fn default_workspace_path() -> PathBuf {
+    if let Some(documents_dir) = dirs_next::document_dir() {
+        return documents_dir.join("OSA Workspace");
+    }
+
+    dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("OSA Workspace")
+}
+
+const OPENROUTER_MODELS: [(&str, &str); 10] = [
+    ("anthropic/claude-sonnet-4", "Claude Sonnet 4"),
+    ("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet"),
+    ("openai/gpt-4.1", "GPT-4.1"),
+    ("openai/gpt-4o", "GPT-4o"),
+    ("openai/o3", "o3"),
+    ("google/gemini-2.5-pro", "Gemini 2.5 Pro"),
+    ("deepseek/deepseek-r1", "DeepSeek R1"),
+    ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B"),
+    ("mistralai/mistral-large", "Mistral Large"),
+    ("qwen/qwen3-235b-a22b", "Qwen3 235B"),
+];
+
+const OPENAI_MODELS: [(&str, &str); 13] = [
+    ("gpt-4.1", "GPT-4.1"),
+    ("gpt-4.1-mini", "GPT-4.1 Mini"),
+    ("gpt-4.1-nano", "GPT-4.1 Nano"),
+    ("gpt-4o", "GPT-4o"),
+    ("gpt-4o-mini", "GPT-4o Mini"),
+    ("o3", "o3"),
+    ("o3-mini", "o3-mini"),
+    ("o1", "o1"),
+    ("gpt-5.4", "GPT-5.4"),
+    ("gpt-5.2", "GPT-5.2"),
+    ("gpt-5.3-codex", "GPT-5.3 Codex"),
+    ("gpt-5.2-codex", "GPT-5.2 Codex"),
+    ("gpt-5.1-codex", "GPT-5.1 Codex"),
+];
+
+const ANTHROPIC_MODELS: [(&str, &str); 6] = [
+    ("claude-opus-4-20250514", "Claude Opus 4"),
+    ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
+    ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+    ("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet"),
+    ("claude-3-opus-20240229", "Claude 3 Opus"),
+    ("claude-3-haiku-20240307", "Claude 3 Haiku"),
+];
+
+const GOOGLE_MODELS: [(&str, &str); 3] = [
+    ("gemini-2.5-pro-preview-05-06", "Gemini 2.5 Pro"),
+    ("gemini-2.5-flash-preview-05-20", "Gemini 2.5 Flash"),
+    ("gemini-2.0-flash-001", "Gemini 2.0 Flash"),
+];
+
+const OLLAMA_MODELS: [(&str, &str); 5] = [
+    ("llama3.1:70b", "Llama 3.1 70B"),
+    ("qwen3:32b", "Qwen3 32B"),
+    ("mistral:7b", "Mistral 7B"),
+    ("codellama:13b", "CodeLlama 13B"),
+    ("deepseek-r1:14b", "DeepSeek R1 14B"),
+];
+
+const GROQ_MODELS: [(&str, &str); 3] = [
+    ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
+    ("llama-3.1-8b-instant", "Llama 3.1 8B"),
+    ("mixtral-8x7b-32768", "Mixtral 8x7B"),
+];
+
+const DEEPSEEK_MODELS: [(&str, &str); 2] = [
+    ("deepseek-r1", "DeepSeek R1"),
+    ("deepseek-chat", "DeepSeek V3"),
+];
+
+const XAI_MODELS: [(&str, &str); 2] = [("grok-3", "Grok 3"), ("grok-3-mini", "Grok 3 Mini")];
+
+fn map_models(models: &[(&str, &str)]) -> Vec<(String, String)> {
+    models
+        .iter()
+        .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
+        .collect()
+}
+
+fn provider_presets() -> Vec<ProviderPreset> {
+    vec![
+        ProviderPreset {
+            id: "openrouter".to_string(),
+            name: "OpenRouter".to_string(),
+            description: "Multi-provider aggregator with access to 200+ models".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            key_label: "OpenRouter API Key".to_string(),
+            key_placeholder: "sk-or-v1-...".to_string(),
+            key_help: "Required for OpenRouter. This stays in your local config file.".to_string(),
+            api_key_required: true,
+            default_model: "anthropic/claude-sonnet-4".to_string(),
+            models: map_models(&OPENROUTER_MODELS),
+            oauth_flow_type: None,
+            oauth_client_id: None,
+            oauth_authorization_url: None,
+            oauth_token_url: None,
+            oauth_device_code_url: None,
+            oauth_scopes: vec![],
+        },
+        ProviderPreset {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            description: "OpenAI API direct access".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            key_label: "OpenAI API Key".to_string(),
+            key_placeholder: "sk-...".to_string(),
+            key_help: "Required for OpenAI. This stays in your local config file.".to_string(),
+            api_key_required: true,
+            default_model: "gpt-4.1".to_string(),
+            models: map_models(&OPENAI_MODELS),
+            oauth_flow_type: Some("pkce".to_string()),
+            oauth_client_id: std::env::var("OPENAI_OAUTH_CLIENT_ID")
+                .ok()
+                .or_else(|| Some("app_EMoamEEZ73f0CkXaXp7hrann".to_string())),
+            oauth_authorization_url: Some("https://auth.openai.com/oauth/authorize".to_string()),
+            oauth_token_url: Some("https://auth.openai.com/oauth/token".to_string()),
+            oauth_device_code_url: None,
+            oauth_scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+                "offline_access".to_string(),
+            ],
+        },
+        ProviderPreset {
+            id: "anthropic".to_string(),
+            name: "Anthropic".to_string(),
+            description: "Anthropic API direct access".to_string(),
+            base_url: "https://api.anthropic.com/v1".to_string(),
+            key_label: "Anthropic API Key".to_string(),
+            key_placeholder: "sk-ant-...".to_string(),
+            key_help: "Required for Anthropic. This stays in your local config file.".to_string(),
+            api_key_required: true,
+            default_model: "claude-sonnet-4-20250514".to_string(),
+            models: map_models(&ANTHROPIC_MODELS),
+            oauth_flow_type: None,
+            oauth_client_id: None,
+            oauth_authorization_url: None,
+            oauth_token_url: None,
+            oauth_device_code_url: None,
+            oauth_scopes: vec![],
+        },
+        ProviderPreset {
+            id: "google".to_string(),
+            name: "Google AI".to_string(),
+            description: "Google Gemini API (OpenAI-compatible endpoint)".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            key_label: "Google AI API Key".to_string(),
+            key_placeholder: "AIza...".to_string(),
+            key_help: "Required for Google AI. This stays in your local config file.".to_string(),
+            api_key_required: true,
+            default_model: "gemini-2.5-pro-preview-05-06".to_string(),
+            models: map_models(&GOOGLE_MODELS),
+            oauth_flow_type: None,
+            oauth_client_id: None,
+            oauth_authorization_url: None,
+            oauth_token_url: None,
+            oauth_device_code_url: None,
+            oauth_scopes: vec![],
+        },
+        ProviderPreset {
+            id: "github-copilot".to_string(),
+            name: "GitHub Copilot".to_string(),
+            description: "GitHub Copilot chat completions endpoint".to_string(),
+            base_url: "https://api.githubcopilot.com".to_string(),
+            key_label: "Copilot Token".to_string(),
+            key_placeholder: "Optional for OAuth mode".to_string(),
+            key_help: "Use sign-in when available, or provide a token if supported in your setup.".to_string(),
+            api_key_required: false,
+            default_model: "gpt-4.1".to_string(),
+            models: vec![
+                ("claude-sonnet-4".to_string(), "Claude Sonnet 4".to_string()),
+                ("gpt-4.1".to_string(), "GPT-4.1".to_string()),
+                ("gpt-4o".to_string(), "GPT-4o".to_string()),
+                ("o3-mini".to_string(), "o3-mini".to_string()),
+                ("o1".to_string(), "o1".to_string()),
+            ],
+            oauth_flow_type: Some("device_code".to_string()),
+            oauth_client_id: std::env::var("GITHUB_COPILOT_OAUTH_CLIENT_ID")
+                .ok()
+                .or_else(|| std::env::var("GITHUBCOPILOT_OAUTH_CLIENT_ID").ok())
+                .or_else(|| Some("Ov23li8tweQw6odWQebz".to_string())),
+            oauth_authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
+            oauth_token_url: Some("https://github.com/login/oauth/access_token".to_string()),
+            oauth_device_code_url: Some("https://github.com/login/device/code".to_string()),
+            oauth_scopes: vec!["read:user".to_string()],
+        },
+        ProviderPreset {
+            id: "ollama".to_string(),
+            name: "Ollama".to_string(),
+            description: "Run models locally with Ollama".to_string(),
+            base_url: "http://localhost:11434/v1".to_string(),
+            key_label: "Optional API Key".to_string(),
+            key_placeholder: "Usually leave blank".to_string(),
+            key_help: "Local Ollama usually does not need a key. Keep Ollama running on this machine.".to_string(),
+            api_key_required: false,
+            default_model: "llama3.1:70b".to_string(),
+            models: map_models(&OLLAMA_MODELS),
+            oauth_flow_type: None,
+            oauth_client_id: None,
+            oauth_authorization_url: None,
+            oauth_token_url: None,
+            oauth_device_code_url: None,
+            oauth_scopes: vec![],
+        },
+        ProviderPreset {
+            id: "groq".to_string(),
+            name: "Groq".to_string(),
+            description: "Ultra-fast inference with Groq".to_string(),
+            base_url: "https://api.groq.com/openai/v1".to_string(),
+            key_label: "Groq API Key".to_string(),
+            key_placeholder: "gsk_...".to_string(),
+            key_help: "Required for Groq. This stays in your local config file.".to_string(),
+            api_key_required: true,
+            default_model: "llama-3.3-70b-versatile".to_string(),
+            models: map_models(&GROQ_MODELS),
+            oauth_flow_type: None,
+            oauth_client_id: None,
+            oauth_authorization_url: None,
+            oauth_token_url: None,
+            oauth_device_code_url: None,
+            oauth_scopes: vec![],
+        },
+        ProviderPreset {
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            description: "DeepSeek API direct access".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            key_label: "DeepSeek API Key".to_string(),
+            key_placeholder: "sk-...".to_string(),
+            key_help: "Required for DeepSeek. This stays in your local config file.".to_string(),
+            api_key_required: true,
+            default_model: "deepseek-r1".to_string(),
+            models: map_models(&DEEPSEEK_MODELS),
+            oauth_flow_type: None,
+            oauth_client_id: None,
+            oauth_authorization_url: None,
+            oauth_token_url: None,
+            oauth_device_code_url: None,
+            oauth_scopes: vec![],
+        },
+        ProviderPreset {
+            id: "xai".to_string(),
+            name: "xAI".to_string(),
+            description: "xAI Grok API".to_string(),
+            base_url: "https://api.x.ai/v1".to_string(),
+            key_label: "xAI API Key".to_string(),
+            key_placeholder: "xai-...".to_string(),
+            key_help: "Required for xAI. This stays in your local config file.".to_string(),
+            api_key_required: true,
+            default_model: "grok-3".to_string(),
+            models: map_models(&XAI_MODELS),
+            oauth_flow_type: None,
+            oauth_client_id: None,
+            oauth_authorization_url: None,
+            oauth_token_url: None,
+            oauth_device_code_url: None,
+            oauth_scopes: vec![],
+        },
+    ]
+}
+
+fn models_snapshot_catalog() -> &'static SnapshotCatalog {
+    static SNAPSHOT: OnceLock<SnapshotCatalog> = OnceLock::new();
+    SNAPSHOT.get_or_init(|| {
+        serde_json::from_str(include_str!("../../src/agent/models_snapshot.json"))
+            .unwrap_or_default()
+    })
+}
+
+fn provider_preset(provider_type: &str) -> Option<ProviderPreset> {
+    if let Some(preset) = provider_presets()
+        .into_iter()
+        .find(|preset| preset.id == provider_type)
+    {
+        return Some(preset);
+    }
+
+    let provider = models_snapshot_catalog().get(provider_type)?;
+    let mut models: Vec<(String, String)> = provider
+        .models
+        .values()
+        .filter(|m| {
+            let family = m.family.to_lowercase();
+            !family.contains("embedding") && !family.contains("whisper")
+        })
+        .map(|m| (m.id.clone(), m.name.clone()))
+        .collect();
+
+    if models.is_empty() {
+        return None;
+    }
+
+    models.sort_by(|a, b| a.1.cmp(&b.1));
+    let default_model = models[0].0.clone();
+
+    Some(ProviderPreset {
+        id: provider.id.clone(),
+        name: provider.name.clone(),
+        description: if provider.doc.trim().is_empty() {
+            "Configured from models snapshot".to_string()
+        } else {
+            provider.doc.clone()
+        },
+        base_url: provider.api.clone(),
+        key_label: format!("{} API Key", provider.name),
+        key_placeholder: "Enter API key".to_string(),
+        key_help: "This key is stored in your local config file.".to_string(),
+        api_key_required: true,
+        default_model,
+        models,
+        oauth_flow_type: None,
+        oauth_client_id: None,
+        oauth_authorization_url: None,
+        oauth_token_url: None,
+        oauth_device_code_url: None,
+        oauth_scopes: vec![],
+    })
+}
+
+fn setup_catalog_presets() -> Vec<ProviderPreset> {
+    let mut by_id: BTreeMap<String, ProviderPreset> = BTreeMap::new();
+
+    for preset in provider_presets() {
+        by_id.insert(preset.id.clone(), preset);
+    }
+
+    for (provider_id, provider) in models_snapshot_catalog() {
+        let entry = by_id.entry(provider_id.clone()).or_insert_with(|| {
+            let mut models: Vec<(String, String)> = provider
+                .models
+                .values()
+                .filter(|m| {
+                    let family = m.family.to_lowercase();
+                    !family.contains("embedding") && !family.contains("whisper")
+                })
+                .map(|m| (m.id.clone(), m.name.clone()))
+                .collect();
+            models.sort_by(|a, b| a.1.cmp(&b.1));
+            let default_model = models
+                .first()
+                .map(|m| m.0.clone())
+                .unwrap_or_else(|| "".to_string());
+
+            ProviderPreset {
+                id: provider.id.clone(),
+                name: provider.name.clone(),
+                description: if provider.doc.trim().is_empty() {
+                    "Configured from models snapshot".to_string()
+                } else {
+                    provider.doc.clone()
+                },
+                base_url: provider.api.clone(),
+                key_label: format!("{} API Key", provider.name),
+                key_placeholder: "Enter API key".to_string(),
+                key_help: "This key is stored in your local config file.".to_string(),
+                api_key_required: true,
+                default_model,
+                models,
+                oauth_flow_type: None,
+                oauth_client_id: None,
+                oauth_authorization_url: None,
+                oauth_token_url: None,
+                oauth_device_code_url: None,
+                oauth_scopes: vec![],
+            }
+        });
+
+        let snapshot_models: Vec<(String, String)> = provider
+            .models
+            .values()
+            .filter(|m| {
+                let family = m.family.to_lowercase();
+                !family.contains("embedding") && !family.contains("whisper")
+            })
+            .map(|m| (m.id.clone(), m.name.clone()))
+            .collect();
+
+        if !snapshot_models.is_empty() {
+            for model in snapshot_models {
+                if !entry.models.iter().any(|(id, _)| id == &model.0) {
+                    entry.models.push(model);
+                }
+            }
+            entry.models.sort_by(|a, b| a.1.cmp(&b.1));
+            // Keep preset default_model if still present, otherwise fall back to first
+            if !entry.models.iter().any(|(id, _)| id == &entry.default_model) {
+                if let Some((model_id, _)) = entry.models.first() {
+                    entry.default_model = model_id.clone();
+                }
+            }
+        }
+
+        if entry.base_url.trim().is_empty() {
+            entry.base_url = provider.api.clone();
+        }
+
+        if entry.description.trim().is_empty() {
+            entry.description = provider.doc.clone();
+        }
+    }
+
+    by_id
+        .into_values()
+        .filter(|p| !p.models.is_empty())
+        .collect()
+}
+
+fn load_existing_config(path: &Path) -> Option<ExistingConfig> {
+    let raw = fs::read_to_string(path).ok()?;
+    toml::from_str(&raw).ok()
+}
+
+fn load_existing_document(path: &Path) -> Option<toml::Value> {
+    let raw = fs::read_to_string(path).ok()?;
+    toml::from_str(&raw).ok()
+}
+
+fn primary_provider(config: &ExistingConfig) -> Option<ExistingProviderConfig> {
+    if !config.default_provider.trim().is_empty() {
+        if let Some(provider) = config
+            .providers
+            .iter()
+            .find(|provider| provider.provider_type == config.default_provider)
+        {
+            return Some(provider.clone());
+        }
+    }
+
+    if let Some(provider) = config.providers.first() {
+        return Some(provider.clone());
+    }
+
+    if !config.provider.provider_type.trim().is_empty() {
+        return Some(config.provider.clone());
+    }
+
+    None
+}
+
+fn provider_for_type(
+    config: &ExistingConfig,
+    provider_type: &str,
+) -> Option<ExistingProviderConfig> {
+    config
+        .providers
+        .iter()
+        .find(|provider| provider.provider_type == provider_type)
+        .cloned()
+        .or_else(|| {
+            if config.provider.provider_type == provider_type {
+                Some(config.provider.clone())
+            } else {
+                None
+            }
+        })
+}
+
+fn current_provider_type(config: &ExistingConfig, provider: &ExistingProviderConfig) -> String {
+    if !config.default_provider.trim().is_empty() {
+        config.default_provider.trim().to_string()
+    } else {
+        provider.provider_type.trim().to_string()
+    }
+}
+
+fn current_model(config: &ExistingConfig, provider: &ExistingProviderConfig) -> String {
+    if !config.default_model.trim().is_empty() {
+        config.default_model.trim().to_string()
+    } else {
+        provider.model.trim().to_string()
+    }
+}
+
+fn resolve_provider_api_key(
+    state: &AppState,
+    provider_type: &str,
+    provided_api_key: &str,
+) -> String {
+    let provided_api_key = provided_api_key.trim();
+    if !provided_api_key.is_empty() {
+        return provided_api_key.to_string();
+    }
+
+    load_existing_config(&state.config_path)
+        .and_then(|config| provider_for_type(&config, provider_type))
+        .map(|provider| provider.api_key.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn ensure_table(value: &mut toml::Value) -> &mut toml::map::Map<String, toml::Value> {
+    if !value.is_table() {
+        *value = toml::Value::Table(toml::map::Map::new());
+    }
+
+    value.as_table_mut().unwrap()
+}
+
+fn ensure_child_table<'a>(
+    table: &'a mut toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> &'a mut toml::map::Map<String, toml::Value> {
+    if !matches!(table.get(key), Some(toml::Value::Table(_))) {
+        table.insert(key.to_string(), toml::Value::Table(toml::map::Map::new()));
+    }
+
+    table.get_mut(key).unwrap().as_table_mut().unwrap()
+}
+
+fn provider_value(
+    provider_type: &str,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    auth_mode: &str,
+    preset: &ProviderPreset,
+) -> toml::Value {
+    let mut table = toml::map::Map::new();
+    table.insert(
+        "provider_type".to_string(),
+        toml::Value::String(provider_type.to_string()),
+    );
+    table.insert(
+        "api_key".to_string(),
+        toml::Value::String(api_key.to_string()),
+    );
+    table.insert(
+        "base_url".to_string(),
+        toml::Value::String(base_url.to_string()),
+    );
+    table.insert(
+        "model".to_string(),
+        toml::Value::String(model.to_string()),
+    );
+
+    if auth_mode == "oauth" {
+        table.insert(
+            "auth_type".to_string(),
+            toml::Value::String("oauth".to_string()),
+        );
+        if let Some(client_id) = &preset.oauth_client_id {
+            if !client_id.trim().is_empty() {
+                table.insert(
+                    "oauth_client_id".to_string(),
+                    toml::Value::String(client_id.clone()),
+                );
+            }
+        }
+        if let Some(auth_url) = &preset.oauth_authorization_url {
+            table.insert(
+                "oauth_authorization_url".to_string(),
+                toml::Value::String(auth_url.clone()),
+            );
+        }
+        if let Some(token_url) = &preset.oauth_token_url {
+            table.insert(
+                "oauth_token_url".to_string(),
+                toml::Value::String(token_url.clone()),
+            );
+        }
+        if !preset.oauth_scopes.is_empty() {
+            table.insert(
+                "oauth_scopes".to_string(),
+                toml::Value::Array(
+                    preset
+                        .oauth_scopes
+                        .iter()
+                        .map(|scope| toml::Value::String(scope.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    }
+
+    toml::Value::Table(table)
+}
+
+fn default_workspace_value(path: &str) -> toml::Value {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut table = toml::map::Map::new();
+    table.insert("id".to_string(), toml::Value::String("default".to_string()));
+    table.insert(
+        "name".to_string(),
+        toml::Value::String("Default Workspace".to_string()),
+    );
+    table.insert("path".to_string(), toml::Value::String(path.to_string()));
+    table.insert(
+        "description".to_string(),
+        toml::Value::String("Default working directory".to_string()),
+    );
+    table.insert(
+        "permission".to_string(),
+        toml::Value::String("read_write".to_string()),
+    );
+    table.insert("created_at".to_string(), toml::Value::String(now.clone()));
+    table.insert("last_used".to_string(), toml::Value::String(now));
+    toml::Value::Table(table)
+}
+
+fn update_default_workspace(
+    agent_table: &mut toml::map::Map<String, toml::Value>,
+    workspace_path: &str,
+) {
+    let default_workspace = default_workspace_value(workspace_path);
+
+    if !matches!(agent_table.get("workspaces"), Some(toml::Value::Array(_))) {
+        agent_table.insert(
+            "workspaces".to_string(),
+            toml::Value::Array(vec![default_workspace]),
+        );
+        return;
+    }
+
+    let workspaces = agent_table
+        .get_mut("workspaces")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+
+    let mut replaced = false;
+    for workspace in workspaces.iter_mut() {
+        let is_default = workspace
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .map(|id| id == "default")
+            .unwrap_or(false);
+        if !is_default {
+            continue;
+        }
+
+        *workspace = default_workspace.clone();
+        replaced = true;
+        break;
+    }
+
+    if !replaced {
+        workspaces.push(default_workspace);
+    }
+}
+
+fn config_is_ready(config: &ExistingConfig) -> bool {
+    let provider = match primary_provider(config) {
+        Some(provider) => provider,
+        None => return false,
+    };
+
+    let provider_type = current_provider_type(config, &provider);
+    if provider_type.is_empty() {
+        return false;
+    }
+
+    let model = current_model(config, &provider);
+    if model.is_empty() {
+        return false;
+    }
+
+    if config.agent.workspace.trim().is_empty() {
+        return false;
+    }
+
+    if config.server.password_enabled && config.server.password.trim().is_empty() {
+        return false;
+    }
+
+    true
+}
+
+fn compute_setup_state(state: &AppState) -> SetupState {
+    let has_config = state.config_path.exists();
+    let default_workspace = default_workspace_path().display().to_string();
+
+    if !has_config {
+        return SetupState {
+            needs_setup: true,
+            has_config: false,
+            config_path: state.config_path.display().to_string(),
+            workspace_path: default_workspace,
+            provider_type: "openrouter".to_string(),
+            provider_supported: true,
+            password_enabled: true,
+            password_configured: false,
+            api_key_configured: false,
+            osagent_found: state.osagent_path.exists(),
+        };
+    }
+
+    match load_existing_config(&state.config_path) {
+        Some(config) => {
+            let provider = primary_provider(&config).unwrap_or_default();
+            let provider_type = current_provider_type(&config, &provider);
+            let workspace_path = if config.agent.workspace.trim().is_empty() {
+                default_workspace
+            } else {
+                config.agent.workspace.trim().to_string()
+            };
+            SetupState {
+                needs_setup: !config_is_ready(&config),
+                has_config: true,
+                config_path: state.config_path.display().to_string(),
+                workspace_path,
+                provider_type: provider_type.clone(),
+                provider_supported: provider_preset(&provider_type).is_some(),
+                password_enabled: config.server.password_enabled,
+                password_configured: !config.server.password.trim().is_empty(),
+                api_key_configured: !provider.api_key.trim().is_empty()
+                    || provider.auth_type.trim() == "oauth",
+                osagent_found: state.osagent_path.exists(),
+            }
+        }
+        None => SetupState {
+            needs_setup: true,
+            has_config: true,
+            config_path: state.config_path.display().to_string(),
+            workspace_path: default_workspace,
+            provider_type: "openrouter".to_string(),
+            provider_supported: true,
+            password_enabled: true,
+            password_configured: false,
+            api_key_configured: false,
+            osagent_found: state.osagent_path.exists(),
+        },
+    }
+}
+
+fn save_setup_config_file(
+    state: &AppState,
+    payload: SetupConfigPayload,
+) -> Result<SetupState, String> {
+    let provider_type = payload.provider_type.trim().to_lowercase();
+    let selected_model = payload.model.trim().to_string();
+    let auth_mode = payload.auth_mode.trim().to_lowercase();
+    let workspace_path = payload.workspace_path.trim();
+    let password = payload.password.trim().to_string();
+    let api_key = if auth_mode == "oauth" {
+        String::new()
+    } else {
+        resolve_provider_api_key(state, &provider_type, &payload.api_key)
+    };
+
+    let preset = provider_preset(&provider_type)
+        .ok_or_else(|| "Unsupported provider selected".to_string())?;
+
+    if workspace_path.is_empty() {
+        return Err("Choose a workspace folder before continuing".to_string());
+    }
+
+    if auth_mode != "oauth" && preset.api_key_required && api_key.is_empty() {
+        return Err("Enter an API key to continue".to_string());
+    }
+
+    if payload.password_enabled && password.is_empty() {
+        return Err("Enter a password or turn password protection off".to_string());
+    }
+
+    let model = if selected_model.is_empty() {
+        if provider_type == "openai" && auth_mode == "oauth" {
+            "gpt-5.3-codex".to_string()
+        } else {
+            preset.default_model.clone()
+        }
+    } else if preset.models.iter().any(|(id, _)| id == &selected_model) {
+        selected_model
+    } else {
+        return Err("Selected model is not available for this provider".to_string());
+    };
+
+    fs::create_dir_all(workspace_path)
+        .map_err(|e| format!("Failed to create workspace folder: {}", e))?;
+
+    if let Some(parent) = state.config_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config folder: {}", e))?;
+    }
+
+    let password_hash = if payload.password_enabled {
+        bcrypt::hash(&password, bcrypt::DEFAULT_COST)
+            .map_err(|e| format!("Failed to hash password: {}", e))?
+    } else {
+        String::new()
+    };
+
+    let existing_config = load_existing_config(&state.config_path);
+    let mut document = load_existing_document(&state.config_path)
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+
+    let root = ensure_table(&mut document);
+    root.insert(
+        "default_provider".to_string(),
+        toml::Value::String(provider_type.clone()),
+    );
+    root.insert(
+        "default_model".to_string(),
+        toml::Value::String(model.clone()),
+    );
+
+    let server = ensure_child_table(root, "server");
+    let bind = existing_config
+        .as_ref()
+        .map(|config| config.server.bind.trim())
+        .filter(|bind| !bind.is_empty())
+        .unwrap_or("127.0.0.1");
+    let port = existing_config
+        .as_ref()
+        .map(|config| config.server.port)
+        .filter(|port| *port != 0)
+        .unwrap_or(8765);
+    server.insert("bind".to_string(), toml::Value::String(bind.to_string()));
+    server.insert("port".to_string(), toml::Value::Integer(i64::from(port)));
+    server.insert("password".to_string(), toml::Value::String(password_hash));
+    server.insert(
+        "password_enabled".to_string(),
+        toml::Value::Boolean(payload.password_enabled),
+    );
+
+    let provider_entry = provider_value(
+        &provider_type,
+        &api_key,
+        &preset.base_url,
+        &model,
+        &auth_mode,
+        &preset,
+    );
+    if !matches!(root.get("providers"), Some(toml::Value::Array(_))) {
+        root.insert(
+            "providers".to_string(),
+            toml::Value::Array(vec![provider_entry.clone()]),
+        );
+    } else {
+        let providers = root.get_mut("providers").unwrap().as_array_mut().unwrap();
+        let mut updated = false;
+        for existing in providers.iter_mut() {
+            let matches_provider = existing
+                .get("provider_type")
+                .and_then(toml::Value::as_str)
+                .map(|existing_type| existing_type == provider_type.as_str())
+                .unwrap_or(false);
+            if matches_provider {
+                *existing = provider_entry.clone();
+                updated = true;
+                break;
+            }
+        }
+
+        if !updated {
+            providers.push(provider_entry);
+        }
+    }
+
+    let agent = ensure_child_table(root, "agent");
+    agent.insert(
+        "workspace".to_string(),
+        toml::Value::String(workspace_path.to_string()),
+    );
+    agent.insert(
+        "active_workspace".to_string(),
+        toml::Value::String("default".to_string()),
+    );
+    update_default_workspace(agent, workspace_path);
+
+    let data = toml::to_string_pretty(&document)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    fs::write(&state.config_path, data).map_err(|e| format!("Failed to save config: {}", e))?;
+
+    add_log(
+        state,
+        "info",
+        format!("Saved launcher setup to {}", state.config_path.display()),
+    );
+
+    Ok(compute_setup_state(state))
+}
+
+async fn validate_provider_connection(
+    state: &AppState,
+    payload: ProviderValidationPayload,
+) -> Result<ProviderValidationResult, String> {
+    let provider_type = payload.provider_type.trim().to_lowercase();
+    let preset = provider_preset(&provider_type)
+        .ok_or_else(|| "Unsupported provider selected".to_string())?;
+    let api_key = resolve_provider_api_key(state, &provider_type, &payload.api_key);
+
+    if preset.api_key_required && api_key.trim().is_empty() {
+        return Err("Enter an API key before testing this provider".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|e| format!("Could not create HTTP client: {}", e))?;
+
+    let request = if provider_type == "ollama" {
+        let request = client.get("http://localhost:11434/api/tags");
+        if api_key.trim().is_empty() {
+            request
+        } else {
+            request.bearer_auth(api_key)
+        }
+    } else {
+        client
+            .get(format!("{}/models", preset.base_url.trim_end_matches('/')))
+            .bearer_auth(api_key)
+    };
+
+    let response = request.send().await.map_err(|e| match provider_type.as_str() {
+        "ollama" => format!(
+            "Could not reach Ollama. Make sure the Ollama app or service is running on this machine. {}",
+            e
+        ),
+        _ => format!("Could not reach {}: {}", preset.name, e),
+    })?;
+
+    let status = response.status();
+    if status.is_success() {
+        let message = match provider_type.as_str() {
+            "openrouter" => "OpenRouter connection looks good.".to_string(),
+            "openai" => "OpenAI connection looks good.".to_string(),
+            "ollama" => "Ollama responded and looks ready.".to_string(),
+            _ => format!("{} connection looks good.", preset.name),
+        };
+        return Ok(ProviderValidationResult { ok: true, message });
+    }
+
+    let message = match status.as_u16() {
+        401 | 403 => format!(
+            "{} rejected the credentials. Double-check the API key and try again.",
+            match provider_type.as_str() {
+                "openrouter" => "OpenRouter",
+                "openai" => "OpenAI",
+                "ollama" => "Ollama",
+                _ => &preset.name,
+            }
+        ),
+        _ => format!(
+            "{} returned HTTP {} while testing the connection.",
+            match provider_type.as_str() {
+                "openrouter" => "OpenRouter",
+                "openai" => "OpenAI",
+                "ollama" => "Ollama",
+                _ => &preset.name,
+            },
+            status
+        ),
+    };
+
+    Ok(ProviderValidationResult { ok: false, message })
 }
 
 fn add_log_to_state(logs: &Mutex<Vec<LogEntry>>, level: &str, message: String) {
@@ -171,6 +1600,393 @@ fn get_build_running(state: State<AppState>) -> bool {
 }
 
 #[tauri::command]
+fn get_setup_state(state: State<AppState>) -> SetupState {
+    compute_setup_state(&state)
+}
+
+#[tauri::command]
+fn get_setup_provider_catalog() -> Vec<SetupProviderInfo> {
+    setup_catalog_presets()
+        .into_iter()
+        .map(|preset| {
+            let oauth = match preset.oauth_flow_type {
+                Some(ref flow_type) => {
+                    let env_var_name = format!(
+                        "{}_OAUTH_CLIENT_ID",
+                        preset.id.to_uppercase().replace('-', "_")
+                    );
+                    let has_client_id = std::env::var(&env_var_name)
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
+                        || preset
+                            .oauth_client_id
+                            .as_deref()
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                        || load_existing_config(&get_config_path())
+                            .map(|c| !c.provider.oauth_client_id.trim().is_empty())
+                            .unwrap_or(false);
+                    Some(SetupProviderOAuth {
+                        flow_type: flow_type.clone(),
+                        client_id_configured: has_client_id,
+                    })
+                }
+                None => None,
+            };
+
+            SetupProviderInfo {
+                id: preset.id,
+                name: preset.name,
+                description: preset.description,
+                base_url: preset.base_url,
+                key_label: preset.key_label,
+                key_placeholder: preset.key_placeholder,
+                key_help: preset.key_help,
+                api_key_required: preset.api_key_required,
+                default_model: preset.default_model,
+                models: preset
+                    .models
+                    .into_iter()
+                    .map(|(id, name)| SetupProviderModel { id, name })
+                    .collect(),
+                oauth,
+            }
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct LauncherTokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+async fn exchange_setup_oauth_code(
+    token_url: &str,
+    client_id: &str,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<LauncherTokenResponse, String> {
+    let response = reqwest::Client::new()
+        .post(token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(
+            [
+                ("grant_type", "authorization_code"),
+                ("client_id", client_id),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", code_verifier),
+            ]
+            .iter()
+            .map(|(key, value)| format!("{}={}", urlencoding::encode(key), urlencoding::encode(value)))
+            .collect::<Vec<_>>()
+            .join("&"),
+        )
+        .send()
+        .await
+        .map_err(|e| format!("OAuth token exchange failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("OAuth token exchange failed ({}): {}", status, body));
+    }
+
+    response
+        .json::<LauncherTokenResponse>()
+        .await
+        .map_err(|e| format!("Invalid OAuth token response: {}", e))
+}
+
+#[tauri::command]
+async fn start_setup_oauth(payload: SetupOAuthStartPayload) -> Result<SetupOAuthStartResult, String> {
+    let provider_id = payload.provider_type.trim().to_lowercase();
+    let preset = provider_preset(&provider_id)
+        .ok_or_else(|| "Unsupported provider selected".to_string())?;
+
+    let flow_type = preset
+        .oauth_flow_type
+        .clone()
+        .ok_or_else(|| format!("{} does not support sign-in", preset.name))?;
+    if flow_type != "pkce" {
+        return Err(format!("{} sign-in flow is not supported in launcher", preset.name));
+    }
+
+    // Resolution order (same convention as web UI):
+    // 1. Standardized env var: {PROVIDER_UPPERCASE}_OAUTH_CLIENT_ID
+    // 2. Preset-specific env var (e.g. GITHUB_COPILOT_OAUTH_CLIENT_ID)
+    // 3. oauth_client_id stored in existing config.toml
+    let env_var_name = format!(
+        "{}_OAUTH_CLIENT_ID",
+        provider_id.to_uppercase().replace('-', "_")
+    );
+    let client_id = std::env::var(&env_var_name)
+        .ok()
+        .or_else(|| preset.oauth_client_id.clone().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            load_existing_config(&get_config_path()).and_then(|c| {
+                let id = c.provider.oauth_client_id.trim().to_string();
+                if id.is_empty() { None } else { Some(id) }
+            })
+        })
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "No OAuth client ID configured for {}. Set the {} environment variable.",
+                preset.name, env_var_name
+            )
+        })?;
+    let auth_base = preset
+        .oauth_authorization_url
+        .clone()
+        .ok_or_else(|| format!("No OAuth authorization URL configured for {}", preset.name))?;
+    let token_url = preset
+        .oauth_token_url
+        .clone()
+        .ok_or_else(|| format!("No OAuth token URL configured for {}", preset.name))?;
+
+    let redirect_uri = format!("http://localhost:{}/auth/callback", OPENAI_OAUTH_PORT);
+    let scope = if preset.oauth_scopes.is_empty() {
+        "api.full-access".to_string()
+    } else {
+        preset.oauth_scopes.join(" ")
+    };
+    let state = oauth_state();
+    let code_verifier = generate_pkce_verifier();
+    let code_challenge = pkce_challenge(&code_verifier);
+
+    let listener = TcpListener::bind(("127.0.0.1", OPENAI_OAUTH_PORT))
+        .await
+        .map_err(|e| format!("Failed to bind OAuth callback port {}: {}", OPENAI_OAUTH_PORT, e))?;
+
+    let mut url = reqwest::Url::parse(&auth_base)
+        .map_err(|e| format!("Invalid OAuth URL for {}: {}", preset.name, e))?;
+    url.query_pairs_mut()
+        .append_pair("client_id", &client_id)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("response_type", "code")
+        .append_pair("scope", &scope)
+        .append_pair("state", &state)
+        .append_pair("code_challenge", &code_challenge)
+        .append_pair("code_challenge_method", "S256");
+
+    if provider_id == "openai" {
+        url.query_pairs_mut()
+            .append_pair("id_token_add_organizations", "true")
+            .append_pair("codex_cli_simplified_flow", "true")
+            .append_pair("originator", "osagent");
+    }
+
+    let auth_url = url.to_string();
+    open::that(&auth_url).map_err(|e| format!("Failed to open browser: {}", e))?;
+    let code = wait_for_oauth_callback(listener, &state).await?;
+    let tokens = exchange_setup_oauth_code(
+        &token_url,
+        &client_id,
+        &code,
+        &redirect_uri,
+        &code_verifier,
+    )
+    .await?;
+
+    let storage = LauncherOAuthStorage::new(oauth_storage_path(&get_config_path()));
+    storage.set_token(
+        &provider_id,
+        LauncherOAuthTokenEntry {
+            access_token: tokens.access_token.clone(),
+            refresh_token: if tokens.refresh_token.trim().is_empty() {
+                None
+            } else {
+                Some(tokens.refresh_token.clone())
+            },
+            expires_at: tokens
+                .expires_in
+                .map(|secs| chrono::Utc::now().timestamp() + secs),
+            scopes: Some(preset.oauth_scopes.clone()),
+            account_id: extract_account_id(tokens.id_token.as_deref(), Some(&tokens.access_token)),
+        },
+    )?;
+
+    Ok(SetupOAuthStartResult {
+        opened: true,
+        auth_url,
+        connected: true,
+    })
+}
+
+#[tauri::command]
+async fn start_device_code_oauth(
+    payload: DeviceCodeStartPayload,
+) -> Result<DeviceCodeStartResult, String> {
+    let provider_id = payload.provider_type.trim().to_lowercase();
+    let preset = provider_preset(&provider_id)
+        .ok_or_else(|| "Unsupported provider".to_string())?;
+
+    let device_code_url = preset
+        .oauth_device_code_url
+        .ok_or_else(|| format!("{} does not support device code sign-in", preset.name))?;
+
+    let client_id = preset
+        .oauth_client_id
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| format!("No OAuth client ID configured for {}", preset.name))?;
+
+    let scope = preset.oauth_scopes.join(" ");
+
+    #[derive(serde::Deserialize)]
+    struct DeviceCodeResponse {
+        device_code: String,
+        user_code: String,
+        verification_uri: String,
+        #[serde(default)]
+        interval: u64,
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&device_code_url)
+        .header("Accept", "application/json")
+        .form(&[("client_id", client_id.as_str()), ("scope", scope.as_str())])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to start device code flow: {}", e))?;
+
+    let data: DeviceCodeResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid device code response: {}", e))?;
+
+    Ok(DeviceCodeStartResult {
+        user_code: data.user_code,
+        verification_uri: data.verification_uri,
+        device_code: data.device_code,
+        interval: if data.interval == 0 { 5 } else { data.interval },
+    })
+}
+
+#[tauri::command]
+async fn poll_device_code_oauth(
+    payload: DeviceCodePollPayload,
+) -> Result<DeviceCodePollResult, String> {
+    let provider_id = payload.provider_type.trim().to_lowercase();
+    let preset = provider_preset(&provider_id)
+        .ok_or_else(|| "Unsupported provider".to_string())?;
+
+    let client_id = preset
+        .oauth_client_id
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| format!("No OAuth client ID for {}", preset.name))?;
+
+    let token_url = preset
+        .oauth_token_url
+        .clone()
+        .ok_or_else(|| format!("No token URL for device code flow for {}", preset.name))?;
+
+    #[derive(serde::Deserialize)]
+    struct PollResponse {
+        #[serde(default)]
+        access_token: String,
+        #[serde(default)]
+        error: String,
+        #[serde(default)]
+        error_description: String,
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(token_url)
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("device_code", payload.device_code.as_str()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Poll request failed: {}", e))?;
+
+    let data: PollResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid poll response: {}", e))?;
+
+    if !data.access_token.is_empty() {
+        let storage = LauncherOAuthStorage::new(oauth_storage_path(&get_config_path()));
+        storage.set_token(
+            &provider_id,
+            LauncherOAuthTokenEntry {
+                access_token: data.access_token.clone(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: Some(preset.oauth_scopes.clone()),
+                account_id: None,
+            },
+        )?;
+        Ok(DeviceCodePollResult {
+            status: "success".to_string(),
+            access_token: None,
+            message: "Signed in successfully.".to_string(),
+        })
+    } else if data.error == "authorization_pending" || data.error == "slow_down" {
+        Ok(DeviceCodePollResult {
+            status: "pending".to_string(),
+            access_token: None,
+            message: "Waiting for authorization...".to_string(),
+        })
+    } else {
+        Ok(DeviceCodePollResult {
+            status: "error".to_string(),
+            access_token: None,
+            message: if data.error_description.is_empty() {
+                data.error
+            } else {
+                data.error_description
+            },
+        })
+    }
+}
+
+#[tauri::command]
+fn browse_workspace_folder(state: State<AppState>) -> Option<String> {
+    let current_setup = compute_setup_state(&state);
+    let starting_dir = PathBuf::from(&current_setup.workspace_path);
+    let dialog = rfd::FileDialog::new();
+    let dialog = if starting_dir.exists() {
+        dialog.set_directory(starting_dir)
+    } else {
+        dialog.set_directory(default_workspace_path())
+    };
+
+    dialog.pick_folder().map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+fn save_setup_config(
+    window: Window,
+    state: State<AppState>,
+    payload: SetupConfigPayload,
+) -> Result<SetupState, String> {
+    let setup_state = save_setup_config_file(&state, payload)?;
+    let _ = window.emit("setup-state-changed", &setup_state);
+    Ok(setup_state)
+}
+
+#[tauri::command]
+async fn validate_setup_provider(
+    state: State<'_, AppState>,
+    payload: ProviderValidationPayload,
+) -> Result<ProviderValidationResult, String> {
+    validate_provider_connection(&state, payload).await
+}
+
+#[tauri::command]
 fn start_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, String> {
     let running = *state.osagent_running.lock().unwrap();
     if running {
@@ -180,6 +1996,14 @@ fn start_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, 
     if !state.osagent_path.exists() {
         let msg = format!("osagent.exe not found at {}", state.osagent_path.display());
         add_log(&state, "error", msg.clone());
+        return Err(msg);
+    }
+
+    if compute_setup_state(&state).needs_setup {
+        let msg = "Finish setup before starting OSAgent".to_string();
+        add_log(&state, "warn", msg.clone());
+        window.show().ok();
+        window.set_focus().ok();
         return Err(msg);
     }
 
@@ -388,79 +2212,70 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
         // Save JoinHandles so we can wait for readers to fully drain the pipe
         // before marking the build as done. child.wait() returning does NOT mean
         // the pipe buffers are empty — readers may still have data to read.
-        let stdout_handle = if let Some(stdout) = stdout {
-            Some(std::thread::spawn(move || {
+        let stdout_handle = stdout.map(|stdout| {
+            std::thread::spawn(move || {
                 let reader = std::io::BufReader::new(stdout);
-                for line in reader.lines() {
-                    if let Ok(l) = line {
-                        let trimmed = l.trim();
-                        if !trimmed.is_empty() {
-                            let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                            let state = app_handle_out.state::<AppState>();
-                            add_log_to_state(&state.logs, "info", trimmed.to_string());
-                            if let Ok(mut file) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&log_file_out)
-                            {
-                                use std::io::Write;
-                                let _ = writeln!(file, "[{}] [INFO] {}", timestamp, trimmed);
-                            }
+                for l in reader.lines().map_while(Result::ok) {
+                    let trimmed = l.trim();
+                    if !trimmed.is_empty() {
+                        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+                        let state = app_handle_out.state::<AppState>();
+                        add_log_to_state(&state.logs, "info", trimmed.to_string());
+                        if let Ok(mut file) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&log_file_out)
+                        {
+                            use std::io::Write;
+                            let _ = writeln!(file, "[{}] [INFO] {}", timestamp, trimmed);
                         }
                     }
                 }
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         let app_handle_err = app_handle.clone();
         let log_file_err = log_file_path.clone();
-        let stderr_handle = if let Some(stderr) = stderr {
-            Some(std::thread::spawn(move || {
+        let stderr_handle = stderr.map(|stderr| {
+            std::thread::spawn(move || {
                 let reader = std::io::BufReader::new(stderr);
-                for line in reader.lines() {
-                    if let Ok(l) = line {
-                        // Each \n-terminated line may contain multiple \r-separated
-                        // cargo progress updates. Split and handle each segment.
-                        for part in l.split('\r') {
-                            let clean = strip_ansi_codes(part);
-                            let trimmed = clean.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
-                            let level =
-                                if trimmed.starts_with("error") || trimmed.contains("error[") {
-                                    "error"
-                                } else if trimmed.starts_with("warning") {
-                                    "warn"
-                                } else {
-                                    "info"
-                                };
-                            let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                            let state = app_handle_err.state::<AppState>();
-                            add_log_to_state(&state.logs, level, trimmed.to_string());
-                            if let Ok(mut file) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&log_file_err)
-                            {
-                                use std::io::Write;
-                                let _ = writeln!(
-                                    file,
-                                    "[{}] [{}] {}",
-                                    timestamp,
-                                    level.to_uppercase(),
-                                    trimmed
-                                );
-                            }
+                for l in reader.lines().map_while(Result::ok) {
+                    // Each \n-terminated line may contain multiple \r-separated
+                    // cargo progress updates. Split and handle each segment.
+                    for part in l.split('\r') {
+                        let clean = strip_ansi_codes(part);
+                        let trimmed = clean.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let level = if trimmed.starts_with("error") || trimmed.contains("error[") {
+                            "error"
+                        } else if trimmed.starts_with("warning") {
+                            "warn"
+                        } else {
+                            "info"
+                        };
+                        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+                        let state = app_handle_err.state::<AppState>();
+                        add_log_to_state(&state.logs, level, trimmed.to_string());
+                        if let Ok(mut file) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&log_file_err)
+                        {
+                            use std::io::Write;
+                            let _ = writeln!(
+                                file,
+                                "[{}] [{}] {}",
+                                timestamp,
+                                level.to_uppercase(),
+                                trimmed
+                            );
                         }
                     }
                 }
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         let exit_status = child.wait();
 
@@ -760,17 +2575,24 @@ fn main() {
             _ => {}
         })
         .manage(app_state)
-        .on_window_event(|event| match event.event() {
-            WindowEvent::CloseRequested { api, .. } => {
+        .on_window_event(|event| {
+            if let WindowEvent::CloseRequested { api, .. } = event.event() {
                 event.window().hide().ok();
                 api.prevent_close();
             }
-            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_logs,
             get_build_running,
+            get_setup_state,
+            get_setup_provider_catalog,
+            start_setup_oauth,
+            start_device_code_oauth,
+            poll_device_code_oauth,
+            browse_workspace_folder,
+            save_setup_config,
+            validate_setup_provider,
             start_osagent,
             stop_osagent,
             restart_osagent,
@@ -787,6 +2609,13 @@ fn main() {
 
             let state = app.state::<AppState>();
             add_log(&state, "info", "OSAgent Launcher initialized".into());
+            if compute_setup_state(&state).needs_setup {
+                add_log(
+                    &state,
+                    "info",
+                    "Launcher is ready to guide first-time setup".into(),
+                );
+            }
 
             Ok(())
         })

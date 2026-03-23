@@ -476,7 +476,7 @@ pub async fn transcribe(
     }
 
     let model_path = model_id
-        .and_then(|id| find_model_by_id(id))
+        .and_then(find_model_by_id)
         .or_else(find_downloaded_model)
         .ok_or_else(|| "No Whisper model installed. Download a model first.".to_string())?;
 

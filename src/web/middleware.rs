@@ -65,9 +65,7 @@ where
                 .and_then(|h| h.to_str().ok());
 
             if let Some(auth) = auth_header {
-                if auth.starts_with("Bearer ") {
-                    let token = &auth[7..];
-
+                if let Some(token) = auth.strip_prefix("Bearer ") {
                     if crate::web::auth::verify_token(token, &secret).is_ok() {
                         return inner.call(request).await;
                     }

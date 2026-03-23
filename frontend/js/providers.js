@@ -937,8 +937,8 @@ OSA.addProvider = async function() {
 
     // If OAuth is active, save config
     if (OSA.currentProviderOAuthSupported) {
-        const dot = document.getElementById('oauth-dot');
-        if (dot.classList.contains('connected')) {
+        const connectedView = document.getElementById('oauth-connected-view');
+        if (connectedView && !connectedView.classList.contains('hidden')) {
             addBtn.disabled = true;
             addBtn.textContent = 'Saving...';
             try {

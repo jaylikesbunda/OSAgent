@@ -24,14 +24,20 @@ echo "║         OSAgent Performance Benchmark Suite                   ║"
 echo "╚═══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
+# CI-quality checks
+echo -e "${YELLOW}[1/7] Running CI-quality checks...${NC}"
+cargo fmt -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features --verbose
+
 # Build release binary
-echo -e "${YELLOW}[1/6] Building release binary...${NC}"
+echo -e "${YELLOW}[2/7] Building release binary...${NC}"
 cargo build --release 2>/dev/null
 BINARY_SIZE=$(ls -lh ./target/release/osagent | awk '{print $5}')
 echo -e "   Binary size: ${GREEN}$BINARY_SIZE${NC}"
 
 # Memory baseline
-echo -e "${YELLOW}[2/6] Measuring memory baseline...${NC}"
+echo -e "${YELLOW}[3/7] Measuring memory baseline...${NC}"
 ./target/release/osagent --version &
 PID=$!
 sleep 0.5
@@ -48,7 +54,7 @@ fi
 kill $PID 2>/dev/null || true
 
 # Startup time
-echo -e "${YELLOW}[3/6] Measuring startup time...${NC}"
+echo -e "${YELLOW}[4/7] Measuring startup time...${NC}"
 STARTUP_TIMES=()
 for i in {1..10}; do
     START=$(date +%s%N)
@@ -61,11 +67,11 @@ AVG_STARTUP=$(echo "${STARTUP_TIMES[@]}" | tr ' ' '\n' | awk '{sum+=$1} END {pri
 echo -e "   Average startup: ${GREEN}${AVG_STARTUP}ms${NC}"
 
 # Run criterion benchmarks
-echo -e "${YELLOW}[4/6] Running micro-benchmarks...${NC}"
+echo -e "${YELLOW}[5/7] Running micro-benchmarks...${NC}"
 cargo bench --bench performance -- --save-baseline osagent_$TIMESTAMP 2>&1 | tee "$RESULTS_DIR/criterion_$TIMESTAMP.txt" || true
 
 # Compare with competitors if available
-echo -e "${YELLOW}[5/6] Checking competitors...${NC}"
+echo -e "${YELLOW}[6/7] Checking competitors...${NC}"
 
 # OpenCode comparison
 if command -v opencode &> /dev/null; then
@@ -117,7 +123,7 @@ else
 fi
 
 # Generate report
-echo -e "${YELLOW}[6/6] Generating report...${NC}"
+echo -e "${YELLOW}[7/7] Generating report...${NC}"
 
 cat > "$REPORT_FILE" << EOF
 # OSAgent Performance Report

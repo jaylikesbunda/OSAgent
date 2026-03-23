@@ -92,18 +92,18 @@ impl SkillLoader {
         }
 
         let entries = fs::read_dir(dir).map_err(|e| {
-            OSAgentError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to read skills directory: {}", e),
-            ))
+            OSAgentError::Io(std::io::Error::other(format!(
+                "Failed to read skills directory: {}",
+                e
+            )))
         })?;
 
         for entry in entries {
             let entry = entry.map_err(|e| {
-                OSAgentError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read directory entry: {}", e),
-                ))
+                OSAgentError::Io(std::io::Error::other(format!(
+                    "Failed to read directory entry: {}",
+                    e
+                )))
             })?;
 
             let skill_dir = entry.path();
@@ -133,10 +133,10 @@ impl SkillLoader {
         }
 
         let content = fs::read_to_string(&skill_md).map_err(|e| {
-            OSAgentError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to read SKILL.md: {}", e),
-            ))
+            OSAgentError::Io(std::io::Error::other(format!(
+                "Failed to read SKILL.md: {}",
+                e
+            )))
         })?;
 
         let (name, description, metadata, body) = parse_skill_md(&content);

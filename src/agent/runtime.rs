@@ -173,6 +173,10 @@ impl AgentRuntime {
         config.migrate_legacy_provider();
 
         let catalog = Arc::new(ModelCatalog::new());
+        let oauth_dir = PathBuf::from(shellexpand::tilde(&config.storage.database).to_string())
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
 
         let storage = Arc::new(SqliteStorage::new(&config.storage.database)?);
         storage
@@ -199,18 +203,20 @@ impl AgentRuntime {
                 }
             }
 
-            let provider = Arc::new(OpenAICompatibleProvider::with_catalog(
+            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_and_oauth(
                 cfg,
                 Some(catalog.clone()),
+                Some(crate::oauth::create_oauth_storage(&oauth_dir)),
             )?);
             provider_instances.push((provider_cfg.provider_type.clone(), provider));
         }
 
         if provider_instances.is_empty() {
             warn!("No providers configured - using legacy single provider config");
-            let provider = Arc::new(OpenAICompatibleProvider::with_catalog(
+            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_and_oauth(
                 config.provider.clone(),
                 Some(catalog.clone()),
+                Some(crate::oauth::create_oauth_storage(&oauth_dir)),
             )?);
             provider_instances.push((config.provider.provider_type.clone(), provider));
         }
@@ -1521,7 +1527,7 @@ impl AgentRuntime {
             let last_tool = recent_tool_outcomes
                 .last()
                 .map(|(name, success, line)| {
-                    let mut snippet = line.replace('\n', " ").replace('\r', " ");
+                    let mut snippet = line.replace(['\n', '\r'], " ");
                     if snippet.len() > 180 {
                         snippet.truncate(180);
                         snippet.push_str("...");
@@ -1673,7 +1679,7 @@ impl AgentRuntime {
         Ok(())
     }
 
-    fn message_kind<'a>(message: &'a Message) -> Option<&'a str> {
+    fn message_kind(message: &Message) -> Option<&str> {
         message
             .metadata
             .get("kind")
@@ -2188,18 +2194,18 @@ impl AgentRuntime {
     async fn execute_parallel_tool_calls(
         &self,
         session_id: &str,
-        session: &Session,
+        _session: &Session,
         active_workspace: &WorkspaceConfig,
         tool_calls: &[ToolCall],
-        runtime_config: &Config,
-        recent_tool_signatures: &mut Vec<String>,
-        recent_tool_intents: &mut Vec<String>,
-        recent_tool_outcomes: &mut Vec<(String, bool, String)>,
+        _runtime_config: &Config,
+        _recent_tool_signatures: &mut Vec<String>,
+        _recent_tool_intents: &mut Vec<String>,
+        _recent_tool_outcomes: &mut Vec<(String, bool, String)>,
         tool_success_count: &mut usize,
         tool_failure_count: &mut usize,
-        loop_guard_triggered: &mut bool,
-        iteration: usize,
-        user: &str,
+        _loop_guard_triggered: &mut bool,
+        _iteration: usize,
+        _user: &str,
         message_index: i32,
     ) -> Result<Vec<(String, bool, u64, String, Option<String>)>> {
         let session_id = session_id.to_string();
@@ -2358,7 +2364,7 @@ impl AgentRuntime {
         let mut outputs = Vec::new();
 
         for (tool_call, result) in tool_calls.iter().zip(results) {
-            let (tool_name, success, output, duration_ms, _, _) = result;
+            let (_tool_name, success, output, duration_ms, _, _) = result;
 
             let tool_signature = Self::tool_call_signature(&tool_call.name, &tool_call.arguments);
             let tool_intent = Self::tool_intent_signature(&tool_call.name, &tool_call.arguments);
@@ -2613,7 +2619,6 @@ impl AgentRuntime {
 
     fn normalize_loop_text(value: &str) -> String {
         value
-            .trim()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
@@ -2998,9 +3003,16 @@ impl AgentRuntime {
 
     pub async fn add_provider(&self, provider_config: crate::config::ProviderConfig) -> Result<()> {
         let catalog = self.catalog.clone();
-        let provider = Arc::new(OpenAICompatibleProvider::with_catalog(
+        let oauth_dir = PathBuf::from(
+            shellexpand::tilde(&self.config.read().await.storage.database).to_string(),
+        )
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+        let provider = Arc::new(OpenAICompatibleProvider::with_catalog_and_oauth(
             provider_config.clone(),
             Some(catalog),
+            Some(crate::oauth::create_oauth_storage(&oauth_dir)),
         )?);
 
         let mut providers = self.providers.write().await;

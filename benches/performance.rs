@@ -1,6 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -11,7 +10,7 @@ fn bench_startup_time(c: &mut Criterion) {
     c.bench_function("startup_cold", |b| {
         b.iter(|| {
             let start = Instant::now();
-            let output = Command::new(binary)
+            let _output = Command::new(binary)
                 .arg("--version")
                 .output()
                 .expect("Failed to start osagent");
@@ -148,9 +147,7 @@ fn bench_string_operations(c: &mut Criterion) {
 
     group.bench_function("concat_1000", |b| b.iter(|| strings.join("\n")));
 
-    group.bench_function("clone_1000", |b| {
-        b.iter(|| strings.iter().map(|s| s.clone()).collect::<Vec<_>>())
-    });
+    group.bench_function("clone_1000", |b| b.iter(|| strings.to_vec()));
 
     group.finish();
 }
@@ -165,7 +162,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 
     group.bench_function("insert_1000", |b| {
         b.iter(|| {
-            let conn = Connection::open(&db_path).unwrap();
+            let mut conn = Connection::open(&db_path).unwrap();
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, data TEXT)",
                 [],
@@ -186,7 +183,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
     });
 
     // Pre-populate for read test
-    let conn = Connection::open(&db_path).unwrap();
+    let mut conn = Connection::open(&db_path).unwrap();
     conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", [])
         .unwrap();
     let tx = conn.transaction().unwrap();

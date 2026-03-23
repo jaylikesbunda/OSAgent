@@ -112,7 +112,7 @@ impl SkillBundle {
             let path = entry.path();
             let relative = path
                 .strip_prefix(base_path)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             if path.is_dir() {
                 let dir_name = relative.to_string_lossy().to_string();
@@ -144,8 +144,8 @@ impl SkillBundle {
             if file.name() == "manifest.toml" {
                 let mut content = String::new();
                 file.read_to_string(&mut content)?;
-                return Ok(toml::from_str(&content)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);
+                return toml::from_str(&content)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
             }
         }
 

@@ -199,7 +199,7 @@ impl CodeIndexer {
                     "Index already has {} documents, skipping re-indexing",
                     stats.number_of_documents
                 );
-                return Ok(stats.number_of_documents as usize);
+                return Ok(stats.number_of_documents);
             }
         }
 
@@ -331,10 +331,7 @@ impl CodeIndexer {
     }
 
     fn sanitize_id(file_path: &str, chunk_id: &u64) -> String {
-        let sanitized = file_path
-            .replace('\\', "_")
-            .replace('/', "_")
-            .replace('.', "_");
+        let sanitized = file_path.replace(['\\', '/', '.'], "_");
         format!("{}-{}", sanitized, chunk_id)
     }
 
@@ -439,7 +436,7 @@ impl CodeIndexer {
                 end_line: hit.result.end_line,
                 content: hit.result.content,
                 language: hit.result.language,
-                score: hit.ranking_score.map(|s| s as f64),
+                score: hit.ranking_score.map(|s| s),
             })
             .collect();
 
@@ -474,7 +471,7 @@ impl CodeIndexer {
                 end_line: hit.result.end_line,
                 content: hit.result.content,
                 language: hit.result.language,
-                score: hit.ranking_score.map(|s| s as f64),
+                score: hit.ranking_score.map(|s| s),
             })
             .collect();
 

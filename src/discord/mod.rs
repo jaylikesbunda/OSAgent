@@ -20,7 +20,6 @@ use serenity::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
 use tracing::{error, info, warn};
 
 const DEFAULT_WORKSPACE_CHOICE_LIMIT: usize = 25;
@@ -1702,7 +1701,7 @@ impl Handler {
                     if !current_text.trim().is_empty() {
                         embeds.push(
                             CreateEmbed::new()
-                                .description(&current_text.clone())
+                                .description(current_text.clone())
                                 .colour(EMBED_COLOR_PRIMARY),
                         );
                         current_text.clear();
@@ -1956,9 +1955,9 @@ impl EventHandler for Handler {
     ) {
         if let Some(command) = interaction.as_autocomplete() {
             if command.data.name == "workspace" {
-                self.handle_workspace_autocomplete(&ctx, &command).await;
+                self.handle_workspace_autocomplete(&ctx, command).await;
             } else if command.data.name == "persona" {
-                self.handle_persona_autocomplete(&ctx, &command).await;
+                self.handle_persona_autocomplete(&ctx, command).await;
             }
             return;
         }
@@ -1967,9 +1966,9 @@ impl EventHandler for Handler {
             let command_name = command.data.name.as_str();
 
             match command_name {
-                "new" => self.handle_new_command(&ctx, &command).await,
-                "status" => self.handle_status_command(&ctx, &command).await,
-                "reset" => self.handle_reset_command(&ctx, &command).await,
+                "new" => self.handle_new_command(&ctx, command).await,
+                "status" => self.handle_status_command(&ctx, command).await,
+                "reset" => self.handle_reset_command(&ctx, command).await,
                 "permissions" => {
                     let action = command
                         .data
@@ -1984,18 +1983,19 @@ impl EventHandler for Handler {
                         .iter()
                         .find(|o| o.name == "path")
                         .and_then(|o| o.value.as_str());
-                    self.handle_permissions_command(&ctx, &command, action, path)
+                    self.handle_permissions_command(&ctx, command, action, path)
                         .await;
                 }
                 "mode" => {
-                    if let Some(mode) = command.data.options.get(0).and_then(|o| o.value.as_str()) {
-                        self.handle_mode_command(&ctx, &command, mode).await;
+                    if let Some(mode) = command.data.options.first().and_then(|o| o.value.as_str())
+                    {
+                        self.handle_mode_command(&ctx, command, mode).await;
                     }
                 }
                 "model" => {
-                    if let Some(model) = command.data.options.get(0).and_then(|o| o.value.as_str())
+                    if let Some(model) = command.data.options.first().and_then(|o| o.value.as_str())
                     {
-                        self.handle_model_command(&ctx, &command, model).await;
+                        self.handle_model_command(&ctx, command, model).await;
                     }
                 }
                 "workspace" => {
@@ -2012,7 +2012,7 @@ impl EventHandler for Handler {
                         .iter()
                         .find(|o| o.name == "id")
                         .and_then(|o| o.value.as_str());
-                    self.handle_workspace_command(&ctx, &command, action, workspace_id)
+                    self.handle_workspace_command(&ctx, command, action, workspace_id)
                         .await;
                 }
                 "persona" => {
@@ -2035,28 +2035,29 @@ impl EventHandler for Handler {
                         .iter()
                         .find(|o| o.name == "character")
                         .and_then(|o| o.value.as_str());
-                    self.handle_persona_command(&ctx, &command, action, persona_id, character)
+                    self.handle_persona_command(&ctx, command, action, persona_id, character)
                         .await;
                 }
                 "subagent" => {
-                    self.handle_subagent_command(&ctx, &command).await;
+                    self.handle_subagent_command(&ctx, command).await;
                 }
                 "lsp" => {
-                    self.handle_lsp_command(&ctx, &command).await;
+                    self.handle_lsp_command(&ctx, command).await;
                 }
-                "settings" => self.handle_settings_command(&ctx, &command).await,
-                "help" => Self::handle_help_command(&ctx, &command).await,
+                "settings" => self.handle_settings_command(&ctx, command).await,
+                "help" => Self::handle_help_command(&ctx, command).await,
                 "chat" => {
                     if let Some(message) =
-                        command.data.options.get(0).and_then(|o| o.value.as_str())
+                        command.data.options.first().and_then(|o| o.value.as_str())
                     {
-                        self.handle_chat_command(&ctx, &command, message).await;
+                        self.handle_chat_command(&ctx, command, message).await;
                     }
                 }
                 "answer" => {
-                    if let Some(answer) = command.data.options.get(0).and_then(|o| o.value.as_str())
+                    if let Some(answer) =
+                        command.data.options.first().and_then(|o| o.value.as_str())
                     {
-                        self.handle_answer_command(&ctx, &command, answer).await;
+                        self.handle_answer_command(&ctx, command, answer).await;
                     }
                 }
                 _ => {

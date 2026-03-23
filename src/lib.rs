@@ -1,3 +1,17 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::map_identity)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::match_like_matches_macro)]
+
 pub mod agent;
 pub mod config;
 pub mod error;

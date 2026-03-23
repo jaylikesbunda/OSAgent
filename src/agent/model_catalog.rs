@@ -214,8 +214,10 @@ impl ModelCatalog {
             .into_iter()
             .map(|p| (p.id.clone(), p))
             .collect();
+        let mut seen_provider_ids = std::collections::HashSet::new();
 
         for (prov_id, prov) in catalog {
+            seen_provider_ids.insert(prov_id.clone());
             let connected =
                 connected_ids.contains(prov_id) || env_detected.iter().any(|e| e.id == *prov_id);
 
@@ -246,7 +248,7 @@ impl ModelCatalog {
                 prov_id.clone()
             };
 
-            let models: Vec<ModelInfo> = prov
+            let mut models: Vec<ModelInfo> = prov
                 .models
                 .iter()
                 .filter(|(_, m)| {
@@ -273,6 +275,29 @@ impl ModelCatalog {
                 })
                 .collect();
 
+            if let Some(preset) = preset {
+                let existing_ids: std::collections::HashSet<String> =
+                    models.iter().map(|m| m.id.clone()).collect();
+                for model in &preset.models {
+                    if existing_ids.contains(&model.id) {
+                        continue;
+                    }
+                    models.push(ModelInfo {
+                        id: model.id.clone(),
+                        name: model.name.clone(),
+                        provider_id: prov_id.clone(),
+                        provider_name: name.clone(),
+                        context_window: model.context_window,
+                        input_limit: None,
+                        output_limit: 0,
+                        supports_tools: model.supports_tools,
+                        supports_vision: model.supports_vision,
+                        category: model.category.clone(),
+                        available: connected,
+                    });
+                }
+            }
+
             all_models.extend(models.clone());
 
             providers.push(ProviderInfo {
@@ -286,8 +311,57 @@ impl ModelCatalog {
                 },
                 connected,
                 api_key_source,
-                oauth_supported: crate::oauth::provider::is_oauth_provider(&prov_id),
+                oauth_supported: crate::oauth::provider::is_oauth_provider(prov_id),
                 api_key_url: preset.and_then(|p| p.api_key_url.clone()),
+                models,
+            });
+        }
+
+        for preset in preset_map.values() {
+            if seen_provider_ids.contains(&preset.id) {
+                continue;
+            }
+
+            let connected = connected_ids.contains(&preset.id)
+                || env_detected.iter().any(|e| e.id == preset.id);
+            let api_key_source = if connected {
+                if connected_ids.contains(&preset.id) {
+                    "config".to_string()
+                } else {
+                    "env".to_string()
+                }
+            } else {
+                String::new()
+            };
+
+            let models: Vec<ModelInfo> = preset
+                .models
+                .iter()
+                .map(|model| ModelInfo {
+                    id: model.id.clone(),
+                    name: model.name.clone(),
+                    provider_id: preset.id.clone(),
+                    provider_name: preset.name.clone(),
+                    context_window: model.context_window,
+                    input_limit: None,
+                    output_limit: 0,
+                    supports_tools: model.supports_tools,
+                    supports_vision: model.supports_vision,
+                    category: model.category.clone(),
+                    available: connected,
+                })
+                .collect();
+
+            all_models.extend(models.clone());
+            providers.push(ProviderInfo {
+                id: preset.id.clone(),
+                name: preset.name.clone(),
+                base_url: preset.base_url.clone(),
+                description: preset.description.clone(),
+                connected,
+                api_key_source,
+                oauth_supported: crate::oauth::provider::is_oauth_provider(&preset.id),
+                api_key_url: preset.api_key_url.clone(),
                 models,
             });
         }

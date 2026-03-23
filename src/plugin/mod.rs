@@ -38,40 +38,40 @@ pub trait Plugin: Send + Sync {
 
     async fn on_tool_before(
         &self,
-        tool_name: &str,
-        session_id: &str,
-        args: &serde_json::Value,
+        _tool_name: &str,
+        _session_id: &str,
+        _args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
         None
     }
 
     async fn on_tool_after(
         &self,
-        tool_name: &str,
-        session_id: &str,
-        args: &serde_json::Value,
-        result: &Result<String, String>,
+        _tool_name: &str,
+        _session_id: &str,
+        _args: &serde_json::Value,
+        _result: &Result<String, String>,
     ) -> Option<String> {
         None
     }
 
-    async fn on_permission_ask(&self, permission_type: &str, resource: &str) -> Option<String> {
+    async fn on_permission_ask(&self, _permission_type: &str, _resource: &str) -> Option<String> {
         None
     }
 
     async fn on_event(
         &self,
-        event_type: &str,
-        data: &serde_json::Value,
+        _event_type: &str,
+        _data: &serde_json::Value,
     ) -> Option<serde_json::Value> {
         None
     }
 
-    async fn on_message(&self, session_id: &str, message: &str) -> Option<String> {
+    async fn on_message(&self, _session_id: &str, _message: &str) -> Option<String> {
         None
     }
 
-    async fn on_config(&self, config: &mut serde_json::Value) -> Result<(), String> {
+    async fn on_config(&self, _config: &mut serde_json::Value) -> Result<(), String> {
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
-use crate::skills::bundle::{get_icons_base_dir, get_skills_base_dir, BundleManifest};
+use crate::skills::bundle::{get_icons_base_dir, get_skills_base_dir};
 use crate::skills::config::{
-    get_config_base_dir, parse_frontmatter, ConfigField, MaskedValue, SkillConfig, SkillConfigStore,
+    get_config_base_dir, parse_frontmatter, ConfigField, SkillConfigStore,
 };
 use serde::Serialize;
 use std::collections::HashMap;

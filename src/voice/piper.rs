@@ -175,7 +175,7 @@ pub fn find_installed_voices() -> Vec<InstalledModel> {
             if path.extension().map(|e| e == "onnx").unwrap_or(false) {
                 if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
                     let size_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
-                    let lang = detect_voice_lang(name);
+                    let _lang = detect_voice_lang(name);
 
                     voices.push(InstalledModel {
                         id: name.to_string(),

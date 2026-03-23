@@ -14,7 +14,7 @@ async fn main() {
     let initial_mem = get_memory_mb();
 
     let mut handles = vec![];
-    for i in 0..100 {
+    for _i in 0..100 {
         let handle = tokio::spawn(async move {
             let data = vec![0u8; 1024 * 1024]; // 1MB
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -161,7 +161,7 @@ fn get_memory_mb() -> u64 {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        let output = Command::new("wmic")
+        let _output = Command::new("wmic")
             .args(["OS", "get", "TotalVisibleMemorySize", "/Value"])
             .output()
             .ok();

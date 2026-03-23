@@ -22,19 +22,10 @@ const MIDDLE_OMISSION_MARKER: &str =
     "\n\n⚠️ [... middle content omitted — showing head and tail ...]\n\n";
 
 /// Options for truncation behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TruncationOptions {
     pub suffix: Option<String>,
     pub min_keep_chars: Option<usize>,
-}
-
-impl Default for TruncationOptions {
-    fn default() -> Self {
-        Self {
-            suffix: None,
-            min_keep_chars: None,
-        }
-    }
 }
 
 /// Detect whether text likely contains error/diagnostic content near the end,
@@ -170,7 +161,7 @@ pub fn maybe_truncate_tool_result(
 /// Summarize a tool output for context storage, applying size limits.
 /// Used in the main agent loop to keep session messages manageable.
 pub fn summarize_tool_output_for_context(
-    tool_name: &str,
+    _tool_name: &str,
     output: &str,
     context_window_tokens: Option<usize>,
 ) -> String {

@@ -9,6 +9,7 @@ use crate::tools::registry::ToolRegistry;
 use chrono::Utc;
 use dashmap::DashMap;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
@@ -397,7 +398,7 @@ impl SubagentManager {
 
     async fn create_provider(
         cfg: &Config,
-        storage: Arc<SqliteStorage>,
+        _storage: Arc<SqliteStorage>,
     ) -> Result<Arc<dyn Provider>> {
         let provider_config = if !cfg.default_provider.is_empty() {
             cfg.providers
@@ -419,13 +420,22 @@ impl SubagentManager {
             }
         }
 
-        Ok(Arc::new(OpenAICompatibleProvider::new(config)?))
+        let oauth_dir = PathBuf::from(shellexpand::tilde(&cfg.storage.database).to_string())
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        Ok(Arc::new(OpenAICompatibleProvider::with_catalog_and_oauth(
+            config,
+            None,
+            Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+        )?))
     }
 
     async fn run_iteration(
         session_id: String,
         parent_session_id: String,
-        task_id: String,
+        _task_id: String,
         storage: Arc<SqliteStorage>,
         event_bus: Arc<EventBus>,
         tool_registry: Arc<ToolRegistry>,

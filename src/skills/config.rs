@@ -30,21 +30,12 @@ pub fn parse_frontmatter(content: &str) -> Option<SkillConfigSchema> {
     serde_yaml::from_str(yaml).ok()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SkillRequirements {
     #[serde(default)]
     pub bins: Vec<String>,
     #[serde(default)]
     pub files: Vec<String>,
-}
-
-impl Default for SkillRequirements {
-    fn default() -> Self {
-        Self {
-            bins: Vec::new(),
-            files: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,18 +52,14 @@ pub struct ConfigField {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ConfigFieldType {
+    #[default]
     String,
     ApiKey,
     Password,
     Number,
     Boolean,
-}
-
-impl Default for ConfigFieldType {
-    fn default() -> Self {
-        ConfigFieldType::String
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

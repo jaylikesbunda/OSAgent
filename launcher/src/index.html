@@ -8,83 +8,270 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- Custom Title Bar -->
-  <div class="titlebar" data-tauri-drag-region>
-    <div class="titlebar-icon">
-      <img src="icons/thinking-indicator.png" alt="OSAgent" width="20" height="20" />
-    </div>
-    <div class="titlebar-text" data-tauri-drag-region>OSAgent</div>
-    <div class="titlebar-controls">
-      <button class="titlebar-btn minimize" id="btn-minimize" title="Minimize">
-        <svg viewBox="0 0 24 24"><path d="M6 12h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-      <button class="titlebar-btn close" id="btn-close" title="Close to Tray">
-        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-    </div>
-  </div>
-
-  <!-- Main Content -->
-  <div class="content">
-    <!-- Status Card -->
-    <div class="status-card" id="status-card">
-      <div class="status-indicator" id="status-indicator">
-        <div class="status-dot" id="status-dot"></div>
+  <div class="app-frame">
+    <div class="titlebar" data-tauri-drag-region>
+      <div class="titlebar-brand" data-tauri-drag-region>
+        <div class="titlebar-icon">
+          <img src="icons/thinking-indicator.png" alt="OSAgent" width="16" height="16" />
+        </div>
+        <div>
+          <div class="titlebar-text" data-tauri-drag-region>OSAgent Launcher</div>
+        </div>
       </div>
-      <div class="status-info">
-        <div class="status-label" id="status-label">Stopped</div>
-        <div class="status-pid" id="status-pid">PID: -</div>
+      <div class="titlebar-controls">
+        <button class="titlebar-btn" id="btn-minimize" title="Minimize">
+          <svg viewBox="0 0 24 24"><path d="M6 12h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="titlebar-btn close" id="btn-close" title="Close to Tray">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
       </div>
     </div>
 
-    <!-- Action Buttons -->
-    <div class="actions">
-      <button class="btn btn-primary" id="btn-start">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7L8 5z" fill="currentColor"/></svg>
-        Start
-      </button>
-      <button class="btn btn-danger" id="btn-stop" disabled>
-        <svg viewBox="0 0 24 24" fill="none"><rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor"/></svg>
-        Stop
-      </button>
-      <button class="btn btn-secondary" id="btn-restart" disabled>
-        <svg viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 11-9-9c2.52 0 4.93 1 6.74 2.74L21 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 5v3h-3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        Restart
-      </button>
-    </div>
+    <main class="app-content">
+      <section class="view" id="setup-view">
+        <section class="wizard-card">
+          <nav class="wizard-track" id="wizard-steps" aria-label="Setup steps">
+            <div class="wizard-track-line"></div>
+            <button class="wizard-pill active" data-step="0" type="button">
+              <span class="wizard-pill-num">1</span>
+              <span class="wizard-pill-label">Provider</span>
+            </button>
+            <button class="wizard-pill" data-step="1" type="button">
+              <span class="wizard-pill-num">2</span>
+              <span class="wizard-pill-label">Model</span>
+            </button>
+            <button class="wizard-pill" data-step="2" type="button">
+              <span class="wizard-pill-num">3</span>
+              <span class="wizard-pill-label">Auth</span>
+            </button>
+            <button class="wizard-pill" data-step="3" type="button">
+              <span class="wizard-pill-num">4</span>
+              <span class="wizard-pill-label">Workspace</span>
+            </button>
+            <button class="wizard-pill" data-step="4" type="button">
+              <span class="wizard-pill-num">5</span>
+              <span class="wizard-pill-label">Review</span>
+            </button>
+          </nav>
 
-    <!-- Quick Actions -->
-    <div class="quick-actions">
-      <button class="btn btn-outline" id="btn-open-ui">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="15,3 21,3 21,9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        Open Web UI
-      </button>
-<button class="btn btn-outline" id="btn-build">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        Build OSAgent
-      </button>
-    </div>
+          <div class="inline-notice hidden" id="setup-notice"></div>
+          <div class="inline-error hidden" id="setup-error"></div>
 
-    <!-- Path Info -->
-    <div class="path-info">
-      <div class="path-row">
-        <span class="path-label">Binary</span>
-        <span class="path-value" id="path-binary">-</span>
-      </div>
-      <div class="path-row">
-        <span class="path-label">Config</span>
-        <span class="path-value" id="path-config">-</span>
-      </div>
-    </div>
+          <!-- Step 1: Provider -->
+          <div class="wizard-panel active" data-step-panel="0">
+            <div class="step-meta-strip">
+              <span id="setup-config-path" class="meta-path">-</span>
+              <span>·</span>
+              <span id="setup-binary-status" class="meta-status">Checking...</span>
+            </div>
+            <div class="section-heading">
+              <h2>Choose a provider</h2>
+              <p>Pick the AI service you want OSA to use.</p>
+            </div>
+            <div class="step-body">
+              <div class="form-grid compact">
+                <label class="field">
+                  <span>Search</span>
+                  <input id="provider-search" type="text" placeholder="Filter providers..." autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>Provider</span>
+                  <select id="provider-select"></select>
+                </label>
+              </div>
+              <p class="provider-desc" id="provider-desc"></p>
+            </div>
+          </div>
 
-    <!-- Log Output -->
-    <div class="log-section">
-      <div class="log-header">
-        <span>Output Log</span>
-        <button class="btn btn-tiny" id="btn-clear-log">Clear</button>
-      </div>
-      <div class="log-container" id="log-container"></div>
-    </div>
+          <!-- Step 2: Model -->
+          <div class="wizard-panel" data-step-panel="1">
+            <div class="section-heading">
+              <h2>Choose a model</h2>
+              <p>Select the model to use with your chosen provider.</p>
+            </div>
+            <div class="step-body">
+              <div class="form-grid compact">
+                <label class="field">
+                  <span>Search models</span>
+                  <input id="model-search" type="text" placeholder="Filter models..." autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <select id="provider-model"></select>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 3: Auth -->
+          <div class="wizard-panel" data-step-panel="2">
+            <div class="section-heading">
+              <h2>Authentication</h2>
+              <p>Choose how to authenticate with your provider.</p>
+            </div>
+            <div class="step-body">
+              <div class="form-grid compact">
+                <div class="field" id="provider-auth-method-wrap">
+                  <span>Method</span>
+                  <div class="auth-toggle" id="provider-auth-toggle">
+                    <button class="auth-btn active" id="provider-auth-api" type="button">API Key</button>
+                    <button class="auth-btn" id="provider-auth-signin" type="button">Sign In</button>
+                  </div>
+                  <small id="provider-auth-note">Sign in is only available for providers with OAuth support.</small>
+                </div>
+                <label class="field" id="provider-api-key-wrap">
+                  <span id="provider-key-label">API Key</span>
+                  <input id="provider-api-key" type="password" placeholder="" autocomplete="off">
+                  <small id="provider-key-help">Stored locally in your config file.</small>
+                </label>
+                <div class="field hidden" id="provider-signin-row">
+                  <button class="btn secondary" id="btn-provider-signin" type="button">Sign in with Provider</button>
+                  <div class="device-code-hint hidden" id="device-code-hint">
+                    <span class="device-code-instruction">Visit <strong id="device-code-url">github.com/login/device</strong> and enter:</span>
+                    <code id="device-code-value">XXXX-XXXX</code>
+                    <small id="device-code-status">Waiting for you to authorize...</small>
+                  </div>
+                  <small id="provider-signin-hint">Opens provider sign-in in your browser.</small>
+                </div>
+              </div>
+              <div class="detail-card test-card">
+                <div class="detail-row">
+                  <span>Saved key</span>
+                  <strong id="provider-saved-key-status">No saved key stored yet</strong>
+                </div>
+                <div class="test-actions">
+                  <div class="provider-test-result idle" id="provider-test-result">Test the provider connection.</div>
+                  <button class="btn secondary" id="btn-test-provider" type="button">Test Connection</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 4: Workspace -->
+          <div class="wizard-panel" data-step-panel="3">
+            <div class="section-heading">
+              <h2>Workspace</h2>
+              <p>Where should OSA read and write files by default?</p>
+            </div>
+            <div class="step-body">
+              <div class="form-grid">
+                <label class="field">
+                  <span>Workspace folder</span>
+                  <div class="input-row">
+                    <input id="workspace-path" type="text" placeholder="Choose a folder" autocomplete="off">
+                    <button class="btn secondary" id="btn-browse-workspace" type="button">Browse</button>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 5: Review + Security -->
+          <div class="wizard-panel" data-step-panel="4">
+            <div class="section-heading">
+              <h2>Ready to save</h2>
+              <p>Confirm settings and set a web UI password if you want one.</p>
+            </div>
+            <div class="step-body">
+              <label class="toggle-card">
+                <input id="password-enabled" type="checkbox" checked>
+                <span>
+                  <strong>Require a web UI password</strong>
+                  <small>If off, anyone on this machine can open the local web UI.</small>
+                </span>
+              </label>
+              <div class="form-grid" id="password-fields">
+                <label class="field">
+                  <span>Password</span>
+                  <input id="password-input" type="password" placeholder="Choose a password" autocomplete="new-password">
+                </label>
+                <label class="field">
+                  <span>Confirm</span>
+                  <input id="password-confirm" type="password" placeholder="Type it again" autocomplete="new-password">
+                </label>
+              </div>
+              <div class="review-list">
+                <div class="review-item"><span>Provider</span><strong id="review-provider">-</strong></div>
+                <div class="review-item"><span>Model</span><strong id="review-model">-</strong></div>
+                <div class="review-item"><span>Workspace</span><strong id="review-workspace">-</strong></div>
+                <div class="review-item"><span>Config file</span><strong id="review-config">-</strong></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="wizard-actions">
+            <button class="btn ghost" id="wizard-back" type="button">Back</button>
+            <button class="btn primary" id="wizard-next" type="button">Continue</button>
+            <button class="btn primary hidden" id="wizard-save" type="button">Save and Start OSA</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="view hidden" id="dashboard-view">
+        <div class="dashboard-grid">
+          <section class="panel control-panel">
+            <div class="status-card stopped" id="status-card">
+              <div class="status-dot" id="status-dot"></div>
+              <div class="status-info">
+                <div class="status-label" id="status-label">Stopped</div>
+                <div class="status-pid" id="status-pid">PID: -</div>
+              </div>
+              <div class="inline-status-chip" id="dashboard-setup-status">Setup ready</div>
+            </div>
+
+            <div class="actions dash-actions">
+              <button class="btn primary" id="btn-start" type="button">Start</button>
+              <button class="btn secondary danger" id="btn-stop" type="button" disabled>Stop</button>
+              <button class="btn ghost" id="btn-restart" type="button" disabled>Restart</button>
+            </div>
+
+            <div class="review-list mini dash-info">
+              <div class="review-item"><span>Provider</span><strong id="dashboard-provider">-</strong></div>
+              <div class="review-item"><span>Workspace</span><strong id="dashboard-workspace">-</strong></div>
+              <div class="review-item"><span>Security</span><strong id="dashboard-security">-</strong></div>
+              <div class="review-item"><span>Binary</span><strong id="path-binary">-</strong></div>
+              <div class="review-item"><span>Config</span><strong id="path-config">-</strong></div>
+            </div>
+
+            <div class="actions quick-actions dash-secondary">
+              <button class="btn ghost" id="btn-open-ui" type="button">Open Web UI</button>
+              <button class="btn ghost" id="btn-open-setup" type="button">Reconfigure</button>
+              <button class="btn ghost" id="btn-build" type="button">Build OSA</button>
+            </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="log-header">
+              <h2>Output</h2>
+              <button class="btn ghost tiny" id="btn-clear-log" type="button">Clear</button>
+            </div>
+            <div class="log-container" id="log-container"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view hidden" id="finish-view">
+        <div class="finish-card">
+          <div class="finish-icon">
+            <svg viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 12l3 3 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <h2>OSAgent is running</h2>
+          <div class="review-list mini finish-summary">
+            <div class="review-item"><span>Provider</span><strong id="finish-provider">-</strong></div>
+            <div class="review-item"><span>Workspace</span><strong id="finish-workspace">-</strong></div>
+            <div class="review-item"><span>Security</span><strong id="finish-security">-</strong></div>
+          </div>
+          <div class="actions two-up">
+            <button class="btn primary" id="btn-finish-open-ui" type="button">Open Web UI</button>
+            <button class="btn ghost" id="btn-finish-dashboard" type="button">Go to Dashboard</button>
+          </div>
+        </div>
+      </section>
+    </main>
   </div>
 
   <script src="app.js"></script>

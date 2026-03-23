@@ -63,9 +63,11 @@
     "windows": [
       {
         "title": "OSAgent Launcher",
-        "width": 480,
-        "height": 620,
-        "resizable": false,
+        "width": 620,
+        "height": 520,
+        "minWidth": 540,
+        "minHeight": 440,
+        "resizable": true,
         "fullscreen": false,
         "decorations": false,
         "center": true,
