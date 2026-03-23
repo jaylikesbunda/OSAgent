@@ -1,0 +1,231 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillConfigSchema {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub emoji: Option<String>,
+    #[serde(default)]
+    pub requires: SkillRequirements,
+    #[serde(default)]
+    pub config: Vec<ConfigField>,
+}
+
+/// Parse the YAML frontmatter block from a SKILL.md file.
+/// Returns None if no frontmatter is present or parsing fails.
+pub fn parse_frontmatter(content: &str) -> Option<SkillConfigSchema> {
+    if !content.starts_with("---") {
+        return None;
+    }
+    let after_open = &content[3..];
+    // Find the closing ---
+    let end = after_open.find("\n---")?;
+    let yaml = &after_open[..end];
+    serde_yaml::from_str(yaml).ok()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillRequirements {
+    #[serde(default)]
+    pub bins: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+impl Default for SkillRequirements {
+    fn default() -> Self {
+        Self {
+            bins: Vec::new(),
+            files: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: ConfigFieldType,
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFieldType {
+    String,
+    ApiKey,
+    Password,
+    Number,
+    Boolean,
+}
+
+impl Default for ConfigFieldType {
+    fn default() -> Self {
+        ConfigFieldType::String
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillConfig {
+    pub settings: HashMap<String, String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            settings: HashMap::new(),
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SkillConfigStore {
+    base_dir: PathBuf,
+}
+
+impl SkillConfigStore {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    pub fn get_config_dir(&self) -> PathBuf {
+        self.base_dir.clone()
+    }
+
+    pub fn skill_config_path(&self, skill_name: &str) -> PathBuf {
+        self.base_dir.join(skill_name).join("config.toml")
+    }
+
+    pub fn skill_icon_path(&self, skill_name: &str) -> Option<PathBuf> {
+        let path = self.base_dir.join(skill_name).join("icon.png");
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    pub fn load_config(&self, skill_name: &str) -> std::io::Result<SkillConfig> {
+        let path = self.skill_config_path(skill_name);
+        if !path.exists() {
+            return Ok(SkillConfig::default());
+        }
+        let content = fs::read_to_string(&path)?;
+        let config: SkillConfig = toml::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(config)
+    }
+
+    pub fn save_config(&self, skill_name: &str, config: &SkillConfig) -> std::io::Result<()> {
+        let skill_dir = self.base_dir.join(skill_name);
+        fs::create_dir_all(&skill_dir)?;
+        let path = self.skill_config_path(skill_name);
+        let content = toml::to_string_pretty(config)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        fs::write(&path, content)
+    }
+
+    pub fn delete_config(&self, skill_name: &str) -> std::io::Result<()> {
+        let skill_dir = self.base_dir.join(skill_name);
+        if skill_dir.exists() {
+            fs::remove_dir_all(&skill_dir)?;
+        }
+        Ok(())
+    }
+
+    pub fn list_skills_with_config(&self) -> std::io::Result<Vec<String>> {
+        if !self.base_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut skills = Vec::new();
+        for entry in fs::read_dir(&self.base_dir)? {
+            let entry = entry?;
+            if entry.path().is_dir() {
+                if let Some(name) = entry.path().file_name().and_then(|n| n.to_str()) {
+                    skills.push(name.to_string());
+                }
+            }
+        }
+        Ok(skills)
+    }
+
+    pub fn get_masked_config(
+        &self,
+        skill_name: &str,
+    ) -> std::io::Result<HashMap<String, MaskedValue>> {
+        let config = self.load_config(skill_name)?;
+        let mut masked = HashMap::new();
+        for (key, value) in config.settings {
+            masked.insert(key, MaskedValue::from_value(&value));
+        }
+        masked.insert("enabled".to_string(), MaskedValue::Bool(config.enabled));
+        Ok(masked)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MaskedValue {
+    String(String),
+    Bool(bool),
+    Number(f64),
+}
+
+impl MaskedValue {
+    pub fn from_value(value: &str) -> Self {
+        if let Ok(num) = value.parse::<f64>() {
+            MaskedValue::Number(num)
+        } else if value == "true" || value == "false" {
+            MaskedValue::Bool(value.parse::<bool>().unwrap_or(false))
+        } else {
+            MaskedValue::String(value.to_string())
+        }
+    }
+
+    pub fn masked(&self) -> String {
+        match self {
+            MaskedValue::String(s) if s.len() > 8 => {
+                format!("{}...{}", &s[..4], &s[s.len() - 4..])
+            }
+            MaskedValue::String(s) if !s.is_empty() => "***".to_string(),
+            MaskedValue::String(_) => "".to_string(),
+            MaskedValue::Bool(b) => b.to_string(),
+            MaskedValue::Number(n) => n.to_string(),
+        }
+    }
+
+    pub fn is_api_key(&self) -> bool {
+        matches!(self, MaskedValue::String(s) if s.len() > 10)
+    }
+
+    pub fn as_string(&self) -> String {
+        match self {
+            MaskedValue::String(s) => s.clone(),
+            MaskedValue::Bool(b) => b.to_string(),
+            MaskedValue::Number(n) => n.to_string(),
+        }
+    }
+}
+
+pub fn get_config_base_dir() -> PathBuf {
+    let data_dir = std::env::var("OSAGENT_DATA_DIR")
+        .unwrap_or_else(|_| std::env::var("OSAGENT_WORKSPACE").unwrap_or_else(|_| ".".to_string()));
+    PathBuf::from(data_dir).join("skills-config")
+}

@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OSA</title>
+    <link rel="stylesheet" href="/static/css/variables.css">
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/sidebar.css">
+    <link rel="stylesheet" href="/static/css/header.css">
+    <link rel="stylesheet" href="/static/css/messages.css">
+    <link rel="stylesheet" href="/static/css/input.css">
+    <link rel="stylesheet" href="/static/css/modal.css">
+    <link rel="stylesheet" href="/static/css/tool.css">
+    <link rel="stylesheet" href="/static/css/code.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/todo.css">
+    <link rel="stylesheet" href="/static/css/question.css">
+    <link rel="stylesheet" href="/static/css/responsive.css">
+    <link rel="stylesheet" href="/static/css/workflow.css">
+    <link rel="stylesheet" href="/static/css/skills.css">
+    <link rel="stylesheet" href="/static/css/litegraph.min.css">
+</head>
+<body>
+    <div class="app">
+        <div id="login-view" class="login-container">
+            <div class="login-card">
+                <h1 class="login-title">
+                    <img class="logo-icon" src="images/thinking-indicator.png" alt="OSA">
+                    OSA
+                </h1>
+                <p class="login-subtitle">Enter your password to continue</p>
+                <div id="login-error" class="login-error hidden"></div>
+                <input type="password" id="password-input" class="login-input" placeholder="Password" onkeypress="if(event.key==='Enter')login()">
+                <button class="login-btn" onclick="login()">Continue</button>
+            </div>
+        </div>
+
+        <div id="app-view" class="hidden" style="display: none; width: 100%; height: 100%;">
+            <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="closeSidebar()"></div>
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <img class="logo-icon" src="images/thinking-indicator.png" alt="OSA">
+                        OSA
+                    </div>
+                    <button class="new-chat-btn" onclick="createSession()">
+                        <span>+</span> New chat
+                    </button>
+                    <button class="clear-btn" onclick="clearSessions()">Clear sessions</button>
+                </div>
+                <div class="sessions-list" id="sessions-list"></div>
+            </div>
+
+            <div class="main">
+                <div class="header">
+                    <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
+                        <svg class="hamburger-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="3" y1="6" x2="21" y2="6"></line>
+                            <line x1="3" y1="12" x2="21" y2="12"></line>
+                            <line x1="3" y1="18" x2="21" y2="18"></line>
+                        </svg>
+                        <svg class="close-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                    <div class="header-title" id="header-title" onclick="OSA.startRenameCurrentSession(this)">Select a session</div>
+                    <div class="context-indicator hidden" id="context-indicator" onclick="OSA.toggleContextModal()">
+                        <div class="context-ring">
+                            <svg viewBox="0 0 36 36">
+                                <circle class="context-ring-bg" cx="18" cy="18" r="15.5"/>
+                                <circle class="context-ring-progress" id="context-ring-progress" cx="18" cy="18" r="15.5"/>
+                            </svg>
+                            <span class="context-ring-text" id="context-pct">0%</span>
+                        </div>
+                    </div>
+                    <div class="connection-status hidden" id="connection-status">
+                        <span id="connection-text">Connecting...</span>
+                    </div>
+                    <div class="header-controls">
+                        <button class="mobile-workspace-btn" onclick="toggleWorkspaceMenu()" title="Workspace">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                        </button>
+                        <button class="mobile-persona-btn" onclick="togglePersonaMenu()" title="Persona">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        </button>
+                        <div class="model-selector">
+                            <div class="model-selector-input-wrap">
+                                <input class="model-input" id="model-input" placeholder="Model id" onfocus="toggleModelDropdown()" readonly />
+                                <button class="model-dropdown-btn" onclick="toggleModelDropdown()" title="Browse models">&#9662;</button>
+                            </div>
+                            <div id="model-dropdown" class="model-dropdown hidden">
+                                <div class="model-dropdown-search">
+                                    <input type="text" id="model-search" placeholder="Search models..." oninput="handleModelSearch(event)" onkeydown="handleModelDropdownKeydown(event)" />
+                                </div>
+                                <div class="model-dropdown-list"></div>
+                            </div>
+                        </div>
+                        <button class="settings-btn" onclick="openSettings()" title="Settings" aria-label="Settings">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="3"></circle>
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6c.26-.58.76-1 1.51-1H12a2 2 0 0 1 4 0v.09c0 .75.42 1.25 1 1.51a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.58.26 1 .76 1 1.51V12a2 2 0 0 1 0 4h-.09c-.75 0-1.25.42-1.51 1Z"></path>
+                            </svg>
+                        </button>
+                        <button class="workflow-btn hidden" id="workflow-btn" onclick="openWorkflowEditor()">Workflows</button>
+                        <button class="logout-btn" onclick="logout()" title="Logout" aria-label="Logout">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M16 17l5-5-5-5"></path>
+                                <path d="M21 12H9"></path>
+                                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="chat-area">
+                    <div class="messages" id="messages">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">+</div>
+                            <div class="empty-state-title">Start a conversation</div>
+                            <div class="empty-state-text">Click "New chat" to begin</div>
+                        </div>
+                    </div>
+                    <div class="input-area">
+                        <div class="input-bar-wrap">
+                            <div class="input-left-controls">
+                                <button id="workspace-trigger" class="input-tab" type="button" onclick="toggleWorkspaceMenu()">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                                    <span id="workspace-trigger-label">Workspace</span>
+                                </button>
+                                <button id="persona-trigger" class="input-tab" type="button" onclick="togglePersonaMenu()">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                                    <span id="persona-trigger-label">Default</span>
+                                </button>
+                            </div>
+                            <div class="input-right-bar">
+                                <input type="text" id="message-input" placeholder="Type a message... ( / for commands)" onkeypress="if(event.key==='Enter')sendMessage()" oninput="OSA.handleSlashInput()" />
+                                <button id="mic-btn" class="input-icon-btn" onclick="toggleRecording()" title="Voice input" aria-pressed="false">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>
+                                </button>
+                                <button id="tts-btn" class="input-icon-btn" onclick="toggleTTS()" title="Text-to-speech" aria-pressed="false">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                                </button>
+                                <button id="send-btn" onclick="handleSendButtonClick()">
+                                    <svg id="send-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                                    <svg id="stop-icon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div id="workspace-menu" class="context-menu hidden">
+                            <div class="context-menu-header">
+                                <span>Workspace</span>
+                                <button class="menu-action-btn" type="button" onclick="openWorkspaceEditorForCreate()">Add</button>
+                            </div>
+                            <div id="workspace-menu-list" class="context-menu-list"></div>
+                            <div id="workspace-inline-editor" class="workspace-compact-editor hidden">
+                                <div class="workspace-editor-grid">
+                                    <div class="workspace-field">
+                                        <label for="workspace-inline-id">Workspace ID</label>
+                                        <input type="text" id="workspace-inline-id" placeholder="e.g. app-main" />
+                                    </div>
+                                    <div class="workspace-field">
+                                        <label for="workspace-inline-name">Display Name</label>
+                                        <input type="text" id="workspace-inline-name" placeholder="My App Workspace" />
+                                    </div>
+                                    <div class="workspace-field full">
+                                        <label for="workspace-inline-path">Folder</label>
+                                        <div class="path-field">
+                                            <input type="text" id="workspace-inline-path" placeholder="Choose a folder" />
+                                            <button class="control-btn" type="button" onclick="browseWorkspacePath()">Browse</button>
+                                        </div>
+                                    </div>
+                                    <div class="workspace-field">
+                                        <label for="workspace-inline-permission">Permission</label>
+                                        <select id="workspace-inline-permission">
+                                            <option value="read_write">Read + write</option>
+                                            <option value="read_only">Read only</option>
+                                        </select>
+                                    </div>
+                                    <div class="workspace-field">
+                                        <label for="workspace-inline-description">Description</label>
+                                        <input type="text" id="workspace-inline-description" placeholder="Optional" />
+                                    </div>
+                                </div>
+                                <div class="workspace-editor-actions">
+                                    <div class="action-group">
+                                        <button class="control-btn primary" type="button" onclick="saveWorkspaceInline()">Save</button>
+                                        <button class="control-btn" type="button" onclick="applyInlineWorkspaceToSession()">Save + use</button>
+                                    </div>
+                                    <div class="action-group">
+                                        <button class="control-btn" type="button" onclick="closeWorkspaceEditor()">Cancel</button>
+                                    </div>
+                                </div>
+                                <div id="workspace-inline-status" class="workspace-inline-status hidden"></div>
+                            </div>
+                        </div>
+                        <div id="persona-menu" class="context-menu persona-menu hidden">
+                            <div class="context-menu-header">
+                                <span>Persona</span>
+                            </div>
+                            <div id="persona-menu-list" class="context-menu-list"></div>
+                            <div id="persona-custom-wrap" class="workspace-compact-editor hidden">
+                                <div class="workspace-field">
+                                    <label for="persona-character">Character description</label>
+                                    <input id="persona-character" class="persona-input" placeholder="e.g. a grumpy senior dev who hates JavaScript" />
+                                </div>
+                                <div class="workspace-editor-actions">
+                                    <div class="action-group">
+                                        <button class="control-btn primary" type="button" onclick="applyPersona()">Apply</button>
+                                        <button class="control-btn" type="button" onclick="resetPersona()">Reset</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="context-modal" class="context-modal hidden" onclick="OSA.closeContextModal(event)">
+        <div class="context-modal-content" onclick="event.stopPropagation()">
+            <div class="context-modal-header">
+                <h3>Context Usage</h3>
+                <button class="context-modal-close" onclick="OSA.closeContextModal()">&times;</button>
+            </div>
+            <div class="context-modal-body">
+                <div class="context-stats">
+                    <div class="context-stat">
+                        <div class="context-stat-label">Context Window</div>
+                        <div class="context-stat-value" id="ctx-window">-</div>
+                    </div>
+                    <div class="context-stat">
+                        <div class="context-stat-label">Tokens Used</div>
+                        <div class="context-stat-value" id="ctx-used">-</div>
+                    </div>
+                    <div class="context-stat">
+                        <div class="context-stat-label">Budget</div>
+                        <div class="context-stat-value" id="ctx-budget">-</div>
+                    </div>
+                </div>
+                <div class="context-progress-section">
+                    <div class="context-progress-bar">
+                        <div class="context-progress-fill" id="ctx-progress-fill"></div>
+                    </div>
+                    <div class="context-progress-labels">
+                        <span>0</span>
+                        <span id="ctx-progress-pct">0%</span>
+                        <span id="ctx-max">-</span>
+                    </div>
+                </div>
+                <div class="context-details" id="context-details">
+                    <div class="context-detail-row">
+                        <span class="context-detail-label">Status</span>
+                        <span class="context-detail-value" id="ctx-status">-</span>
+                    </div>
+                    <div class="context-detail-row" id="ctx-actual-row" style="display:none">
+                        <span class="context-detail-label">Actual Input</span>
+                        <span class="context-detail-value" id="ctx-actual-input">-</span>
+                    </div>
+                    <div class="context-detail-row" id="ctx-output-row" style="display:none">
+                        <span class="context-detail-label">Output</span>
+                        <span class="context-detail-value" id="ctx-output">-</span>
+                    </div>
+                    <div class="context-detail-row" id="ctx-cache-row" style="display:none">
+                        <span class="context-detail-label">Cache</span>
+                        <span class="context-detail-value" id="ctx-cache">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="question-modal" class="question-modal hidden">
+        <div class="question-card">
+            <div class="question-header">
+                <h2 id="question-title">Question</h2>
+            </div>
+            <div class="question-body" id="question-body">
+            </div>
+            <div class="question-footer">
+                <button class="question-submit-btn" id="question-submit-btn" onclick="submitQuestion()">Submit</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="workflow-editor" class="workflow-editor hidden"></div>
+
+    <!-- Memory Edit Modal -->
+    <div id="memory-edit-modal" class="modal hidden" onclick="if(event.target===this)OSA.closeMemoryEdit()">
+        <div class="modal-dialog" style="max-width:520px;width:100%;background:var(--bg-primary);border-radius:12px;padding:24px;border:1px solid var(--border)">
+            <h3 style="margin:0 0 16px;font-size:16px">Edit Memory</h3>
+            <input type="hidden" id="edit-memory-id" />
+            <div class="settings-field" style="margin-bottom:12px">
+                <label for="edit-memory-title">Title</label>
+                <input type="text" id="edit-memory-title" placeholder="Memory title" />
+            </div>
+            <div class="settings-field" style="margin-bottom:12px">
+                <label for="edit-memory-content">Content</label>
+                <textarea id="edit-memory-content" rows="5" style="resize:vertical;font-family:inherit;font-size:13px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);width:100%;box-sizing:border-box"></textarea>
+            </div>
+            <div class="settings-field" style="margin-bottom:20px">
+                <label for="edit-memory-tags">Tags (comma-separated)</label>
+                <input type="text" id="edit-memory-tags" placeholder="e.g. preference, project" />
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button type="button" class="btn-ghost" onclick="OSA.closeMemoryEdit()">Cancel</button>
+                <button type="button" class="btn-action" onclick="OSA.saveMemoryEdit()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="settings-modal" class="modal hidden">
+        <div class="settings-modal-content">
+            <div class="settings-modal-header">
+                <h2>Settings</h2>
+            </div>
+            <div class="settings-with-sidebar">
+                <div class="settings-sidebar">
+                    <div class="settings-sidebar-section">
+                        <div class="settings-sidebar-section-title">General</div>
+                        <button class="settings-sidebar-item active" data-tab="provider" onclick="switchSettingsTab('provider')">
+                            Provider
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="models" onclick="switchSettingsTab('models')">
+                            Models
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="agent" onclick="switchSettingsTab('agent')">
+                            Agent
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="theme" onclick="switchSettingsTab('theme')">
+                            Theme
+                        </button>
+                    </div>
+                    <div class="settings-sidebar-section">
+                        <div class="settings-sidebar-section-title">Integrations</div>
+                        <button class="settings-sidebar-item" data-tab="discord" onclick="switchSettingsTab('discord')">
+                            Discord
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="voice" onclick="switchSettingsTab('voice')">
+                            Voice
+                        </button>
+                    </div>
+                    <div class="settings-sidebar-section">
+                        <div class="settings-sidebar-section-title">Advanced</div>
+                        <button class="settings-sidebar-item" data-tab="memory" onclick="switchSettingsTab('memory')">
+                            Memory
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="skills" onclick="switchSettingsTab('skills')">
+                            Skills
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="security" onclick="switchSettingsTab('security')">
+                            Security
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="experimental" onclick="switchSettingsTab('experimental')">
+                            Experimental
+                        </button>
+                    </div>
+                </div>
+                <div class="settings-main">
+                <div class="settings-pane active" id="pane-provider">
+                    <div class="settings-pane-header">
+                        <h2>Provider</h2>
+                        <p class="settings-pane-desc">Configure your API connection and server settings</p>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">API Connection</div>
+                        <div class="settings-field">
+                            <label for="setting-base-url">Base URL</label>
+                            <input type="text" id="setting-base-url" placeholder="https://api.openai.com/v1" />
+                            <span class="settings-field-hint">OpenAI-compatible API endpoint</span>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-model">Default Model</label>
+                            <input type="text" id="setting-model" placeholder="gpt-4.1" />
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-theme">
+                    <div class="settings-pane-header">
+                        <h2>Theme</h2>
+                        <p class="settings-pane-desc">Customize the appearance of the interface</p>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Color Theme</div>
+                        <div class="theme-options">
+                            <label class="theme-option">
+                                <input type="radio" name="theme" value="dark" onchange="OSA.setTheme('dark')" />
+                                <div class="theme-preview theme-preview-dark">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-content"></div>
+                                </div>
+                                <span class="theme-name">Dark</span>
+                            </label>
+                            <label class="theme-option">
+                                <input type="radio" name="theme" value="light" onchange="OSA.setTheme('light')" />
+                                <div class="theme-preview theme-preview-light">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-content"></div>
+                                </div>
+                                <span class="theme-name">Light</span>
+                            </label>
+                            <label class="theme-option">
+                                <input type="radio" name="theme" value="blue" onchange="OSA.setTheme('blue')" />
+                                <div class="theme-preview theme-preview-blue">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-content"></div>
+                                </div>
+                                <span class="theme-name">Blue</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Accent Color</div>
+                        <div class="accent-presets">
+                            <button class="accent-swatch" data-color="#7c7cff" title="Purple" style="background:#7c7cff"></button>
+                            <button class="accent-swatch" data-color="#4a9eff" title="Blue" style="background:#4a9eff"></button>
+                            <button class="accent-swatch" data-color="#00d4ff" title="Cyan" style="background:#00d4ff"></button>
+                            <button class="accent-swatch" data-color="#4ade80" title="Green" style="background:#4ade80"></button>
+                            <button class="accent-swatch" data-color="#fb923c" title="Orange" style="background:#fb923c"></button>
+                            <button class="accent-swatch" data-color="#f472b6" title="Pink" style="background:#f472b6"></button>
+                            <button class="accent-swatch" data-color="#ff6b6b" title="Red" style="background:#ff6b6b"></button>
+                            <label class="accent-swatch accent-swatch-custom" title="Custom color">
+                                <input type="color" id="accent-color-picker" oninput="OSA.setAccent(this.value)" />
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-models">
+                    <div class="settings-pane-header">
+                        <h2>Models</h2>
+                        <p class="settings-pane-desc">Browse and connect to model providers</p>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Providers</div>
+                        <div id="model-catalog-list" class="model-catalog-list">Loading...</div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">All Models</div>
+                        <div class="settings-field">
+                            <input type="text" id="model-catalog-search" placeholder="Filter by name, ID, or provider..." oninput="OSA.filterSettingsModels(this.value)" />
+                        </div>
+                        <div id="all-models-list" class="model-catalog-list">Loading...</div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-agent">
+                    <div class="settings-pane-header">
+                        <h2>Agent</h2>
+                        <p class="settings-pane-desc">Adjust generation parameters</p>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Generation</div>
+                        <div class="settings-field-row">
+                            <div class="settings-field flex-1">
+                                <label for="setting-max-tokens">Max Tokens</label>
+                                <input type="number" id="setting-max-tokens" placeholder="4096" />
+                            </div>
+                            <div class="settings-field flex-1">
+                                <label for="setting-temperature">Temperature</label>
+                                <input type="number" id="setting-temperature" step="0.1" placeholder="0.7" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-discord">
+                    <div class="settings-pane-header">
+                        <h2>Discord</h2>
+                        <p class="settings-pane-desc">Configure the Discord bot integration</p>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Bot Configuration</div>
+                        <div class="settings-field">
+                            <label for="setting-discord-enabled">Discord Bot</label>
+                            <select id="setting-discord-enabled">
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-discord-allowed-users">Allowed User IDs</label>
+                            <textarea id="setting-discord-allowed-users" rows="4" placeholder="One Discord user ID per line or comma-separated"></textarea>
+                            <span class="settings-field-hint">Leave blank to allow all users</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-voice">
+                    <div class="settings-pane-header">
+                        <h2>Voice</h2>
+                        <p class="settings-pane-desc">Configure voice input and output settings</p>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Voice Input & Output</div>
+                        <div class="settings-field">
+                            <label for="setting-voice-enabled">Enable Voice</label>
+                            <select id="setting-voice-enabled">
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                        </div>
+                        <div class="settings-field-row">
+                            <div class="settings-field flex-1">
+                                <label for="setting-stt-provider">Speech-to-Text</label>
+                                <select id="setting-stt-provider">
+                                    <option value="browser">Browser (Web Speech API)</option>
+                                    <option value="whisper-api">OpenAI Whisper API</option>
+                                    <option value="whisper-local">Local Whisper</option>
+                                </select>
+                            </div>
+                            <div class="settings-field flex-1">
+                                <label for="setting-tts-provider">Text-to-Speech</label>
+                                <select id="setting-tts-provider">
+                                    <option value="browser">Browser (SpeechSynthesis)</option>
+                                    <option value="piper-local">Local Piper TTS</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="settings-field-row">
+                            <div class="settings-field flex-1">
+                                <label for="setting-voice-language">Language</label>
+                                <input type="text" id="setting-voice-language" placeholder="en" />
+                            </div>
+                            <div class="settings-field" style="max-width:120px">
+                                <label for="setting-voice-speed">Speed</label>
+                                <input type="number" id="setting-voice-speed" step="0.1" min="0.5" max="2" placeholder="1.0" />
+                            </div>
+                        </div>
+                        <div class="settings-field-row">
+                            <div class="settings-field flex-1">
+                                <label for="setting-auto-send">Auto-send Transcript</label>
+                                <select id="setting-auto-send">
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                            <div class="settings-field flex-1">
+                                <label for="setting-auto-speak">Auto-speak Responses</label>
+                                <select id="setting-auto-speak">
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Voice Models</div>
+                        <div id="voice-models-browser" class="voice-models-browser">
+                            <div class="loading-placeholder">Loading models...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-memory">
+                    <div class="settings-pane-header">
+                        <h2>Memory</h2>
+                        <p class="settings-pane-desc">Persistent memory lets the agent remember facts about you and your projects across sessions</p>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title">Agent Memory</div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Enable Memory</label>
+                                <span class="toggle-desc">When enabled, the agent can record and recall memories across sessions</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-memory-enabled" onchange="OSA.onMemoryToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="settings-field" id="memory-file-field" style="display:none">
+                            <label for="setting-memory-file">Memory File</label>
+                            <input type="text" id="setting-memory-file" placeholder="~/.osagent/memories.json" />
+                            <span class="settings-field-hint">JSON file where memories are stored</span>
+                        </div>
+                    </div>
+
+                    <div class="settings-group" id="memory-list-group">
+                        <div class="settings-group-title" style="display:flex;align-items:center;justify-content:space-between">
+                            <span>Recorded Memories</span>
+                            <button type="button" class="btn-ghost" style="font-size:12px" onclick="OSA.loadMemories()">Refresh</button>
+                        </div>
+                        <div id="memory-list" class="decision-list">Enable memory to view and manage memories.</div>
+                        <div class="settings-inline-form" id="memory-add-form" style="display:none">
+                            <input type="text" id="memory-title" placeholder="Title (e.g. Preferred language)" />
+                            <textarea id="memory-content" placeholder="Memory content..." rows="3" style="resize:vertical;font-family:inherit;font-size:13px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);width:100%;box-sizing:border-box"></textarea>
+                            <input type="text" id="memory-tags" placeholder="Tags (comma-separated, optional)" />
+                            <div class="settings-form-actions">
+                                <button type="button" class="btn-action" onclick="OSA.addMemory()">Add Memory</button>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+                <div class="settings-pane" id="pane-security">
+                    <div class="settings-pane-header">
+                        <h2>Security</h2>
+                        <p class="settings-pane-desc">Manage password protection and network access</p>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <div class="settings-group-title">Password Protection</div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Require Password</label>
+                                <span class="toggle-desc">Demand password to access the web interface</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-password-enabled" onchange="OSA.onPasswordToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-group" id="password-change-section">
+                        <div class="settings-group-title">Change Password</div>
+                        <div class="settings-field">
+                            <label for="setting-current-password">Current Password</label>
+                            <input type="password" id="setting-current-password" placeholder="Enter current password" />
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-new-password">New Password</label>
+                            <input type="password" id="setting-new-password" placeholder="Enter new password" />
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-confirm-password">Confirm New Password</label>
+                            <input type="password" id="setting-confirm-password" placeholder="Confirm new password" />
+                        </div>
+                        <div id="password-error" class="settings-error hidden"></div>
+                        <button type="button" class="btn-primary" onclick="OSA.changePassword()">Update Password</button>
+                        <div id="password-success" class="settings-success hidden">Password updated successfully!</div>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <div class="settings-group-title">Network Access</div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Local Network (LAN)</label>
+                                <span class="toggle-desc">Allow access from other devices on your network</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-lan-enabled" onchange="OSA.onLanToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        
+                        <div id="lan-address-section" class="lan-address-section hidden">
+                            <div class="lan-address-card">
+                                <div class="lan-address-label">Connect from other devices using:</div>
+                                <div class="lan-address-value" id="lan-address-display">http://192.168.1.100:8765</div>
+                                <button type="button" class="btn-copy" onclick="OSA.copyLanAddress()">Copy</button>
+                            </div>
+                        </div>
+                        
+                        <div id="firewall-warning" class="firewall-warning hidden">
+                            <div class="warning-icon">!</div>
+                            <div class="warning-content">
+                                <strong>Firewall Warning</strong>
+                                <p>Your server will be accessible from other devices on your local network. Make sure your firewall allows connections on port <span id="warning-port">8765</span>.</p>
+                                <p>Anyone on your network with the server address and password (if set) can access your agent.</p>
+                            </div>
+                        </div>
+                        
+                        <div id="custom-network-fields" class="hidden" style="margin-top: 16px;">
+                            <div class="settings-field-row">
+                                <div class="settings-field flex-1">
+                                    <label for="setting-bind">Bind Address</label>
+                                    <input type="text" id="setting-bind" placeholder="127.0.0.1" />
+                                </div>
+                                <div class="settings-field" style="max-width:120px">
+                                    <label for="setting-port">Port</label>
+                                    <input type="number" id="setting-port" placeholder="8765" oninput="OSA.onPortChange()" />
+                                </div>
+                            </div>
+                        </div>
+                        <div id="network-restart-notice" class="settings-notice hidden">
+                            Network settings require server restart to take effect.
+                        </div>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <div class="settings-group-title">Server Control</div>
+                        <button type="button" class="btn-warning" id="btn-restart-server" onclick="OSA.restartServer()">
+                            Restart Server
+                        </button>
+                        <div id="restart-success" class="settings-success hidden">Server restarting...</div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-experimental">
+                    <div class="settings-pane-header">
+                        <h2>Experimental</h2>
+                        <p class="settings-pane-desc">Enable or disable experimental features</p>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <div class="settings-group-title">Features</div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Workflows</label>
+                                <span class="toggle-desc">Enable the visual workflow editor for chaining tasks</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-experimental-workflows" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div id="settings-error" class="settings-error hidden"></div>
+                </div>
+            </div>
+            <div class="settings-modal-footer">
+                <button class="btn-ghost" onclick="closeSettings()">Close</button>
+                <button class="btn-action" onclick="saveSettings()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="add-provider-modal" class="modal hidden">
+        <div class="modal-content add-provider-modal">
+            <button class="modal-close" onclick="OSA.closeAddProviderModal()">&times;</button>
+            <div class="provider-modal-header">
+                <div class="provider-modal-icon" id="provider-modal-icon">API</div>
+                <h2 id="provider-modal-title">Connect Provider</h2>
+                <p class="provider-modal-desc" id="provider-modal-desc">Connect your account</p>
+            </div>
+            <div class="provider-modal-body">
+                <!-- OAuth Section (shown for OAuth-capable providers) -->
+                <div id="oauth-section" class="provider-section hidden">
+                    <!-- Connected State -->
+                    <div class="oauth-connected-view hidden" id="oauth-connected-view">
+                        <div class="oauth-success-header">
+                            <div class="oauth-check-icon">
+                                <svg viewBox="0 0 16 16" width="24" height="24"><path fill="currentColor" d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+                            </div>
+                            <span class="oauth-connected-label">Connected</span>
+                        </div>
+                        <p class="oauth-connected-account" id="oauth-connected-account">Account connected</p>
+                        <div class="oauth-connected-actions">
+                            <button type="button" class="btn-ghost btn-sm" id="oauth-refresh-btn" onclick="OSA.refreshOAuthToken()">
+                                <svg class="icon-inline" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path fill="currentColor" d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
+                                Refresh
+                            </button>
+                            <button type="button" class="btn-ghost btn-sm btn-danger" id="oauth-disconnect-btn" onclick="OSA.disconnectOAuth()">
+                                Disconnect
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- PKCE Flow - Browser Auth -->
+                    <div class="oauth-pkce-view hidden" id="oauth-pkce-view">
+                        <p class="oauth-flow-desc">Sign in with your <span id="oauth-provider-name-pkce">provider</span> account for secure, token-based access.</p>
+                        <button type="button" class="btn-primary btn-lg" id="oauth-connect-btn" onclick="OSA.initiateOAuth()">
+                            <svg class="icon-inline" viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path fill="currentColor" d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
+                            <span id="oauth-connect-text">Connect with Provider</span>
+                        </button>
+                        <div class="oauth-error hidden" id="oauth-error-pkce"></div>
+                    </div>
+
+                    <!-- Device Code Flow -->
+                    <div class="oauth-device-view hidden" id="oauth-device-view">
+                        <p class="oauth-flow-desc">Enter this code on the verification page:</p>
+                        <div class="oauth-device-code" id="oauth-device-code-display">--------</div>
+                        <a href="#" class="oauth-device-link" id="oauth-device-link" target="_blank">
+                            <svg class="icon-inline" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>
+                            Open verification page
+                        </a>
+                        <div class="oauth-device-status" id="oauth-device-status">
+                            <span class="oauth-device-spinner"></span>
+                            <span id="oauth-device-status-text">Waiting for authorization...</span>
+                        </div>
+                        <button type="button" class="btn-ghost btn-sm" id="oauth-device-cancel-btn" onclick="OSA.cancelDeviceCode()">Cancel</button>
+                    </div>
+
+                    <!-- Loading State -->
+                    <div class="oauth-loading-view hidden" id="oauth-loading-view">
+                        <div class="oauth-spinner"></div>
+                        <p id="oauth-loading-text">Connecting...</p>
+                    </div>
+                </div>
+
+                <!-- Divider "or" -->
+                <div class="modal-divider hidden" id="modal-divider">
+                    <span>or</span>
+                </div>
+
+                <!-- API Key Section -->
+                <div id="api-key-section" class="provider-section">
+                    <h3 id="api-key-title" class="hidden">Use API Key Instead</h3>
+                    <div class="provider-input-group">
+                        <label for="provider-api-key" class="provider-input-label">API Key</label>
+                        <div class="provider-input-wrapper">
+                            <svg class="provider-input-icon" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M5.5 4a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0zM8 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4 8H2v7h12V8h-2v1.5a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V8H7v1.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V8z"/></svg>
+                            <input type="password" id="provider-api-key" class="provider-input" placeholder="sk-..." autocomplete="off" />
+                        </div>
+                        <div class="validation-badge" id="validation-badge" style="display:none"></div>
+                    </div>
+                    <div class="provider-input-group">
+                        <label for="provider-base-url" class="provider-input-label">Base URL</label>
+                        <div class="provider-input-wrapper">
+                            <svg class="provider-input-icon" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8.523 12.129l-1.771 1.771a4.25 4.25 0 0 1-5.98-5.98l1.772-1.771.707.707-1.771 1.771a3.25 3.25 0 0 0 4.56 4.56l1.772-1.771.707.707zm1.394-1.394l1.771-1.771a4.25 4.25 0 0 0-5.98-5.98L2.546 4.756l.707.707 1.771-1.771a3.25 3.25 0 0 1 4.56 4.56l-1.771 1.771.707.707zM5.563 10.437l5.06-5.06.707.707-5.06 5.06-.707-.707z"/></svg>
+                            <input type="text" id="provider-base-url" class="provider-input" placeholder="https://api.example.com/v1" />
+                        </div>
+                    </div>
+                    <a href="#" class="api-key-link hidden" id="api-key-link">
+                        <svg class="icon-inline" viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M8.523 12.129l-1.771 1.771a4.25 4.25 0 0 1-5.98-5.98l1.772-1.771.707.707-1.771 1.771a3.25 3.25 0 0 0 4.56 4.56l1.772-1.771.707.707zm1.394-1.394l1.771-1.771a4.25 4.25 0 0 0-5.98-5.98L2.546 4.756l.707.707 1.771-1.771a3.25 3.25 0 0 1 4.56 4.56l-1.771 1.771.707.707z"/></svg>
+                        Get API key from <span id="api-key-link-name">provider</span>
+                    </a>
+                </div>
+
+                <!-- Model Section -->
+                <div class="provider-section">
+                    <label class="provider-input-label">Default Model</label>
+                    <div class="model-select-wrapper" id="modal-model-select-wrapper">
+                        <div class="model-select-display" id="modal-model-select-display" onclick="OSA.toggleModalModelDropdown()">
+                            <span id="modal-model-select-text">Select a model...</span>
+                            <span class="model-select-arrow">&#9662;</span>
+                        </div>
+                        <div class="model-dropdown hidden" id="modal-model-dropdown">
+                            <div class="model-dropdown-search">
+                                <input type="text" id="modal-model-search" placeholder="Search models..." oninput="OSA.handleModalModelSearch(event)" onkeydown="OSA.handleModalDropdownKeydown(event)" />
+                            </div>
+                            <div class="model-dropdown-list" id="modal-model-list"></div>
+                        </div>
+                        <input type="hidden" id="provider-model" />
+                    </div>
+                </div>
+
+                <!-- Default Provider -->
+                <div class="provider-section">
+                    <label class="provider-checkbox">
+                        <input type="checkbox" id="provider-default" />
+                        <span>Set as default provider</span>
+                    </label>
+                </div>
+            </div>
+            <div class="provider-modal-footer">
+                <button class="btn-ghost" onclick="OSA.closeAddProviderModal()">Cancel</button>
+                <button class="btn-action" onclick="OSA.addProvider()" id="add-provider-btn">Add Provider</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/state.js"></script>
+    <script src="/static/js/utils.js"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/providers.js"></script>
+    <script src="/static/js/messages.js"></script>
+    <script src="/static/js/tools.js"></script>
+    <script src="/static/js/voice.js"></script>
+    <script src="/static/js/workspace.js"></script>
+    <script src="/static/js/persona.js"></script>
+    <script src="/static/js/settings.js"></script>
+    <script src="/static/js/voicemodels.js"></script>
+    <script src="/static/js/todos.js"></script>
+    <script src="/static/js/question.js"></script>
+    <script src="/static/js/skills.js"></script>
+    <script src="/static/js/litegraph.min.js"></script>
+    <script src="/static/js/workflow/services/api.js"></script>
+    <script src="/static/js/workflow/services/execution.js"></script>
+    <script src="/static/js/workflow/store/state.js"></script>
+    <script src="/static/js/workflow/nodes/base.js"></script>
+    <script src="/static/js/workflow/litegraph_adapter.js"></script>
+    <script src="/static/js/workflow/views/editor.js"></script>
+    <script src="/static/js/workflow/main.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

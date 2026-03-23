@@ -1,0 +1,201 @@
+# OSA Configuration Example
+
+[server]
+bind = "127.0.0.1"
+port = 8765
+# Password is bcrypt hashed - use 'osagent setup' to generate
+password = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/7.J6LlZq"
+
+# --- Provider Configuration ---
+# OSA supports multiple providers simultaneously.
+# API keys are auto-detected from environment variables:
+#   OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+#   GOOGLE_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, XAI_API_KEY
+#
+# Use default_provider and default_model to select the active provider/model.
+# Preset IDs: openrouter, openai, anthropic, google, ollama, groq, deepseek, xai
+#
+# OAuth providers can use environment variables for credentials:
+#   {PROVIDER}_OAUTH_CLIENT_ID, {PROVIDER}_OAUTH_CLIENT_SECRET
+#   Example: OPENAI_OAUTH_CLIENT_ID, OPENAI_OAUTH_CLIENT_SECRET
+
+# OpenRouter Example (recommended - access to 200+ models)
+[[providers]]
+provider_type = "openrouter"
+api_key = "sk-or-v1-..."  # Or set OPENROUTER_API_KEY env var
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-sonnet-4"
+
+# OpenAI Example (uncomment to use)
+# [[providers]]
+# provider_type = "openai"
+# api_key = "sk-..."
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-4.1"
+
+# OpenAI with OAuth (recommended for enhanced security)
+# [[providers]]
+# provider_type = "openai"
+# auth_type = "oauth"
+# oauth_client_id = "your-client-id"  # Or set OPENAI_OAUTH_CLIENT_ID env var
+# oauth_client_secret = "your-client-secret"  # Or set OPENAI_OAUTH_CLIENT_SECRET env var
+# oauth_scopes = ["api.full-access"]
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-4.1"
+
+# Anthropic Example (uncomment to use)
+# [[providers]]
+# provider_type = "anthropic"
+# api_key = "sk-ant-..."
+# base_url = "https://api.anthropic.com/v1"
+# model = "claude-sonnet-4-20250514"
+
+# Anthropic with OAuth (recommended for enhanced security)
+# [[providers]]
+# provider_type = "anthropic"
+# auth_type = "oauth"
+# oauth_client_id = "your-client-id"  # Or set ANTHROPIC_OAUTH_CLIENT_ID env var
+# oauth_client_secret = "your-client-secret"  # Or set ANTHROPIC_OAUTH_CLIENT_SECRET env var
+# oauth_scopes = ["api:read", "api:write"]
+# base_url = "https://api.anthropic.com/v1"
+# model = "claude-sonnet-4-20250514"
+
+# Google AI Example (uncomment to use)
+# [[providers]]
+# provider_type = "google"
+# api_key = "AI..."
+# base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+# model = "gemini-2.5-pro-preview-05-06"
+
+# Google AI with OAuth
+# [[providers]]
+# provider_type = "google"
+# auth_type = "oauth"
+# oauth_client_id = "your-client-id"  # Or set GOOGLE_AI_OAUTH_CLIENT_ID env var
+# oauth_client_secret = "your-client-secret"  # Or set GOOGLE_AI_OAUTH_CLIENT_SECRET env var
+# oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+# base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+# model = "gemini-2.5-pro-preview-05-06"
+
+# GitHub Copilot with OAuth
+# [[providers]]
+# provider_type = "github-copilot"
+# auth_type = "oauth"
+# oauth_client_id = "your-github-oauth-app-client-id"  # Or set GITHUB-COPILOT_OAUTH_CLIENT_ID env var
+# oauth_client_secret = "your-github-oauth-app-client-secret"  # Or set GITHUB-COPILOT_OAUTH_CLIENT_SECRET env var
+# oauth_scopes = ["read:user", "workflow"]
+# base_url = "https://api.githubcopilot.com/chat/completions"
+# model = "gpt-4o"
+
+# Ollama Example (uncomment to use)
+# [[providers]]
+# provider_type = "ollama"
+# api_key = ""
+# base_url = "http://localhost:11434/v1"
+# model = "llama3.1:70b"
+
+# AWS Bedrock Example (with AWS credentials)
+# [[providers]]
+# provider_type = "amazon-bedrock"
+# auth_type = "aws"
+# aws_profile = "default"  # Or set AWS_PROFILE env var
+# region = "us-east-1"
+# base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+# model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+
+# Active provider and model selection
+# default_provider = "openrouter"
+# default_model = "anthropic/claude-sonnet-4"
+
+[agent]
+workspace = "~/.osagent/workspace"
+active_workspace = "default"
+workspaces = [
+  { id = "default", name = "Default Workspace", path = "~/.osagent/workspace", description = "Default working directory", created_at = "2026-01-01T00:00:00Z", last_used = "2026-01-01T00:00:00Z" }
+]
+max_tokens = 4096
+temperature = 0.7
+checkpoint_enabled = true
+checkpoint_interval = 5
+
+# Discord Bot (optional; requires building with `--features discord`)
+# [discord]
+# enabled = true
+# token = "your-discord-bot-token"
+# allowed_users = [123456789012345678]
+
+[tools]
+allowed = [
+  "bash",
+  "read_file",
+  "write_file",
+  "edit_file",
+  "delete_file",
+  "list_files",
+  "apply_patch",
+  "batch",
+  "grep",
+  "glob",
+  "process",
+  "code_python",
+  "code_node",
+  "code_bash",
+  "web_fetch",
+  "web_search",
+  "task",
+  "todowrite",
+  "todoread",
+  "persona",
+  "reflect",
+  "question",
+  "skill",
+  "skill_list",
+  "lsp",
+  "subagent",
+  "plan_exit",
+]
+
+[tools.bash]
+allowed_commands = ["ls", "cat", "grep", "git", "npm", "cargo", "python", "node"]
+timeout_seconds = 30
+
+[tools.code_python]
+enabled = true
+timeout_seconds = 60
+max_output_bytes = 1048576  # 1MB
+
+[tools.code_node]
+enabled = true
+timeout_seconds = 60
+max_output_bytes = 1048576
+
+[tools.code_bash]
+enabled = true
+timeout_seconds = 60
+max_output_bytes = 1048576
+
+[tools.grep]
+timeout_seconds = 60
+
+[tools.glob]
+timeout_seconds = 60
+
+[logging]
+level = "info"  # trace, debug, info, warn, error
+audit_enabled = true
+audit_file = "~/.osagent/audit.log"
+
+[storage]
+database = "~/.osagent/osagent.db"
+
+# Available provider presets and their models:
+#   openrouter:  200+ models via openrouter.ai (Claude, GPT, Gemini, Llama, etc.)
+#   openai:      GPT-4.1, GPT-4.1 Mini, GPT-4o, GPT-4o Mini, o3-mini
+#   anthropic:   Claude Sonnet 4, Claude 3.5 Sonnet, Claude 3 Opus, Claude 3 Haiku
+#   google:      Gemini 2.5 Pro, Gemini 2.5 Flash, Gemini 2.0 Flash
+#   ollama:      Llama 3.1 70B, Qwen3 32B, Mistral 7B, CodeLlama 13B, DeepSeek R1 14B
+#   groq:        Llama 3.3 70B, Llama 3.1 8B, Mixtral 8x7B
+#   deepseek:    DeepSeek R1, DeepSeek V3
+#   xai:         Grok 3, Grok 3 Mini
+#
+# Browse the full catalog in Settings > Provider or use the model dropdown in the header.

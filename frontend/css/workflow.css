@@ -1,0 +1,537 @@
+.workflow-editor {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100vh;
+  width: 100vw;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  z-index: 9999;
+}
+
+.workflow-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+
+.toolbar-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.workflow-toolbar button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-toolbar button:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.workflow-toolbar button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.btn-back {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-save {
+  background: var(--bg-tertiary);
+}
+
+.btn-save:hover {
+  background: var(--bg-hover);
+}
+
+.btn-run {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.btn-run:hover {
+  background: var(--bg-hover);
+}
+
+.btn-stop {
+  background: var(--error);
+  color: #fff;
+  border-color: var(--error);
+}
+
+.btn-stop:hover {
+  opacity: 0.9;
+}
+
+.workflow-content {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.workflow-sidebar {
+  width: 240px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.workflow-list-section,
+.node-palette-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.workflow-list-section h3,
+.node-palette-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 10px 0;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.btn-new-workflow {
+  width: 100%;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 10px;
+  transition: all 0.15s;
+}
+
+.btn-new-workflow:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
+}
+
+.workflow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.workflow-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+
+.workflow-item:hover {
+  background: var(--bg-hover);
+}
+
+.workflow-item.active {
+  background: var(--bg-hover);
+  border-left: 2px solid var(--accent);
+}
+
+.workflow-name {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.workflow-version {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.node-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  cursor: grab;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+
+.palette-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.palette-item:active {
+  cursor: grabbing;
+}
+
+.palette-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.palette-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.palette-icon.trigger { background: #2a7; color: #fff; }
+.palette-icon.agent { background: #4a8; color: #fff; }
+.palette-icon.condition { background: #f90; color: #000; }
+.palette-icon.transform { background: #7a5; color: #fff; }
+.palette-icon.delay { background: #68a; color: #fff; }
+.palette-icon.output { background: #5a5; color: #fff; }
+
+.workflow-canvas-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  height: 100%;
+}
+
+.workflow-canvas-container canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.canvas-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.workflow-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.workflow-properties-panel {
+  width: 280px;
+  min-width: 280px;
+  background: var(--bg-secondary) !important;
+  border-left: 1px solid var(--border) !important;
+  padding: 16px !important;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.properties-placeholder {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 100% !important;
+  color: var(--text-muted) !important;
+  font-size: 14px !important;
+  text-align: center !important;
+}
+
+.properties-placeholder p {
+  color: var(--text-muted) !important;
+  font-size: 13px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.properties-content {
+  display: block !important;
+}
+
+.properties-content h4 {
+  margin: 0 0 12px 0 !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+  padding-bottom: 12px !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+
+.property-group {
+  margin-bottom: 14px !important;
+}
+
+.property-group label {
+  display: block !important;
+  font-size: 11px !important;
+  color: var(--text-muted) !important;
+  margin-bottom: 6px !important;
+  font-weight: 500 !important;
+  text-transform: none !important;
+}
+
+.property-group input[type="text"],
+.property-group input[type="number"],
+.property-group textarea,
+.property-group select {
+  width: 100% !important;
+  padding: 8px 10px !important;
+  background: var(--bg-primary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+  color: var(--text-primary) !important;
+  font-size: 13px !important;
+  font-family: inherit !important;
+  box-sizing: border-box !important;
+  transition: border-color 0.15s !important;
+}
+
+.property-group input:focus,
+.property-group textarea:focus,
+.property-group select:focus {
+  outline: none !important;
+  border-color: var(--text-secondary) !important;
+}
+
+.property-group textarea {
+  min-height: 70px !important;
+  resize: vertical !important;
+  line-height: 1.4 !important;
+}
+
+.btn-delete-node {
+  width: 100% !important;
+  padding: 10px !important;
+  background: var(--error) !important;
+  color: #fff !important;
+  border: none !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  font-size: 14px !important;
+  margin-top: 16px !important;
+  font-family: inherit !important;
+}
+
+.btn-delete-node:hover {
+  opacity: 0.9 !important;
+}
+
+.workflow-execution-log {
+  position: absolute;
+  bottom: 0;
+  left: 240px;
+  right: 280px;
+  height: 200px;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border);
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.workflow-execution-log h3 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.log-content {
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.log-entry {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-entry.running {
+  color: var(--success, #22c55e);
+}
+
+.log-entry.completed {
+  color: var(--success, #22c55e);
+}
+
+.log-entry.failed {
+  color: var(--error);
+}
+
+.empty-message {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.node-executing {
+  box-shadow: 0 0 10px var(--success, #22c55e);
+}
+
+.node-completed {
+  box-shadow: 0 0 10px var(--success, #22c55e);
+}
+
+.node-failed {
+  box-shadow: 0 0 10px var(--error);
+}
+
+.litegraph .canvas {
+  background: var(--bg-primary) !important;
+}
+
+.litegraph .node {
+  border-radius: 6px !important;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+.litegraph .node-title {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+}
+
+.litegraph .node-widget {
+  padding: 4px 8px !important;
+}
+
+.litegraph .node-widget input {
+  background: var(--bg-primary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 4px !important;
+  color: var(--text-primary) !important;
+  font-size: 12px !important;
+  padding: 4px 6px !important;
+}
+
+.litegraph .port {
+  border-radius: 4px !important;
+}
+
+.litegraph .port-input {
+  background: var(--bg-hover) !important;
+}
+
+.litegraph .port-output {
+  background: var(--bg-hover) !important;
+}
+
+.litegraph .link {
+  border-width: 2px !important;
+}
+
+.litegraph .node {
+  border-radius: 6px !important;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
+  box-shadow: none !important;
+}
+
+.litegraph .node-title {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  background: transparent !important;
+}
+
+.litegraph .node-title-text {
+  color: #fff !important;
+}
+
+.litegraph .node-widget {
+  padding: 4px 8px !important;
+}
+
+.litegraph .node-widget input {
+  background: var(--bg-primary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 4px !important;
+  color: var(--text-primary) !important;
+  font-size: 12px !important;
+  padding: 4px 6px !important;
+}
+
+.litegraph .port {
+  border-radius: 4px !important;
+  border: none !important;
+}
+
+.litegraph .port-input {
+  background: var(--bg-hover) !important;
+}
+
+.litegraph .port-output {
+  background: var(--bg-hover) !important;
+}
+
+.litegraph .node-input {
+  background: var(--bg-primary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 4px !important;
+}
+
+.litegraph .node-output {
+  background: var(--bg-primary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 4px !important;
+}
+
+.litegraph .slot {
+  background: var(--text-muted) !important;
+}
+
+.litegraph .litecontextmenu,
+.litegraph .litegdialog,
+.litegraph .graphdialog,
+.litemenubar,
+.litegraph .dialog {
+  display: none !important;
+}

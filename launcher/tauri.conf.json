@@ -1,0 +1,85 @@
+{
+  "build": {
+    "beforeBuildCommand": "cargo build --release",
+    "beforeDevCommand": "cargo build",
+    "devPath": "src",
+    "distDir": "src",
+    "withGlobalTauri": true
+  },
+  "package": {
+    "productName": "OSAgent Launcher",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "shell": {
+        "all": false,
+        "open": true
+      },
+      "window": {
+        "all": true
+      }
+    },
+    "bundle": {
+      "active": true,
+      "targets": "all",
+      "identifier": "com.osagent.launcher",
+      "icon": [
+        "icons/thinking-indicator.png",
+        "icons/thinking-indicator.ico"
+      ],
+      "resources": [],
+      "externalBin": [],
+      "copyright": "2024 OSA Contributors",
+      "category": "DeveloperTool",
+      "shortDescription": "OSAgent Launcher",
+      "longDescription": "Modern launcher for OSAgent AI assistant with system tray and window management",
+      "deb": {
+        "depends": []
+      },
+      "windows": {
+        "certificateThumbprint": null,
+        "digestAlgorithm": "sha256",
+        "timestampUrl": "",
+        "wix": {
+          "template": null,
+          "fragmentPaths": [],
+          "componentGroupRefs": [],
+          "componentRefs": [],
+          "featureGroupRefs": [],
+          "featureRefs": [],
+          "mergeRefs": [],
+          "skipWebviewInstall": false,
+          "license": null
+        }
+      }
+    },
+    "security": {
+      "csp": "default-src 'self' http://localhost:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    },
+    "updater": {
+      "active": false
+    },
+    "windows": [
+      {
+        "title": "OSAgent Launcher",
+        "width": 480,
+        "height": 620,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "center": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "visible": true
+      }
+    ],
+    "systemTray": {
+      "iconPath": "icons/thinking-indicator.png",
+      "iconAsTemplate": false,
+      "menuOnLeftClick": false,
+      "title": "OSAgent"
+    }
+  }
+}

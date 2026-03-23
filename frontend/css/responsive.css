@@ -1,0 +1,397 @@
+@media (max-width: 900px) {
+    .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        z-index: 1001;
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+        margin-left: 0;
+    }
+
+    .sidebar.open {
+        transform: translateX(0);
+    }
+
+    .sidebar.collapsed {
+        margin-left: 0;
+    }
+
+    .main {
+        width: 100%;
+    }
+
+    .header {
+        position: sticky;
+        top: 0;
+        z-index: 1000;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 8px 12px;
+        min-height: auto;
+    }
+
+    .sidebar-toggle {
+        order: 0;
+    }
+
+    .header-title {
+        order: 1;
+        flex: 1;
+        min-width: 0;
+        text-align: left;
+    }
+
+    .context-indicator,
+    .connection-status {
+        display: none !important;
+    }
+
+    .header-controls {
+        order: 2;
+        width: 100%;
+        display: flex;
+        gap: 6px;
+    }
+
+    .model-selector {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .model-selector-input-wrap .model-input {
+        width: 100%;
+        flex: 1;
+    }
+
+    .model-dropdown {
+        right: auto;
+        left: 0;
+        width: calc(100vw - 32px);
+        max-width: 340px;
+    }
+
+    .settings-btn,
+    .logout-btn {
+        padding: 6px 8px;
+        font-size: 11px;
+    }
+
+    .mobile-workspace-btn,
+    .mobile-persona-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 34px;
+        min-height: 34px;
+    }
+
+    .input-left-controls {
+        display: flex;
+        gap: 4px;
+    }
+
+    .input-tab {
+        padding: 6px 8px;
+        font-size: 11px;
+    }
+
+    .input-tab svg {
+        width: 10px;
+        height: 10px;
+    }
+
+    .messages {
+        padding: 12px 8px;
+    }
+
+    .session-inspector {
+        padding: 12px 12px 14px;
+    }
+
+    .session-inspector.collapsed {
+        padding-top: 0;
+        padding-bottom: 0;
+    }
+
+    .inspector-toggle {
+        margin: 6px 12px 0;
+        padding: 5px 10px;
+    }
+
+    .inspector-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .inspector-list {
+        max-height: 200px;
+    }
+
+    .message {
+        padding: 12px 0;
+        margin: 0 auto 16px;
+    }
+
+    .message-content {
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    .input-area {
+        padding: 12px 8px 12px;
+    }
+
+    .input-wrapper {
+        max-width: none;
+    }
+
+    .composer-shell {
+        padding: 10px;
+        border-radius: 14px;
+    }
+
+    .composer-toolbar {
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 10px;
+    }
+
+    .context-controls {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .context-dropdown,
+    .context-trigger,
+    .context-menu {
+        width: 100%;
+    }
+
+    .context-trigger {
+        padding: 0 12px;
+        min-height: 40px;
+        font-size: 12px;
+    }
+
+    .context-trigger-text {
+        gap: 6px;
+        font-size: 12px;
+    }
+
+    .permission-pill {
+        min-width: 30px;
+        padding: 3px 6px;
+        font-size: 10px;
+    }
+
+    .context-chevron {
+        font-size: 10px;
+    }
+
+    .context-menu {
+        min-width: 0;
+        left: 0;
+        right: 0;
+        width: auto;
+        max-width: calc(100vw - 20px);
+        max-height: min(350px, calc(100vh - 220px));
+        padding: 8px;
+    }
+
+    .persona-dropdown .context-menu {
+        max-height: min(280px, calc(100vh - 260px));
+    }
+
+    .context-menu-header {
+        padding: 2px 4px 8px;
+        font-size: 11px;
+    }
+
+    .menu-action-btn {
+        padding: 5px 8px;
+        font-size: 11px;
+    }
+
+    .menu-icon-btn {
+        width: 28px;
+        height: 28px;
+        font-size: 11px;
+    }
+
+    .menu-row-main {
+        padding: 8px 10px;
+        font-size: 12px;
+    }
+
+    .menu-row-title {
+        font-size: 12px;
+    }
+
+    .menu-row-meta {
+        font-size: 10px;
+    }
+
+    .workspace-compact-editor {
+        padding: 10px;
+    }
+
+    .workspace-field label {
+        font-size: 11px;
+    }
+
+    .workspace-field input,
+    .workspace-field select {
+        padding: 8px 10px;
+        font-size: 12px;
+    }
+
+    .control-btn {
+        padding: 8px 10px;
+        font-size: 11px;
+    }
+
+    .voice-controls {
+        width: 100%;
+    }
+
+    .voice-btn {
+        width: 36px;
+        height: 36px;
+    }
+
+    .voice-btn svg {
+        width: 16px;
+        height: 16px;
+    }
+
+    .input-container {
+        gap: 8px;
+        padding: 4px;
+    }
+
+    .input-container input {
+        padding: 12px 14px;
+        font-size: 14px;
+    }
+
+    .input-container button {
+        min-width: 60px;
+        padding: 10px 14px;
+        font-size: 12px;
+        border-radius: 10px;
+    }
+
+    .code-block pre {
+        padding: 12px;
+        font-size: 12px;
+    }
+
+    .code-header {
+        padding: 6px 10px;
+    }
+
+    .thinking-indicator {
+        padding: 4px 0;
+        margin: 0 auto 16px;
+    }
+
+    .tool-container {
+        margin: 0 auto 8px;
+    }
+
+    .tool-header {
+        padding: 8px 12px;
+    }
+
+    .tool-content {
+        padding: 10px 12px;
+    }
+
+    .settings-modal-content {
+        max-width: 100%;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+    }
+
+    .settings-with-sidebar {
+        flex-direction: column;
+    }
+
+    .settings-sidebar {
+        width: 100%;
+        flex-shrink: 1;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        max-height: 120px;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
+
+    .settings-sidebar-sections {
+        display: flex;
+        flex-direction: row;
+        gap: 0;
+    }
+
+    .settings-sidebar-section {
+        display: flex;
+        flex-direction: row;
+        padding: 0;
+        flex-shrink: 0;
+    }
+
+    .settings-sidebar-section-title {
+        display: none;
+    }
+
+    .settings-sidebar-item {
+        padding: 10px 14px;
+        font-size: 12px;
+        white-space: nowrap;
+    }
+
+    .settings-main {
+        flex: 1;
+        overflow-y: auto;
+    }
+
+    .settings-pane {
+        padding: 12px;
+    }
+
+    .settings-pane-header h2 {
+        font-size: 14px;
+    }
+
+    .settings-pane-desc {
+        font-size: 12px;
+    }
+
+    .settings-group-title {
+        font-size: 12px;
+    }
+
+    .settings-field label {
+        font-size: 12px;
+    }
+
+    .settings-field input,
+    .settings-field select,
+    .settings-field textarea {
+        font-size: 13px;
+        padding: 8px 10px;
+    }
+
+    .settings-modal-footer {
+        padding: 10px 12px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .settings-modal-footer button {
+        padding: 8px 12px;
+        font-size: 12px;
+    }
+}

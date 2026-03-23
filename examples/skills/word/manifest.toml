@@ -1,0 +1,5 @@
+name = "word"
+version = "1.0.0"
+description = "Microsoft Word document operations via python-docx"
+author = "OSA"
+icon = "icon.png"

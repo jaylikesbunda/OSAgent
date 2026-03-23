@@ -1,0 +1,58 @@
+/target
+/launcher/target
+/icon-gen/target
+**/*.rs.bk
+*.pdb
+
+# Local secrets / environment
+.env
+.env.*
+*.secret
+*.secrets
+*.key
+*.pem
+*.crt
+
+# OSA specific
+.osagent/
+config.toml
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db-*
+*.log
+*.cache
+
+# Frontend / JS build output
+node_modules/
+frontend/node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+benchmark_results/
+/icon-gen
+frontend/images/thinking icon.psd
+frontend/images/osagent.ico
+frontend/images/300x300-logo.png
+frontend/images/3Kx3K-logo.png

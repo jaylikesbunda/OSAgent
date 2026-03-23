@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a reproducible problem in osagent or the launcher
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please include enough detail for someone else to reproduce it.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+      placeholder: The launcher starts, but osagent never binds to localhost...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Build with ...
+        2. Run ...
+        3. Open ...
+        4. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Paste terminal output, stack traces, or screenshots if available.
+      render: text
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - core app
+        - launcher
+        - web UI
+        - docs
+        - workflow / CI
+        - config / setup
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or commit SHA
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11, Ubuntu 24.04, macOS 14
+    validations:
+      required: true

@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an improvement for osagent or the launcher
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: It is hard to...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: Add a command, UI flow, or workflow that...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: I also considered...
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core app
+        - launcher
+        - web UI
+        - tools
+        - docs
+        - workflow / CI
+    validations:
+      required: true

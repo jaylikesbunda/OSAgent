@@ -1,0 +1,96 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'benches/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build release
+        run: cargo build --release
+      
+      - name: Run benchmarks
+        run: cargo bench --bench performance -- --save-baseline ci | tee benchmark_results.txt
+      
+      - name: Get binary size
+        run: |
+          SIZE=$(ls -lh target/release/osagent | awk '{print $5}')
+          echo "BINARY_SIZE=$SIZE" >> $GITHUB_ENV
+          echo "Binary size: $SIZE"
+      
+      - name: Measure startup time
+        run: |
+          TOTAL=0
+          for i in {1..10}; do
+            START=$(date +%s%N)
+            ./target/release/osagent --version > /dev/null 2>&1
+            END=$(date +%s%N)
+            MS=$(( (END - START) / 1000000 ))
+            TOTAL=$((TOTAL + MS))
+          done
+          AVG=$((TOTAL / 10))
+          echo "STARTUP_TIME=${AVG}ms" >> $GITHUB_ENV
+          echo "Average startup: ${AVG}ms"
+      
+      - name: Measure memory
+        run: |
+          ./target/release/osagent --version &
+          PID=$!
+          sleep 0.5
+          MEM=$(ps -o rss= -p $PID | awk '{printf "%.1f", $1/1024}')
+          kill $PID 2>/dev/null || true
+          echo "MEMORY_MB=${MEM}MB" >> $GITHUB_ENV
+          echo "Idle memory: ${MEM}MB"
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark_results.txt
+            target/criterion/
+      
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## Performance Report
+            
+            | Metric | Value |
+            |--------|-------|
+            | Binary Size | ${process.env.BINARY_SIZE} |
+            | Startup Time | ${process.env.STARTUP_TIME} |
+            | Idle Memory | ${process.env.MEMORY_MB} |
+            
+            [View detailed results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+            
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
