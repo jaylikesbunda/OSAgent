@@ -1,5 +1,110 @@
 window.OSA = window.OSA || {};
 
+OSA.labelThinkingOption = function(value) {
+    switch ((value || '').toLowerCase()) {
+        case 'auto': return 'Auto';
+        case 'off': return 'Off';
+        case 'minimal': return 'Minimal';
+        case 'low': return 'Low';
+        case 'medium': return 'Medium';
+        case 'high': return 'High';
+        case 'max': return 'Max';
+        case 'xhigh': return 'X-High';
+        default: return value;
+    }
+};
+
+OSA.applyThinkingStateToSelect = function(selectId, state, selectedValue) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+
+    const options = state?.options || ['auto'];
+    select.innerHTML = options.map(function(option) {
+        return '<option value="' + OSA.escapeHtml(option) + '">' + OSA.escapeHtml(OSA.labelThinkingOption(option)) + '</option>';
+    }).join('');
+
+    const fallback = state?.selected || 'auto';
+    select.value = options.includes(selectedValue) ? selectedValue : fallback;
+};
+
+OSA.updateThinkingHint = function(state) {
+    const hint = document.getElementById('setting-thinking-hint');
+    if (!hint) return;
+
+    const options = (state?.options || []).filter(function(option) { return option !== 'auto'; }).map(OSA.labelThinkingOption);
+    hint.textContent = options.length
+        ? ('Active model: ' + state.provider_id + '/' + state.model + ' - available: ' + options.join(', '))
+        : ('Active model: ' + state.provider_id + '/' + state.model + ' - no provider-specific thinking controls exposed');
+};
+
+OSA.getActiveThinkingSelection = function() {
+    return document.getElementById('header-thinking-level')?.value
+        || document.getElementById('setting-thinking-level')?.value
+        || OSA.getCachedConfig()?.agent?.thinking_level
+        || 'auto';
+};
+
+OSA.refreshThinkingOptions = async function(providerId, model, selectedValue) {
+    try {
+        const params = new URLSearchParams();
+        if (providerId) params.set('provider_id', providerId);
+        if (model) params.set('model', model);
+        const suffix = params.toString() ? ('?' + params.toString()) : '';
+        const state = await OSA.getJson('/api/reasoning/options' + suffix);
+        const value = selectedValue || state.selected || 'auto';
+        OSA.applyThinkingStateToSelect('setting-thinking-level', state, value);
+        OSA.applyThinkingStateToSelect('header-thinking-level', state, value);
+        OSA.updateThinkingHint(state);
+    } catch (error) {
+        console.error('Failed to load thinking options:', error);
+        OSA.applyThinkingStateToSelect('setting-thinking-level', { options: ['auto'], selected: 'auto' }, 'auto');
+        OSA.applyThinkingStateToSelect('header-thinking-level', { options: ['auto'], selected: 'auto' }, 'auto');
+    }
+};
+
+OSA.persistThinkingLevel = async function(value, providerId, model) {
+    const errorDiv = document.getElementById('settings-error');
+    if (errorDiv) errorDiv.classList.add('hidden');
+
+    let cfg = OSA.getCachedConfig();
+    if (!cfg) {
+        cfg = await OSA.getJson('/api/config');
+    }
+
+    const next = {
+        ...cfg,
+        agent: {
+            ...(cfg.agent || {}),
+            thinking_level: value || 'auto'
+        }
+    };
+
+    const res = await fetch('/api/config', {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(next)
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+    }
+
+    OSA.setCachedConfig(next);
+    await OSA.refreshThinkingOptions(providerId, model, next.agent.thinking_level);
+};
+
+OSA.handleQuickThinkingChange = async function(event) {
+    try {
+        const providerId = OSA.currentModelProviderId || OSA.getCachedConfig()?.default_provider || '';
+        const model = OSA.currentModelId || OSA.getCachedConfig()?.default_model || '';
+        await OSA.persistThinkingLevel(event.target.value, providerId, model);
+    } catch (error) {
+        console.error('Failed to update thinking level:', error);
+        alert(error.message || 'Failed to update thinking level');
+        await OSA.refreshThinkingOptions();
+    }
+};
+
 OSA.openSettings = async function() {
     document.getElementById('settings-modal').classList.remove('hidden');
     await OSA.loadSettings();
@@ -25,6 +130,11 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-discord-allowed-users').value = (discord.allowed_users || []).join('\n');
         document.getElementById('setting-max-tokens').value = config.agent?.max_tokens || 4096;
         document.getElementById('setting-temperature').value = config.agent?.temperature || 0.7;
+        await OSA.refreshThinkingOptions(
+            OSA.currentModelProviderId || config.default_provider,
+            OSA.currentModelId || config.default_model || config.provider?.model || '',
+            config.agent?.thinking_level || 'auto'
+        );
         const memEnabled = config.agent?.memory_enabled === true;
         document.getElementById('setting-memory-enabled').checked = memEnabled;
         document.getElementById('setting-memory-file').value = config.agent?.memory_file || '~/.osagent/memories.json';
@@ -67,6 +177,7 @@ OSA.loadSettings = async function() {
         
         await OSA.loadMemories();
         await OSA.loadVoiceInstallStatus();
+        await OSA.renderSettingsProviders();
     } catch (error) {
         console.error('Failed to load settings:', error);
     }
@@ -128,6 +239,7 @@ OSA.saveSettings = async function() {
         ...newConfig.agent,
         max_tokens: parseInt(document.getElementById('setting-max-tokens').value) || 4096,
         temperature: parseFloat(document.getElementById('setting-temperature').value) || 0.7,
+        thinking_level: document.getElementById('setting-thinking-level').value || 'auto',
         memory_enabled: document.getElementById('setting-memory-enabled').checked,
         memory_file: document.getElementById('setting-memory-file').value || '~/.osagent/memories.json'
     };
@@ -154,6 +266,8 @@ OSA.saveSettings = async function() {
             const data = await res.json().catch(() => ({}));
             throw new Error(data.error || `HTTP ${res.status}`);
         }
+        OSA.setCachedConfig(newConfig);
+        await OSA.refreshThinkingOptions(undefined, undefined, newConfig.agent.thinking_level);
         OSA.setVoiceConfig(newConfig.voice);
         OSA.closeSettings();
     } catch (error) {
@@ -226,7 +340,7 @@ OSA.switchSettingsTab = async function(tabId) {
     document.querySelectorAll('.settings-pane').forEach(pane => {
         pane.classList.toggle('active', pane.id === `pane-${tabId}`);
     });
-    if (tabId === 'models') {
+    if (tabId === 'models' || tabId === 'provider') {
         OSA.renderSettingsProviders();
     } else if (tabId === 'voice') {
         OSA.loadVoiceModels().then(() => OSA.renderVoiceModelBrowser());

@@ -120,7 +120,7 @@ OSA.renderModelCard = function(model, type) {
                 <label class="model-radio">
                     <input type="radio" name="model-${type}" value="${model.id}" 
                         ${isSelected ? 'checked' : ''} 
-                        onchange="OSA.selectModel('${type}', '${model.id}')" 
+                        onchange="OSA.selectVoiceModel('${type}', '${model.id}')" 
                         ${isDownloading ? 'disabled' : ''} />
                     <span class="model-name">${OSA.escapeHtml(model.name)}</span>
                 </label>
@@ -163,7 +163,7 @@ OSA.renderInstalledModels = function() {
     `).join('');
 };
 
-OSA.selectModel = async function(type, modelId) {
+OSA.selectVoiceModel = async function(type, modelId) {
     try {
         const configRes = await fetch('/api/config', { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
         const config = await configRes.json();

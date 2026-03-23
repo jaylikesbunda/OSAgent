@@ -107,6 +107,7 @@ pub struct AuditQuery {
 #[derive(Debug, Serialize)]
 pub struct ModelResponse {
     pub model: String,
+    pub provider_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +204,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/reasoning/options", get(get_reasoning_options))
         .route(
             "/api/workspaces",
             get(list_workspaces).post(create_workspace),
@@ -357,7 +359,8 @@ pub struct SetSessionWorkspaceRequest {
 
 async fn get_model(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<ModelResponse> {
     let model = agent.get_current_model().await;
-    Json(ModelResponse { model })
+    let provider_id = agent.get_config().await.default_provider;
+    Json(ModelResponse { model, provider_id })
 }
 
 async fn set_model(
@@ -528,6 +531,29 @@ async fn restart_server(
 
 async fn get_config(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<Config> {
     Json(agent.get_config().await)
+}
+
+async fn get_reasoning_options(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<crate::agent::reasoning::ThinkingOptionsState> {
+    let config = agent.get_config().await;
+    let provider_id = params
+        .get("provider_id")
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config.default_provider.clone());
+    let model = params
+        .get("model")
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config.active_model());
+
+    Json(
+        agent
+            .get_reasoning_state(&provider_id, &model, &config.agent.thinking_level)
+            .await,
+    )
 }
 
 async fn update_config(

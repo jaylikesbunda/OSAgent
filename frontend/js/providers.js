@@ -6,6 +6,7 @@ OSA.modelSearchQuery = '';
 OSA.currentProviderId = null;
 OSA.currentProviderApiKeyUrl = null;
 OSA.currentProviderOAuthSupported = false;
+OSA.pendingProviderModel = null;
 OSA.validationDebounce = null;
 OSA.expandedModels = {};
 OSA.modalModelDropdownOpen = false;
@@ -21,12 +22,16 @@ OSA.saveFavourites = function() {
     localStorage.setItem('osa_favourite_models', JSON.stringify(OSA.favourites));
 };
 
-OSA.isFavourite = function(modelId) {
-    return OSA.favourites.some(function(f) { return f.id === modelId; });
+OSA.isFavourite = function(modelId, providerId) {
+    return OSA.favourites.some(function(f) {
+        return f.id === modelId && (!providerId || f.provider_id === providerId);
+    });
 };
 
 OSA.toggleFavourite = function(modelId, providerId, modelName, providerName) {
-    const idx = OSA.favourites.findIndex(function(f) { return f.id === modelId; });
+    const idx = OSA.favourites.findIndex(function(f) {
+        return f.id === modelId && f.provider_id === providerId;
+    });
     if (idx >= 0) {
         OSA.favourites.splice(idx, 1);
     } else {
@@ -41,9 +46,10 @@ OSA.toggleFavourite = function(modelId, providerId, modelName, providerName) {
 // ── Model Option HTML Builder ────────────────────────────────
 
 OSA.buildModelOptionHtml = function(m, providerId, currentModel, opts) {
-    const isCurrent = m.id.toLowerCase() === (currentModel || '').toLowerCase();
-    const isFav = OSA.isFavourite(m.id);
     const pid = m.provider_id || providerId;
+    const isCurrent = m.id.toLowerCase() === (currentModel || '').toLowerCase()
+        && (!OSA.currentModelProviderId || OSA.currentModelProviderId === pid);
+    const isFav = OSA.isFavourite(m.id, pid);
     const ctx = m.context_window >= 1000000
         ? (m.context_window / 1000000).toFixed(0) + 'M'
         : m.context_window > 0 ? (m.context_window / 1000).toFixed(0) + 'K' : '?';
@@ -93,6 +99,19 @@ OSA.loadProviderCatalog = async function() {
     }
 };
 
+OSA.sortProvidersForDropdown = function(providers) {
+    const providerOrder = ['OpenRouter', 'OpenAI', 'Anthropic', 'Google AI', 'Groq', 'DeepSeek', 'xAI', 'Ollama (Local)'];
+    return [...(providers || [])].sort((a, b) => {
+        if (!!a.connected !== !!b.connected) return a.connected ? -1 : 1;
+        const ai = providerOrder.indexOf(a.name);
+        const bi = providerOrder.indexOf(b.name);
+        if (ai !== -1 && bi !== -1) return ai - bi;
+        if (ai !== -1) return -1;
+        if (bi !== -1) return 1;
+        return a.name.localeCompare(b.name);
+    });
+};
+
 // ── SVG Icons ───────────────────────────────────────────────
 
 OSA.icons = {
@@ -132,13 +151,39 @@ window.toggleModelDropdown = function() { OSA.toggleModelDropdown(); };
 window.closeModelDropdown = function() { OSA.closeModelDropdown(); };
 window.handleModelSearch = function(e) { OSA.handleModelSearch(e); };
 window.handleModelDropdownKeydown = function(e) { OSA.handleModelDropdownKeydown(e); };
+window.handleModelInputKeydown = function(e) { OSA.handleModelInputKeydown(e); };
+
+OSA.handleModelInputKeydown = function(event) {
+    const key = event.key || '';
+    if (key === 'ArrowDown' || key === 'Enter' || key === ' ') {
+        event.preventDefault();
+        if (!OSA.modelDropdownOpen) {
+            OSA.toggleModelDropdown();
+        }
+        return;
+    }
+
+    if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        if (!OSA.modelDropdownOpen) {
+            OSA.toggleModelDropdown();
+        }
+        const searchInput = document.getElementById('model-search');
+        if (searchInput) {
+            searchInput.value = key;
+            OSA.modelSearchQuery = key;
+            searchInput.focus();
+            OSA.renderModelDropdown();
+        }
+    }
+};
 
 OSA.renderModelDropdown = async function() {
     const dropdown = document.getElementById('model-dropdown');
     if (!dropdown) return;
 
     const query = OSA.modelSearchQuery.trim();
-    const currentModel = (document.getElementById('model-input')?.value || '').toLowerCase();
+    const currentModel = (OSA.currentModelId || document.getElementById('model-input')?.value || '').toLowerCase();
 
     if (query.length >= 1) {
         try {
@@ -157,7 +202,7 @@ OSA.renderModelDropdown = async function() {
     if (OSA.favourites.length > 0) {
         html += '<div class="model-group-title model-group-favs">★ Favourites</div>';
         for (const fav of OSA.favourites) {
-            const full = (all_models || []).find(function(m) { return m.id === fav.id; }) || {
+            const full = (all_models || []).find(function(m) { return m.id === fav.id && m.provider_id === fav.provider_id; }) || {
                 id: fav.id, name: fav.name, provider_id: fav.provider_id,
                 provider_name: fav.provider_name, context_window: 0,
                 supports_tools: false, supports_vision: false, category: ''
@@ -166,15 +211,7 @@ OSA.renderModelDropdown = async function() {
         }
     }
 
-    const providerOrder = ['OpenRouter', 'OpenAI', 'Anthropic', 'Google AI', 'Groq', 'DeepSeek', 'xAI', 'Ollama (Local)'];
-    const sortedProviders = [...(providers || [])].sort((a, b) => {
-        const ai = providerOrder.indexOf(a.name);
-        const bi = providerOrder.indexOf(b.name);
-        if (ai !== -1 && bi !== -1) return ai - bi;
-        if (ai !== -1) return -1;
-        if (bi !== -1) return 1;
-        return a.name.localeCompare(b.name);
-    });
+    const sortedProviders = OSA.sortProvidersForDropdown(providers);
 
     for (const provider of sortedProviders) {
         const models = provider.models || [];
@@ -204,8 +241,19 @@ OSA.renderModelSearchResults = function(models, currentModel) {
         grouped[m.provider_name].push(m);
     }
 
+    const providersByName = Object.fromEntries((OSA.providerCatalog.providers || []).map(function(provider) {
+        return [provider.name, provider];
+    }));
+    const orderedProviders = OSA.sortProvidersForDropdown(
+        Object.keys(grouped).map(function(name) {
+            return providersByName[name] || { name: name, connected: false };
+        })
+    );
+
     let html = '';
-    for (const [providerName, providerModels] of Object.entries(grouped)) {
+    for (const provider of orderedProviders) {
+        const providerName = provider.name;
+        const providerModels = grouped[providerName] || [];
         html += '<div class="model-group-title">' + OSA.escapeHtml(providerName) + '</div>';
         for (const m of providerModels) {
             html += OSA.buildModelOptionHtml(m, m.provider_id, currentModel, {});
@@ -215,18 +263,53 @@ OSA.renderModelSearchResults = function(models, currentModel) {
     dropdown.querySelector('.model-dropdown-list').innerHTML = html;
 };
 
-OSA.selectModel = function(modelId, providerId) {
+OSA.selectModel = async function(modelId, providerId) {
+    const provider = (OSA.providerCatalog.providers || []).find(function(item) { return item.id === providerId; });
+    const configured = !!(provider && provider.connected) || await (async function() {
+        try {
+            const data = await OSA.getJson('/api/providers');
+            return (data.providers || []).some(function(item) { return item.id === providerId; });
+        } catch (error) {
+            const cfg = OSA.getCachedConfig ? OSA.getCachedConfig() : null;
+            return !!cfg?.providers?.some(function(item) { return item.provider_type === providerId; });
+        }
+    })();
+
+    if (!configured) {
+        OSA.closeModelDropdown();
+        await OSA.openAddProviderModal(providerId, modelId);
+        return;
+    }
+
+    OSA.currentModelId = modelId;
+    OSA.currentModelProviderId = providerId;
     const input = document.getElementById('model-input');
-    if (input) input.value = modelId;
+    if (input) {
+        const provider = (OSA.providerCatalog.providers || []).find(function(item) { return item.id === providerId; });
+        input.value = provider ? provider.name + ' · ' + modelId : modelId;
+        input.title = provider ? provider.name + ' / ' + modelId : modelId;
+    }
     OSA.closeModelDropdown();
 
-    fetch('/api/model', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + OSA.getToken(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelId, provider_id: providerId })
-    }).then(res => res.ok ? {} : res.json().catch(() => ({})))
-      .then(data => { if (data.error) console.error('Failed to switch model:', data.error); })
-      .catch(error => console.error('Failed to switch model:', error));
+    try {
+        const res = await fetch('/api/model', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + OSA.getToken(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelId, provider_id: providerId })
+        });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) {
+            throw new Error(data.error || 'Failed to switch model');
+        }
+        if (typeof OSA.refreshThinkingOptions === 'function') {
+            const cachedConfig = OSA.getCachedConfig ? OSA.getCachedConfig() : null;
+            const selected = cachedConfig?.agent?.thinking_level || 'auto';
+            OSA.refreshThinkingOptions(providerId, modelId, selected);
+        }
+    } catch (error) {
+        console.error('Failed to switch model:', error);
+        alert(error.message || 'Failed to switch model');
+    }
 };
 
 OSA.modelSearchDebounce = null;
@@ -339,6 +422,9 @@ OSA.populateModalModelDropdown = function(models, providerId) {
 };
 
 OSA.selectModalModel = function(modelId, modelName, providerId) {
+    OSA.pendingProviderModel = modelId;
+    OSA.currentModelId = modelId;
+    OSA.currentModelProviderId = providerId;
     document.getElementById('provider-model').value = modelId;
     document.getElementById('modal-model-select-text').textContent = modelName;
     OSA.closeModalModelDropdown();
@@ -403,6 +489,65 @@ OSA.renderSettingsModelList = function(query) {
     catalogList.innerHTML = html;
 };
 
+OSA.renderRoutingOverview = function(catalog, providersData) {
+    const summaryEl = document.getElementById('provider-routing-summary');
+    const listEl = document.getElementById('provider-routing-list');
+    if (!summaryEl && !listEl) return;
+
+    const connected = providersData.providers || [];
+    const activeId = providersData.default_provider || '';
+    const activeModel = providersData.default_model || '';
+    const providersById = Object.fromEntries((catalog.providers || []).map(function(provider) {
+        return [provider.id, provider];
+    }));
+    const activeProvider = providersById[activeId] || null;
+
+    if (summaryEl) {
+        if (!activeId || !activeModel) {
+            summaryEl.innerHTML = '<div class="provider-route-card"><div><div class="provider-route-title">No active connected route</div><div class="provider-route-meta">Connect a provider in the Models tab to start routing by provider + model.</div></div><button class="btn-action" onclick="switchSettingsTab(\'models\')">Open Models</button></div>';
+        } else {
+            const providerName = activeProvider ? activeProvider.name : activeId;
+            summaryEl.innerHTML = '<div class="provider-route-card provider-route-card-active">' +
+                '<div>' +
+                    '<div class="provider-route-kicker">Active provider route</div>' +
+                    '<div class="provider-route-title">' + OSA.escapeHtml(providerName) + '</div>' +
+                    '<div class="provider-route-meta">Model: <strong>' + OSA.escapeHtml(activeModel) + '</strong></div>' +
+                '</div>' +
+                '<div class="provider-route-actions">' +
+                    '<button class="btn-ghost" onclick="switchSettingsTab(\'models\')">Browse Models</button>' +
+                    '<button class="btn-action" onclick="OSA.openAddProviderModal(\'' + OSA.escapeHtml(activeId) + '\', \'' + OSA.escapeHtml(activeModel) + '\')">Manage</button>' +
+                '</div>' +
+            '</div>';
+        }
+    }
+
+    if (listEl) {
+        if (!connected.length) {
+            listEl.innerHTML = '<div class="model-empty">No connected providers yet</div>';
+            return;
+        }
+
+        listEl.innerHTML = connected.map(function(entry) {
+            const provider = providersById[entry.id] || null;
+            const name = provider ? provider.name : entry.id;
+            const status = provider && provider.oauth_supported ? 'OAuth' : 'API key';
+            const activeBadge = entry.is_default ? '<span class="badge badge-apikey" style="opacity:0.7">active</span>' : '';
+            const safeProviderId = OSA.escapeHtml(entry.id);
+            const safeModelId = OSA.escapeHtml(entry.model || '');
+            return `<div class="provider-route-list-item">
+                <div class="provider-route-list-main">
+                    <div class="provider-route-list-title">${OSA.escapeHtml(name)}${activeBadge}</div>
+                    <div class="provider-route-list-meta">${OSA.escapeHtml(entry.model || 'provider default')} · ${OSA.escapeHtml(status)}</div>
+                </div>
+                <div class="provider-route-actions">
+                    <button class="btn-ghost" onclick="OSA.selectModel('${safeModelId}', '${safeProviderId}')"${entry.model ? '' : ' disabled'}>Use</button>
+                    <button class="btn-ghost" onclick="OSA.openAddProviderModal('${safeProviderId}', '${safeModelId}')">Edit</button>
+                </div>
+            </div>`;
+        }).join('');
+    }
+};
+
 // ── Settings Providers with Collapsible Models ──────────────
 
 OSA.renderSettingsProviders = async function() {
@@ -417,6 +562,7 @@ OSA.renderSettingsProviders = async function() {
             OSA.getJson('/api/providers')
         ]);
         OSA.providerCatalog = catalog;
+        OSA.renderRoutingOverview(catalog, providersData);
 
         // Build a map of connected provider configs (id → config entry)
         const connectedMap = {};
@@ -441,9 +587,11 @@ OSA.renderSettingsProviders = async function() {
                 statusBadge = '<span class="badge badge-disconnected">Not connected</span>';
             }
 
+            const safeProviderId = OSA.escapeHtml(provider.id);
+            const safeConnectedModel = OSA.escapeHtml((connectedEntry && connectedEntry.model) || '');
             const connectBtn = provider.connected
-                ? ''
-                : '<button class="btn-action" onclick="OSA.openAddProviderModal(\'' + OSA.escapeHtml(provider.id) + '\')" style="padding:4px 12px;font-size:12px">Connect</button>';
+                ? `<button class="btn-ghost" onclick="OSA.openAddProviderModal('${safeProviderId}', '${safeConnectedModel}')" style="padding:4px 12px;font-size:12px">Manage</button>`
+                : '<button class="btn-action" onclick="OSA.openAddProviderModal(\'' + safeProviderId + '\')" style="padding:4px 12px;font-size:12px">Connect</button>';
 
             let modelSection = '';
             if (modelCount > 0) {
@@ -460,7 +608,7 @@ OSA.renderSettingsProviders = async function() {
 
             // Show active model if this provider is connected and configured
             const activeMeta = connectedEntry
-                ? '<div class="provider-catalog-meta" style="margin-top:2px">Active model: <span style="color:var(--text-primary)">' + OSA.escapeHtml(connectedEntry.model) + '</span></div>'
+                ? '<div class="provider-catalog-meta" style="margin-top:2px">Route: <span style="color:var(--text-primary)">' + OSA.escapeHtml(connectedEntry.model || 'provider default') + '</span></div>'
                 : '<div class="provider-catalog-meta">' + OSA.escapeHtml(provider.description) + '</div>';
 
             catalogHtml += '<div class="provider-catalog-item">' +
@@ -537,15 +685,20 @@ OSA.renderCategorizedModels = function(models, providerId) {
 
 // ── Sleek Add Provider Modal ────────────────────────────────
 
-OSA.openAddProviderModal = async function(providerId) {
+OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     const modal = document.getElementById('add-provider-modal');
     if (!modal || !providerId) return;
 
-    await OSA.loadProviderCatalog();
+    const [_, providersData] = await Promise.all([
+        OSA.loadProviderCatalog(),
+        OSA.getJson('/api/providers').catch(function() { return { providers: [] }; })
+    ]);
     OSA.currentProviderId = providerId;
+    OSA.pendingProviderModel = preferredModelId || null;
 
     const provider = OSA.providerCatalog.providers.find(p => p.id === providerId);
     if (!provider) return;
+    const connectedEntry = (providersData.providers || []).find(function(item) { return item.id === providerId; }) || null;
 
     OSA.currentProviderOAuthSupported = provider.oauth_supported;
     OSA.currentProviderApiKeyUrl = provider.api_key_url || null;
@@ -597,14 +750,24 @@ OSA.openAddProviderModal = async function(providerId) {
 
     // Reset fields
     document.getElementById('provider-api-key').value = '';
-    document.getElementById('provider-default').checked = false;
+    document.getElementById('provider-default').checked = !!(connectedEntry && connectedEntry.is_default);
     document.getElementById('validation-badge').style.display = 'none';
-    document.getElementById('modal-model-select-text').textContent = 'Select a model...';
+    document.getElementById('modal-model-select-text').textContent = 'Use provider default (choose later)';
     document.getElementById('provider-model').value = '';
     OSA.closeModalModelDropdown();
 
     // Populate modal model dropdown
     OSA.populateModalModelDropdown(provider.models, provider.id);
+    const initialModelId = OSA.pendingProviderModel || (connectedEntry && connectedEntry.model) || '';
+    if (initialModelId) {
+        const selected = provider.models.find(function(model) { return model.id === initialModelId; });
+        if (selected) {
+            OSA.selectModalModel(selected.id, selected.name, provider.id);
+        } else {
+            document.getElementById('provider-model').value = initialModelId;
+            document.getElementById('modal-model-select-text').textContent = initialModelId;
+        }
+    }
 
     // Set up auto-validation
     document.getElementById('provider-api-key').oninput = function() { OSA.scheduleValidation(); };
@@ -998,9 +1161,11 @@ OSA.closeAddProviderModal = function() {
     OSA.currentProviderId = null;
     OSA.currentProviderOAuthSupported = false;
     OSA.currentProviderApiKeyUrl = null;
+    OSA.pendingProviderModel = null;
     document.getElementById('provider-api-key').value = '';
     document.getElementById('provider-base-url').value = '';
     document.getElementById('provider-model').value = '';
+    document.getElementById('modal-model-select-text').textContent = 'Use provider default (choose later)';
     document.getElementById('provider-default').checked = false;
     document.getElementById('validation-badge').style.display = 'none';
     document.getElementById('oauth-client-id').value = '';

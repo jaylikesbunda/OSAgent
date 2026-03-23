@@ -9,7 +9,7 @@ use crate::agent::provider::{OpenAICompatibleProvider, Provider};
 use crate::agent::provider_presets;
 use crate::agent::session::SessionManager;
 use crate::agent::subagent_manager::SubagentManager;
-use crate::config::{Config, WorkspaceConfig};
+use crate::config::{AgentConfig, Config, WorkspaceConfig};
 use crate::error::{OSAgentError, Result};
 use crate::external::{ExternalDirectoryManager, PermissionAction, PermissionPrompt};
 use crate::indexer::CodeIndexer;
@@ -56,7 +56,8 @@ Keep it concrete, repo-specific, and optimized for continuing the task rather th
 
 pub struct AgentRuntime {
     config: Arc<tokio::sync::RwLock<Config>>,
-    provider: Arc<dyn Provider>,
+    agent_settings: Arc<tokio::sync::RwLock<AgentConfig>>,
+    provider: Arc<tokio::sync::RwLock<Arc<dyn Provider>>>,
     providers: Arc<tokio::sync::RwLock<Vec<(String, Arc<dyn Provider>)>>>,
     catalog: Arc<ModelCatalog>,
     session_manager: Arc<SessionManager>,
@@ -167,10 +168,15 @@ fn is_repo_exploration_request(message: &str) -> bool {
 }
 
 impl AgentRuntime {
+    async fn active_provider(&self) -> Arc<dyn Provider> {
+        self.provider.read().await.clone()
+    }
+
     pub fn new(config: Config) -> Result<Self> {
         let mut config = config;
         config.ensure_workspace_defaults();
         config.migrate_legacy_provider();
+        let agent_settings = Arc::new(tokio::sync::RwLock::new(config.agent.clone()));
 
         let catalog = Arc::new(ModelCatalog::new());
         let oauth_dir = PathBuf::from(shellexpand::tilde(&config.storage.database).to_string())
@@ -203,20 +209,22 @@ impl AgentRuntime {
                 }
             }
 
-            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_and_oauth(
+            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
                 cfg,
                 Some(catalog.clone()),
                 Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+                agent_settings.clone(),
             )?);
             provider_instances.push((provider_cfg.provider_type.clone(), provider));
         }
 
         if provider_instances.is_empty() {
             warn!("No providers configured - using legacy single provider config");
-            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_and_oauth(
+            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
                 config.provider.clone(),
                 Some(catalog.clone()),
                 Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+                agent_settings.clone(),
             )?);
             provider_instances.push((config.provider.provider_type.clone(), provider));
         }
@@ -328,7 +336,8 @@ impl AgentRuntime {
 
         Ok(Self {
             config: Arc::new(tokio::sync::RwLock::new(config)),
-            provider,
+            agent_settings,
+            provider: Arc::new(tokio::sync::RwLock::new(provider)),
             providers: Arc::new(tokio::sync::RwLock::new(provider_instances)),
             catalog,
             session_manager,
@@ -661,11 +670,12 @@ impl AgentRuntime {
                 ));
             }
 
-            let context_window = self.provider.model_context_window().await;
+            let provider = self.active_provider().await;
+            let context_window = provider.model_context_window().await;
             if let Some(window) = context_window {
                 let model_limit = self.catalog.lookup_model_limit(
-                    self.provider.provider_type(),
-                    &self.provider.current_model().await,
+                    provider.provider_type(),
+                    &provider.current_model().await,
                 );
                 let input_limit = model_limit.as_ref().and_then(|l| l.input);
                 let output_limit = model_limit.as_ref().map(|l| l.output).unwrap_or(8192);
@@ -809,7 +819,7 @@ impl AgentRuntime {
                     });
                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
                 }
-                result = self.provider.complete(&api_messages, &tools) => {
+                result = provider.complete(&api_messages, &tools) => {
                     result.map_err(|e| {
                         error!("Provider error in session {}: {}", session_id, e);
                         self.event_bus.emit(AgentEvent::Error {
@@ -1836,7 +1846,8 @@ impl AgentRuntime {
             Self::transcript_for_compaction(&prefix, 24_000)
         )));
 
-        let summary = match self.provider.complete(&compact_messages, &[]).await {
+        let provider = self.active_provider().await;
+        let summary = match provider.complete(&compact_messages, &[]).await {
             Ok(response) => response
                 .content
                 .unwrap_or_else(|| Self::summarize_for_context(&prefix, 2_500)),
@@ -2939,11 +2950,11 @@ impl AgentRuntime {
     }
 
     pub async fn get_current_model(&self) -> String {
-        self.provider.current_model().await
+        self.active_provider().await.current_model().await
     }
 
     pub async fn set_current_model(&self, model: String) {
-        self.provider.set_model(model).await;
+        self.active_provider().await.set_model(model).await;
     }
 
     pub async fn switch_provider_model(&self, provider_id: String, model: String) -> Result<()> {
@@ -2974,6 +2985,10 @@ impl AgentRuntime {
         cfg.set_active_provider_model(&provider_id, &model);
         drop(cfg);
 
+        let mut active_provider = self.provider.write().await;
+        *active_provider = new_provider;
+        drop(active_provider);
+
         info!("Switched to provider={}, model={}", provider_id, model);
         Ok(())
     }
@@ -3003,17 +3018,22 @@ impl AgentRuntime {
 
     pub async fn add_provider(&self, provider_config: crate::config::ProviderConfig) -> Result<()> {
         let catalog = self.catalog.clone();
+        let provider_id = provider_config.provider_type.clone();
         let oauth_dir = PathBuf::from(
             shellexpand::tilde(&self.config.read().await.storage.database).to_string(),
         )
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-        let provider = Arc::new(OpenAICompatibleProvider::with_catalog_and_oauth(
+        let provider = Arc::new(OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
             provider_config.clone(),
             Some(catalog),
             Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+            self.agent_settings.clone(),
         )?);
+
+        let default_provider = self.config.read().await.default_provider.clone();
+        let should_activate = default_provider.is_empty() || default_provider == provider_id;
 
         let mut providers = self.providers.write().await;
         providers.retain(|(id, _)| id != &provider_config.provider_type);
@@ -3027,7 +3047,23 @@ impl AgentRuntime {
         if cfg.default_provider.is_empty() {
             cfg.default_provider = provider_config.provider_type.clone();
         }
+        if cfg.default_provider == provider_id {
+            cfg.default_model = provider_config.model.clone();
+        }
         drop(cfg);
+
+        if should_activate {
+            let active = self
+                .providers
+                .read()
+                .await
+                .iter()
+                .find(|(id, _)| id == &provider_id)
+                .map(|(_, p)| p.clone())
+                .ok_or_else(|| OSAgentError::Config(format!("Provider '{}' not found", provider_id)))?;
+            let mut active_provider = self.provider.write().await;
+            *active_provider = active;
+        }
 
         Ok(())
     }
@@ -3058,26 +3094,11 @@ impl AgentRuntime {
         drop(cfg);
 
         if was_active {
-            let mut provider_guard = self.providers.write().await;
+            let provider_guard = self.providers.read().await;
             if let Some((_, first)) = provider_guard.first() {
-                let new_provider = first.clone();
-                *provider_guard = provider_guard
-                    .iter()
-                    .map(|(id, p)| {
-                        if id
-                            == provider_guard
-                                .first()
-                                .map(|(id, _)| id.as_str())
-                                .unwrap_or("")
-                        {
-                            (id.clone(), new_provider.clone())
-                        } else {
-                            (id.clone(), p.clone())
-                        }
-                    })
-                    .collect();
+                let mut active_provider = self.provider.write().await;
+                *active_provider = first.clone();
             }
-            drop(provider_guard);
         }
 
         Ok(())
@@ -3177,6 +3198,16 @@ impl AgentRuntime {
         self.config.read().await.clone()
     }
 
+    pub async fn get_reasoning_state(
+        &self,
+        provider_id: &str,
+        model: &str,
+        selected: &str,
+    ) -> crate::agent::reasoning::ThinkingOptionsState {
+        let meta = self.catalog.lookup_reasoning_metadata(provider_id, model);
+        crate::agent::reasoning::state_for(provider_id, model, meta.as_ref(), selected)
+    }
+
     pub async fn get_workspaces(&self) -> Vec<WorkspaceConfig> {
         self.config.read().await.list_workspaces()
     }
@@ -3225,6 +3256,10 @@ impl AgentRuntime {
 
     pub async fn replace_config(&self, mut config: Config) {
         config.ensure_workspace_defaults();
+        {
+            let mut agent_settings = self.agent_settings.write().await;
+            *agent_settings = config.agent.clone();
+        }
         let mut cfg = self.config.write().await;
         *cfg = config;
         if let Err(e) = self

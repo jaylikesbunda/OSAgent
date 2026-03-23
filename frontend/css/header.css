@@ -62,6 +62,27 @@
     flex-shrink: 0;
 }
 
+.header-thinking-control {
+    flex-shrink: 0;
+}
+
+.header-thinking-select {
+    height: 36px;
+    min-width: 104px;
+    padding: 8px 30px 8px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.header-thinking-select:hover,
+.header-thinking-select:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
 .model-selector-input-wrap {
     display: flex;
     align-items: center;

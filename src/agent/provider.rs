@@ -1,4 +1,4 @@
-use crate::config::ProviderConfig;
+use crate::config::{AgentConfig, ProviderConfig};
 use crate::error::{OSAgentError, Result};
 use crate::oauth::{extract_account_id, OAuthStorage, OAuthTokenEntry};
 use crate::storage::models::{Message, ToolCall};
@@ -6,17 +6,20 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::{Event, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use super::model_catalog::ModelCatalog;
+use super::provider_adapter::{create_provider_adapter, ProviderAdapter, RequestMode};
+use super::provider_auth::{get_extra_headers, resolve_provider_config};
+use super::reasoning;
 
 const MAX_RETRIES: u32 = 4;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 const MAX_TOOL_SCHEMA_TOKENS: usize = 8_000;
-const OPENAI_CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 #[async_trait]
@@ -94,11 +97,14 @@ struct ResolvedRequestAuth {
     request_url: String,
     api_key: String,
     extra_headers: Vec<(String, String)>,
+    request_mode: RequestMode,
 }
 
 pub struct OpenAICompatibleProvider {
     client: reqwest::Client,
     config: ProviderConfig,
+    adapter: Arc<dyn ProviderAdapter>,
+    agent_settings: Arc<RwLock<AgentConfig>>,
     oauth_storage: Option<OAuthStorage>,
     context_window: RwLock<Option<usize>>,
     context_window_attempted: RwLock<bool>,
@@ -122,6 +128,20 @@ impl OpenAICompatibleProvider {
         config: ProviderConfig,
         catalog: Option<Arc<ModelCatalog>>,
         oauth_storage: Option<OAuthStorage>,
+    ) -> Result<Self> {
+        Self::with_catalog_oauth_and_agent_settings(
+            config,
+            catalog,
+            oauth_storage,
+            Arc::new(RwLock::new(AgentConfig::default())),
+        )
+    }
+
+    pub fn with_catalog_oauth_and_agent_settings(
+        config: ProviderConfig,
+        catalog: Option<Arc<ModelCatalog>>,
+        oauth_storage: Option<OAuthStorage>,
+        agent_settings: Arc<RwLock<AgentConfig>>,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3600))
@@ -151,7 +171,9 @@ impl OpenAICompatibleProvider {
 
         Ok(Self {
             client,
+            adapter: create_provider_adapter(&config.provider_type),
             config,
+            agent_settings,
             oauth_storage,
             context_window: RwLock::new(None),
             context_window_attempted: RwLock::new(false),
@@ -200,20 +222,591 @@ impl OpenAICompatibleProvider {
             })
             .collect()
     }
+
+    fn build_responses_input(&self, messages: &[Message]) -> Vec<serde_json::Value> {
+        let mut input = Vec::new();
+
+        for msg in messages {
+            match msg.role.as_str() {
+                "system" | "user" | "assistant" => {
+                    if !msg.content.is_empty() {
+                        input.push(serde_json::json!({
+                            "role": msg.role,
+                            "content": msg.content,
+                        }));
+                    }
+
+                    if msg.role == "assistant" {
+                        if let Some(tool_calls) = &msg.tool_calls {
+                            for tool_call in tool_calls {
+                                input.push(serde_json::json!({
+                                    "type": "function_call",
+                                    "call_id": tool_call.id,
+                                    "name": tool_call.name,
+                                    "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+                                }));
+                            }
+                        }
+                    }
+                }
+                "tool" => {
+                    if let Some(call_id) = &msg.tool_call_id {
+                        input.push(serde_json::json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": msg.content,
+                        }));
+                    }
+                }
+                _ => {
+                    if !msg.content.is_empty() {
+                        input.push(serde_json::json!({
+                            "role": msg.role,
+                            "content": msg.content,
+                        }));
+                    }
+                }
+            }
+        }
+
+        input
+    }
+
+    fn responses_instructions(messages: &[Message]) -> Option<String> {
+        let joined = messages
+            .iter()
+            .filter(|msg| msg.role == "system")
+            .map(|msg| msg.content.trim())
+            .filter(|content| !content.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    }
+
+    fn non_system_messages(messages: &[Message]) -> Vec<Message> {
+        messages
+            .iter()
+            .filter(|msg| msg.role != "system")
+            .cloned()
+            .collect()
+    }
+
+    async fn generation_settings(&self) -> AgentConfig {
+        self.agent_settings.read().await.clone()
+    }
+
+    fn thinking_budget_for_level(level: &str) -> usize {
+        match level {
+            "none" => 0,
+            "minimal" | "low" => 4_000,
+            "medium" => 16_000,
+            "high" => 32_000,
+            "max" | "xhigh" => 48_000,
+            _ => 16_000,
+        }
+    }
+
+    fn apply_generation_controls(
+        request_body: &mut serde_json::Value,
+        mode: RequestMode,
+        provider_type: &str,
+        model: &str,
+        settings: &AgentConfig,
+        meta: Option<&crate::agent::model_catalog::ModelReasoningMetadata>,
+    ) {
+        if settings.max_tokens > 0 {
+            match mode {
+                RequestMode::Responses => {
+                    request_body["max_output_tokens"] = serde_json::json!(settings.max_tokens);
+                }
+                _ => {
+                    request_body["max_tokens"] = serde_json::json!(settings.max_tokens);
+                }
+            }
+        }
+
+        if settings.temperature.is_finite() {
+            match mode {
+                RequestMode::Responses => {
+                    if provider_type != "openai" {
+                        request_body["temperature"] = serde_json::json!(settings.temperature);
+                    }
+                }
+                _ => {
+                    request_body["temperature"] = serde_json::json!(settings.temperature);
+                }
+            }
+        }
+
+        let selected = reasoning::normalize_selection(
+            &settings.thinking_level,
+            provider_type,
+            model,
+            meta,
+        );
+        let Some(thinking_level) = selected.as_deref() else {
+            return;
+        };
+        match provider_type {
+            "openai" if mode == RequestMode::Responses => {
+                request_body["reasoning"] = serde_json::json!({
+                    "effort": thinking_level
+                });
+            }
+            "anthropic" => {
+                if thinking_level == "none" {
+                    request_body["thinking"] = serde_json::json!({
+                        "type": "disabled"
+                    });
+                } else {
+                    request_body["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": Self::thinking_budget_for_level(thinking_level)
+                    });
+                }
+            }
+            "google" | "google-vertex" => {
+                if model.to_ascii_lowercase().contains("2.5") {
+                    request_body["thinkingConfig"] = serde_json::json!({
+                        "includeThoughts": thinking_level != "none",
+                        "thinkingBudget": Self::thinking_budget_for_level(thinking_level)
+                    });
+                } else if thinking_level == "none" {
+                    request_body["thinkingConfig"] = serde_json::json!({
+                        "includeThoughts": false
+                    });
+                } else {
+                    request_body["thinkingConfig"] = serde_json::json!({
+                        "includeThoughts": true,
+                        "thinkingLevel": thinking_level
+                    });
+                }
+            }
+            "groq" => {
+                request_body["reasoning_effort"] = serde_json::json!(thinking_level);
+            }
+            "openrouter" => {
+                request_body["reasoning"] = if thinking_level == "none" {
+                    serde_json::json!({ "enabled": false })
+                } else {
+                    serde_json::json!({ "effort": thinking_level })
+                };
+            }
+            "xai" => {
+                request_body["reasoningEffort"] = serde_json::json!(thinking_level);
+            }
+            _ => {}
+        }
+    }
+
+    fn transform_tools_for_request(
+        &self,
+        tools: &[ToolDefinition],
+        model: &str,
+    ) -> Vec<ToolDefinition> {
+        tools
+            .iter()
+            .map(|tool| ToolDefinition {
+                tool_type: tool.tool_type.clone(),
+                function: ToolFunction {
+                    name: tool.function.name.clone(),
+                    description: tool.function.description.clone(),
+                    parameters: self
+                        .adapter
+                        .transform_schema(tool.function.parameters.clone(), model),
+                },
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn parse_response_content(response_json: &serde_json::Value) -> Option<String> {
+        if let Some(output_text) = response_json.get("output_text").and_then(|v| v.as_str()) {
+            if !output_text.is_empty() {
+                return Some(output_text.to_string());
+            }
+        }
+
+        let mut chunks = Vec::new();
+        if let Some(output_items) = response_json.get("output").and_then(|v| v.as_array()) {
+            for item in output_items {
+                if item.get("type").and_then(|v| v.as_str()) == Some("message") {
+                    if let Some(content_items) = item.get("content").and_then(|v| v.as_array()) {
+                        for content in content_items {
+                            if let Some(text) = content.get("text").and_then(|v| v.as_str()) {
+                                if !text.is_empty() {
+                                    chunks.push(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if chunks.is_empty() {
+            None
+        } else {
+            Some(chunks.join("\n"))
+        }
+    }
+
+    fn parse_response_tool_calls(response_json: &serde_json::Value) -> Option<Vec<ToolCall>> {
+        let mut calls = Vec::new();
+        if let Some(output_items) = response_json.get("output").and_then(|v| v.as_array()) {
+            for item in output_items {
+                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                    continue;
+                }
+
+                let Some(id) = item.get("call_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(serde_json::json!({}));
+
+                calls.push(ToolCall {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    arguments,
+                });
+            }
+        }
+
+        if calls.is_empty() {
+            None
+        } else {
+            Some(calls)
+        }
+    }
+
+    fn parse_response_usage(response_json: &serde_json::Value) -> Option<TokenUsage> {
+        let usage = response_json.get("usage")?;
+
+        let input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| usage.get("prompt_tokens").and_then(|v| v.as_u64()))
+            .unwrap_or(0) as usize;
+        let output = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| usage.get("completion_tokens").and_then(|v| v.as_u64()))
+            .unwrap_or(0) as usize;
+        let total = usage
+            .get("total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or((input + output) as u64) as usize;
+
+        Some(TokenUsage {
+            input,
+            output,
+            total,
+            cached_read: usage
+                .get("input_tokens_details")
+                .and_then(|v| v.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            cached_write: None,
+            reasoning: usage
+                .get("output_tokens_details")
+                .and_then(|v| v.get("reasoning_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+        })
+    }
+
+    fn parse_chat_completions_response(response_json: &serde_json::Value) -> ProviderResponse {
+        let choice = &response_json["choices"][0];
+        let message = &choice["message"];
+
+        let content = message["content"].as_str().map(|s| s.to_string());
+
+        let tool_calls = message["tool_calls"].as_array().map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let id = call["id"].as_str()?.to_string();
+                    let name = call["function"]["name"].as_str()?.to_string();
+                    let arguments = call["function"]["arguments"]
+                        .as_str()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or(serde_json::json!({}));
+
+                    Some(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })
+                })
+                .collect()
+        });
+
+        let finish_reason = choice["finish_reason"]
+            .as_str()
+            .unwrap_or("stop")
+            .to_string();
+
+        let usage = response_json.get("usage").map(|usage_obj| TokenUsage {
+            input: usage_obj["prompt_tokens"].as_u64().unwrap_or(0) as usize,
+            output: usage_obj["completion_tokens"].as_u64().unwrap_or(0) as usize,
+            total: usage_obj["total_tokens"].as_u64().unwrap_or(0) as usize,
+            cached_read: usage_obj
+                .get("cached_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            cached_write: None,
+            reasoning: usage_obj
+                .get("completion_tokens_details")
+                .and_then(|v| v.get("reasoning_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+        });
+
+        ProviderResponse {
+            content,
+            tool_calls,
+            finish_reason,
+            retry_count: 0,
+            context_compressed: false,
+            usage,
+        }
+    }
+
+    fn parse_responses_response(response_json: &serde_json::Value) -> ProviderResponse {
+        ProviderResponse {
+            content: Self::parse_response_content(response_json),
+            tool_calls: Self::parse_response_tool_calls(response_json),
+            finish_reason: response_json
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed")
+                .to_string(),
+            retry_count: 0,
+            context_compressed: false,
+            usage: Self::parse_response_usage(response_json),
+        }
+    }
+
+    async fn send_responses_request(
+        &self,
+        request_auth: &ResolvedRequestAuth,
+        request_body: &serde_json::Value,
+        config: &ProviderConfig,
+    ) -> Result<ProviderResponse> {
+        let mut req = self
+            .client
+            .post(&request_auth.request_url)
+            .header("Content-Type", "application/json")
+            .timeout(Duration::from_secs(3600))
+            .json(request_body);
+
+        if !request_auth.api_key.is_empty() {
+            req = req.header(
+                "Authorization",
+                format!("Bearer {}", request_auth.api_key.as_str()),
+            );
+        } else {
+            warn!("API key is empty - request will likely fail with 401");
+        }
+
+        if config.base_url.contains("openrouter.ai") {
+            req = req
+                .header("HTTP-Referer", "https://osagent.local")
+                .header("X-Title", "OSA");
+        }
+
+        for (key, value) in &request_auth.extra_headers {
+            req = req.header(key, value);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| OSAgentError::Provider(format!("Responses request failed: {}", e)))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| OSAgentError::Provider(format!("Failed to read responses body: {}", e)))?;
+
+        if !status.is_success() {
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|json| {
+                    json.get("detail")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            json.get("error")
+                                .and_then(|v| v.get("message"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .or_else(|| json.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                })
+                .unwrap_or_else(|| body.clone());
+
+            return Err(OSAgentError::Provider(format!(
+                "API request failed ({}): {}",
+                status, detail
+            )));
+        }
+
+        let mut content = String::new();
+        let mut calls: HashMap<String, (String, String)> = HashMap::new();
+        let mut final_response: Option<serde_json::Value> = None;
+        let mut final_status: Option<String> = None;
+        let mut usage: Option<TokenUsage> = None;
+
+        for chunk in body.split("\n\n") {
+            let trimmed = chunk.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let mut event_name = String::new();
+            let mut data_lines = Vec::new();
+
+            for line in trimmed.lines() {
+                if let Some(rest) = line.strip_prefix("event:") {
+                    event_name = rest.trim().to_string();
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    data_lines.push(rest.trim_start().to_string());
+                }
+            }
+
+            let data = data_lines.join("\n");
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+
+            let parsed: serde_json::Value = serde_json::from_str(&data).map_err(|e| {
+                OSAgentError::Parse(format!(
+                    "Failed to parse responses stream JSON: {} | Body: {}",
+                    e, data
+                ))
+            })?;
+
+            if event_name.is_empty() {
+                event_name = parsed
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            }
+
+            match event_name.as_str() {
+                "error" => {
+                    let msg = parsed
+                        .get("error")
+                        .and_then(|v| v.get("message"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
+                        .unwrap_or("Unknown responses stream error");
+                    return Err(OSAgentError::Provider(msg.to_string()));
+                }
+                "response.output_text.delta" => {
+                    if let Some(delta) = parsed.get("delta").and_then(|v| v.as_str()) {
+                        content.push_str(delta);
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str()) {
+                        let entry = calls
+                            .entry(item_id.to_string())
+                            .or_insert_with(|| (String::new(), String::new()));
+                        if let Some(delta) = parsed.get("delta").and_then(|v| v.as_str()) {
+                            entry.1.push_str(delta);
+                        }
+                    }
+                }
+                "response.output_item.added" | "response.output_item.done" => {
+                    if let Some(item) = parsed.get("item") {
+                        if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
+                            let id = item
+                                .get("call_id")
+                                .or_else(|| item.get("id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !id.is_empty() {
+                                let entry = calls
+                                    .entry(id)
+                                    .or_insert_with(|| (String::new(), String::new()));
+                                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                                    entry.0 = name.to_string();
+                                }
+                                if let Some(arguments) = item.get("arguments").and_then(|v| v.as_str()) {
+                                    entry.1 = arguments.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+                "response.completed" => {
+                    if let Some(response) = parsed.get("response") {
+                        usage = Self::parse_response_usage(response);
+                        final_status = response
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        final_response = Some(response.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(response_json) = final_response {
+            return Ok(Self::parse_responses_response(&response_json));
+        }
+
+        let tool_calls = if calls.is_empty() {
+            None
+        } else {
+            Some(
+                calls
+                    .into_iter()
+                    .map(|(id, (name, arguments))| ToolCall {
+                        id,
+                        name,
+                        arguments: serde_json::from_str(&arguments).unwrap_or(serde_json::json!({})),
+                    })
+                    .collect(),
+            )
+        };
+
+        Ok(ProviderResponse {
+            content: if content.is_empty() { None } else { Some(content) },
+            tool_calls,
+            finish_reason: final_status.unwrap_or_else(|| "completed".to_string()),
+            retry_count: 0,
+            context_compressed: false,
+            usage,
+        })
+    }
 }
 
 impl OpenAICompatibleProvider {
-    fn oauth_enabled(&self) -> bool {
-        self.config.auth_type.as_deref() == Some("oauth")
+    fn resolved_config(&self) -> ProviderConfig {
+        resolve_provider_config(self.config.clone())
     }
 
-    fn completion_url(base_url: &str) -> String {
-        let trimmed = base_url.trim_end_matches('/');
-        if trimmed.ends_with("/chat/completions") {
-            trimmed.to_string()
-        } else {
-            format!("{}/chat/completions", trimmed)
-        }
+    fn oauth_enabled(&self) -> bool {
+        self.config.auth_type.as_deref() == Some("oauth")
     }
 
     fn oauth_entry(&self) -> Result<Option<OAuthTokenEntry>> {
@@ -317,58 +910,42 @@ impl OpenAICompatibleProvider {
         Ok(Some(entry))
     }
 
-    async fn resolve_request_auth(&self) -> Result<ResolvedRequestAuth> {
-        let mut request_url = Self::completion_url(&self.config.base_url);
-        let mut api_key = self.config.api_key.clone();
+    async fn resolve_request_auth(&self, model: &str) -> Result<ResolvedRequestAuth> {
+        let config = self.resolved_config();
+        let oauth_entry = if self.oauth_enabled() {
+            self.resolve_oauth_entry().await?
+        } else {
+            None
+        };
+
+        let request_mode = self
+            .adapter
+            .request_mode(&config, oauth_entry.as_ref(), model);
+
+        let request_url = self
+            .adapter
+            .resolve_endpoint(&config, oauth_entry.as_ref());
+        let mut api_key = config.api_key.clone();
         let mut extra_headers = Vec::new();
 
-        if let Some(headers) = &self.config.custom_headers {
+        if let Some(headers) = &config.custom_headers {
             for (key, value) in headers {
                 extra_headers.push((key.clone(), value.clone()));
             }
         }
 
-        if !self.oauth_enabled() {
-            return Ok(ResolvedRequestAuth {
-                request_url,
-                api_key,
-                extra_headers,
-            });
+        if let Some(entry) = oauth_entry.as_ref() {
+            api_key = entry.access_token.clone();
         }
 
-        let Some(entry) = self.resolve_oauth_entry().await? else {
-            return Ok(ResolvedRequestAuth {
-                request_url,
-                api_key,
-                extra_headers,
-            });
-        };
-
-        api_key = entry.access_token.clone();
-        match self.config.provider_type.as_str() {
-            "openai" => {
-                request_url = OPENAI_CODEX_API_ENDPOINT.to_string();
-                if let Some(account_id) = entry.account_id.clone() {
-                    extra_headers.push(("ChatGPT-Account-Id".to_string(), account_id));
-                }
-                extra_headers.push(("originator".to_string(), "osagent".to_string()));
-            }
-            "github-copilot" => {
-                request_url = "https://api.githubcopilot.com/chat/completions".to_string();
-                extra_headers.push(("Editor-Version".to_string(), "OSAgent/1.0".to_string()));
-                extra_headers.push(("User-Agent".to_string(), "OSAgent/1.0".to_string()));
-                extra_headers.push((
-                    "Openai-Intent".to_string(),
-                    "conversation-edits".to_string(),
-                ));
-            }
-            _ => {}
-        }
+        extra_headers.extend(get_extra_headers(&config.provider_type, &config));
+        extra_headers.extend(self.adapter.extra_headers(&config, oauth_entry.as_ref()));
 
         Ok(ResolvedRequestAuth {
             request_url,
             api_key,
             extra_headers,
+            request_mode,
         })
     }
 
@@ -482,18 +1059,19 @@ impl OpenAICompatibleProvider {
     }
 
     async fn fetch_openrouter_context_window(&self) -> Option<usize> {
-        if !self.config.base_url.contains("openrouter.ai") {
+        let config = self.resolved_config();
+        if !config.base_url.contains("openrouter.ai") {
             return None;
         }
 
         let mut req = self
             .client
-            .get(format!("{}/models", self.config.base_url))
+            .get(format!("{}/models", config.base_url))
             .header("Content-Type", "application/json")
             .timeout(Duration::from_secs(30));
 
-        if !self.config.api_key.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        if !config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", config.api_key));
         }
 
         req = req
@@ -591,15 +1169,84 @@ impl OpenAICompatibleProvider {
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse> {
         let model = self.current_model().await;
-        let mut request_body = serde_json::json!({
-            "model": model,
-            "messages": self.build_messages(messages),
-        });
+        let mut config = self.resolved_config();
+        config.model = model.clone();
+        let transformed_messages = self.adapter.transform_messages(messages, &config);
+        let request_auth = self.resolve_request_auth(&model).await?;
+        let mode = request_auth.request_mode;
+        let generation_settings = self.generation_settings().await;
+        let reasoning_meta = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.lookup_reasoning_metadata(&config.provider_type, &config.model));
+        let transformed_tools = self.transform_tools_for_request(
+            tools,
+            &config.model,
+        );
+        let non_system_messages = Self::non_system_messages(&transformed_messages);
 
-        let include_tools =
-            Self::should_send_tools(messages, tools) && !Self::should_trim_tools(messages, tools);
+        let mut request_body = match mode {
+            RequestMode::ChatCompletions | RequestMode::Custom => serde_json::json!({
+                "model": model,
+                "messages": self.build_messages(&transformed_messages),
+            }),
+            RequestMode::Responses => serde_json::json!({
+                "model": model,
+                "input": self.build_responses_input(&non_system_messages),
+            }),
+        };
+        if mode == RequestMode::Responses {
+            if let Some(instructions) = Self::responses_instructions(&transformed_messages) {
+                request_body["instructions"] = serde_json::json!(instructions);
+            }
+        }
+
+        let provider_options = self
+            .adapter
+            .default_options(&config.provider_type, &config.model);
+        if let Some(options) = provider_options.as_object() {
+            for (key, value) in options {
+                request_body[key] = value.clone();
+            }
+        }
+        Self::apply_generation_controls(
+            &mut request_body,
+            mode,
+            &config.provider_type,
+            &config.model,
+            &generation_settings,
+            reasoning_meta.as_ref(),
+        );
+        if mode == RequestMode::Responses
+            && request_auth.request_url.contains("chatgpt.com/backend-api/codex")
+        {
+            if let Some(obj) = request_body.as_object_mut() {
+                obj.remove("max_output_tokens");
+            }
+        }
+
+        let include_tools = Self::should_send_tools(&transformed_messages, tools)
+            && !Self::should_trim_tools(&transformed_messages, tools);
         if include_tools {
-            request_body["tools"] = serde_json::to_value(tools).unwrap();
+            let tool_payload = match mode {
+                RequestMode::Responses => serde_json::to_value(
+                    transformed_tools
+                        .iter()
+                        .map(|tool| {
+                            serde_json::json!({
+                                "type": "function",
+                                "name": tool.function.name,
+                                "description": tool.function.description,
+                                "parameters": tool.function.parameters,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                _ => serde_json::to_value(&transformed_tools).unwrap(),
+            };
+
+            request_body["tools"] = tool_payload;
             request_body["tool_choice"] = serde_json::json!("auto");
         } else if !tools.is_empty() {
             info!(
@@ -613,7 +1260,27 @@ impl OpenAICompatibleProvider {
             serde_json::to_string_pretty(&request_body).unwrap_or_default()
         );
 
-        let request_auth = self.resolve_request_auth().await?;
+        if mode == RequestMode::Responses {
+            request_body["stream"] = serde_json::json!(true);
+            let parsed = self
+                .send_responses_request(&request_auth, &request_body, &config)
+                .await?;
+
+            info!(
+                "Parsed response - content: {:?}, finish_reason: {}",
+                parsed.content.as_ref().map(|c| {
+                    if c.chars().count() > 100 {
+                        format!("{}...", c.chars().take(100).collect::<String>())
+                    } else {
+                        c.clone()
+                    }
+                }),
+                parsed.finish_reason
+            );
+
+            return Ok(parsed);
+        }
+
         let api_key = &request_auth.api_key;
         let api_key_preview = if api_key.len() > 10 {
             format!("{}...{}", &api_key[..7], &api_key[api_key.len() - 4..])
@@ -624,8 +1291,12 @@ impl OpenAICompatibleProvider {
         };
 
         info!(
-            "Sending request to {} with model {}, API key: {}",
-            request_auth.request_url, self.config.model, api_key_preview
+            "Sending request to {} with provider {}, model {}, mode {:?}, API key: {}",
+            request_auth.request_url,
+            self.adapter.provider_type(),
+            config.model,
+            mode,
+            api_key_preview
         );
 
         let response = {
@@ -641,7 +1312,7 @@ impl OpenAICompatibleProvider {
                 warn!("API key is empty - request will likely fail with 401");
             }
 
-            if self.config.base_url.contains("openrouter.ai") {
+            if config.base_url.contains("openrouter.ai") {
                 req = req
                     .header("HTTP-Referer", "https://osagent.local")
                     .header("X-Title", "OSA");
@@ -695,72 +1366,21 @@ impl OpenAICompatibleProvider {
             return Err(OSAgentError::Provider(full_error));
         }
 
-        let choice = &response_json["choices"][0];
-        let message = &choice["message"];
-
-        let content = message["content"].as_str().map(|s| s.to_string());
+        let parsed = Self::parse_chat_completions_response(&response_json);
 
         info!(
             "Parsed response - content: {:?}, finish_reason: {}",
-            content.as_ref().map(|c| {
+            parsed.content.as_ref().map(|c| {
                 if c.chars().count() > 100 {
                     format!("{}...", c.chars().take(100).collect::<String>())
                 } else {
                     c.clone()
                 }
             }),
-            choice["finish_reason"]
+            parsed.finish_reason
         );
 
-        let tool_calls = message["tool_calls"].as_array().map(|calls| {
-            calls
-                .iter()
-                .filter_map(|call| {
-                    let id = call["id"].as_str()?.to_string();
-                    let name = call["function"]["name"].as_str()?.to_string();
-                    let arguments = call["function"]["arguments"]
-                        .as_str()
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or(serde_json::json!({}));
-
-                    Some(ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    })
-                })
-                .collect()
-        });
-
-        let finish_reason = choice["finish_reason"]
-            .as_str()
-            .unwrap_or("stop")
-            .to_string();
-
-        let usage = response_json.get("usage").map(|usage_obj| TokenUsage {
-            input: usage_obj["prompt_tokens"].as_u64().unwrap_or(0) as usize,
-            output: usage_obj["completion_tokens"].as_u64().unwrap_or(0) as usize,
-            total: usage_obj["total_tokens"].as_u64().unwrap_or(0) as usize,
-            cached_read: usage_obj
-                .get("cached_tokens")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize),
-            cached_write: None,
-            reasoning: usage_obj
-                .get("completion_tokens_details")
-                .and_then(|v| v.get("reasoning_tokens"))
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize),
-        });
-
-        Ok(ProviderResponse {
-            content,
-            tool_calls,
-            finish_reason,
-            retry_count: 0,
-            context_compressed: false,
-            usage,
-        })
+        Ok(parsed)
     }
 }
 
@@ -779,14 +1399,50 @@ impl Provider for OpenAICompatibleProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
-        let request_auth = self.resolve_request_auth().await?;
-        let request_body = serde_json::json!({
-            "model": self.config.model,
-            "messages": self.build_messages(messages),
-            "tools": tools,
+        let model = self.current_model().await;
+        let mut config = self.resolved_config();
+        config.model = model.clone();
+        let request_auth = self.resolve_request_auth(&model).await?;
+        let mode = request_auth.request_mode;
+        let generation_settings = self.generation_settings().await;
+        let reasoning_meta = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.lookup_reasoning_metadata(&config.provider_type, &config.model));
+        if mode != RequestMode::ChatCompletions {
+            return Err(OSAgentError::Provider(
+                "Streaming currently supports only chat/completions mode".to_string(),
+            ));
+        }
+
+        let transformed_messages = self.adapter.transform_messages(messages, &config);
+        let transformed_tools = self.transform_tools_for_request(
+            tools,
+            &config.model,
+        );
+        let provider_options = self
+            .adapter
+            .default_options(&config.provider_type, &config.model);
+        let mut request_body = serde_json::json!({
+            "model": model,
+            "messages": self.build_messages(&transformed_messages),
+            "tools": transformed_tools,
             "tool_choice": "auto",
             "stream": true,
         });
+        if let Some(options) = provider_options.as_object() {
+            for (key, value) in options {
+                request_body[key] = value.clone();
+            }
+        }
+        Self::apply_generation_controls(
+            &mut request_body,
+            mode,
+            &config.provider_type,
+            &config.model,
+            &generation_settings,
+            reasoning_meta.as_ref(),
+        );
 
         let mut req = self
             .client
@@ -921,5 +1577,156 @@ impl Provider for OpenAICompatibleProvider {
 
     fn provider_type(&self) -> &str {
         &self.config.provider_type
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_chat_completions_response() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "grep",
+                            "arguments": "{\"pattern\":\"foo\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+
+        let parsed = OpenAICompatibleProvider::parse_chat_completions_response(&payload);
+        assert_eq!(parsed.finish_reason, "tool_calls");
+        assert_eq!(parsed.tool_calls.as_ref().map(|x| x.len()), Some(1));
+        assert_eq!(parsed.usage.as_ref().map(|x| x.total), Some(15));
+    }
+
+    #[test]
+    fn parses_responses_api_response() {
+        let payload = serde_json::json!({
+            "status": "completed",
+            "output_text": "done",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_a",
+                    "name": "glob",
+                    "arguments": "{\"pattern\":\"**/*.rs\"}"
+                }
+            ],
+            "usage": {
+                "input_tokens": 21,
+                "output_tokens": 9,
+                "total_tokens": 30,
+                "output_tokens_details": {
+                    "reasoning_tokens": 3
+                }
+            }
+        });
+
+        let parsed = OpenAICompatibleProvider::parse_responses_response(&payload);
+        assert_eq!(parsed.finish_reason, "completed");
+        assert_eq!(parsed.content.as_deref(), Some("done"));
+        assert_eq!(parsed.tool_calls.as_ref().map(|x| x.len()), Some(1));
+        assert_eq!(parsed.usage.as_ref().map(|x| x.reasoning), Some(Some(3)));
+    }
+
+    #[test]
+    fn builds_responses_input_with_function_call_output() {
+        let provider = OpenAICompatibleProvider::new(ProviderConfig::default()).unwrap();
+        let mut assistant = Message::assistant("".to_string(), None);
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_123".to_string(),
+            name: "bash".to_string(),
+            arguments: serde_json::json!({ "command": "ls" }),
+        }]);
+
+        let tool = Message::tool_result("call_123".to_string(), "ok".to_string());
+        let input = provider.build_responses_input(&[Message::user("hi".to_string()), assistant, tool]);
+
+        assert!(input.iter().any(|item| {
+            item.get("type").and_then(|v| v.as_str()) == Some("function_call")
+                && item.get("call_id").and_then(|v| v.as_str()) == Some("call_123")
+        }));
+        assert!(input.iter().any(|item| {
+            item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+                && item.get("call_id").and_then(|v| v.as_str()) == Some("call_123")
+        }));
+    }
+
+    #[test]
+    fn extracts_responses_instructions_from_system_messages() {
+        let messages = vec![
+            Message::system("System A".to_string()),
+            Message::user("Hi".to_string()),
+            Message::system("System B".to_string()),
+        ];
+
+        let instructions = OpenAICompatibleProvider::responses_instructions(&messages);
+        assert_eq!(instructions.as_deref(), Some("System A\n\nSystem B"));
+
+        let filtered = OpenAICompatibleProvider::non_system_messages(&messages);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].role, "user");
+    }
+
+    #[test]
+    fn applies_generation_controls_for_openai_responses() {
+        let mut request = serde_json::json!({});
+        let settings = AgentConfig {
+            max_tokens: 2048,
+            temperature: 0.3,
+            thinking_level: "high".to_string(),
+            ..AgentConfig::default()
+        };
+
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut request,
+            RequestMode::Responses,
+            "openai",
+            "gpt-5.3-codex",
+            &settings,
+            None,
+        );
+
+        assert_eq!(request["max_output_tokens"], serde_json::json!(2048));
+        assert_eq!(request["reasoning"]["effort"], serde_json::json!("high"));
+        assert!(request.get("temperature").is_none());
+    }
+
+    #[test]
+    fn applies_generation_controls_for_anthropic() {
+        let mut request = serde_json::json!({});
+        let settings = AgentConfig {
+            max_tokens: 1024,
+            temperature: 0.2,
+            thinking_level: "off".to_string(),
+            ..AgentConfig::default()
+        };
+
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut request,
+            RequestMode::ChatCompletions,
+            "anthropic",
+            "claude-sonnet",
+            &settings,
+            None,
+        );
+
+        assert_eq!(request["max_tokens"], serde_json::json!(1024));
+        assert_eq!(request["temperature"].as_f64(), Some(0.20000000298023224));
+        assert_eq!(request["thinking"]["type"], serde_json::json!("disabled"));
     }
 }

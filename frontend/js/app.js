@@ -122,7 +122,15 @@ OSA.loadModel = async function() {
         }
         const input = document.getElementById('model-input');
         if (input) {
-            input.value = data.model || '';
+            OSA.currentModelId = data.model || '';
+            OSA.currentModelProviderId = data.provider_id || '';
+            const provider = (OSA.providerCatalog.providers || []).find(function(item) { return item.id === data.provider_id; });
+            input.value = provider ? provider.name + ' · ' + (data.model || '') : (data.model || '');
+            input.title = provider ? provider.name + ' / ' + (data.model || '') : (data.model || '');
+        }
+        if (typeof OSA.refreshThinkingOptions === 'function') {
+            const selected = OSA.getCachedConfig?.()?.agent?.thinking_level || 'auto';
+            await OSA.refreshThinkingOptions(data.provider_id || '', data.model || '', selected);
         }
     } catch (error) {
         console.error('Failed to load model:', error);

@@ -131,6 +131,16 @@ pub struct ModelLimitInfo {
     pub output: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelReasoningMetadata {
+    pub provider_id: String,
+    pub model_id: String,
+    pub family: String,
+    pub reasoning: bool,
+    pub release_date: String,
+    pub output_limit: usize,
+}
+
 pub type ModelsDevCatalog = std::collections::BTreeMap<String, ModelsDevProvider>;
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
@@ -539,6 +549,62 @@ impl ModelCatalog {
             })
     }
 
+    pub fn lookup_reasoning_metadata(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<ModelReasoningMetadata> {
+        {
+            let cache = self.cached_catalog.read().unwrap();
+            if let Some((catalog, timestamp)) = cache.as_ref() {
+                if timestamp.elapsed().as_secs() < CACHE_TTL_SECS {
+                    if let Some(provider) = catalog.get(provider_id) {
+                        if let Some(model) = provider.models.get(model_id) {
+                            return Some(ModelReasoningMetadata {
+                                provider_id: provider_id.to_string(),
+                                model_id: model_id.to_string(),
+                                family: model.family.clone(),
+                                reasoning: model.reasoning,
+                                release_date: model.release_date.clone(),
+                                output_limit: model.limit.output,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let presets = get_presets();
+        presets
+            .iter()
+            .find(|preset| preset.id == provider_id)
+            .and_then(|preset| preset.models.iter().find(|model| model.id == model_id))
+            .map(|model| ModelReasoningMetadata {
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+                family: infer_family(model_id),
+                reasoning: model.category == "reasoning" || model.id.to_ascii_lowercase().contains("codex"),
+                release_date: String::new(),
+                output_limit: 0,
+            })
+            .or_else(|| {
+                self.custom_models
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .find(|model| model.provider_id == provider_id && model.model_id == model_id)
+                    .map(|model| ModelReasoningMetadata {
+                        provider_id: provider_id.to_string(),
+                        model_id: model_id.to_string(),
+                        family: infer_family(model_id),
+                        reasoning: model.model_id.to_ascii_lowercase().contains("reason")
+                            || model.model_id.to_ascii_lowercase().contains("codex"),
+                        release_date: String::new(),
+                        output_limit: 0,
+                    })
+            })
+    }
+
     pub fn search_models(&self, query: &str) -> Vec<ModelInfo> {
         let query = query.to_lowercase();
         let configured_providers: Vec<ProviderConfig> = Vec::new();
@@ -571,4 +637,36 @@ impl Default for ModelCatalog {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn infer_family(model_id: &str) -> String {
+        let id = model_id.to_ascii_lowercase();
+        if id.contains("claude") {
+            return "claude".to_string();
+        }
+        if id.contains("gemini") {
+            return "gemini".to_string();
+        }
+        if id.contains("grok") {
+            return "grok".to_string();
+        }
+        if id.contains("mistral") {
+            return "mistral".to_string();
+        }
+        if id.contains("llama") {
+            return "llama".to_string();
+        }
+        if id.contains("deepseek") {
+            return "deepseek".to_string();
+        }
+        if id.contains("qwen") {
+            return "qwen".to_string();
+        }
+        if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
+            return "o".to_string();
+        }
+        if id.contains("gpt") || id.contains("codex") {
+            return "gpt".to_string();
+        }
+        String::new()
 }

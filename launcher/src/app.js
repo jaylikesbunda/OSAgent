@@ -194,7 +194,7 @@
   function resetProviderValidation() {
     state.providerValidation.signature = '';
     if (state.wizard.auth_mode === 'oauth') {
-      setProviderValidation('idle', 'Provider sign-in selected. API key test is not required.');
+      setProviderValidation('idle', 'Sign in first. You can pick a model after this step or later in the web UI.');
       state.providerValidation.signature = '';
       return;
     }
@@ -309,6 +309,10 @@
     const modelsToShow = filtered.length ? filtered : provider.models;
 
     els.providerModel.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Use provider default (choose later)';
+    els.providerModel.appendChild(placeholder);
     modelsToShow.forEach((model) => {
       const option = document.createElement('option');
       option.value = model.id;
@@ -317,7 +321,7 @@
     });
 
     const validCurrent = modelsToShow.some((m) => m.id === state.wizard.model);
-    state.wizard.model = validCurrent ? state.wizard.model : (modelsToShow[0]?.id || provider.default_model);
+    state.wizard.model = validCurrent ? state.wizard.model : '';
     els.providerModel.value = state.wizard.model;
   }
 
@@ -348,7 +352,7 @@
   function updateReview() {
     const provider = currentProvider();
     els.reviewProvider.textContent = provider ? provider.name : '-';
-    els.reviewModel.textContent = state.wizard.model || '-';
+    els.reviewModel.textContent = state.wizard.model || 'Provider default (change later)';
     els.reviewWorkspace.textContent = state.wizard.workspace_path || 'No folder selected';
     els.reviewConfig.textContent = state.setup ? state.setup.config_path : '-';
   }
@@ -425,10 +429,7 @@
     state.wizard.password = '';
     state.wizard.confirm_password = '';
     state.wizard.api_key = '';
-    if (!state.wizard.model) {
-      const provider = currentProvider();
-      state.wizard.model = provider ? provider.default_model : '';
-    }
+    state.wizard.model = '';
     setProviderAuthMode('api_key');
     resetProviderValidation();
 
@@ -459,7 +460,7 @@
       state.wizard.provider_type = state.providers[state.setup.provider_type]
         ? state.setup.provider_type
         : (state.providerOrder[0] || '');
-      state.wizard.model = currentProvider() ? currentProvider().default_model : '';
+      state.wizard.model = '';
       state.wizard.workspace_path = state.setup.workspace_path || state.wizard.workspace_path;
       state.wizard.password_enabled = state.setup.password_enabled;
       state.wizard.password = '';
@@ -480,13 +481,21 @@
     if (!provider) return 'No providers available.';
 
     if (
-      state.wizard.step === 2 &&
+      state.wizard.step === 1 &&
       state.wizard.auth_mode === 'api_key' &&
       provider.api_key_required &&
       !state.wizard.api_key.trim() &&
       !hasSavedKeyForSelectedProvider()
     ) {
       return 'Enter an API key to continue.';
+    }
+    if (
+      state.wizard.step === 1 &&
+      state.wizard.auth_mode === 'oauth' &&
+      state.providerValidation.status !== 'success' &&
+      !hasSavedKeyForSelectedProvider()
+    ) {
+      return 'Sign in to continue.';
     }
     if (state.wizard.step === 3 && !state.wizard.workspace_path.trim()) {
       return 'Choose a workspace folder to continue.';
@@ -522,7 +531,7 @@
         state.wizard.provider_type = state.providerOrder[0];
       }
       const provider = currentProvider();
-      if (provider) state.wizard.model = provider.default_model;
+      state.wizard.model = '';
       renderProviderSelect();
     } catch (error) {
       setSetupError('Failed to load provider catalog: ' + error);
@@ -798,6 +807,7 @@
     els.providerSelect.addEventListener('change', (event) => {
       state.wizard.provider_type = event.target.value;
       state.modelFilter = '';
+      state.wizard.model = '';
       if (els.modelSearch) els.modelSearch.value = '';
       renderModelSelect();
       updateProviderFields();
@@ -814,7 +824,9 @@
 
     els.providerModel.addEventListener('change', (event) => {
       state.wizard.model = event.target.value;
-      resetProviderValidation();
+      if (state.wizard.auth_mode === 'api_key') {
+        resetProviderValidation();
+      }
       updateReview();
     });
 
@@ -839,9 +851,13 @@
           .then(() => {
             els.btnProviderSignIn.disabled = false;
             els.btnProviderSignIn.textContent = 'Sign in with Provider';
-            setSetupNotice('Sign-in complete. Continue setup.');
+            setSetupNotice('Sign-in complete. Pick a model now or leave it for the web UI.');
             setSetupError('');
             setProviderValidation('success', 'Signed in successfully.');
+            if (state.wizard.step === 1) {
+              state.wizard.step = 2;
+              updateWizardTabs();
+            }
             updateReview();
           })
           .catch((error) => {
@@ -896,7 +912,11 @@
                 if (pollResult.status === 'success') {
                   stopDeviceCodePolling();
                   setProviderValidation('success', 'Signed in successfully.');
-                  setSetupNotice('Device sign-in complete. Continue setup.');
+                  setSetupNotice('Device sign-in complete. Pick a model now or leave it for the web UI.');
+                  if (state.wizard.step === 1) {
+                    state.wizard.step = 2;
+                    updateWizardTabs();
+                  }
                   updateReview();
                 } else if (pollResult.status === 'error') {
                   stopDeviceCodePolling();

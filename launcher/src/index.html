@@ -39,11 +39,11 @@
             </button>
             <button class="wizard-pill" data-step="1" type="button">
               <span class="wizard-pill-num">2</span>
-              <span class="wizard-pill-label">Model</span>
+              <span class="wizard-pill-label">Auth</span>
             </button>
             <button class="wizard-pill" data-step="2" type="button">
               <span class="wizard-pill-num">3</span>
-              <span class="wizard-pill-label">Auth</span>
+              <span class="wizard-pill-label">Model</span>
             </button>
             <button class="wizard-pill" data-step="3" type="button">
               <span class="wizard-pill-num">4</span>
@@ -84,28 +84,8 @@
             </div>
           </div>
 
-          <!-- Step 2: Model -->
+          <!-- Step 2: Auth -->
           <div class="wizard-panel" data-step-panel="1">
-            <div class="section-heading">
-              <h2>Choose a model</h2>
-              <p>Select the model to use with your chosen provider.</p>
-            </div>
-            <div class="step-body">
-              <div class="form-grid compact">
-                <label class="field">
-                  <span>Search models</span>
-                  <input id="model-search" type="text" placeholder="Filter models..." autocomplete="off">
-                </label>
-                <label class="field">
-                  <span>Model</span>
-                  <select id="provider-model"></select>
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <!-- Step 3: Auth -->
-          <div class="wizard-panel" data-step-panel="2">
             <div class="section-heading">
               <h2>Authentication</h2>
               <p>Choose how to authenticate with your provider.</p>
@@ -120,7 +100,7 @@
                   </div>
                   <small id="provider-auth-note">Sign in is only available for providers with OAuth support.</small>
                 </div>
-                <label class="field" id="provider-api-key-wrap">
+                <label class="field">
                   <span id="provider-key-label">API Key</span>
                   <input id="provider-api-key" type="password" placeholder="" autocomplete="off">
                   <small id="provider-key-help">Stored locally in your config file.</small>
@@ -144,6 +124,26 @@
                   <div class="provider-test-result idle" id="provider-test-result">Test the provider connection.</div>
                   <button class="btn secondary" id="btn-test-provider" type="button">Test Connection</button>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 3: Model -->
+          <div class="wizard-panel" data-step-panel="2">
+            <div class="section-heading">
+              <h2>Choose a model</h2>
+              <p>Pick a model now, or leave this alone and change it later in the web UI.</p>
+            </div>
+            <div class="step-body">
+              <div class="form-grid compact">
+                <label class="field" id="provider-api-key-wrap">
+                  <span>Search models</span>
+                  <input id="model-search" type="text" placeholder="Filter models..." autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <select id="provider-model"></select>
+                </label>
               </div>
             </div>
           </div>

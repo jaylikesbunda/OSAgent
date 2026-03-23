@@ -87,8 +87,8 @@
                         </button>
                         <div class="model-selector">
                             <div class="model-selector-input-wrap">
-                                <input class="model-input" id="model-input" placeholder="Model id" onfocus="toggleModelDropdown()" readonly />
-                                <button class="model-dropdown-btn" onclick="toggleModelDropdown()" title="Browse models">&#9662;</button>
+                                <input class="model-input" id="model-input" placeholder="Model id" onfocus="toggleModelDropdown()" onkeydown="handleModelInputKeydown(event)" title="Click or type to search models" readonly />
+                                <button class="model-dropdown-btn" onclick="toggleModelDropdown()" title="Browse or search models">&#9662;</button>
                             </div>
                             <div id="model-dropdown" class="model-dropdown hidden">
                                 <div class="model-dropdown-search">
@@ -96,6 +96,11 @@
                                 </div>
                                 <div class="model-dropdown-list"></div>
                             </div>
+                        </div>
+                        <div class="header-thinking-control">
+                            <select id="header-thinking-level" class="header-thinking-select" onchange="OSA.handleQuickThinkingChange(event)" title="Thinking level">
+                                <option value="auto">Auto</option>
+                            </select>
                         </div>
                         <button class="settings-btn" onclick="openSettings()" title="Settings" aria-label="Settings">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -361,19 +366,29 @@
                 <div class="settings-main">
                 <div class="settings-pane active" id="pane-provider">
                     <div class="settings-pane-header">
-                        <h2>Provider</h2>
-                        <p class="settings-pane-desc">Configure your API connection and server settings</p>
+                        <h2>Routing</h2>
+                        <p class="settings-pane-desc">See what model route is active and manage your connected providers without losing the old fallback controls.</p>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">API Connection</div>
+                        <div class="settings-group-title">Current Route</div>
+                        <div id="provider-routing-summary" class="provider-routing-summary">Loading...</div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Connected Providers</div>
+                        <div id="provider-routing-list" class="provider-routing-list">Loading...</div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Compatibility Fallback</div>
+                        <div class="settings-field-hint" style="margin-bottom:12px">These legacy fields remain available for older flows, but the main provider/model experience now lives in the Models tab.</div>
                         <div class="settings-field">
                             <label for="setting-base-url">Base URL</label>
                             <input type="text" id="setting-base-url" placeholder="https://api.openai.com/v1" />
-                            <span class="settings-field-hint">OpenAI-compatible API endpoint</span>
+                            <span class="settings-field-hint">Legacy OpenAI-compatible endpoint fallback</span>
                         </div>
                         <div class="settings-field">
                             <label for="setting-model">Default Model</label>
                             <input type="text" id="setting-model" placeholder="gpt-4.1" />
+                            <span class="settings-field-hint">Legacy fallback model when no connected-provider route is selected</span>
                         </div>
                     </div>
                 </div>
@@ -430,14 +445,15 @@
                 <div class="settings-pane" id="pane-models">
                     <div class="settings-pane-header">
                         <h2>Models</h2>
-                        <p class="settings-pane-desc">Browse and connect to model providers</p>
+                        <p class="settings-pane-desc">Connect providers, pick active routes, and browse the shared model catalog.</p>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">Providers</div>
+                        <div class="settings-group-title">Connected & Available Routes</div>
+                        <div class="settings-field-hint" style="margin-bottom:12px">Connected providers stay at the top. Expand a provider to switch its model or edit its connection.</div>
                         <div id="model-catalog-list" class="model-catalog-list">Loading...</div>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">All Models</div>
+                        <div class="settings-group-title">Catalog Search</div>
                         <div class="settings-field">
                             <input type="text" id="model-catalog-search" placeholder="Filter by name, ID, or provider..." oninput="OSA.filterSettingsModels(this.value)" />
                         </div>
@@ -460,6 +476,13 @@
                                 <label for="setting-temperature">Temperature</label>
                                 <input type="number" id="setting-temperature" step="0.1" placeholder="0.7" />
                             </div>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-thinking-level">Thinking Level</label>
+                            <select id="setting-thinking-level">
+                                <option value="auto">Auto</option>
+                            </select>
+                            <span class="settings-field-hint" id="setting-thinking-hint">Provider/model-specific reasoning options for the active model.</span>
                         </div>
                     </div>
                 </div>
@@ -809,10 +832,10 @@
 
                 <!-- Model Section -->
                 <div class="provider-section">
-                    <label class="provider-input-label">Default Model</label>
+                    <label class="provider-input-label">Default Model (Optional)</label>
                     <div class="model-select-wrapper" id="modal-model-select-wrapper">
                         <div class="model-select-display" id="modal-model-select-display" onclick="OSA.toggleModalModelDropdown()">
-                            <span id="modal-model-select-text">Select a model...</span>
+                            <span id="modal-model-select-text">Use provider default (choose later)</span>
                             <span class="model-select-arrow">&#9662;</span>
                         </div>
                         <div class="model-dropdown hidden" id="modal-model-dropdown">

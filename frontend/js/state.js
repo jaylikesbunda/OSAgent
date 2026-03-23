@@ -2,6 +2,8 @@ window.OSA = window.OSA || {};
 
 OSA.token = localStorage.getItem('token');
 OSA.currentSession = null;
+OSA.currentModelId = null;
+OSA.currentModelProviderId = null;
 OSA.eventSource = null;
 OSA.activeTools = new Map();
 OSA.isProcessing = false;

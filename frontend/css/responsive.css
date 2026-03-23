@@ -60,6 +60,15 @@
         min-width: 0;
     }
 
+    .header-thinking-control {
+        min-width: 92px;
+    }
+
+    .header-thinking-select {
+        width: 100%;
+        min-width: 92px;
+    }
+
     .model-selector-input-wrap .model-input {
         width: 100%;
         flex: 1;
