@@ -1,6 +1,10 @@
 use crate::tools::web_search::normalize::decode_duckduckgo_redirect;
-use crate::tools::web_search::types::{BackendError, BackendResult, SearchBackend, SearchRequest, SearchResult};
-use crate::tools::web_search::{fetch_search_page, is_probable_block_page, looks_like_no_results_page};
+use crate::tools::web_search::types::{
+    BackendError, BackendResult, SearchBackend, SearchRequest, SearchResult,
+};
+use crate::tools::web_search::{
+    fetch_search_page, is_probable_block_page, looks_like_no_results_page,
+};
 use async_trait::async_trait;
 use reqwest::Client;
 use scraper::{Html, Selector};
@@ -22,7 +26,12 @@ impl SearchBackend for DuckDuckGoHtmlBackend {
             "https://html.duckduckgo.com/html/?q={}",
             urlencoding::encode(&request.query)
         );
-        let html = fetch_search_page(client, &url, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1").await?;
+        let html = fetch_search_page(
+            client,
+            &url,
+            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+        )
+        .await?;
         parse_html_results(&html, request.num_results, self.id())
     }
 }

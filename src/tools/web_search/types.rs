@@ -92,9 +92,7 @@ impl BackendError {
         match self.kind {
             BackendErrorKind::Blocked => Some(Duration::from_secs(10 * 60)),
             BackendErrorKind::Parse => Some(Duration::from_secs(3 * 60)),
-            BackendErrorKind::Network | BackendErrorKind::Timeout => {
-                Some(Duration::from_secs(90))
-            }
+            BackendErrorKind::Network | BackendErrorKind::Timeout => Some(Duration::from_secs(90)),
             BackendErrorKind::HttpStatus(status) if status >= 500 => Some(Duration::from_secs(90)),
             BackendErrorKind::HttpStatus(429) => Some(Duration::from_secs(5 * 60)),
             BackendErrorKind::HttpStatus(_) | BackendErrorKind::Empty => None,

@@ -1120,24 +1120,26 @@ impl SqliteStorage {
         let cutoff = Utc::now() - chrono::Duration::days(days);
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(OSAgentError::Storage)?;
-            
-            let mut stmt = tx.prepare(
-                "SELECT session_id FROM subagent_tasks WHERE status = 'completed' AND completed_at < ?1"
-            ).map_err(OSAgentError::Storage)?;
-            
+
+            let mut stmt = tx
+                .prepare(
+                    "SELECT session_id FROM subagent_tasks WHERE status = 'completed' AND completed_at < ?1",
+                )
+                .map_err(OSAgentError::Storage)?;
+
             let session_ids: Vec<String> = stmt
                 .query_map(params![cutoff.timestamp()], |row| row.get(0))
                 .map_err(OSAgentError::Storage)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(OSAgentError::Storage)?;
-            
+
             drop(stmt);
-            
+
             for session_id in &session_ids {
                 tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
                     .map_err(OSAgentError::Storage)?;
             }
-            
+
             tx.commit().map_err(OSAgentError::Storage)?;
             Ok(session_ids.len())
         })

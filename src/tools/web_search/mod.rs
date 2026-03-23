@@ -69,7 +69,11 @@ impl SearchService {
             query: query.clone(),
             num_results: num_results.clamp(1, MAX_RESULTS),
         };
-        let cache_key = format!("{}::{}", request.query.to_ascii_lowercase(), request.num_results);
+        let cache_key = format!(
+            "{}::{}",
+            request.query.to_ascii_lowercase(),
+            request.num_results
+        );
         if let Some(mut cached) = self.cache.get(&cache_key) {
             cached.cached = true;
             return Ok(cached);
@@ -196,7 +200,8 @@ pub(crate) async fn fetch_search_page(
                     BackendError::network(format!("failed fetching search results: {error}"))
                 };
                 last_error = Some(classified.clone());
-                if attempt == 0 && (error.is_timeout() || error.is_connect() || error.is_request()) {
+                if attempt == 0 && (error.is_timeout() || error.is_connect() || error.is_request())
+                {
                     sleep(Duration::from_millis(250)).await;
                     continue;
                 }
@@ -239,7 +244,9 @@ pub(crate) fn looks_like_no_results_page(html: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::SearchService;
-    use crate::tools::web_search::types::{BackendError, SearchBackend, SearchRequest, SearchResult};
+    use crate::tools::web_search::types::{
+        BackendError, SearchBackend, SearchRequest, SearchResult,
+    };
     use async_trait::async_trait;
     use reqwest::Client;
     use std::sync::{Arc, Mutex};
@@ -298,7 +305,10 @@ mod tests {
             Duration::from_secs(60),
         );
 
-        let response = service.search("rust async", 5).await.expect("expected response");
+        let response = service
+            .search("rust async", 5)
+            .await
+            .expect("expected response");
         assert_eq!(response.backend, "ddg_html");
         assert!(response.fallback_used);
         assert_eq!(*primary_calls.lock().expect("lock poisoned"), 1);
@@ -318,8 +328,14 @@ mod tests {
             Duration::from_secs(60),
         );
 
-        let first = service.search("rust async", 5).await.expect("expected response");
-        let second = service.search("rust async", 5).await.expect("expected cached response");
+        let first = service
+            .search("rust async", 5)
+            .await
+            .expect("expected response");
+        let second = service
+            .search("rust async", 5)
+            .await
+            .expect("expected cached response");
 
         assert!(!first.cached);
         assert!(second.cached);

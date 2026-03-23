@@ -395,8 +395,7 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
                     if let Ok(l) = line {
                         let trimmed = l.trim();
                         if !trimmed.is_empty() {
-                            let timestamp =
-                                chrono::Local::now().format("%H:%M:%S").to_string();
+                            let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
                             let state = app_handle_out.state::<AppState>();
                             add_log_to_state(&state.logs, "info", trimmed.to_string());
                             if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -405,8 +404,7 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
                                 .open(&log_file_out)
                             {
                                 use std::io::Write;
-                                let _ =
-                                    writeln!(file, "[{}] [INFO] {}", timestamp, trimmed);
+                                let _ = writeln!(file, "[{}] [INFO] {}", timestamp, trimmed);
                             }
                         }
                     }
@@ -431,17 +429,15 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
                             if trimmed.is_empty() {
                                 continue;
                             }
-                            let level = if trimmed.starts_with("error")
-                                || trimmed.contains("error[")
-                            {
-                                "error"
-                            } else if trimmed.starts_with("warning") {
-                                "warn"
-                            } else {
-                                "info"
-                            };
-                            let timestamp =
-                                chrono::Local::now().format("%H:%M:%S").to_string();
+                            let level =
+                                if trimmed.starts_with("error") || trimmed.contains("error[") {
+                                    "error"
+                                } else if trimmed.starts_with("warning") {
+                                    "warn"
+                                } else {
+                                    "info"
+                                };
+                            let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
                             let state = app_handle_err.state::<AppState>();
                             add_log_to_state(&state.logs, level, trimmed.to_string());
                             if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -471,8 +467,12 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
         // Wait for both readers to finish draining the pipe before we
         // write the completion log entry and clear build_running. This
         // guarantees the frontend's final poll sees all output.
-        if let Some(h) = stdout_handle { let _ = h.join(); }
-        if let Some(h) = stderr_handle { let _ = h.join(); }
+        if let Some(h) = stdout_handle {
+            let _ = h.join();
+        }
+        if let Some(h) = stderr_handle {
+            let _ = h.join();
+        }
 
         let state = app_handle.state::<AppState>();
         match exit_status {

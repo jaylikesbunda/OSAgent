@@ -125,7 +125,7 @@ impl WorkflowDb {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, name, description, current_version, created_at, updated_at FROM workflows WHERE id = ?")?;
             let mut rows = stmt.query(rusqlite::params![id])?;
-            
+
             if let Some(row) = rows.next()? {
                 Ok(Some(Workflow {
                     id: row.get(0)?,
@@ -145,7 +145,7 @@ impl WorkflowDb {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, name, description, current_version, created_at, updated_at FROM workflows ORDER BY updated_at DESC")?;
             let mut rows = stmt.query([])?;
-            
+
             let mut workflows = Vec::new();
             while let Some(row) = rows.next()? {
                 workflows.push(Workflow {
@@ -192,7 +192,7 @@ impl WorkflowDb {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, workflow_id, version, graph_json, created_at FROM workflow_versions WHERE workflow_id = ? AND version = ?")?;
             let mut rows = stmt.query(rusqlite::params![workflow_id, version])?;
-            
+
             if let Some(row) = rows.next()? {
                 Ok(Some(WorkflowVersion {
                     id: row.get(0)?,
@@ -211,7 +211,7 @@ impl WorkflowDb {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, workflow_id, version, graph_json, created_at FROM workflow_versions WHERE workflow_id = ? ORDER BY version DESC")?;
             let mut rows = stmt.query(rusqlite::params![workflow_id])?;
-            
+
             let mut versions = Vec::new();
             while let Some(row) = rows.next()? {
                 versions.push(WorkflowVersion {
@@ -255,7 +255,7 @@ impl WorkflowDb {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, workflow_id, workflow_version, status, started_at, completed_at, error_message FROM workflow_runs WHERE id = ?")?;
             let mut rows = stmt.query(rusqlite::params![run_id])?;
-            
+
             if let Some(row) = rows.next()? {
                 Ok(Some(WorkflowRun {
                     id: row.get(0)?,
@@ -276,7 +276,7 @@ impl WorkflowDb {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, workflow_id, workflow_version, status, started_at, completed_at, error_message FROM workflow_runs WHERE workflow_id = ? ORDER BY started_at DESC")?;
             let mut rows = stmt.query(rusqlite::params![workflow_id])?;
-            
+
             let mut runs = Vec::new();
             while let Some(row) = rows.next()? {
                 runs.push(WorkflowRun {
@@ -317,7 +317,7 @@ impl WorkflowDb {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, run_id, node_id, node_type, status, input_json, output_json, started_at, completed_at FROM workflow_node_logs WHERE run_id = ? ORDER BY started_at")?;
             let mut rows = stmt.query(rusqlite::params![run_id])?;
-            
+
             let mut logs = Vec::new();
             while let Some(row) = rows.next()? {
                 logs.push(NodeLog {
