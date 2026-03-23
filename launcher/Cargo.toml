@@ -3,7 +3,7 @@ name = "osagent-launcher"
 version = "0.1.0"
 edition = "2021"
 authors = ["OSA Contributors"]
-license = "GPL-3.0"
+license = "MIT"
 description = "OSAgent modern launcher with system tray and window management"
 
 [build-dependencies]

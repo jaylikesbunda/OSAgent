@@ -115,7 +115,7 @@ If you discover a security vulnerability, please email the maintainers directly 
 
 ## License
 
-By contributing to OSA, you agree that your contributions will be licensed under the GNU General Public License v3.
+By contributing to OSA, you agree that your contributions will be licensed under the MIT License.
 
 ## Questions?
 

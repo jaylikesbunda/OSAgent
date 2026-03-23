@@ -80,19 +80,6 @@ model = "anthropic/claude-sonnet-4"
 workspace = "~/.osagent/workspace"
 ```
 
-### Available Models
-
-| Provider   | Example Models |
-|------------|----------------|
-| OpenRouter | Claude Sonnet 4, GPT-4.1, Gemini 2.5 Pro, Llama 3.1 |
-| OpenAI     | GPT-4.1, GPT-4o, o3-mini |
-| Anthropic  | Claude Sonnet 4, Claude 3.5 Sonnet |
-| Google     | Gemini 2.5 Pro, Gemini 2.0 Flash |
-| Ollama     | Llama 3.1 70B, Qwen3 32B, Mistral 7B |
-| Groq       | Llama 3.3 70B, Mixtral 8x7B |
-| DeepSeek   | DeepSeek R1, DeepSeek V3 |
-| xAI        | Grok 3 |
-
 ## Usage
 
 ### CLI Commands
@@ -109,7 +96,7 @@ osagent update        # Check for updates
 ### Web UI
 
 - **New Chat** - Start a new conversation
-- **Model Selector** - Switch between providers/models
+- **Provider Selector** - Switch between providers
 - **Workspaces** - Manage isolated working directories
 - **Tools** - Enable/disable tool execution capabilities
 
@@ -189,4 +176,4 @@ cargo build --release
 
 ## License
 
-GPL-3.0
+MIT

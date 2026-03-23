@@ -3,7 +3,7 @@ name = "osagent"
 version = "0.1.0"
 edition = "2021"
 authors = ["OSA Contributors"]
-license = "GPL-3.0"
+license = "MIT"
 description = "Secure local AI agent with a web UI, workspace tools, and optional Discord integration"
 repository = "https://github.com/osagent/osagent"
 
