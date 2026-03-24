@@ -210,28 +210,9 @@ mod tests {
     fn truncates_with_suffix() {
         let text = "a".repeat(10_000);
         let result = truncate_tool_result_text(&text, 1000, &TruncationOptions::default());
-        assert!(result.len() <= 1000 + 200, // suffix adds some chars
+        assert!(result.len() <= 1000 + 200);
         assert!(result.contains("Content truncated"));
     }
-
-    #[test]
-    fn head_tail_preserves_errors() {
-        let mut head = String::new();
-        let tail = "\nError: compilation failed at line 42\nSummary: 3 errors found";
-        for _ in 0..99 {
-            head.push_str(&head);
-        }
-        let text = format!("{}{}", head, tail);
-        let result = truncate_tool_result_text(&text, 500, &TruncationOptions::default());
-        // Should preserve Error: and Summary in the tail
-        assert!(result.contains("Error:"));
-        assert!(result.contains("middle content omitted"));
-        // Should be able to fit in 500 chars
-        let suffix_len = result.len() - 500;
-        assert!(suffix_len <= 300, "Suffix should fit");
-        assert!(result.contains("Content truncated"));
-    }
-}
 
     #[test]
     fn head_tail_preserves_errors() {
