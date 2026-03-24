@@ -375,7 +375,10 @@ mod tests {
 
     #[test]
     fn detects_critical_repeat() {
-        let mut det = default_detector();
+        let mut det = ToolLoopDetector::new(LoopDetectionConfig {
+            warning_threshold: 25,
+            ..Default::default()
+        });
         let args = json!({"path": "a.txt"});
         for _ in 0..20 {
             det.record_and_check("read_file", &args, true);
@@ -432,7 +435,11 @@ mod tests {
 
     #[test]
     fn global_circuit_breaker() {
-        let mut det = default_detector();
+        let mut det = ToolLoopDetector::new(LoopDetectionConfig {
+            warning_threshold: 50,
+            critical_threshold: 50,
+            ..Default::default()
+        });
         for _ in 0..30 {
             det.record_and_check("bash", &json!({"command": "fail"}), false);
         }

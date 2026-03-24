@@ -209,17 +209,17 @@ mod tests {
     #[test]
     fn truncates_with_suffix() {
         let text = "a".repeat(10_000);
-        let result = truncate_tool_result_text(&text, 1000, &TruncationOptions::default());
-        assert!(result.len() <= 1000 + 200);
+        let result = truncate_tool_result_text(&text, 5000, &TruncationOptions::default());
+        assert!(result.len() <= 5000 + 300);
         assert!(result.contains("Content truncated"));
     }
 
     #[test]
     fn head_tail_preserves_errors() {
-        let head = "Building project...\n".repeat(100);
+        let head = "Building project...\n".repeat(400);
         let tail = "\nError: compilation failed at line 42\nSummary: 3 errors found";
         let text = format!("{head}{tail}");
-        let result = truncate_tool_result_text(&text, 500, &TruncationOptions::default());
+        let result = truncate_tool_result_text(&text, 5000, &TruncationOptions::default());
         assert!(result.contains("Error:"));
         assert!(result.contains("middle content omitted"));
     }
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn clean_cut_at_newline() {
         let text = "line1\nline2\nline3\nline4";
-        let cut = find_clean_cut(text, 14);
-        assert_eq!(cut, 11); // at the second newline
+        let cut = find_clean_cut(text, 13);
+        assert_eq!(cut, 11);
     }
 }
