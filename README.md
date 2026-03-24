@@ -60,13 +60,8 @@ No Rust installation required.
 
 ### Configuration
 
-Set your API key:
-```bash
-export OPENROUTER_API_KEY=sk-or-v1-...
-# or: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, XAI_API_KEY
-```
+Config is stored in `~/.osagent/config.toml`. The launcher handles setup, but you can edit manually:
 
-Or configure directly in `~/.osagent/config.toml`:
 ```toml
 [[providers]]
 provider_type = "openrouter"
@@ -80,17 +75,6 @@ Enable tools in `~/.osagent/config.toml`:
 ```toml
 [tools]
 allowed = ["bash", "read_file", "write_file", "grep", "glob", "code_python", "code_node"]
-```
-
-### CLI Commands
-
-```bash
-osagent start            # Start the agent server
-osagent setup            # Run the interactive setup wizard
-osagent config show      # Display current configuration
-osagent config edit      # Edit configuration in $EDITOR
-osagent service install  # Install as system service
-osagent update           # Check for updates
 ```
 
 ### Skills
