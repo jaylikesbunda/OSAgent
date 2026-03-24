@@ -1937,6 +1937,7 @@ async fn stream_download(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new("powershell")
         .args([

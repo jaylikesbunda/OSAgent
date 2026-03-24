@@ -463,23 +463,21 @@ async fn download_and_extract_binary(
 
         let final_binary = dir.join(binary_name);
         if let Ok(mut entries) = std::fs::read_dir(&extract_dir) {
-            if let Some(first) = entries.next() {
-                if let Ok(entry) = first {
-                    let piper_dir = entry.path().join("piper");
-                    let extracted_binary = piper_dir.join(binary_name);
-                    if extracted_binary.exists() {
-                        std::fs::copy(&extracted_binary, &final_binary)
-                            .map_err(|e| format!("Failed to copy binary: {}", e))?;
+            if let Some(Ok(entry)) = entries.next() {
+                let piper_dir = entry.path().join("piper");
+                let extracted_binary = piper_dir.join(binary_name);
+                if extracted_binary.exists() {
+                    std::fs::copy(&extracted_binary, &final_binary)
+                        .map_err(|e| format!("Failed to copy binary: {}", e))?;
 
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            std::fs::set_permissions(
-                                &final_binary,
-                                std::fs::Permissions::from_mode(0o755),
-                            )
-                            .map_err(|e| format!("Failed to set permissions: {}", e))?;
-                        }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(
+                            &final_binary,
+                            std::fs::Permissions::from_mode(0o755),
+                        )
+                        .map_err(|e| format!("Failed to set permissions: {}", e))?;
                     }
                 }
             }

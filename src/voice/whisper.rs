@@ -315,6 +315,7 @@ pub async fn install_binary() -> Result<(), String> {
             WHISPER_CPP_VERSION
         );
         download_and_extract_binary(&url, &dir, "whisper.exe").await?;
+        info!("Whisper binary installed successfully");
     }
 
     #[cfg(target_os = "macos")]
@@ -332,7 +333,6 @@ pub async fn install_binary() -> Result<(), String> {
         return Err("Unsupported platform for automatic Whisper installation. Please install whisper.cpp manually.".to_string());
     }
 
-    info!("Whisper binary installed successfully");
     Ok(())
 }
 
