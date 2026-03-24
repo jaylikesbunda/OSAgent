@@ -53,9 +53,10 @@ No Rust installation required.
 
 - **Multi-Provider** — OpenRouter, OpenAI, Anthropic, Google, Ollama, Groq, DeepSeek, xAI
 - **Web UI** — Modern chat with workspaces and tool visualization
+- **Discord Bot** — Deploy as a Discord bot with slash commands, per-channel sessions, and thinking indicators
 - **Tool Execution** — Bash, Python, Node, file ops, web search
 - **Skills System** — Extend with custom integrations
-- **Audit Logging** — Full action history for compliance
+- **Voice STT/TTS** — Whisper speech-to-text and Piper local text-to-speech with browser Web Speech API support
 - **Local-First** — Runs entirely on your machine
 
 ### Configuration
