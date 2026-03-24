@@ -4,7 +4,7 @@
   </a>
 </p>
 
-<h1 align="center">OSA - Open Source Agent</h1>
+<h1 align="center">OSA - Your Open Source Agent</h1>
 
 <p align="center"><strong>Your personal AI agent. Fast, local and secure.</strong></p>
 
