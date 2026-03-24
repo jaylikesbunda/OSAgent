@@ -30,24 +30,18 @@
 
 ### Installation
 
-**macOS / Linux**
-```bash
-curl -sSL https://raw.githubusercontent.com/osagent/osagent/main/install.sh | bash
-```
+**All Platforms**
+Download the launcher from [Releases](https://github.com/osagent/osagent/releases/latest), then run it.
 
-**Windows**
-Download from [Releases](https://github.com/osagent/osagent/releases/latest)
-
-**From Source**
-```bash
-cargo build --release
-```
+The launcher will:
+1. Build the core (if needed)
+2. Guide you through setup (API key, workspace)
+3. Start OSA at http://localhost:8765
 
 ### Quick Start
 
 ```bash
-osagent setup    # Configure your API key
-osagent start    # Launch at http://localhost:8765
+osagent-launcher    # Opens setup wizard, then starts OSA
 ```
 
 ### Features
