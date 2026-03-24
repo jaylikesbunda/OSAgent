@@ -128,9 +128,9 @@
                         </div>
                     </div>
                     <div class="input-area">
-                        <div class="input-bar-wrap">
-                            <div class="input-left-controls">
-                                <button id="workspace-trigger" class="input-tab" type="button" onclick="toggleWorkspaceMenu()">
+                         <div class="input-bar-wrap">
+                             <div class="input-left-controls">
+                                 <button id="workspace-trigger" class="input-tab" type="button" onclick="toggleWorkspaceMenu()">
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
                                     <span id="workspace-trigger-label">Workspace</span>
                                 </button>
@@ -147,15 +147,16 @@
                                 <button id="tts-btn" class="input-icon-btn" onclick="toggleTTS()" title="Text-to-speech" aria-pressed="false">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
                                 </button>
-                                <button id="send-btn" onclick="handleSendButtonClick()">
-                                    <svg id="send-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                                    <svg id="stop-icon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
-                                </button>
-                            </div>
-                        </div>
-                        <div id="workspace-menu" class="context-menu hidden">
-                            <div class="context-menu-header">
-                                <span>Workspace</span>
+                                 <button id="send-btn" onclick="handleSendButtonClick()">
+                                     <svg id="send-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                                     <svg id="stop-icon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+                                 </button>
+                             </div>
+                         </div>
+                         <div id="voice-status" class="voice-status hidden" aria-live="polite"></div>
+                         <div id="workspace-menu" class="context-menu hidden">
+                             <div class="context-menu-header">
+                                 <span>Workspace</span>
                                 <button class="menu-action-btn" type="button" onclick="openWorkspaceEditorForCreate()">Add</button>
                             </div>
                             <div id="workspace-menu-list" class="context-menu-list"></div>
@@ -524,30 +525,38 @@
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Voice Input & Output</div>
-                        <div class="settings-field">
-                            <label for="setting-voice-enabled">Enable Voice</label>
-                            <select id="setting-voice-enabled">
-                                <option value="true">Enabled</option>
-                                <option value="false">Disabled</option>
-                            </select>
-                        </div>
-                        <div class="settings-field-row">
-                            <div class="settings-field flex-1">
-                                <label for="setting-stt-provider">Speech-to-Text</label>
-                                <select id="setting-stt-provider">
-                                    <option value="browser">Browser (Web Speech API)</option>
-                                    <option value="whisper-api">OpenAI Whisper API</option>
-                                    <option value="whisper-local">Local Whisper</option>
-                                </select>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-voice-enabled">Enable Voice</label>
+                                <span class="toggle-desc">Turn voice input and voice output features on for the chat interface.</span>
                             </div>
-                            <div class="settings-field flex-1">
-                                <label for="setting-tts-provider">Text-to-Speech</label>
-                                <select id="setting-tts-provider">
-                                    <option value="browser">Browser (SpeechSynthesis)</option>
-                                    <option value="piper-local">Local Piper TTS</option>
-                                </select>
-                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-voice-enabled">
+                                <span class="toggle-slider"></span>
+                            </label>
                         </div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-stt-local">Local Whisper Speech-to-Text</label>
+                                <span class="toggle-desc">Off uses browser speech recognition. On records from the mic and sends audio to Local Whisper, then places the transcript into the chat box.</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-stt-local">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <input type="hidden" id="setting-stt-provider" value="browser">
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-tts-local">Local Piper Text-to-Speech</label>
+                                <span class="toggle-desc">Off uses browser speech. On uses Local Piper for offline speech playback after you install a voice.</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-tts-local">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <input type="hidden" id="setting-tts-provider" value="browser">
                         <div class="settings-field-row">
                             <div class="settings-field flex-1">
                                 <label for="setting-voice-language">Language</label>
@@ -558,21 +567,25 @@
                                 <input type="number" id="setting-voice-speed" step="0.1" min="0.5" max="2" placeholder="1.0" />
                             </div>
                         </div>
-                        <div class="settings-field-row">
-                            <div class="settings-field flex-1">
-                                <label for="setting-auto-send">Auto-send Transcript</label>
-                                <select id="setting-auto-send">
-                                    <option value="true">Yes</option>
-                                    <option value="false">No</option>
-                                </select>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-auto-send">Auto-send Transcript</label>
+                                <span class="toggle-desc">Automatically send the transcribed text as soon as voice input finishes instead of leaving it in the chat box for review.</span>
                             </div>
-                            <div class="settings-field flex-1">
-                                <label for="setting-auto-speak">Auto-speak Responses</label>
-                                <select id="setting-auto-speak">
-                                    <option value="true">Yes</option>
-                                    <option value="false">No</option>
-                                </select>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-auto-send">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-auto-speak">Auto-speak Responses</label>
+                                <span class="toggle-desc">Automatically play assistant responses using the selected speech provider when voice is enabled.</span>
                             </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-auto-speak">
+                                <span class="toggle-slider"></span>
+                            </label>
                         </div>
                     </div>
                     <div class="settings-group">

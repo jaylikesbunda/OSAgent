@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
+use futures::StreamExt;
 use std::path::PathBuf;
 use std::process::Command;
+use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use super::{broadcast_progress, get_models_dir, InstalledModel, ModelInfo};
 
 const PIPER_VERSION: &str = "2023.11.14-2";
+const PROGRESS_WRITE_CHUNK_SIZE: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PiperStatus {
@@ -105,6 +108,24 @@ pub fn get_available_voices_all() -> Vec<ModelInfo> {
             });
         }
     }
+
+    for voice in installed {
+        if result.iter().any(|model| model.id == voice.id) {
+            continue;
+        }
+
+        result.push(ModelInfo {
+            id: voice.id.clone(),
+            model_type: "piper".to_string(),
+            name: voice.name.clone(),
+            size_mb: ((voice.size_bytes as f64) / (1024.0 * 1024.0)).ceil() as u64,
+            lang: Some(detect_voice_lang(&voice.id)),
+            quality: Some("custom".to_string()),
+            url: String::new(),
+            installed: true,
+        });
+    }
+
     result
 }
 
@@ -287,21 +308,60 @@ async fn download_and_extract_binary(
         ));
     }
 
-    let bytes = response
-        .bytes()
+    #[cfg(target_os = "windows")]
+    let archive_path = dir.join("piper_archive.zip");
+    #[cfg(not(target_os = "windows"))]
+    let archive_path = dir.join("piper_archive.tar.gz");
+    let total_bytes = response.content_length().unwrap_or(0);
+    let mut downloaded = 0u64;
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::File::create(&archive_path)
         .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+        .map_err(|e| format!("Failed to create archive: {}", e))?;
 
-    let archive_path = dir.join("piper_archive");
-    std::fs::write(&archive_path, &bytes).map_err(|e| format!("Failed to write archive: {}", e))?;
+    broadcast_progress(super::DownloadProgress {
+        model_id: "piper-binary".to_string(),
+        model_type: "piper".to_string(),
+        stage: "downloading runtime".to_string(),
+        progress: 0.0,
+        bytes_downloaded: 0,
+        total_bytes,
+    });
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Failed to read response: {}", e))?;
+        for part in chunk.chunks(PROGRESS_WRITE_CHUNK_SIZE) {
+            file.write_all(part)
+                .await
+                .map_err(|e| format!("Failed to write archive: {}", e))?;
+            downloaded += part.len() as u64;
+
+            broadcast_progress(super::DownloadProgress {
+                model_id: "piper-binary".to_string(),
+                model_type: "piper".to_string(),
+                stage: "downloading runtime".to_string(),
+                progress: if total_bytes > 0 {
+                    downloaded as f32 / total_bytes as f32
+                } else {
+                    0.0
+                },
+                bytes_downloaded: downloaded,
+                total_bytes,
+            });
+        }
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush archive: {}", e))?;
 
     broadcast_progress(super::DownloadProgress {
         model_id: "piper-binary".to_string(),
         model_type: "piper".to_string(),
         stage: "extracting".to_string(),
         progress: 1.0,
-        bytes_downloaded: bytes.len() as u64,
-        total_bytes: bytes.len() as u64,
+        bytes_downloaded: downloaded,
+        total_bytes,
     });
 
     info!("Extracting binary...");
@@ -475,22 +535,38 @@ pub async fn download_voice(voice_name: &str) -> Result<PathBuf, String> {
         total_bytes,
     });
 
-    let bytes = response
-        .bytes()
+    let mut downloaded = 0u64;
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::File::create(&voice_path)
         .await
-        .map_err(|e| format!("Failed to read voice: {}", e))?;
+        .map_err(|e| format!("Failed to create voice file: {}", e))?;
 
-    let downloaded = bytes.len() as u64;
-    broadcast_progress(super::DownloadProgress {
-        model_id: voice_name.to_string(),
-        model_type: "piper".to_string(),
-        stage: "downloading".to_string(),
-        progress: 1.0,
-        bytes_downloaded: downloaded,
-        total_bytes,
-    });
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Failed to read voice: {}", e))?;
+        for part in chunk.chunks(PROGRESS_WRITE_CHUNK_SIZE) {
+            file.write_all(part)
+                .await
+                .map_err(|e| format!("Failed to write voice: {}", e))?;
+            downloaded += part.len() as u64;
 
-    std::fs::write(&voice_path, &bytes).map_err(|e| format!("Failed to write voice: {}", e))?;
+            broadcast_progress(super::DownloadProgress {
+                model_id: voice_name.to_string(),
+                model_type: "piper".to_string(),
+                stage: "downloading".to_string(),
+                progress: if total_bytes > 0 {
+                    downloaded as f32 / total_bytes as f32
+                } else {
+                    0.0
+                },
+                bytes_downloaded: downloaded,
+                total_bytes,
+            });
+        }
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush voice file: {}", e))?;
 
     let json_url = format!("{}.json", url);
     info!("Downloading voice config from: {}", json_url);
@@ -582,8 +658,13 @@ fn find_voice_by_name(name: &str) -> Option<PathBuf> {
     }
 }
 
-pub async fn install_all(lang: &str) -> Result<(), String> {
+pub async fn install_all(lang: &str, voice_name: Option<&str>) -> Result<(), String> {
     install_binary().await?;
+
+    if let Some(name) = voice_name {
+        download_voice(name).await?;
+        return Ok(());
+    }
 
     let voices = get_available_voices(lang);
     if let Some(voice) = voices.first() {

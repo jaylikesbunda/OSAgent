@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
+use futures::StreamExt;
 use std::path::PathBuf;
 use std::process::Command;
+use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use super::{broadcast_progress, get_models_dir, InstalledModel, ModelInfo};
 
 const WHISPER_CPP_VERSION: &str = "1.8.3";
+const PROGRESS_WRITE_CHUNK_SIZE: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WhisperStatus {
@@ -64,6 +67,25 @@ fn get_binary_path() -> PathBuf {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn required_runtime_files() -> Vec<&'static str> {
+    vec!["whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "SDL2.dll"]
+}
+
+#[cfg(not(target_os = "windows"))]
+fn required_runtime_files() -> Vec<&'static str> {
+    vec![]
+}
+
+fn is_runtime_installed() -> bool {
+    let dir = get_models_dir();
+    let binary_path = get_binary_path();
+    binary_path.exists()
+        && required_runtime_files()
+            .into_iter()
+            .all(|file| dir.join(file).exists())
+}
+
 fn get_model_path(model: &WhisperModel) -> PathBuf {
     get_models_dir().join(format!("ggml-{}.bin", model.id()))
 }
@@ -73,8 +95,7 @@ fn get_custom_model_path(model_id: &str) -> PathBuf {
 }
 
 pub fn get_status() -> WhisperStatus {
-    let binary_path = get_binary_path();
-    let binary_installed = binary_path.exists();
+    let binary_installed = is_runtime_installed();
 
     let model_path = find_downloaded_model();
 
@@ -101,6 +122,16 @@ fn find_downloaded_model() -> Option<PathBuf> {
             return Some(path);
         }
     }
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|ext| ext == "bin").unwrap_or(false) {
+                return Some(path);
+            }
+        }
+    }
+
     None
 }
 
@@ -128,7 +159,7 @@ pub fn get_available_models() -> Vec<ModelInfo> {
     let installed_ids: std::collections::HashSet<String> =
         installed.iter().map(|m| m.id.clone()).collect();
 
-    vec![
+    let mut models = vec![
         ModelInfo {
             id: "tiny".to_string(),
             model_type: "whisper".to_string(),
@@ -173,7 +204,26 @@ pub fn get_available_models() -> Vec<ModelInfo> {
                 .to_string(),
             installed: installed_ids.contains("medium"),
         },
-    ]
+    ];
+
+    for model in installed {
+        if ["tiny", "base", "small", "medium"].contains(&model.id.as_str()) {
+            continue;
+        }
+
+        models.push(ModelInfo {
+            id: model.id.clone(),
+            model_type: "whisper".to_string(),
+            name: model.name.clone(),
+            size_mb: ((model.size_bytes as f64) / (1024.0 * 1024.0)).ceil() as u64,
+            lang: None,
+            quality: Some("custom".to_string()),
+            url: String::new(),
+            installed: true,
+        });
+    }
+
+    models
 }
 
 pub fn find_installed_models() -> Vec<InstalledModel> {
@@ -195,21 +245,27 @@ pub fn find_installed_models() -> Vec<InstalledModel> {
                         .to_string();
 
                     let size_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+                    let display_name = id
+                        .split(['-', '_'])
+                        .filter(|part| !part.is_empty())
+                        .map(|part| {
+                            let mut chars = part.chars();
+                            match chars.next() {
+                                Some(first) => {
+                                    let mut out = first.to_uppercase().to_string();
+                                    out.push_str(chars.as_str());
+                                    out
+                                }
+                                None => String::new(),
+                            }
+                        })
+                        .collect::<Vec<String>>()
+                        .join(" ");
 
                     models.push(InstalledModel {
                         id,
                         model_type: "whisper".to_string(),
-                        name: format!(
-                            "Whisper {}",
-                            name.strip_prefix("ggml-")
-                                .and_then(|s| s.strip_suffix(".bin"))
-                                .unwrap_or("")
-                                .chars()
-                                .next()
-                                .map(|c| c.to_uppercase())
-                                .map(|s| s.to_string())
-                                .unwrap_or_default()
-                        ),
+                        name: format!("Whisper {}", display_name),
                         path: path.to_string_lossy().to_string(),
                         size_bytes,
                     });
@@ -237,9 +293,13 @@ pub async fn install_binary() -> Result<(), String> {
         .map_err(|e| format!("Failed to create models directory: {}", e))?;
 
     let binary_path = get_binary_path();
-    if binary_path.exists() {
+    if is_runtime_installed() {
         info!("Whisper binary already installed");
         return Ok(());
+    }
+
+    if binary_path.exists() {
+        info!("Whisper binary is missing runtime files, reinstalling");
     }
 
     #[cfg(target_os = "windows")]
@@ -288,21 +348,59 @@ async fn download_and_extract_binary(
         ));
     }
 
+    #[cfg(target_os = "windows")]
+    let archive_path = dir.join("whisper_archive.zip");
+    #[cfg(not(target_os = "windows"))]
+    let archive_path = dir.join("whisper_archive.tar.gz");
     let total_bytes = response.content_length().unwrap_or(0);
-    let bytes = response
-        .bytes()
+    let mut downloaded = 0u64;
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::File::create(&archive_path)
         .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+        .map_err(|e| format!("Failed to create archive: {}", e))?;
 
-    let archive_path = dir.join("whisper_archive");
-    std::fs::write(&archive_path, &bytes).map_err(|e| format!("Failed to write archive: {}", e))?;
+    broadcast_progress(super::DownloadProgress {
+        model_id: "whisper-binary".to_string(),
+        model_type: "whisper".to_string(),
+        stage: "downloading runtime".to_string(),
+        progress: 0.0,
+        bytes_downloaded: 0,
+        total_bytes,
+    });
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Failed to read response: {}", e))?;
+        for part in chunk.chunks(PROGRESS_WRITE_CHUNK_SIZE) {
+            file.write_all(part)
+                .await
+                .map_err(|e| format!("Failed to write archive: {}", e))?;
+            downloaded += part.len() as u64;
+
+            broadcast_progress(super::DownloadProgress {
+                model_id: "whisper-binary".to_string(),
+                model_type: "whisper".to_string(),
+                stage: "downloading runtime".to_string(),
+                progress: if total_bytes > 0 {
+                    downloaded as f32 / total_bytes as f32
+                } else {
+                    0.0
+                },
+                bytes_downloaded: downloaded,
+                total_bytes,
+            });
+        }
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush archive: {}", e))?;
 
     broadcast_progress(super::DownloadProgress {
         model_id: "whisper-binary".to_string(),
         model_type: "whisper".to_string(),
         stage: "extracting".to_string(),
         progress: 1.0,
-        bytes_downloaded: total_bytes,
+        bytes_downloaded: downloaded,
         total_bytes,
     });
 
@@ -329,22 +427,51 @@ async fn download_and_extract_binary(
             ));
         }
 
-        let extracted_binary = dir.join("Release").join("whisper-cli.exe");
+        let release_dir = dir.join("Release");
+        let extracted_binary = release_dir.join("whisper-cli.exe");
         let final_binary = dir.join(binary_name);
         if extracted_binary.exists() {
             std::fs::copy(&extracted_binary, &final_binary)
                 .map_err(|e| format!("Failed to copy binary: {}", e))?;
 
-            let dlls = ["ggml.dll", "ggml-cpu.dll", "ggml-base.dll", "SDL2.dll"];
-            for dll in dlls {
-                let src = dir.join("Release").join(dll);
-                let dst = dir.join(dll);
-                if src.exists() {
-                    let _ = std::fs::copy(&src, &dst);
+            if let Ok(entries) = std::fs::read_dir(&release_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+
+                    let Some(file_name) = path.file_name() else {
+                        continue;
+                    };
+
+                    if file_name == "whisper-cli.exe" {
+                        continue;
+                    }
+
+                    let dest = dir.join(file_name);
+                    std::fs::copy(&path, &dest).map_err(|e| {
+                        format!(
+                            "Failed to copy runtime file '{}' : {}",
+                            file_name.to_string_lossy(),
+                            e
+                        )
+                    })?;
+                }
+            } else {
+                return Err("Failed to inspect extracted Whisper runtime files".to_string());
+            }
+
+            for required in required_runtime_files() {
+                if !dir.join(required).exists() {
+                    return Err(format!(
+                        "Whisper runtime install is incomplete: missing {} after extraction",
+                        required
+                    ));
                 }
             }
 
-            let _ = std::fs::remove_dir_all(dir.join("Release"));
+            let _ = std::fs::remove_dir_all(&release_dir);
         }
     }
 
@@ -435,22 +562,38 @@ pub async fn download_model(model_id: &str) -> Result<PathBuf, String> {
         total_bytes,
     });
 
-    let bytes = response
-        .bytes()
+    let mut downloaded = 0u64;
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::File::create(&model_path)
         .await
-        .map_err(|e| format!("Failed to read model: {}", e))?;
+        .map_err(|e| format!("Failed to create model file: {}", e))?;
 
-    let downloaded = bytes.len() as u64;
-    broadcast_progress(super::DownloadProgress {
-        model_id: model_id.to_string(),
-        model_type: "whisper".to_string(),
-        stage: "downloading".to_string(),
-        progress: 1.0,
-        bytes_downloaded: downloaded,
-        total_bytes,
-    });
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Failed to read model: {}", e))?;
+        for part in chunk.chunks(PROGRESS_WRITE_CHUNK_SIZE) {
+            file.write_all(part)
+                .await
+                .map_err(|e| format!("Failed to write model: {}", e))?;
+            downloaded += part.len() as u64;
 
-    std::fs::write(&model_path, &bytes).map_err(|e| format!("Failed to write model: {}", e))?;
+            broadcast_progress(super::DownloadProgress {
+                model_id: model_id.to_string(),
+                model_type: "whisper".to_string(),
+                stage: "downloading".to_string(),
+                progress: if total_bytes > 0 {
+                    downloaded as f32 / total_bytes as f32
+                } else {
+                    0.0
+                },
+                bytes_downloaded: downloaded,
+                total_bytes,
+            });
+        }
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush model file: {}", e))?;
 
     broadcast_progress(super::DownloadProgress {
         model_id: model_id.to_string(),
@@ -475,10 +618,17 @@ pub async fn transcribe(
         return Err("Whisper binary not installed. Run voice installation first.".to_string());
     }
 
-    let model_path = model_id
-        .and_then(find_model_by_id)
-        .or_else(find_downloaded_model)
-        .ok_or_else(|| "No Whisper model installed. Download a model first.".to_string())?;
+    let model_path = if let Some(id) = model_id {
+        find_model_by_id(id).ok_or_else(|| {
+            format!(
+                "Selected Whisper model '{}' is not installed. Download it first from Voice settings.",
+                id
+            )
+        })?
+    } else {
+        find_downloaded_model()
+            .ok_or_else(|| "No Whisper model installed. Download a model first.".to_string())?
+    };
 
     let mut args = vec![
         "-f".to_string(),

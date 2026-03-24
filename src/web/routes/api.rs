@@ -1597,6 +1597,21 @@ async fn voice_status(Extension(_config): Extension<Config>) -> Json<serde_json:
     }))
 }
 
+fn normalized_stt_provider(provider: &str) -> &str {
+    match provider {
+        "whisper" => "whisper-local",
+        "whisper-api" => "browser",
+        _ => provider,
+    }
+}
+
+fn normalized_tts_provider(provider: &str) -> &str {
+    match provider {
+        "piper" => "piper-local",
+        _ => provider,
+    }
+}
+
 async fn tts_synthesize(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Json(payload): Json<TtsRequest>,
@@ -1619,7 +1634,7 @@ async fn tts_synthesize(
         ));
     }
 
-    match voice_config.tts_provider.as_str() {
+    match normalized_tts_provider(voice_config.tts_provider.as_str()) {
         "browser" => {
             Err((
                 StatusCode::BAD_REQUEST,
@@ -1674,6 +1689,7 @@ pub struct VoiceInstallRequest {
     pub whisper_model: Option<String>,
     pub install_piper: Option<bool>,
     pub language: Option<String>,
+    pub piper_voice: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1684,9 +1700,10 @@ pub struct VoiceInstallResponse {
 }
 
 async fn voice_install(
-    Extension(config): Extension<Config>,
+    Extension(agent): Extension<Arc<AgentRuntime>>,
     Json(payload): Json<VoiceInstallRequest>,
 ) -> Result<Json<VoiceInstallResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let config = agent.get_config().await;
     let lang = payload
         .language
         .clone()
@@ -1721,7 +1738,7 @@ async fn voice_install(
     }
 
     if payload.install_piper.unwrap_or(false) {
-        match crate::voice::piper::install_all(&lang).await {
+        match crate::voice::piper::install_all(&lang, payload.piper_voice.as_deref()).await {
             Ok(()) => {
                 messages.push("Piper TTS installed successfully".to_string());
             }
@@ -1766,13 +1783,14 @@ pub struct VoiceTranscribeResponse {
 }
 
 async fn voice_transcribe(
-    Extension(config): Extension<Config>,
+    Extension(agent): Extension<Arc<AgentRuntime>>,
     Json(payload): Json<VoiceTranscribeRequest>,
 ) -> Result<Json<VoiceTranscribeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let config = agent.get_config().await;
     let voice_config = config
         .voice
         .as_ref()
-        .filter(|v| v.enabled && v.stt_provider == "whisper-local")
+        .filter(|v| v.enabled && normalized_stt_provider(v.stt_provider.as_str()) == "whisper-local")
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
@@ -3647,10 +3665,11 @@ async fn voice_progress() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
 }
 
 async fn voice_upload(
-    Extension(config): Extension<Config>,
+    Extension(agent): Extension<Arc<AgentRuntime>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
     body: axum::body::Bytes,
 ) -> Result<Json<crate::voice::UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let config = agent.get_config().await;
     let _voice_config = config.voice.as_ref().ok_or((
         StatusCode::BAD_REQUEST,
         Json(ErrorResponse {
@@ -3705,12 +3724,14 @@ async fn voice_upload(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let (filename, file_path) = if model_type == "whisper" {
-        let name = format!("custom_whisper_{}.bin", timestamp);
-        (name.clone(), models_dir.join(&name))
+    let (model_id, filename, file_path) = if model_type == "whisper" {
+        let id = format!("custom_whisper_{}", timestamp);
+        let name = format!("ggml-{}.bin", id);
+        (id, name.clone(), models_dir.join(&name))
     } else {
-        let name = format!("custom_piper_{}.onnx", timestamp);
-        (name.clone(), models_dir.join(&name))
+        let id = format!("custom_piper_{}", timestamp);
+        let name = format!("{}.onnx", id);
+        (id, name.clone(), models_dir.join(&name))
     };
 
     std::fs::write(&file_path, &bytes).map_err(|e| {
@@ -3724,9 +3745,9 @@ async fn voice_upload(
 
     let size_bytes = bytes.len() as u64;
     let model = crate::voice::InstalledModel {
-        id: filename,
+        id: model_id.clone(),
         model_type: model_type.to_string(),
-        name: format!("Custom {} model", model_type),
+        name: format!("Custom {} {}", model_type, model_id),
         path: file_path.to_string_lossy().to_string(),
         size_bytes,
     };

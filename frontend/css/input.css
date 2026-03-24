@@ -100,6 +100,51 @@
     color: var(--accent);
 }
 
+.input-icon-btn.recording {
+    color: #ff6b6b;
+    background: rgba(255, 107, 107, 0.12);
+}
+
+.input-icon-btn.busy {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.input-icon-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+.voice-status {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.voice-status[data-state="ready"] {
+    color: var(--text-primary);
+}
+
+.voice-status[data-state="recording"] {
+    border-color: rgba(255, 107, 107, 0.35);
+    color: #ffb3b3;
+}
+
+.voice-status[data-state="busy"] {
+    border-color: rgba(255, 255, 255, 0.16);
+    color: var(--text-primary);
+}
+
+.voice-status[data-state="error"] {
+    border-color: rgba(255, 107, 107, 0.35);
+    color: #ff9b9b;
+}
+
 #send-btn {
     width: 34px;
     height: 34px;

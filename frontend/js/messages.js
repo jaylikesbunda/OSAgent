@@ -199,7 +199,6 @@ OSA.renderThinkingSection = function(thinking, expanded = false) {
     return `
         <div class="message-thinking${expanded ? ' expanded' : ''}">
             <button type="button" class="thinking-toggle" onclick="OSA.toggleThinkingBlock(this)">
-                <span class="thinking-toggle-icon">></span>
                 <span class="thinking-toggle-label">Thinking</span>
                 <span class="thinking-preview">${OSA.escapeHtml(preview)}</span>
             </button>
@@ -216,7 +215,6 @@ OSA.ensureThinkingContainer = function(message) {
         container.className = 'message-thinking expanded streaming';
         container.innerHTML = `
             <button type="button" class="thinking-toggle" onclick="OSA.toggleThinkingBlock(this)">
-                <span class="thinking-toggle-icon">></span>
                 <span class="thinking-toggle-label">Thinking</span>
                 <span class="thinking-preview"></span>
             </button>

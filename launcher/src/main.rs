@@ -83,6 +83,7 @@ pub struct AppState {
     osagent_pid: Mutex<Option<u32>>,
     osagent_running: Mutex<bool>,
     build_running: Mutex<bool>,
+    run_profile: Mutex<String>,
     osagent_path: PathBuf,
     config_path: PathBuf,
     logs: Mutex<Vec<LogEntry>>,
@@ -101,6 +102,47 @@ pub struct AgentStatus {
     pub pid: Option<u32>,
     pub osagent_path: String,
     pub config_path: String,
+}
+
+#[derive(Clone, Serialize)]
+struct VoiceStatus {
+    whisper_installed: bool,
+    piper_installed: bool,
+    whisper_model: Option<String>,
+    piper_voice: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VoiceInstallPayload {
+    install_whisper: bool,
+    whisper_model: String,
+    install_piper: bool,
+    piper_voice: String,
+}
+
+#[derive(Clone, Serialize)]
+struct VoiceProgress {
+    model_id: String,
+    stage: String,
+    progress: f32,
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
+struct BuildProgress {
+    compiling: u32,
+    current_crate: String,
+    warnings: u32,
+    errors: u32,
+    finished: bool,
+    success: bool,
+    profile: String,
+}
+
+#[derive(Serialize)]
+struct BinaryStatus {
+    debug_exists: bool,
+    release_exists: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -445,6 +487,16 @@ struct SetupConfigPayload {
     workspace_path: String,
     password_enabled: bool,
     password: String,
+    #[serde(default)]
+    stt_mode: String,
+    #[serde(default)]
+    stt_whisper_model: String,
+    #[serde(default)]
+    tts_mode: String,
+    #[serde(default)]
+    tts_piper_language: String,
+    #[serde(default)]
+    tts_piper_voice: String,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +648,31 @@ fn get_osagent_path() -> PathBuf {
     }
 
     candidates[0].clone()
+}
+
+fn get_osagent_path_for_profile(profile: &str) -> PathBuf {
+    let exe_path = std::env::current_exe()
+        .ok()
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let binary_name = if cfg!(windows) {
+        "osagent.exe"
+    } else {
+        "osagent"
+    };
+
+    // exe is at: .../osagent/launcher/target/release/osagent-launcher.exe
+    // We need:   .../osagent/target/{profile}/osagent[.exe]
+    if let Some(root) = exe_path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+    {
+        return root.join("target").join(profile).join(binary_name);
+    }
+
+    PathBuf::from(format!("osagent/target/{}/{}", profile, binary_name))
 }
 
 fn get_config_path() -> PathBuf {
@@ -1466,6 +1543,32 @@ fn save_setup_config_file(
     );
     update_default_workspace(agent, workspace_path);
 
+    // Voice section
+    let stt_local = payload.stt_mode == "local";
+    let tts_local = payload.tts_mode == "local";
+    let voice_stt_provider = if stt_local { "whisper-local" } else { "browser" };
+    let voice_tts_provider = if tts_local { "piper-local" } else { "browser" };
+    let voice_lang = if payload.tts_piper_language.is_empty() { "en" } else { &payload.tts_piper_language };
+    let whisper_model_val = if stt_local && !payload.stt_whisper_model.is_empty() {
+        payload.stt_whisper_model.clone()
+    } else {
+        "base".to_string()
+    };
+    let piper_voice_val = if tts_local && !payload.tts_piper_voice.is_empty() {
+        Some(payload.tts_piper_voice.clone())
+    } else {
+        None
+    };
+    let voice = ensure_child_table(root, "voice");
+    voice.insert("enabled".to_string(), toml::Value::Boolean(stt_local || tts_local));
+    voice.insert("stt_provider".to_string(), toml::Value::String(voice_stt_provider.to_string()));
+    voice.insert("tts_provider".to_string(), toml::Value::String(voice_tts_provider.to_string()));
+    voice.insert("language".to_string(), toml::Value::String(voice_lang.to_string()));
+    voice.insert("whisper_model".to_string(), toml::Value::String(whisper_model_val));
+    if let Some(pv) = piper_voice_val {
+        voice.insert("piper_voice".to_string(), toml::Value::String(pv));
+    }
+
     let data = toml::to_string_pretty(&document)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
     fs::write(&state.config_path, data).map_err(|e| format!("Failed to save config: {}", e))?;
@@ -1575,6 +1678,195 @@ fn add_log(state: &AppState, level: &str, message: String) {
     add_log_to_state(&state.logs, level, message);
 }
 
+fn terminate_osagent_processes(state: &AppState) {
+    if let Ok(mut process) = state.osagent_process.lock() {
+        if let Some(mut child) = process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    if let Ok(mut pid) = state.osagent_pid.lock() {
+        *pid = None;
+    }
+    if let Ok(mut running) = state.osagent_running.lock() {
+        *running = false;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "osagent.exe", "/T"])
+            .creation_flags(0x08000000)
+            .output();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("pkill").args(["-f", "(^|/)osagent$"]).output();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("pkill").args(["-f", "(^|/)osagent$"]).output();
+    }
+}
+
+// --- Voice helpers ---
+
+fn get_voice_dir() -> Option<std::path::PathBuf> {
+    dirs_next::home_dir().map(|h| h.join(".osagent").join("voice"))
+}
+
+fn check_whisper_installed() -> (bool, Option<String>) {
+    let dir = match get_voice_dir() {
+        Some(d) => d,
+        None => return (false, None),
+    };
+    #[cfg(target_os = "windows")]
+    let binary = dir.join("whisper.exe");
+    #[cfg(not(target_os = "windows"))]
+    let binary = dir.join("whisper");
+    let installed = binary.exists();
+    let model = if installed {
+        std::fs::read_dir(&dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .find(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        name.starts_with("ggml-") && name.ends_with(".bin")
+                    })
+                    .map(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        name.trim_start_matches("ggml-").trim_end_matches(".bin").to_string()
+                    })
+            })
+    } else {
+        None
+    };
+    (installed, model)
+}
+
+fn check_piper_installed() -> (bool, Option<String>) {
+    let dir = match get_voice_dir() {
+        Some(d) => d,
+        None => return (false, None),
+    };
+    #[cfg(target_os = "windows")]
+    let binary = dir.join("piper.exe");
+    #[cfg(not(target_os = "windows"))]
+    let binary = dir.join("piper");
+    let installed = binary.exists();
+    let voice = if installed {
+        std::fs::read_dir(&dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .find(|e| e.file_name().to_string_lossy().ends_with(".onnx"))
+                    .map(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        name.trim_end_matches(".onnx").to_string()
+                    })
+            })
+    } else {
+        None
+    };
+    (installed, voice)
+}
+
+async fn stream_download(
+    url: &str,
+    dest: &std::path::Path,
+    window: &tauri::Window,
+    model_id: &str,
+    stage: &str,
+    progress_offset: f32,
+    progress_range: f32,
+) -> Result<(), String> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download failed with HTTP {}", response.status()));
+    }
+
+    let total = response.content_length().unwrap_or(0);
+    let mut bytes_received: u64 = 0;
+    let mut last_pct: i32 = -1;
+    let mut collected: Vec<u8> = if total > 0 { Vec::with_capacity(total as usize) } else { Vec::new() };
+
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Read error: {}", e))? {
+        bytes_received += chunk.len() as u64;
+        collected.extend_from_slice(&chunk);
+        if total > 0 {
+            let pct = ((bytes_received as f32 / total as f32) * 100.0) as i32;
+            if pct != last_pct && pct % 5 == 0 {
+                last_pct = pct;
+                let p = progress_offset + (bytes_received as f32 / total as f32) * progress_range;
+                let _ = window.emit("voice-progress", VoiceProgress {
+                    model_id: model_id.to_string(),
+                    stage: stage.to_string(),
+                    progress: p,
+                    message: format!("{} {}%", stage, pct),
+                });
+            }
+        }
+    }
+
+    std::fs::write(dest, &collected).map_err(|e| format!("Failed to save file: {}", e))?;
+    Ok(())
+}
+
+fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile", "-NonInteractive", "-Command",
+            &format!(
+                "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                archive.display(), dest.display()
+            ),
+        ])
+        .output()
+        .map_err(|e| format!("PowerShell error: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("Extraction failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn extract_tar_gz(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new("tar")
+        .args(["-xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
+        .output()
+        .map_err(|e| format!("tar error: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("Extraction failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 // --- Tauri Commands ---
 
 #[tauri::command]
@@ -1597,6 +1889,14 @@ fn get_logs(state: State<AppState>) -> Vec<LogEntry> {
 #[tauri::command]
 fn get_build_running(state: State<AppState>) -> bool {
     *state.build_running.lock().unwrap()
+}
+
+#[tauri::command]
+fn get_binary_status() -> BinaryStatus {
+    BinaryStatus {
+        debug_exists: get_osagent_path_for_profile("debug").exists(),
+        release_exists: get_osagent_path_for_profile("release").exists(),
+    }
 }
 
 #[tauri::command]
@@ -1987,14 +2287,25 @@ async fn validate_setup_provider(
 }
 
 #[tauri::command]
-fn start_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, String> {
+fn start_osagent(
+    window: Window,
+    state: State<AppState>,
+    profile: Option<String>,
+) -> Result<AgentStatus, String> {
     let running = *state.osagent_running.lock().unwrap();
     if running {
         return Err("OSAgent is already running".into());
     }
 
-    if !state.osagent_path.exists() {
-        let msg = format!("osagent.exe not found at {}", state.osagent_path.display());
+    let resolved_profile = profile.unwrap_or_else(|| "release".to_string());
+    *state.run_profile.lock().unwrap() = resolved_profile.clone();
+    let binary_path = get_osagent_path_for_profile(&resolved_profile);
+
+    if !binary_path.exists() {
+        let msg = format!(
+            "osagent binary not found at {} — build it first",
+            binary_path.display()
+        );
         add_log(&state, "error", msg.clone());
         return Err(msg);
     }
@@ -2014,7 +2325,11 @@ fn start_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, 
     add_log(
         &state,
         "info",
-        format!("Starting osagent from {}", state.osagent_path.display()),
+        format!(
+            "Starting osagent ({}) from {}",
+            resolved_profile,
+            binary_path.display()
+        ),
     );
 
     let log_dir = dirs_next::home_dir()
@@ -2023,7 +2338,7 @@ fn start_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, 
     let _ = std::fs::create_dir_all(&log_dir);
     let log_file_path = log_dir.join("launcher_output.log");
 
-    let mut cmd = Command::new(&state.osagent_path);
+    let mut cmd = Command::new(&binary_path);
     cmd.arg("start")
         .arg("--config")
         .arg(&state.config_path)
@@ -2140,10 +2455,11 @@ fn stop_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, S
 #[tauri::command]
 fn restart_osagent(window: Window, app_handle: tauri::AppHandle) -> Result<AgentStatus, String> {
     let state = app_handle.state::<AppState>();
+    let profile = state.run_profile.lock().unwrap().clone();
     let _ = stop_osagent(window.clone(), state);
     std::thread::sleep(std::time::Duration::from_millis(500));
     let state = app_handle.state::<AppState>();
-    start_osagent(window, state)
+    start_osagent(window, state, Some(profile))
 }
 
 #[tauri::command]
@@ -2157,10 +2473,36 @@ fn hide_to_tray(window: Window) {
 }
 
 #[tauri::command]
-fn build_osagent(window: Window, state: State<AppState>) -> Result<String, String> {
-    let osagent_dir = state
-        .osagent_path
+fn build_osagent(
+    window: Window,
+    state: State<AppState>,
+    profile: String,
+) -> Result<String, String> {
+    // Stop osagent if running to avoid file lock issues
+    let running = *state.osagent_running.lock().unwrap();
+    if running {
+        add_log(&state, "info", "Stopping OSAgent before build...".to_string());
+        let mut process = state.osagent_process.lock().unwrap();
+        if let Some(mut child) = process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *state.osagent_pid.lock().unwrap() = None;
+        *state.osagent_running.lock().unwrap() = false;
+        let _ = window.emit("osagent-status-changed", AgentStatus {
+            running: false,
+            pid: None,
+            osagent_path: state.osagent_path.to_string_lossy().to_string(),
+            config_path: state.config_path.to_string_lossy().to_string(),
+        });
+        update_tray_menu(&window, false);
+        // Give the OS a moment to release the file lock
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    let osagent_dir = get_osagent_path_for_profile(&profile)
         .parent()
+        .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf())
         .ok_or_else(|| "Could not determine osagent directory".to_string())?;
@@ -2170,15 +2512,34 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
         .join(".osagent")
         .join("launcher_output.log");
 
-    let start_msg = format!("Building osagent in {}", osagent_dir.display());
+    let start_msg = format!("Building osagent ({}) in {}", profile, osagent_dir.display());
     add_log(&state, "info", start_msg);
     *state.build_running.lock().unwrap() = true;
 
     let app_handle = window.app_handle();
+    let profile_clone = profile.clone();
+
+    // Emit initial progress event so the frontend can show the progress section immediately.
+    let _ = window.emit(
+        "build-progress",
+        BuildProgress {
+            compiling: 0,
+            current_crate: String::new(),
+            warnings: 0,
+            errors: 0,
+            finished: false,
+            success: false,
+            profile: profile.clone(),
+        },
+    );
 
     std::thread::spawn(move || {
         let mut cmd = std::process::Command::new("cargo");
-        cmd.args(["build", "--release"]);
+        if profile_clone == "debug" {
+            cmd.args(["build"]);
+        } else {
+            cmd.args(["build", "--release"]);
+        }
         cmd.current_dir(&osagent_dir);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -2200,6 +2561,20 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
                 let state = app_handle.state::<AppState>();
                 add_log(&state, "error", format!("Failed to spawn cargo: {}", e));
                 *state.build_running.lock().unwrap() = false;
+                if let Some(win) = app_handle.get_window("main") {
+                    let _ = win.emit(
+                        "build-progress",
+                        BuildProgress {
+                            compiling: 0,
+                            current_crate: String::new(),
+                            warnings: 0,
+                            errors: 1,
+                            finished: true,
+                            success: false,
+                            profile: profile_clone.clone(),
+                        },
+                    );
+                }
                 return;
             }
         };
@@ -2236,43 +2611,182 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
 
         let app_handle_err = app_handle.clone();
         let log_file_err = log_file_path.clone();
+        let profile_for_err = profile_clone.clone();
+        // Shared counters for emitting structured build-progress events.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let compiling_count = std::sync::Arc::new(AtomicU32::new(0));
+        let warnings_count = std::sync::Arc::new(AtomicU32::new(0));
+        let errors_count = std::sync::Arc::new(AtomicU32::new(0));
+        let cc2 = compiling_count.clone();
+        let wc2 = warnings_count.clone();
+        let ec2 = errors_count.clone();
         let stderr_handle = stderr.map(|stderr| {
             std::thread::spawn(move || {
-                let reader = std::io::BufReader::new(stderr);
-                for l in reader.lines().map_while(Result::ok) {
-                    // Each \n-terminated line may contain multiple \r-separated
-                    // cargo progress updates. Split and handle each segment.
-                    for part in l.split('\r') {
-                        let clean = strip_ansi_codes(part);
-                        let trimmed = clean.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let level = if trimmed.starts_with("error") || trimmed.contains("error[") {
-                            "error"
-                        } else if trimmed.starts_with("warning") {
-                            "warn"
-                        } else {
-                            "info"
-                        };
-                        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                        let state = app_handle_err.state::<AppState>();
-                        add_log_to_state(&state.logs, level, trimmed.to_string());
-                        if let Ok(mut file) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&log_file_err)
-                        {
-                            use std::io::Write;
-                            let _ = writeln!(
-                                file,
-                                "[{}] [{}] {}",
-                                timestamp,
-                                level.to_uppercase(),
-                                trimmed
+                use std::io::Read;
+                let mut reader = std::io::BufReader::new(stderr);
+                let mut buf = [0u8; 1];
+                let mut line = String::new();
+                
+                fn process_line(
+                    line: &str,
+                    app_handle: &tauri::AppHandle,
+                    cc: &std::sync::Arc<AtomicU32>,
+                    wc: &std::sync::Arc<AtomicU32>,
+                    ec: &std::sync::Arc<AtomicU32>,
+                    profile: &str,
+                    log_file: &std::path::Path,
+                ) {
+                    let clean = strip_ansi_codes(line);
+                    let trimmed = clean.trim();
+                    if trimmed.is_empty() {
+                        return;
+                    }
+                    let level = if trimmed.starts_with("error") || trimmed.contains("error[") {
+                        "error"
+                    } else if trimmed.starts_with("warning") {
+                        "warn"
+                    } else {
+                        "info"
+                    };
+                    // Parse "Compiling crate-name" events
+                    if trimmed.starts_with("Compiling ") {
+                        let n = cc.fetch_add(1, Ordering::Relaxed) + 1;
+                        let crate_display = trimmed
+                            .trim_start_matches("Compiling ")
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(win) = app_handle.get_window("main") {
+                            let _ = win.emit(
+                                "build-progress",
+                                BuildProgress {
+                                    compiling: n,
+                                    current_crate: crate_display.clone(),
+                                    warnings: wc.load(Ordering::Relaxed),
+                                    errors: ec.load(Ordering::Relaxed),
+                                    finished: false,
+                                    success: false,
+                                    profile: profile.to_string(),
+                                },
                             );
                         }
                     }
+                    // Parse "Building [===>] 469/472: crate-name" progress bar
+                    else if trimmed.starts_with("Building ") {
+                        // Extract current/total like "469/472"
+                        let progress_info = if let Some(bracket_end) = trimmed.find(']') {
+                            let after_bracket = &trimmed[bracket_end + 1..].trim();
+                            // Parse "469/472: crate-name"
+                            if let Some(colon_pos) = after_bracket.find(':') {
+                                let fraction = &after_bracket[..colon_pos].trim();
+                                let crate_name = &after_bracket[colon_pos + 1..].trim();
+                                // Remove trailing dots
+                                let crate_name = crate_name.trim_end_matches('…').trim_end_matches('.').trim();
+                                Some((fraction.to_string(), crate_name.to_string()))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        
+                        if let Some((fraction, crate_name)) = progress_info {
+                            // Parse "469/472" to get current count
+                            let current: u32 = fraction.split('/')
+                                .next()
+                                .and_then(|s| s.trim().parse().ok())
+                                .unwrap_or(0);
+                            if let Some(win) = app_handle.get_window("main") {
+                                let _ = win.emit(
+                                    "build-progress",
+                                    BuildProgress {
+                                        compiling: current,
+                                        current_crate: crate_name.clone(),
+                                        warnings: wc.load(Ordering::Relaxed),
+                                        errors: ec.load(Ordering::Relaxed),
+                                        finished: false,
+                                        success: false,
+                                        profile: profile.to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    else if trimmed.starts_with("Finished") || trimmed.starts_with("error:") {
+                        // "Finished" → success; bare "error:" summary → failure
+                        let success = trimmed.starts_with("Finished");
+                        if !success {
+                            ec.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if let Some(win) = app_handle.get_window("main") {
+                            let _ = win.emit(
+                                "build-progress",
+                                BuildProgress {
+                                    compiling: cc.load(Ordering::Relaxed),
+                                    current_crate: String::new(),
+                                    warnings: wc.load(Ordering::Relaxed),
+                                    errors: ec.load(Ordering::Relaxed),
+                                    finished: true,
+                                    success,
+                                    profile: profile.to_string(),
+                                },
+                            );
+                        }
+                    } else if trimmed.starts_with("warning") || trimmed.contains("warning[") {
+                        wc.fetch_add(1, Ordering::Relaxed);
+                    } else if trimmed.starts_with("error") || trimmed.contains("error[") {
+                        ec.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+                    let state = app_handle.state::<AppState>();
+                    add_log_to_state(&state.logs, level, trimmed.to_string());
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(log_file)
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            file,
+                            "[{}] [{}] {}",
+                            timestamp,
+                            level.to_uppercase(),
+                            trimmed
+                        );
+                    }
+                }
+
+                while let Ok(1) = reader.read(&mut buf) {
+                    let b = buf[0];
+                    if b == b'\r' || b == b'\n' {
+                        if !line.is_empty() {
+                            process_line(
+                                &line,
+                                &app_handle_err,
+                                &cc2,
+                                &wc2,
+                                &ec2,
+                                &profile_for_err,
+                                &log_file_err,
+                            );
+                            line.clear();
+                        }
+                    } else {
+                        line.push(b as char);
+                    }
+                }
+                // Process any remaining content
+                if !line.is_empty() {
+                    process_line(
+                        &line,
+                        &app_handle_err,
+                        &cc2,
+                        &wc2,
+                        &ec2,
+                        &profile_for_err,
+                        &log_file_err,
+                    );
                 }
             })
         });
@@ -2290,7 +2804,8 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
         }
 
         let state = app_handle.state::<AppState>();
-        match exit_status {
+        let success = matches!(&exit_status, Ok(s) if s.success());
+        match &exit_status {
             Ok(s) if s.success() => {
                 add_log(&state, "info", "Build completed successfully".to_string());
             }
@@ -2304,6 +2819,22 @@ fn build_osagent(window: Window, state: State<AppState>) -> Result<String, Strin
             Err(e) => {
                 add_log(&state, "error", format!("Build process error: {}", e));
             }
+        }
+        // Emit a final progress event to ensure the frontend reaches 100% / error state
+        // even if cargo didn't print a "Finished" or "error:" summary line.
+        if let Some(win) = app_handle.get_window("main") {
+            let _ = win.emit(
+                "build-progress",
+                BuildProgress {
+                    compiling: compiling_count.load(Ordering::Relaxed),
+                    current_crate: String::new(),
+                    warnings: warnings_count.load(Ordering::Relaxed),
+                    errors: errors_count.load(Ordering::Relaxed),
+                    finished: true,
+                    success,
+                    profile: profile_clone.clone(),
+                },
+            );
         }
         *state.build_running.lock().unwrap() = false;
     });
@@ -2325,22 +2856,258 @@ fn minimize_window(window: Window) {
 
 #[tauri::command]
 fn exit_app(app: tauri::AppHandle, state: State<AppState>) {
-    let running = *state.osagent_running.lock().unwrap();
-    if running {
-        let mut process = state.osagent_process.lock().unwrap();
-        if let Some(mut child) = process.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        *state.osagent_running.lock().unwrap() = false;
-    }
-
+    terminate_osagent_processes(&state);
     app.exit(0);
 }
 
 #[tauri::command]
 fn check_osagent_path(state: State<AppState>) -> String {
     state.osagent_path.to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn check_voice_status() -> VoiceStatus {
+    let (whisper_installed, whisper_model) = check_whisper_installed();
+    let (piper_installed, piper_voice) = check_piper_installed();
+    VoiceStatus { whisper_installed, piper_installed, whisper_model, piper_voice }
+}
+
+#[tauri::command]
+async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> Result<VoiceStatus, String> {
+    let dir = get_voice_dir().ok_or_else(|| "Could not determine home directory".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create voice dir: {}", e))?;
+
+    if payload.install_whisper {
+        let (binary_ok, _) = check_whisper_installed();
+        if !binary_ok {
+            let _ = window.emit("voice-progress", VoiceProgress {
+                model_id: "whisper".to_string(),
+                stage: "downloading_binary".to_string(),
+                progress: 0.0,
+                message: "Downloading Whisper binary...".to_string(),
+            });
+
+            #[cfg(target_os = "windows")]
+            {
+                let url = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.3/whisper-bin-x64.zip";
+                let archive = dir.join("whisper_archive.zip");
+                stream_download(url, &archive, &window, "whisper", "downloading_binary", 0.0, 0.25).await?;
+
+                let _ = window.emit("voice-progress", VoiceProgress {
+                    model_id: "whisper".to_string(),
+                    stage: "extracting".to_string(),
+                    progress: 0.25,
+                    message: "Extracting Whisper binary...".to_string(),
+                });
+
+                let extract_dir = dir.join("whisper_extract");
+                std::fs::create_dir_all(&extract_dir).ok();
+                extract_zip_powershell(&archive, &extract_dir)?;
+
+                // whisper-bin-x64 zip extracts into a flat directory — find whisper.exe
+                let binary_dest = dir.join("whisper.exe");
+                // Try direct extraction
+                let direct = extract_dir.join("whisper.exe");
+                if direct.exists() {
+                    std::fs::copy(&direct, &binary_dest).ok();
+                } else {
+                    // Search recursively
+                    if let Ok(entries) = std::fs::read_dir(&extract_dir) {
+                        for entry in entries.flatten() {
+                            if entry.file_name() == "whisper.exe" {
+                                std::fs::copy(&entry.path(), &binary_dest).ok();
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Copy DLLs too
+                if let Ok(entries) = std::fs::read_dir(&extract_dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.ends_with(".dll") {
+                            let _ = std::fs::copy(&entry.path(), dir.join(&name));
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(&archive);
+                let _ = std::fs::remove_dir_all(&extract_dir);
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                return Err("Automatic Whisper binary installation is only supported on Windows. Please install whisper.cpp manually.".to_string());
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                return Err("Automatic Whisper binary installation is only supported on Windows. Please install whisper.cpp manually.".to_string());
+            }
+        }
+
+        // Download model
+        let model_id = if payload.whisper_model.is_empty() { "base" } else { &payload.whisper_model };
+        let model_path = dir.join(format!("ggml-{}.bin", model_id));
+        if !model_path.exists() {
+            let _ = window.emit("voice-progress", VoiceProgress {
+                model_id: "whisper".to_string(),
+                stage: "downloading_model".to_string(),
+                progress: 0.3,
+                message: format!("Downloading Whisper {} model...", model_id),
+            });
+            let url = format!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
+                model_id
+            );
+            stream_download(&url, &model_path, &window, "whisper", "downloading_model", 0.3, 0.65).await?;
+        }
+
+        let _ = window.emit("voice-progress", VoiceProgress {
+            model_id: "whisper".to_string(),
+            stage: "complete".to_string(),
+            progress: 0.95,
+            message: "Whisper ready!".to_string(),
+        });
+    }
+
+    if payload.install_piper {
+        let (binary_ok, _) = check_piper_installed();
+        if !binary_ok {
+            let _ = window.emit("voice-progress", VoiceProgress {
+                model_id: "piper".to_string(),
+                stage: "downloading_binary".to_string(),
+                progress: 0.0,
+                message: "Downloading Piper binary...".to_string(),
+            });
+
+            #[cfg(target_os = "windows")]
+            {
+                let url = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
+                let archive = dir.join("piper_archive.zip");
+                stream_download(url, &archive, &window, "piper", "downloading_binary", 0.0, 0.25).await?;
+
+                let _ = window.emit("voice-progress", VoiceProgress {
+                    model_id: "piper".to_string(),
+                    stage: "extracting".to_string(),
+                    progress: 0.25,
+                    message: "Extracting Piper binary...".to_string(),
+                });
+
+                let extract_dir = dir.join("piper_extract");
+                std::fs::create_dir_all(&extract_dir).ok();
+                extract_zip_powershell(&archive, &extract_dir)?;
+
+                let piper_inner = extract_dir.join("piper");
+                let binary_src = piper_inner.join("piper.exe");
+                let binary_dest = dir.join("piper.exe");
+                if binary_src.exists() {
+                    std::fs::copy(&binary_src, &binary_dest).ok();
+                    // Copy DLLs and espeak-ng-data
+                    if let Ok(entries) = std::fs::read_dir(&piper_inner) {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if name.ends_with(".dll") || name == "libtashkeel_model.ort" {
+                                let _ = std::fs::copy(&entry.path(), dir.join(&name));
+                            }
+                        }
+                    }
+                    let espeak_src = piper_inner.join("espeak-ng-data");
+                    let espeak_dst = dir.join("espeak-ng-data");
+                    if espeak_src.exists() {
+                        let _ = copy_dir_recursive(&espeak_src, &espeak_dst);
+                    }
+                }
+                let _ = std::fs::remove_file(&archive);
+                let _ = std::fs::remove_dir_all(&extract_dir);
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let url = if cfg!(target_os = "macos") {
+                    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_x64.tar.gz"
+                } else {
+                    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x64.tar.gz"
+                };
+                let archive = dir.join("piper_archive.tar.gz");
+                stream_download(url, &archive, &window, "piper", "downloading_binary", 0.0, 0.25).await?;
+
+                let extract_dir = dir.join("piper_extract");
+                std::fs::create_dir_all(&extract_dir).ok();
+                extract_tar_gz(&archive, &extract_dir)?;
+
+                let piper_inner = extract_dir.join("piper");
+                let binary_src = piper_inner.join("piper");
+                let binary_dest = dir.join("piper");
+                if binary_src.exists() {
+                    std::fs::copy(&binary_src, &binary_dest).ok();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&binary_dest, std::fs::Permissions::from_mode(0o755));
+                    }
+                    let espeak_src = piper_inner.join("espeak-ng-data");
+                    let espeak_dst = dir.join("espeak-ng-data");
+                    if espeak_src.exists() {
+                        let _ = copy_dir_recursive(&espeak_src, &espeak_dst);
+                    }
+                }
+                let _ = std::fs::remove_file(&archive);
+                let _ = std::fs::remove_dir_all(&extract_dir);
+            }
+        }
+
+        // Download voice
+        if !payload.piper_voice.is_empty() {
+            let voice_path = dir.join(format!("{}.onnx", payload.piper_voice));
+            if !voice_path.exists() {
+                let _ = window.emit("voice-progress", VoiceProgress {
+                    model_id: "piper".to_string(),
+                    stage: "downloading_voice".to_string(),
+                    progress: 0.3,
+                    message: format!("Downloading voice {}...", payload.piper_voice),
+                });
+
+                // Build HuggingFace URL from voice ID convention: lang_REGION-name-quality
+                // e.g. en_US-libritts-high → en/en_US/libritts/high/en_US-libritts-high.onnx
+                let voice_url = voice_id_to_hf_url(&payload.piper_voice);
+                stream_download(&voice_url, &voice_path, &window, "piper", "downloading_voice", 0.3, 0.65).await?;
+
+                // Download JSON config
+                let json_url = format!("{}.json", voice_url);
+                let json_path = dir.join(format!("{}.onnx.json", payload.piper_voice));
+                let _ = stream_download(&json_url, &json_path, &window, "piper", "downloading_voice_config", 0.95, 0.04).await;
+            }
+        }
+
+        let _ = window.emit("voice-progress", VoiceProgress {
+            model_id: "piper".to_string(),
+            stage: "complete".to_string(),
+            progress: 1.0,
+            message: "Piper ready!".to_string(),
+        });
+    }
+
+    let (whisper_installed, whisper_model) = check_whisper_installed();
+    let (piper_installed, piper_voice) = check_piper_installed();
+    Ok(VoiceStatus { whisper_installed, piper_installed, whisper_model, piper_voice })
+}
+
+fn voice_id_to_hf_url(voice_id: &str) -> String {
+    // voice_id: e.g. "en_US-libritts-high" → lang=en, locale=en_US, name=libritts, quality=high
+    let parts: Vec<&str> = voice_id.splitn(3, '-').collect();
+    if parts.len() < 3 {
+        return format!(
+            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high/en_US-libritts-high.onnx"
+        );
+    }
+    let locale = parts[0]; // e.g. "en_US"
+    let name = parts[1];   // e.g. "libritts"
+    let quality = parts[2]; // e.g. "high"
+    let lang = locale.split('_').next().unwrap_or("en");
+    format!(
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/{}/{}/{}/{}/{}.onnx",
+        lang, locale, name, quality, voice_id
+    )
 }
 
 // --- Tray Helpers ---
@@ -2509,6 +3276,7 @@ fn main() {
         osagent_pid: Mutex::new(None),
         osagent_running: Mutex::new(false),
         build_running: Mutex::new(false),
+        run_profile: Mutex::new("release".to_string()),
         osagent_path,
         config_path,
         logs: Mutex::new(Vec::new()),
@@ -2544,7 +3312,7 @@ fn main() {
                 }
                 "start_osagent" => {
                     if let Some(window) = app.get_window("main") {
-                        let _ = start_osagent(window, app.state());
+                        let _ = start_osagent(window, app.state(), None);
                     }
                 }
                 "stop_osagent" => {
@@ -2554,10 +3322,7 @@ fn main() {
                 }
                 "exit" => {
                     let state = app.state::<AppState>();
-                    let mut process = state.osagent_process.lock().unwrap();
-                    if let Some(mut child) = process.take() {
-                        let _ = child.kill();
-                    }
+                    terminate_osagent_processes(&state);
                     app.exit(0);
                 }
                 _ => {}
@@ -2585,6 +3350,7 @@ fn main() {
             get_status,
             get_logs,
             get_build_running,
+            get_binary_status,
             get_setup_state,
             get_setup_provider_catalog,
             start_setup_oauth,
@@ -2603,6 +3369,8 @@ fn main() {
             exit_app,
             check_osagent_path,
             build_osagent,
+            check_voice_status,
+            install_voice,
         ])
         .setup(|app| {
             start_process_monitor(app.handle());

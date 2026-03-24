@@ -51,6 +51,10 @@
             </button>
             <button class="wizard-pill" data-step="4" type="button">
               <span class="wizard-pill-num">5</span>
+              <span class="wizard-pill-label">Voice</span>
+            </button>
+            <button class="wizard-pill" data-step="5" type="button">
+              <span class="wizard-pill-num">6</span>
               <span class="wizard-pill-label">Review</span>
             </button>
           </nav>
@@ -167,8 +171,62 @@
             </div>
           </div>
 
-          <!-- Step 5: Review + Security -->
+          <!-- Step 5: Voice Setup -->
           <div class="wizard-panel" data-step-panel="4">
+            <div class="section-heading">
+              <h2>Voice setup <span class="optional-badge">Optional</span></h2>
+              <p>Install local speech recognition and text-to-speech. You can skip and set this up later from the dashboard.</p>
+            </div>
+            <div class="step-body">
+
+              <div class="voice-section">
+                <div class="voice-section-label">Speech-to-text (STT)</div>
+                <div class="voice-mode-toggle" id="stt-mode-toggle">
+                  <button class="voice-mode-btn active" data-mode="browser" type="button">Browser built-in</button>
+                  <button class="voice-mode-btn" data-mode="local" type="button">Whisper (local)</button>
+                </div>
+                <div class="voice-model-grid hidden" id="stt-model-cards"></div>
+              </div>
+
+              <div class="voice-section">
+                <div class="voice-section-label">Text-to-speech (TTS)</div>
+                <div class="voice-mode-toggle" id="tts-mode-toggle">
+                  <button class="voice-mode-btn active" data-mode="browser" type="button">Browser built-in</button>
+                  <button class="voice-mode-btn" data-mode="local" type="button">Piper (local)</button>
+                </div>
+                <div class="hidden" id="tts-local-options">
+                  <label class="field" style="margin-top:10px">
+                    <span>Language</span>
+                    <select id="tts-lang-select">
+                      <option value="en">English</option>
+                      <option value="de">German</option>
+                      <option value="fr">French</option>
+                      <option value="es">Spanish</option>
+                    </select>
+                  </label>
+                  <div class="voice-model-grid" id="tts-voice-cards"></div>
+                </div>
+              </div>
+
+              <div class="hidden" id="voice-download-section">
+                <div class="voice-progress-wrap hidden" id="voice-wiz-progress-wrap">
+                  <div class="voice-progress-label" id="voice-wiz-progress-label">Preparing...</div>
+                  <div class="progress-bar">
+                    <div class="progress-fill" id="voice-wiz-progress-fill" style="width:0%"></div>
+                  </div>
+                  <div class="progress-text" id="voice-wiz-progress-text">0%</div>
+                </div>
+                <div class="voice-download-actions">
+                  <button class="btn primary" id="btn-download-voice" type="button">Download now</button>
+                  <span class="voice-ready-check hidden" id="voice-wiz-ready">✓ Voice installed</span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Step 6: Review + Security -->
+          <div class="wizard-panel" data-step-panel="5">
             <div class="section-heading">
               <h2>Ready to save</h2>
               <p>Confirm settings and set a web UI password if you want one.</p>
@@ -226,6 +284,14 @@
               <button class="btn ghost" id="btn-restart" type="button" disabled>Restart</button>
             </div>
 
+            <div class="profile-row" id="run-profile-row">
+              <span class="profile-row-label">Run</span>
+              <div class="profile-toggle" id="run-profile-toggle">
+                <button class="profile-btn active" data-profile="release" type="button">Release</button>
+                <button class="profile-btn" data-profile="debug" type="button">Debug</button>
+              </div>
+            </div>
+
             <div class="review-list mini dash-info">
               <div class="review-item"><span>Provider</span><strong id="dashboard-provider">-</strong></div>
               <div class="review-item"><span>Workspace</span><strong id="dashboard-workspace">-</strong></div>
@@ -237,7 +303,45 @@
             <div class="actions quick-actions dash-secondary">
               <button class="btn ghost" id="btn-open-ui" type="button">Open Web UI</button>
               <button class="btn ghost" id="btn-open-setup" type="button">Reconfigure</button>
-              <button class="btn ghost" id="btn-build" type="button">Build OSA</button>
+            </div>
+
+            <div class="build-section">
+              <div class="profile-row">
+                <span class="profile-row-label">Build</span>
+                <div class="profile-toggle" id="build-profile-toggle">
+                  <button class="profile-btn active" data-profile="release" type="button">Release</button>
+                  <button class="profile-btn" data-profile="debug" type="button">Debug</button>
+                </div>
+                <button class="btn ghost tiny" id="btn-build" type="button">Build</button>
+              </div>
+              <div class="build-progress-section hidden" id="build-progress-section">
+                <div class="build-progress-label" id="build-progress-label">Preparing...</div>
+                <div class="progress-bar">
+                  <div class="progress-fill" id="build-progress-fill" style="width:0%"></div>
+                </div>
+                <div class="build-progress-stats" id="build-progress-stats"></div>
+              </div>
+            </div>
+
+            <div class="voice-panel" id="voice-panel">
+              <div class="voice-panel-header">
+                <span class="voice-panel-title">Voice</span>
+                <span class="voice-status-chip" id="voice-status-chip">Not set up</span>
+              </div>
+              <div class="review-list mini">
+                <div class="review-item"><span>STT</span><strong id="voice-stt-status">-</strong></div>
+                <div class="review-item"><span>TTS</span><strong id="voice-tts-status">-</strong></div>
+              </div>
+              <div id="voice-dash-install-section">
+                <div class="voice-progress-wrap hidden" id="voice-dash-progress-wrap">
+                  <div class="voice-progress-label" id="voice-dash-progress-label">Downloading...</div>
+                  <div class="progress-bar">
+                    <div class="progress-fill" id="voice-dash-progress-fill" style="width:0%"></div>
+                  </div>
+                  <div class="progress-text" id="voice-dash-progress-text">0%</div>
+                </div>
+                <button class="btn ghost tiny" id="btn-install-voice-dash" type="button">Install Voice Models</button>
+              </div>
             </div>
           </section>
 

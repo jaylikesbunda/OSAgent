@@ -7,6 +7,25 @@
   const listen = tauri.listen;
   const tauriWindow = tauri.window;
 
+  const WHISPER_MODELS = [
+    { id: 'tiny',   name: 'Tiny',   size: '75 MB',  note: 'Fastest' },
+    { id: 'base',   name: 'Base',   size: '142 MB', note: 'Balanced' },
+    { id: 'small',  name: 'Small',  size: '466 MB', note: 'Accurate' },
+    { id: 'medium', name: 'Medium', size: '1.5 GB', note: 'Best accuracy' }
+  ];
+
+  const PIPER_VOICES = {
+    en: [
+      { id: 'en_US-libritts-high',  name: 'LibriTTS', quality: 'high'   },
+      { id: 'en_US-lessac-medium',  name: 'Lessac',   quality: 'medium' },
+      { id: 'en_US-amy-medium',     name: 'Amy',      quality: 'medium' },
+      { id: 'en_GB-semaine-medium', name: 'Semaine',  quality: 'medium' }
+    ],
+    de: [{ id: 'de_DE-thorsten-medium', name: 'Thorsten', quality: 'medium' }],
+    fr: [{ id: 'fr_FR-siwis-medium',    name: 'Siwis',    quality: 'medium' }],
+    es: [{ id: 'es_ES-sharvard-medium', name: 'Sharvard', quality: 'medium' }]
+  };
+
   const state = {
     isRunning: false,
     logs: [],
@@ -24,6 +43,10 @@
     logSyncCount: 0,
     buildPollInterval: null,
     buildPollLogCount: 0,
+    buildProfile: 'release',
+    runProfile: 'release',
+    buildProgress: null,
+    buildUnlisten: null,
     wizard: {
       step: 0,
       provider_type: '',
@@ -33,9 +56,15 @@
       workspace_path: '',
       password_enabled: true,
       password: '',
-      confirm_password: ''
+      confirm_password: '',
+      stt_mode: 'browser',
+      stt_whisper_model: 'base',
+      tts_mode: 'browser',
+      tts_piper_language: 'en',
+      tts_piper_voice: 'en_US-libritts-high'
     },
-    devicePoll: null
+    devicePoll: null,
+    voiceUnlisten: null
   };
 
   const $ = (selector) => document.querySelector(selector);
@@ -107,11 +136,41 @@
     btnOpenUi: $('#btn-open-ui'),
     btnOpenSetup: $('#btn-open-setup'),
     btnBuild: $('#btn-build'),
+    buildProfileToggle: $('#build-profile-toggle'),
+    runProfileToggle: $('#run-profile-toggle'),
+    buildProgressSection: $('#build-progress-section'),
+    buildProgressLabel: $('#build-progress-label'),
+    buildProgressFill: $('#build-progress-fill'),
+    buildProgressStats: $('#build-progress-stats'),
     btnFinishOpenUi: $('#btn-finish-open-ui'),
     btnFinishDashboard: $('#btn-finish-dashboard'),
     btnMinimize: $('#btn-minimize'),
     btnClose: $('#btn-close'),
-    btnClearLog: $('#btn-clear-log')
+    btnClearLog: $('#btn-clear-log'),
+    // Voice wizard
+    sttModeToggle: $('#stt-mode-toggle'),
+    sttModelCards: $('#stt-model-cards'),
+    ttsModeToggle: $('#tts-mode-toggle'),
+    ttsLocalOptions: $('#tts-local-options'),
+    ttsLangSelect: $('#tts-lang-select'),
+    ttsVoiceCards: $('#tts-voice-cards'),
+    voiceDownloadSection: $('#voice-download-section'),
+    voiceWizProgressWrap: $('#voice-wiz-progress-wrap'),
+    voiceWizProgressLabel: $('#voice-wiz-progress-label'),
+    voiceWizProgressFill: $('#voice-wiz-progress-fill'),
+    voiceWizProgressText: $('#voice-wiz-progress-text'),
+    btnDownloadVoice: $('#btn-download-voice'),
+    voiceWizReady: $('#voice-wiz-ready'),
+    // Voice dashboard
+    voicePanel: $('#voice-panel'),
+    voiceStatusChip: $('#voice-status-chip'),
+    voiceSttStatus: $('#voice-stt-status'),
+    voiceTtsStatus: $('#voice-tts-status'),
+    voiceDashProgressWrap: $('#voice-dash-progress-wrap'),
+    voiceDashProgressLabel: $('#voice-dash-progress-label'),
+    voiceDashProgressFill: $('#voice-dash-progress-fill'),
+    voiceDashProgressText: $('#voice-dash-progress-text'),
+    btnInstallVoiceDash: $('#btn-install-voice-dash')
   };
 
   function currentProvider() {
@@ -147,6 +206,7 @@
     els.setupView.classList.toggle('hidden', viewName !== 'setup');
     els.finishView.classList.toggle('hidden', viewName !== 'finish');
     els.dashboardView.classList.toggle('hidden', viewName !== 'dashboard');
+    if (viewName === 'dashboard') checkVoiceStatus();
   }
 
   function setSetupError(message) {
@@ -502,7 +562,7 @@
     if (state.wizard.step === 3 && !state.wizard.workspace_path.trim()) {
       return 'Choose a workspace folder to continue.';
     }
-    if (state.wizard.step === 4 && state.wizard.password_enabled) {
+    if (state.wizard.step === 5 && state.wizard.password_enabled) {
       if (!state.wizard.password) return 'Enter a password or turn password protection off.';
       if (state.wizard.password !== state.wizard.confirm_password) return 'Passwords do not match yet.';
     }
@@ -518,6 +578,19 @@
     } catch (error) {
       addLog('error', 'Failed to get status: ' + error);
     }
+    try {
+      const binaryStatus = await invoke('get_binary_status');
+      const dbg = binaryStatus.debug_exists;
+      const rel = binaryStatus.release_exists;
+      let badge = '';
+      if (dbg && rel) badge = 'debug & release';
+      else if (rel) badge = 'release only';
+      else if (dbg) badge = 'debug only';
+      else badge = 'not built';
+      if (els.setupBinaryStatus) {
+        els.setupBinaryStatus.textContent = badge;
+      }
+    } catch (_e) {}
   }
 
   async function loadProviderCatalog() {
@@ -564,7 +637,50 @@
     };
   }
 
+  function updateBuildProgressFromLog(message) {
+    if (!message) return;
+
+    const buildingMatch = message.match(/^Building\s+\[[^\]]*\]\s+(\d+)\/(\d+):\s+(.+)$/);
+    if (buildingMatch) {
+      const current = Number(buildingMatch[1]) || 0;
+      const total = Number(buildingMatch[2]) || 0;
+      const crateName = buildingMatch[3]
+        .replace(/[.\u2026]+$/g, '')
+        .replace(/â¦/g, '')
+        .trim();
+      const pct = total > 0 ? Math.max(2, Math.min(99, Math.round((current / total) * 100))) : 0;
+
+      if (els.buildProgressSection) els.buildProgressSection.classList.remove('hidden');
+      if (els.buildProgressLabel) els.buildProgressLabel.textContent = crateName ? 'Building ' + crateName + '...' : 'Building...';
+      if (els.buildProgressFill) els.buildProgressFill.style.width = pct + '%';
+      if (els.buildProgressStats) els.buildProgressStats.textContent = current + ' / ' + total + ' units';
+      return;
+    }
+
+    const compilingMatch = message.match(/^Compiling\s+(\S+)/);
+    if (compilingMatch) {
+      if (els.buildProgressSection) els.buildProgressSection.classList.remove('hidden');
+      if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Compiling ' + compilingMatch[1] + '...';
+      if (els.buildProgressFill && (!els.buildProgressFill.style.width || els.buildProgressFill.style.width === '0%')) {
+        els.buildProgressFill.style.width = '2%';
+      }
+      return;
+    }
+
+    if (/^Build completed successfully/.test(message)) {
+      if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Build complete';
+      if (els.buildProgressFill) els.buildProgressFill.style.width = '100%';
+      return;
+    }
+
+    if (/^Build failed/.test(message)) {
+      if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Build failed';
+      if (els.buildProgressFill) els.buildProgressFill.style.width = '100%';
+    }
+  }
+
   function renderLogEntry(entry) {
+    updateBuildProgressFromLog(entry.message);
     const div = document.createElement('div');
     div.className = 'log-entry';
     div.innerHTML =
@@ -641,9 +757,9 @@
   }
 
   async function startAgent() {
-    addLog('info', 'Starting OSA...');
+    addLog('info', 'Starting OSA (' + state.runProfile + ')...');
     try {
-      const status = await invoke('start_osagent');
+      const status = await invoke('start_osagent', { profile: state.runProfile });
       updateStatus(status.running, status.pid);
       addLog('info', 'OSA started (PID: ' + status.pid + ')');
       return status;
@@ -679,6 +795,10 @@
     if (state.buildPollInterval) {
       clearInterval(state.buildPollInterval);
       state.buildPollInterval = null;
+    }
+    if (state.buildUnlisten) {
+      state.buildUnlisten();
+      state.buildUnlisten = null;
     }
     els.btnBuild.disabled = false;
   }
@@ -755,7 +875,12 @@
           api_key: state.wizard.auth_mode === 'api_key' ? state.wizard.api_key : '',
           workspace_path: state.wizard.workspace_path,
           password_enabled: state.wizard.password_enabled,
-          password: state.wizard.password
+          password: state.wizard.password,
+          stt_mode: state.wizard.stt_mode,
+          stt_whisper_model: state.wizard.stt_whisper_model,
+          tts_mode: state.wizard.tts_mode,
+          tts_piper_language: state.wizard.tts_piper_language,
+          tts_piper_voice: state.wizard.tts_piper_voice
         }
       });
 
@@ -817,6 +942,197 @@
       els.btnTestProvider.disabled = false;
     }
   }
+
+  // ── Voice helpers ────────────────────────────────────────
+
+  function renderWhisperModelCards() {
+    if (!els.sttModelCards) return;
+    els.sttModelCards.innerHTML = '';
+    WHISPER_MODELS.forEach((m) => {
+      const card = document.createElement('div');
+      card.className = 'voice-model-card' + (m.id === state.wizard.stt_whisper_model ? ' selected' : '');
+      card.innerHTML =
+        '<div class="voice-model-card-name">' + escapeHtml(m.name) + '</div>' +
+        '<div class="voice-model-card-meta">' + escapeHtml(m.size) + ' — ' + escapeHtml(m.note) + '</div>';
+      card.addEventListener('click', () => {
+        state.wizard.stt_whisper_model = m.id;
+        renderWhisperModelCards();
+      });
+      els.sttModelCards.appendChild(card);
+    });
+  }
+
+  function renderPiperVoiceCards() {
+    if (!els.ttsVoiceCards) return;
+    const lang = state.wizard.tts_piper_language;
+    const voices = PIPER_VOICES[lang] || PIPER_VOICES['en'];
+    if (!state.wizard.tts_piper_voice || !voices.find((v) => v.id === state.wizard.tts_piper_voice)) {
+      state.wizard.tts_piper_voice = voices[0].id;
+    }
+    els.ttsVoiceCards.innerHTML = '';
+    voices.forEach((v) => {
+      const card = document.createElement('div');
+      card.className = 'voice-model-card' + (v.id === state.wizard.tts_piper_voice ? ' selected' : '');
+      card.innerHTML =
+        '<div class="voice-model-card-name">' + escapeHtml(v.name) + '</div>' +
+        '<div class="voice-model-card-meta">' + escapeHtml(v.quality) + '</div>';
+      card.addEventListener('click', () => {
+        state.wizard.tts_piper_voice = v.id;
+        renderPiperVoiceCards();
+      });
+      els.ttsVoiceCards.appendChild(card);
+    });
+  }
+
+  function updateVoiceDownloadSection() {
+    const needsLocal = state.wizard.stt_mode === 'local' || state.wizard.tts_mode === 'local';
+    if (els.voiceDownloadSection) {
+      els.voiceDownloadSection.classList.toggle('hidden', !needsLocal);
+    }
+  }
+
+  async function checkVoiceStatus() {
+    try {
+      const status = await invoke('check_voice_status');
+      const whisperOk = status.whisper_installed;
+      const piperOk = status.piper_installed;
+
+      if (els.voiceSttStatus) {
+        els.voiceSttStatus.textContent = whisperOk
+          ? ('Installed' + (status.whisper_model ? ' (' + status.whisper_model + ')' : ''))
+          : 'Not installed';
+      }
+      if (els.voiceTtsStatus) {
+        els.voiceTtsStatus.textContent = piperOk
+          ? ('Installed' + (status.piper_voice ? ' (' + status.piper_voice + ')' : ''))
+          : 'Not installed';
+      }
+      const allReady = whisperOk && piperOk;
+      if (els.voiceStatusChip) {
+        els.voiceStatusChip.textContent = allReady ? 'Voice ready' : 'Not installed';
+        els.voiceStatusChip.classList.toggle('ready', allReady);
+      }
+
+      // Show install button only when something is missing
+      const needsInstall =
+        (state.wizard.stt_mode === 'local' && !whisperOk) ||
+        (state.wizard.tts_mode === 'local' && !piperOk);
+      if (els.btnInstallVoiceDash) {
+        els.btnInstallVoiceDash.classList.toggle('hidden', !needsInstall && (whisperOk || piperOk));
+      }
+
+      // Update wizard ready check
+      const wizardReady =
+        (state.wizard.stt_mode !== 'local' || whisperOk) &&
+        (state.wizard.tts_mode !== 'local' || piperOk);
+      if (els.voiceWizReady) {
+        els.voiceWizReady.classList.toggle('hidden', !wizardReady || !(state.wizard.stt_mode === 'local' || state.wizard.tts_mode === 'local'));
+      }
+    } catch (_e) {
+      // Voice check failed — ignore silently
+    }
+  }
+
+  async function downloadVoice(prefix) {
+    const isWizard = prefix === 'wiz';
+    const progressWrap = isWizard ? els.voiceWizProgressWrap : els.voiceDashProgressWrap;
+    const progressLabel = isWizard ? els.voiceWizProgressLabel : els.voiceDashProgressLabel;
+    const progressFill = isWizard ? els.voiceWizProgressFill : els.voiceDashProgressFill;
+    const progressText = isWizard ? els.voiceWizProgressText : els.voiceDashProgressText;
+    const downloadBtn = isWizard ? els.btnDownloadVoice : els.btnInstallVoiceDash;
+
+    if (downloadBtn) downloadBtn.disabled = true;
+    if (progressWrap) progressWrap.classList.remove('hidden');
+    if (progressLabel) progressLabel.textContent = 'Starting download...';
+    if (progressFill) progressFill.style.width = '0%';
+    if (progressText) progressText.textContent = '0%';
+
+    // Listen for progress events
+    if (state.voiceUnlisten) {
+      state.voiceUnlisten();
+      state.voiceUnlisten = null;
+    }
+
+    if (typeof listen === 'function') {
+      state.voiceUnlisten = await listen('voice-progress', (event) => {
+        const p = event.payload;
+        if (!p) return;
+        const pct = Math.round((p.progress || 0) * 100);
+        if (progressLabel) progressLabel.textContent = (p.model_id || '') + ' — ' + (p.stage || '');
+        if (progressFill) progressFill.style.width = pct + '%';
+        if (progressText) progressText.textContent = pct + '%';
+
+        if (p.stage === 'complete') {
+          if (state.voiceUnlisten) { state.voiceUnlisten(); state.voiceUnlisten = null; }
+          checkVoiceStatus();
+          if (isWizard && els.voiceWizReady) {
+            els.voiceWizReady.classList.remove('hidden');
+          }
+          if (progressWrap) setTimeout(() => progressWrap.classList.add('hidden'), 2000);
+        }
+      });
+    }
+
+    try {
+      await invoke('install_voice', {
+        payload: {
+          install_whisper: state.wizard.stt_mode === 'local',
+          whisper_model: state.wizard.stt_whisper_model || 'base',
+          install_piper: state.wizard.tts_mode === 'local',
+          piper_voice: state.wizard.tts_piper_voice || 'en_US-libritts-high'
+        }
+      });
+      await checkVoiceStatus();
+    } catch (e) {
+      if (progressLabel) progressLabel.textContent = 'Error: ' + String(e);
+    } finally {
+      if (downloadBtn) downloadBtn.disabled = false;
+    }
+  }
+
+  function bindVoiceWizardEvents() {
+    if (els.sttModeToggle) {
+      els.sttModeToggle.querySelectorAll('.voice-mode-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const mode = btn.dataset.mode;
+          state.wizard.stt_mode = mode;
+          els.sttModeToggle.querySelectorAll('.voice-mode-btn').forEach((b) =>
+            b.classList.toggle('active', b.dataset.mode === mode));
+          if (els.sttModelCards) els.sttModelCards.classList.toggle('hidden', mode !== 'local');
+          if (mode === 'local') renderWhisperModelCards();
+          updateVoiceDownloadSection();
+        });
+      });
+    }
+
+    if (els.ttsModeToggle) {
+      els.ttsModeToggle.querySelectorAll('.voice-mode-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const mode = btn.dataset.mode;
+          state.wizard.tts_mode = mode;
+          els.ttsModeToggle.querySelectorAll('.voice-mode-btn').forEach((b) =>
+            b.classList.toggle('active', b.dataset.mode === mode));
+          if (els.ttsLocalOptions) els.ttsLocalOptions.classList.toggle('hidden', mode !== 'local');
+          if (mode === 'local') renderPiperVoiceCards();
+          updateVoiceDownloadSection();
+        });
+      });
+    }
+
+    if (els.ttsLangSelect) {
+      els.ttsLangSelect.addEventListener('change', (e) => {
+        state.wizard.tts_piper_language = e.target.value;
+        state.wizard.tts_piper_voice = '';
+        renderPiperVoiceCards();
+      });
+    }
+
+    if (els.btnDownloadVoice) {
+      els.btnDownloadVoice.addEventListener('click', () => downloadVoice('wiz'));
+    }
+  }
+
+  // ────────────────────────────────────────────────────────
 
   function bindWizardEvents() {
     els.wizardTabs.forEach((tab) => {
@@ -1058,17 +1374,42 @@
 
     els.btnOpenSetup.addEventListener('click', openSetupWizard);
 
+    if (els.buildProfileToggle) {
+      els.buildProfileToggle.querySelectorAll('.profile-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const profile = btn.dataset.profile;
+          state.buildProfile = profile;
+          els.buildProfileToggle.querySelectorAll('.profile-btn').forEach((b) =>
+            b.classList.toggle('active', b.dataset.profile === profile));
+        });
+      });
+    }
+
+    if (els.runProfileToggle) {
+      els.runProfileToggle.querySelectorAll('.profile-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const profile = btn.dataset.profile;
+          state.runProfile = profile;
+          els.runProfileToggle.querySelectorAll('.profile-btn').forEach((b) =>
+            b.classList.toggle('active', b.dataset.profile === profile));
+        });
+      });
+    }
+
     els.btnBuild.addEventListener('click', async () => {
-      addLog('info', 'Starting build...');
+      addLog('info', 'Starting build (' + state.buildProfile + ')...');
       els.btnBuild.disabled = true;
+      if (els.buildProgressSection) els.buildProgressSection.classList.remove('hidden');
+      if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Preparing...';
+      if (els.buildProgressFill) els.buildProgressFill.style.width = '0%';
+      if (els.buildProgressStats) els.buildProgressStats.textContent = '';
+
       try {
-        const logsBefore = await invoke('get_logs');
-        state.buildPollLogCount = logsBefore.length;
-        await invoke('build_osagent');
-        state.buildPollInterval = setInterval(pollBuild, 500);
+        await invoke('build_osagent', { profile: state.buildProfile });
       } catch (error) {
         addLog('error', 'Build failed: ' + error);
         els.btnBuild.disabled = false;
+        if (els.buildProgressSection) els.buildProgressSection.classList.add('hidden');
       }
     });
 
@@ -1083,6 +1424,10 @@
     els.btnFinishDashboard.addEventListener('click', () => {
       showView('dashboard');
     });
+
+    if (els.btnInstallVoiceDash) {
+      els.btnInstallVoiceDash.addEventListener('click', () => downloadVoice('dash'));
+    }
 
     els.btnClearLog.addEventListener('click', async () => {
       state.logs = [];
@@ -1116,7 +1461,7 @@
     });
   }
 
-  function bindTauriEvents() {
+  async function bindTauriEvents() {
     if (typeof listen !== 'function') return;
 
     listen('osagent-status-changed', (event) => {
@@ -1135,13 +1480,43 @@
     listen('setup-state-changed', (event) => {
       applySetupState(event.payload);
     });
+
+    await listen('build-progress', (event) => {
+      const p = event.payload;
+      console.log('build-progress event:', p);
+      if (!p) return;
+      state.buildProgress = p;
+
+      if (p.current_crate) {
+        if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Compiling ' + p.current_crate + '...';
+      }
+      if (els.buildProgressStats) {
+        let stats = p.compiling + ' crates';
+        if (p.warnings > 0) stats += ', ' + p.warnings + ' warnings';
+        if (p.errors > 0) stats += ', ' + p.errors + ' errors';
+        els.buildProgressStats.textContent = stats;
+      }
+      if (p.finished) {
+        if (p.success) {
+          if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Build complete';
+          if (els.buildProgressFill) els.buildProgressFill.style.width = '100%';
+          addLog('info', 'Build completed successfully (' + p.profile + ')');
+        } else {
+          if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Build failed';
+          if (els.buildProgressFill) els.buildProgressFill.style.width = '100%';
+          addLog('error', 'Build failed (' + p.profile + ')');
+        }
+        els.btnBuild.disabled = false;
+      }
+    });
   }
 
   async function init() {
     bindTitlebarDrag();
     bindWizardEvents();
+    bindVoiceWizardEvents();
     bindDashboardEvents();
-    bindTauriEvents();
+    await bindTauriEvents();
     await loadProviderCatalog();
     await getStatus();
     await loadSetupState();

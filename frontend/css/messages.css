@@ -137,8 +137,6 @@
 
 .message-thinking {
     margin: 0 0 10px;
-    padding-left: 12px;
-    border-left: 2px solid rgba(255, 255, 255, 0.08);
 }
 
 .thinking-toggle {
@@ -158,17 +156,6 @@
 
 .thinking-toggle:hover {
     color: var(--text-secondary);
-}
-
-.thinking-toggle-icon {
-    flex-shrink: 0;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
-    transition: transform var(--transition-fast);
-}
-
-.message-thinking.expanded .thinking-toggle-icon {
-    transform: rotate(90deg);
 }
 
 .thinking-toggle-label {

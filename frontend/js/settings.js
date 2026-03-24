@@ -159,13 +159,13 @@ OSA.loadSettings = async function() {
         document.getElementById('memory-file-field').style.display = memEnabled ? '' : 'none';
         document.getElementById('memory-add-form').style.display = memEnabled ? '' : 'none';
         
-        const voice = config.voice || {};
-        document.getElementById('setting-voice-enabled').value = voice.enabled ? 'true' : 'false';
-        document.getElementById('setting-stt-provider').value = voice.stt_provider || 'browser';
-        document.getElementById('setting-tts-provider').value = voice.tts_provider || 'browser';
+        const voice = OSA.normalizeVoiceConfig(config.voice || {});
+        document.getElementById('setting-voice-enabled').checked = !!voice.enabled;
+        OSA.setVoiceProviderToggle('stt-provider-toggle', 'setting-stt-provider', voice.stt_provider || 'browser');
+        OSA.setVoiceProviderToggle('tts-provider-toggle', 'setting-tts-provider', voice.tts_provider || 'browser');
         document.getElementById('setting-voice-language').value = voice.language || 'en';
-        document.getElementById('setting-auto-send').value = voice.auto_send ? 'true' : 'false';
-        document.getElementById('setting-auto-speak').value = voice.auto_speak ? 'true' : 'false';
+        document.getElementById('setting-auto-send').checked = !!voice.auto_send;
+        document.getElementById('setting-auto-speak').checked = !!voice.auto_speak;
         document.getElementById('setting-voice-speed').value = voice.voice_speed || 1.0;
         
         document.getElementById('setting-password-enabled').checked = config.server?.password_enabled || false;
@@ -261,15 +261,19 @@ OSA.saveSettings = async function() {
         memory_enabled: document.getElementById('setting-memory-enabled').checked,
         memory_file: document.getElementById('setting-memory-file').value || '~/.osagent/memories.json'
     };
-    newConfig.voice = {
-        enabled: document.getElementById('setting-voice-enabled').value === 'true',
+    const previousVoice = OSA.normalizeVoiceConfig(newConfig.voice || {});
+    newConfig.voice = OSA.normalizeVoiceConfig({
+        ...previousVoice,
+        enabled: document.getElementById('setting-voice-enabled').checked,
         stt_provider: document.getElementById('setting-stt-provider').value,
         tts_provider: document.getElementById('setting-tts-provider').value,
         language: document.getElementById('setting-voice-language').value || 'en',
-        auto_send: document.getElementById('setting-auto-send').value === 'true',
-        auto_speak: document.getElementById('setting-auto-speak').value === 'true',
-        voice_speed: parseFloat(document.getElementById('setting-voice-speed').value) || 1.0
-    };
+        auto_send: document.getElementById('setting-auto-send').checked,
+        auto_speak: document.getElementById('setting-auto-speak').checked,
+        voice_speed: parseFloat(document.getElementById('setting-voice-speed').value) || 1.0,
+        whisper_model: previousVoice?.whisper_model || null,
+        piper_voice: previousVoice?.piper_voice || null
+    });
     newConfig.experimental = {
         workflows_enabled: document.getElementById('setting-experimental-workflows').checked
     };
@@ -287,11 +291,57 @@ OSA.saveSettings = async function() {
         OSA.setCachedConfig(newConfig);
         await OSA.refreshThinkingOptions(undefined, undefined, newConfig.agent.thinking_level);
         OSA.setVoiceConfig(newConfig.voice);
+        OSA.updateVoiceButtons();
         OSA.closeSettings();
     } catch (error) {
         errorDiv.textContent = error.message;
         errorDiv.classList.remove('hidden');
     }
+};
+
+OSA.setVoiceProviderToggle = function(toggleId, hiddenId, value) {
+    const hidden = document.getElementById(hiddenId);
+    if (!hidden) return;
+
+    const normalizedValue = hiddenId === 'setting-stt-provider'
+        ? OSA.normalizeSttProvider(value)
+        : OSA.normalizeTtsProvider(value);
+
+    hidden.value = normalizedValue;
+
+    if (hiddenId === 'setting-stt-provider') {
+        const checkbox = document.getElementById('setting-stt-local');
+        if (checkbox) checkbox.checked = normalizedValue === 'whisper-local';
+    } else if (hiddenId === 'setting-tts-provider') {
+        const checkbox = document.getElementById('setting-tts-local');
+        if (checkbox) checkbox.checked = normalizedValue === 'piper-local';
+    }
+};
+
+OSA.bindVoiceProviderToggles = function() {
+    const toggleMap = [
+        {
+            checkboxId: 'setting-stt-local',
+            hiddenId: 'setting-stt-provider',
+            onValue: 'whisper-local',
+            offValue: 'browser'
+        },
+        {
+            checkboxId: 'setting-tts-local',
+            hiddenId: 'setting-tts-provider',
+            onValue: 'piper-local',
+            offValue: 'browser'
+        }
+    ];
+
+    toggleMap.forEach(function(entry) {
+        const checkbox = document.getElementById(entry.checkboxId);
+        if (!checkbox || checkbox.dataset.bound === 'true') return;
+        checkbox.addEventListener('change', function() {
+            OSA.setVoiceProviderToggle(entry.checkboxId, entry.hiddenId, checkbox.checked ? entry.onValue : entry.offValue);
+        });
+        checkbox.dataset.bound = 'true';
+    });
 };
 
 OSA.loadVoiceInstallStatus = async function() {
@@ -361,7 +411,19 @@ OSA.switchSettingsTab = async function(tabId) {
     if (tabId === 'models' || tabId === 'provider') {
         OSA.renderSettingsProviders();
     } else if (tabId === 'voice') {
-        OSA.loadVoiceModels().then(() => OSA.renderVoiceModelBrowser());
+        const browser = document.getElementById('voice-models-browser');
+        if (browser) {
+            browser.innerHTML = '<div class="loading-placeholder">Loading models...</div>';
+        }
+        try {
+            await OSA.loadVoiceModels();
+            OSA.renderVoiceModelBrowser();
+        } catch (error) {
+            console.error('Failed to render voice models:', error);
+            if (browser) {
+                browser.innerHTML = `<div class="model-empty">Failed to load voice models: ${OSA.escapeHtml(error.message || 'Unknown error')}</div>`;
+            }
+        }
     } else if (tabId === 'skills') {
         await OSA.loadSkillsUI();
     }
@@ -730,3 +792,5 @@ window.closeSettings = OSA.closeSettings;
 window.saveSettings = OSA.saveSettings;
 window.installVoiceModels = OSA.installVoiceModels;
 window.switchSettingsTab = OSA.switchSettingsTab;
+
+document.addEventListener('DOMContentLoaded', OSA.bindVoiceProviderToggles);
