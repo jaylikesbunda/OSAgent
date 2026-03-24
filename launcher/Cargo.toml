@@ -10,7 +10,7 @@ description = "OSAgent modern launcher with system tray and window management"
 tauri-build = { version = "1.5", features = [] }
 
 [dependencies]
-tauri = { version = "1.7", features = ["shell-open", "system-tray", "window-all"] }
+tauri = { version = "1.8", features = ["shell-open", "system-tray", "window-all"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.35", features = ["full"] }
