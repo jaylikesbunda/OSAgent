@@ -78,6 +78,19 @@ pub enum AgentEvent {
         summary: String,
         timestamp: SystemTime,
     },
+    ThinkingStart {
+        session_id: String,
+        timestamp: SystemTime,
+    },
+    ThinkingDelta {
+        session_id: String,
+        content: String,
+        timestamp: SystemTime,
+    },
+    ThinkingEnd {
+        session_id: String,
+        timestamp: SystemTime,
+    },
     Retry {
         session_id: String,
         scope: String,
@@ -199,6 +212,9 @@ impl AgentEvent {
             AgentEvent::ResponseComplete { session_id, .. } => session_id,
             AgentEvent::ContextUpdate { session_id, .. } => session_id,
             AgentEvent::Reasoning { session_id, .. } => session_id,
+            AgentEvent::ThinkingStart { session_id, .. } => session_id,
+            AgentEvent::ThinkingDelta { session_id, .. } => session_id,
+            AgentEvent::ThinkingEnd { session_id, .. } => session_id,
             AgentEvent::Retry { session_id, .. } => session_id,
             AgentEvent::Compaction { session_id, .. } => session_id,
             AgentEvent::StepFinish { session_id, .. } => session_id,

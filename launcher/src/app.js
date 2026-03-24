@@ -20,6 +20,8 @@
       message: 'Test the provider before saving.',
       signature: ''
     },
+    logPollInterval: null,
+    logSyncCount: 0,
     buildPollInterval: null,
     buildPollLogCount: 0,
     wizard: {
@@ -595,15 +597,43 @@
 
   async function loadLogs() {
     try {
+      state.logs = [];
+      els.logContainer.innerHTML = '';
       const existingLogs = await invoke('get_logs');
       existingLogs.forEach((raw) => {
         const entry = normalizeEntry(raw);
         state.logs.push(entry);
         renderLogEntry(entry);
       });
+      state.logSyncCount = existingLogs.length;
     } catch (_error) {
       addLog('warn', 'No existing logs found yet');
     }
+  }
+
+  async function syncLogsFromBackend() {
+    try {
+      const allLogs = await invoke('get_logs');
+
+      if (allLogs.length < state.logSyncCount) {
+        state.logSyncCount = 0;
+      }
+
+      while (state.logSyncCount < allLogs.length) {
+        const entry = normalizeEntry(allLogs[state.logSyncCount]);
+        state.logs.push(entry);
+        if (state.logs.length > 300) state.logs.shift();
+        renderLogEntry(entry);
+        state.logSyncCount += 1;
+      }
+    } catch (_error) {}
+  }
+
+  function startLogPolling() {
+    if (state.logPollInterval) return;
+    state.logPollInterval = setInterval(() => {
+      syncLogsFromBackend();
+    }, 1000);
   }
 
   async function openWebUi() {
@@ -661,6 +691,9 @@
       if (state.logs.length > 300) state.logs.shift();
       renderLogEntry(entry);
       state.buildPollLogCount += 1;
+    }
+    if (state.logSyncCount < state.buildPollLogCount) {
+      state.logSyncCount = state.buildPollLogCount;
     }
   }
 
@@ -1051,9 +1084,15 @@
       showView('dashboard');
     });
 
-    els.btnClearLog.addEventListener('click', () => {
+    els.btnClearLog.addEventListener('click', async () => {
       state.logs = [];
       els.logContainer.innerHTML = '';
+      try {
+        const allLogs = await invoke('get_logs');
+        state.logSyncCount = allLogs.length;
+      } catch (_error) {
+        state.logSyncCount = 0;
+      }
     });
 
     els.btnMinimize.addEventListener('click', async () => {
@@ -1089,6 +1128,7 @@
       const entry = normalizeEntry(event.payload);
       state.logs.push(entry);
       if (state.logs.length > 300) state.logs.shift();
+      state.logSyncCount += 1;
       renderLogEntry(entry);
     });
 
@@ -1106,6 +1146,7 @@
     await getStatus();
     await loadSetupState();
     await loadLogs();
+    startLogPolling();
   }
 
   init();

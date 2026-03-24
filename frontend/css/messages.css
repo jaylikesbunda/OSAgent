@@ -135,6 +135,89 @@
     color: var(--text-muted);
 }
 
+.message-thinking {
+    margin: 0 0 10px;
+    padding-left: 12px;
+    border-left: 2px solid rgba(255, 255, 255, 0.08);
+}
+
+.thinking-toggle {
+    width: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--text-muted);
+    cursor: pointer;
+    text-align: left;
+    font-size: 12px;
+    transition: color var(--transition-fast);
+}
+
+.thinking-toggle:hover {
+    color: var(--text-secondary);
+}
+
+.thinking-toggle-icon {
+    flex-shrink: 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    transition: transform var(--transition-fast);
+}
+
+.message-thinking.expanded .thinking-toggle-icon {
+    transform: rotate(90deg);
+}
+
+.thinking-toggle-label {
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.thinking-preview {
+    min-width: 0;
+    max-width: 480px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.85;
+}
+
+.thinking-body {
+    display: none;
+    padding: 8px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.65;
+    max-height: 320px;
+    overflow-y: auto;
+    opacity: 0.92;
+}
+
+.message-thinking.expanded .thinking-body {
+    display: block;
+}
+
+.message-thinking.streaming .thinking-toggle-label {
+    background: linear-gradient(90deg, var(--text-secondary), var(--text-muted), var(--text-secondary));
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: thinkingLabelShimmer 1.8s ease-in-out infinite;
+}
+
+.message-thinking .thinking-body p:last-child {
+    margin-bottom: 0;
+}
+
+@keyframes thinkingLabelShimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
 .message-actions {
     display: flex;
     gap: 8px;

@@ -64,7 +64,7 @@ OSA.CONTEXT_TOOLS = new Set(['read_file', 'list_files', 'glob', 'grep']);
 
 OSA.handleAgentEvent = function(event) {
     const isStopping = OSA.isAgentStopping();
-    const ignoreDuringStop = ['thinking', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked'];
+    const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked'];
     
     if (isStopping && ignoreDuringStop.includes(event.type)) {
         return;
@@ -73,8 +73,21 @@ OSA.handleAgentEvent = function(event) {
     switch (event.type) {
         case 'thinking':
             OSA.setHasReceivedResponse(false);
+            if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'running';
             OSA.showThinkingIndicator();
             OSA.setSendButtonStopMode(true);
+            break;
+
+        case 'thinking_start':
+            OSA.beginThinkingDisplay();
+            break;
+
+        case 'thinking_delta':
+            OSA.appendThinkingChunk(event.content || '');
+            break;
+
+        case 'thinking_end':
+            OSA.completeThinkingDisplay();
             break;
 
         case 'response_start':
@@ -116,6 +129,7 @@ OSA.handleAgentEvent = function(event) {
 
         case 'response_complete':
             OSA.setHasReceivedResponse(true);
+            if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
             OSA.completeAssistantResponse();
             OSA.hideThinkingIndicator();
             OSA.setProcessing(false);
@@ -1126,8 +1140,11 @@ OSA.renderTaskMessage = function(event) {
 
 OSA.handleEventError = function(event) {
     console.error('Agent error:', event.error);
+    if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
     OSA.setProcessing(false);
     OSA.resetSendButton();
+    OSA.completeThinkingDisplay();
+    OSA.pruneEmptyStreamingMessage();
     OSA.completeAssistantResponse();
     OSA.hideThinkingIndicator();
 
@@ -1142,12 +1159,14 @@ OSA.handleEventError = function(event) {
 };
 
 OSA.handleEventCancelled = function(event) {
+    if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
     OSA.setProcessing(false);
     OSA.setStopping(false);
     OSA.resetSendButton();
+    OSA.completeThinkingDisplay();
+    OSA.pruneEmptyStreamingMessage();
     OSA.completeAssistantResponse();
     OSA.hideThinkingIndicator();
-    OSA.pruneEmptyStreamingMessage();
 
     if (OSA._stopTimeout) {
         clearTimeout(OSA._stopTimeout);

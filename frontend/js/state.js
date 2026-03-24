@@ -36,6 +36,8 @@ OSA.eventSourceSessionId = null;
 OSA.eventReconnectTimer = null;
 OSA.parallelToolGroups = [];
 OSA.parallelToolWindow = 500;
+OSA.pendingFormattedElements = new Set();
+OSA.pendingFormattedFrame = null;
 
 OSA.getToken = () => OSA.token;
 OSA.setToken = t => { OSA.token = t; localStorage.setItem('token', t); };
@@ -102,6 +104,9 @@ OSA.getEventSourceSessionId = () => OSA.eventSourceSessionId;
 OSA.setEventSourceSessionId = id => OSA.eventSourceSessionId = id;
 OSA.getEventReconnectTimer = () => OSA.eventReconnectTimer;
 OSA.setEventReconnectTimer = t => OSA.eventReconnectTimer = t;
+OSA.getPendingFormattedElements = () => OSA.pendingFormattedElements;
+OSA.getPendingFormattedFrame = () => OSA.pendingFormattedFrame;
+OSA.setPendingFormattedFrame = f => OSA.pendingFormattedFrame = f;
 OSA.inspectorExpanded = false;
 OSA.getInspectorExpanded = () => OSA.inspectorExpanded;
 OSA.setInspectorExpanded = e => OSA.inspectorExpanded = e;
@@ -123,3 +128,9 @@ OSA.setSessionHierarchy = h => OSA.sessionHierarchy = h;
 OSA.sidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
 OSA.getSidebarCollapsed = () => OSA.sidebarCollapsed;
 OSA.setSidebarCollapsed = c => { OSA.sidebarCollapsed = c; localStorage.setItem('sidebarCollapsed', c); };
+OSA.showThinkingBlocks = localStorage.getItem('osagent-show-thinking-blocks') !== 'false';
+OSA.getShowThinkingBlocks = () => OSA.showThinkingBlocks;
+OSA.setShowThinkingBlocks = value => {
+    OSA.showThinkingBlocks = value;
+    localStorage.setItem('osagent-show-thinking-blocks', value ? 'true' : 'false');
+};

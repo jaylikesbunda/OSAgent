@@ -88,6 +88,8 @@ pub struct SessionContextState {
 pub struct Message {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub thinking: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
@@ -106,6 +108,7 @@ impl Message {
         Self {
             role: "system".to_string(),
             content,
+            thinking: None,
             timestamp: Utc::now(),
             tool_calls: None,
             tool_call_id: None,
@@ -118,6 +121,7 @@ impl Message {
         Self {
             role: "user".to_string(),
             content,
+            thinking: None,
             timestamp: Utc::now(),
             tool_calls: None,
             tool_call_id: None,
@@ -139,6 +143,7 @@ impl Message {
         Self {
             role: "assistant".to_string(),
             content,
+            thinking: None,
             timestamp: Utc::now(),
             tool_calls,
             tool_call_id: None,
@@ -160,6 +165,7 @@ impl Message {
         Self {
             role: "tool".to_string(),
             content,
+            thinking: None,
             timestamp: Utc::now(),
             tool_calls: None,
             tool_call_id: Some(tool_call_id),

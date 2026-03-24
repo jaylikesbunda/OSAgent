@@ -105,6 +105,23 @@ OSA.handleQuickThinkingChange = async function(event) {
     }
 };
 
+OSA.applyThinkingVisibilitySetting = function(enabled) {
+    OSA.setShowThinkingBlocks(enabled);
+    const checkbox = document.getElementById('setting-show-thinking-blocks');
+    if (checkbox) checkbox.checked = enabled;
+    const currentSession = OSA.getCurrentSession();
+    if (currentSession && currentSession.id) {
+        OSA.selectSession(currentSession.id).catch(error => {
+            console.error('Failed to refresh session after thinking visibility change:', error);
+        });
+    }
+};
+
+OSA.onThinkingVisibilityToggleChange = function() {
+    const checkbox = document.getElementById('setting-show-thinking-blocks');
+    OSA.applyThinkingVisibilitySetting(checkbox ? checkbox.checked : true);
+};
+
 OSA.openSettings = async function() {
     document.getElementById('settings-modal').classList.remove('hidden');
     await OSA.loadSettings();
@@ -130,6 +147,7 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-discord-allowed-users').value = (discord.allowed_users || []).join('\n');
         document.getElementById('setting-max-tokens').value = config.agent?.max_tokens || 4096;
         document.getElementById('setting-temperature').value = config.agent?.temperature || 0.7;
+        document.getElementById('setting-show-thinking-blocks').checked = OSA.getShowThinkingBlocks();
         await OSA.refreshThinkingOptions(
             OSA.currentModelProviderId || config.default_provider,
             OSA.currentModelId || config.default_model || config.provider?.model || '',

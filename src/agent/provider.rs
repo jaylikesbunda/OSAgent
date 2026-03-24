@@ -60,6 +60,8 @@ pub struct ToolFunction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub content: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub finish_reason: String,
     #[serde(default)]
@@ -85,11 +87,30 @@ pub struct TokenUsage {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamToolCallDelta {
+    pub index: usize,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamEvent {
     #[serde(rename = "type")]
     pub event_type: String,
     pub content: Option<String>,
-    pub tool_call: Option<ToolCall>,
+    #[serde(default)]
+    pub thinking: Option<String>,
+    #[serde(default)]
+    pub tool_call_deltas: Vec<StreamToolCallDelta>,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+    #[serde(default)]
+    pub usage: Option<TokenUsage>,
     pub done: bool,
 }
 
@@ -343,12 +364,8 @@ impl OpenAICompatibleProvider {
             }
         }
 
-        let selected = reasoning::normalize_selection(
-            &settings.thinking_level,
-            provider_type,
-            model,
-            meta,
-        );
+        let selected =
+            reasoning::normalize_selection(&settings.thinking_level, provider_type, model, meta);
         let Some(thinking_level) = selected.as_deref() else {
             return;
         };
@@ -455,6 +472,192 @@ impl OpenAICompatibleProvider {
         }
     }
 
+    fn join_non_empty(parts: Vec<String>) -> Option<String> {
+        let joined = parts
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if joined.trim().is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    }
+
+    fn collect_block_texts(
+        content: &serde_json::Value,
+        block_types: &[&str],
+        fields: &[&str],
+    ) -> Vec<String> {
+        content
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                item.get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|value| block_types.contains(&value))
+                    .unwrap_or(false)
+            })
+            .flat_map(|item| {
+                fields.iter().filter_map(|field| {
+                    item.get(*field)
+                        .and_then(|v| v.as_str())
+                        .map(|value| value.to_string())
+                })
+            })
+            .collect()
+    }
+
+    fn parse_chat_message_content(message: &serde_json::Value) -> Option<String> {
+        if let Some(content) = message.get("content") {
+            if content.is_string() {
+                return content.as_str().map(|value| value.to_string());
+            }
+
+            let text_blocks =
+                Self::collect_block_texts(content, &["text", "output_text"], &["text"]);
+            if let Some(text) = Self::join_non_empty(text_blocks) {
+                return Some(text);
+            }
+        }
+
+        None
+    }
+
+    fn parse_chat_message_thinking(message: &serde_json::Value) -> Option<String> {
+        if let Some(content) = message.get("content") {
+            let thinking_blocks = Self::collect_block_texts(
+                content,
+                &[
+                    "thinking",
+                    "reasoning",
+                    "reasoning_content",
+                    "reasoning_summary",
+                ],
+                &["thinking", "text", "summary"],
+            );
+            if let Some(thinking) = Self::join_non_empty(thinking_blocks) {
+                return Some(thinking);
+            }
+        }
+
+        message
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .or_else(|| message.get("thinking").and_then(|v| v.as_str()))
+            .or_else(|| message.get("reasoning").and_then(|v| v.as_str()))
+            .map(|value| value.to_string())
+    }
+
+    fn parse_response_thinking(response_json: &serde_json::Value) -> Option<String> {
+        let mut parts = Vec::new();
+
+        if let Some(reasoning) = response_json.get("reasoning") {
+            if let Some(text) = reasoning.get("text").and_then(|v| v.as_str()) {
+                parts.push(text.to_string());
+            }
+
+            if let Some(summary) = reasoning.get("summary").and_then(|v| v.as_array()) {
+                parts.extend(summary.iter().filter_map(|item| {
+                    item.get("text")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.as_str())
+                        .map(|value| value.to_string())
+                }));
+            }
+        }
+
+        if let Some(output_items) = response_json.get("output").and_then(|v| v.as_array()) {
+            for item in output_items {
+                match item.get("type").and_then(|v| v.as_str()) {
+                    Some("reasoning") | Some("reasoning_summary") => {
+                        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                            parts.push(text.to_string());
+                        }
+                        if let Some(summary) = item.get("summary").and_then(|v| v.as_array()) {
+                            parts.extend(summary.iter().filter_map(|entry| {
+                                entry
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| entry.as_str())
+                                    .map(|value| value.to_string())
+                            }));
+                        }
+                    }
+                    Some("message") => {
+                        if let Some(content_items) = item.get("content") {
+                            parts.extend(Self::collect_block_texts(
+                                content_items,
+                                &["reasoning", "reasoning_summary", "thinking"],
+                                &["text", "thinking", "summary"],
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(text) = response_json
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+        {
+            parts.push(text.to_string());
+        }
+        if let Some(text) = response_json.get("thinking").and_then(|v| v.as_str()) {
+            parts.push(text.to_string());
+        }
+
+        Self::join_non_empty(parts)
+    }
+
+    fn parse_stream_content(value: &serde_json::Value) -> Option<String> {
+        if let Some(text) = value.as_str() {
+            return Some(text.to_string());
+        }
+
+        Self::join_non_empty(Self::collect_block_texts(
+            value,
+            &["text", "output_text"],
+            &["text"],
+        ))
+    }
+
+    fn parse_stream_thinking(value: &serde_json::Value) -> Option<String> {
+        if let Some(text) = value.as_str() {
+            return Some(text.to_string());
+        }
+
+        if let Some(items) = value.as_array() {
+            let mut parts = Vec::new();
+            for item in items {
+                if let Some(text) = item.get("text" ).and_then(|v| v.as_str()) {
+                    parts.push(text.to_string());
+                    continue;
+                }
+                if let Some(text) = item.get("content").and_then(|v| v.as_str()) {
+                    parts.push(text.to_string());
+                    continue;
+                }
+                if let Some(text) = item.as_str() {
+                    parts.push(text.to_string());
+                }
+            }
+            if let Some(joined) = Self::join_non_empty(parts) {
+                return Some(joined);
+            }
+        }
+
+        Self::join_non_empty(Self::collect_block_texts(
+            value,
+            &["thinking", "reasoning", "reasoning_content", "reasoning_summary"],
+            &["thinking", "text", "summary"],
+        ))
+    }
+
     fn parse_response_tool_calls(response_json: &serde_json::Value) -> Option<Vec<ToolCall>> {
         let mut calls = Vec::new();
         if let Some(output_items) = response_json.get("output").and_then(|v| v.as_array()) {
@@ -531,7 +734,8 @@ impl OpenAICompatibleProvider {
         let choice = &response_json["choices"][0];
         let message = &choice["message"];
 
-        let content = message["content"].as_str().map(|s| s.to_string());
+        let content = Self::parse_chat_message_content(message);
+        let thinking = Self::parse_chat_message_thinking(message);
 
         let tool_calls = message["tool_calls"].as_array().map(|calls| {
             calls
@@ -576,6 +780,7 @@ impl OpenAICompatibleProvider {
 
         ProviderResponse {
             content,
+            thinking,
             tool_calls,
             finish_reason,
             retry_count: 0,
@@ -587,6 +792,7 @@ impl OpenAICompatibleProvider {
     fn parse_responses_response(response_json: &serde_json::Value) -> ProviderResponse {
         ProviderResponse {
             content: Self::parse_response_content(response_json),
+            thinking: Self::parse_response_thinking(response_json),
             tool_calls: Self::parse_response_tool_calls(response_json),
             finish_reason: response_json
                 .get("status")
@@ -655,7 +861,11 @@ impl OpenAICompatibleProvider {
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
                         })
-                        .or_else(|| json.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .or_else(|| {
+                            json.get("message")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
                 })
                 .unwrap_or_else(|| body.clone());
 
@@ -666,6 +876,7 @@ impl OpenAICompatibleProvider {
         }
 
         let mut content = String::new();
+        let mut thinking = String::new();
         let mut calls: HashMap<String, (String, String)> = HashMap::new();
         let mut final_response: Option<serde_json::Value> = None;
         let mut final_status: Option<String> = None;
@@ -723,6 +934,17 @@ impl OpenAICompatibleProvider {
                         content.push_str(delta);
                     }
                 }
+                "response.reasoning_summary_text.delta"
+                | "response.reasoning_text.delta"
+                | "response.reasoning.delta" => {
+                    if let Some(delta) = parsed
+                        .get("delta")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| parsed.get("text").and_then(|v| v.as_str()))
+                    {
+                        thinking.push_str(delta);
+                    }
+                }
                 "response.function_call_arguments.delta" => {
                     if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str()) {
                         let entry = calls
@@ -749,7 +971,9 @@ impl OpenAICompatibleProvider {
                                 if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                                     entry.0 = name.to_string();
                                 }
-                                if let Some(arguments) = item.get("arguments").and_then(|v| v.as_str()) {
+                                if let Some(arguments) =
+                                    item.get("arguments").and_then(|v| v.as_str())
+                                {
                                     entry.1 = arguments.to_string();
                                 }
                             }
@@ -783,14 +1007,24 @@ impl OpenAICompatibleProvider {
                     .map(|(id, (name, arguments))| ToolCall {
                         id,
                         name,
-                        arguments: serde_json::from_str(&arguments).unwrap_or(serde_json::json!({})),
+                        arguments: serde_json::from_str(&arguments)
+                            .unwrap_or(serde_json::json!({})),
                     })
                     .collect(),
             )
         };
 
         Ok(ProviderResponse {
-            content: if content.is_empty() { None } else { Some(content) },
+            content: if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            },
+            thinking: if thinking.is_empty() {
+                None
+            } else {
+                Some(thinking)
+            },
             tool_calls,
             finish_reason: final_status.unwrap_or_else(|| "completed".to_string()),
             retry_count: 0,
@@ -874,8 +1108,7 @@ impl OpenAICompatibleProvider {
             let body = response.text().await.unwrap_or_default();
             return Err(OSAgentError::Provider(format!(
                 "Failed to refresh OpenAI OAuth token: {} {}",
-                status,
-                body
+                status, body
             )));
         }
 
@@ -922,9 +1155,7 @@ impl OpenAICompatibleProvider {
             .adapter
             .request_mode(&config, oauth_entry.as_ref(), model);
 
-        let request_url = self
-            .adapter
-            .resolve_endpoint(&config, oauth_entry.as_ref());
+        let request_url = self.adapter.resolve_endpoint(&config, oauth_entry.as_ref());
         let mut api_key = config.api_key.clone();
         let mut extra_headers = Vec::new();
 
@@ -1163,6 +1394,214 @@ impl OpenAICompatibleProvider {
             .unwrap_or_else(|| OSAgentError::Provider("Max retries exceeded".to_string())))
     }
 
+    async fn complete_stream_with_retry(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
+        let mut last_error: Option<OSAgentError> = None;
+        let mut current_messages = messages.to_vec();
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.do_complete_stream(&current_messages, tools).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    if e.is_context_limit() && attempt < MAX_RETRIES {
+                        let (compressed_messages, changed) =
+                            Self::compress_for_context_limit(&current_messages, tools);
+                        if changed {
+                            warn!(
+                                "Provider stream exceeded context (attempt {}/{}). Compressing messages and retrying.",
+                                attempt,
+                                MAX_RETRIES
+                            );
+                            current_messages = compressed_messages;
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+
+                    if e.is_retryable() && attempt < MAX_RETRIES {
+                        let delay = Self::retry_delay_for_attempt(attempt, &e);
+                        warn!(
+                            "Provider stream failed (attempt {}/{}): {}. Retrying in {}s...",
+                            attempt,
+                            MAX_RETRIES,
+                            e,
+                            delay.as_secs()
+                        );
+                        last_error = Some(e);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| OSAgentError::Provider("Max retries exceeded".to_string())))
+    }
+
+    async fn do_complete_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
+        let model = self.current_model().await;
+        let mut config = self.resolved_config();
+        config.model = model.clone();
+        let request_auth = self.resolve_request_auth(&model).await?;
+        let mode = request_auth.request_mode;
+        let generation_settings = self.generation_settings().await;
+        let reasoning_meta = self.catalog.as_ref().and_then(|catalog| {
+            catalog.lookup_reasoning_metadata(&config.provider_type, &config.model)
+        });
+        if mode != RequestMode::ChatCompletions {
+            return Err(OSAgentError::Provider(
+                "Streaming currently supports only chat/completions mode".to_string(),
+            ));
+        }
+
+        let transformed_messages = self.adapter.transform_messages(messages, &config);
+        let transformed_tools = self.transform_tools_for_request(tools, &config.model);
+        let include_tools = Self::should_send_tools(&transformed_messages, tools)
+            && !Self::should_trim_tools(&transformed_messages, tools);
+        let provider_options = self
+            .adapter
+            .default_options(&config.provider_type, &config.model);
+        let mut request_body = serde_json::json!({
+            "model": model,
+            "messages": self.build_messages(&transformed_messages),
+            "stream": true,
+        });
+        if let Some(options) = provider_options.as_object() {
+            for (key, value) in options {
+                request_body[key] = value.clone();
+            }
+        }
+        Self::apply_generation_controls(
+            &mut request_body,
+            mode,
+            &config.provider_type,
+            &config.model,
+            &generation_settings,
+            reasoning_meta.as_ref(),
+        );
+        if include_tools {
+            request_body["tools"] = serde_json::to_value(&transformed_tools).unwrap();
+            request_body["tool_choice"] = serde_json::json!("auto");
+        } else if !tools.is_empty() {
+            info!(
+                "Skipping tool schema in streaming provider request to reduce context size (estimated {} tokens)",
+                Self::estimated_tools_tokens(tools)
+            );
+        }
+
+        let mut req = self
+            .client
+            .post(&request_auth.request_url)
+            .header("Content-Type", "application/json")
+            .json(&request_body);
+
+        if !request_auth.api_key.is_empty() {
+            req = req.header(
+                "Authorization",
+                format!("Bearer {}", request_auth.api_key.as_str()),
+            );
+        }
+
+        for (key, value) in &request_auth.extra_headers {
+            req = req.header(key, value);
+        }
+
+        let event_source = req
+            .eventsource()
+            .map_err(|e| OSAgentError::Parse(e.to_string()))?;
+
+        let stream = event_source
+            .filter_map(|event| async move {
+                match event {
+                    Ok(Event::Open) => None,
+                    Ok(Event::Message(message)) => {
+                        if message.data == "[DONE]" {
+                            return Some(Ok(StreamEvent {
+                                event_type: "done".to_string(),
+                                content: None,
+                                thinking: None,
+                                tool_call_deltas: Vec::new(),
+                                finish_reason: None,
+                                usage: None,
+                                done: true,
+                            }));
+                        }
+
+                        let parsed: serde_json::Value = serde_json::from_str(&message.data).ok()?;
+                        let choice = &parsed["choices"][0];
+                        let delta = &choice["delta"];
+                        let final_message = &choice["message"];
+
+                        let content = Self::parse_stream_content(&delta["content"])
+                            .or_else(|| Self::parse_chat_message_content(final_message));
+                        let thinking = Self::parse_stream_thinking(&delta["reasoning_content"])
+                            .or_else(|| Self::parse_stream_thinking(&delta["reasoning_details"]))
+                            .or_else(|| Self::parse_stream_thinking(&delta["thinking"]))
+                            .or_else(|| Self::parse_stream_thinking(&delta["reasoning"]))
+                            .or_else(|| Self::parse_chat_message_thinking(final_message));
+                        let tool_call_deltas = delta["tool_calls"]
+                            .as_array()
+                            .map(|calls| {
+                                calls
+                                    .iter()
+                                    .map(|call| StreamToolCallDelta {
+                                        index: call["index"].as_u64().unwrap_or(0) as usize,
+                                        id: call["id"].as_str().map(|s| s.to_string()),
+                                        name: call["function"]["name"]
+                                            .as_str()
+                                            .map(|s| s.to_string()),
+                                        arguments: call["function"]["arguments"]
+                                            .as_str()
+                                            .map(|s| s.to_string()),
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let finish_reason = choice["finish_reason"]
+                            .as_str()
+                            .map(|s| s.to_string());
+                        let usage = Self::parse_response_usage(&parsed);
+
+                        if content.is_none()
+                            && thinking.is_none()
+                            && tool_call_deltas.is_empty()
+                            && finish_reason.is_none()
+                            && usage.is_none()
+                        {
+                            return None;
+                        }
+
+                        Some(Ok(StreamEvent {
+                            event_type: "token".to_string(),
+                            content,
+                            thinking,
+                            tool_call_deltas,
+                            finish_reason,
+                            usage,
+                            done: false,
+                        }))
+                    }
+                    Err(err) => Some(Err(OSAgentError::Provider(format!(
+                        "stream error: {}",
+                        err
+                    )))),
+                }
+            })
+            .boxed();
+
+        Ok(stream)
+    }
+
     async fn do_complete(
         &self,
         messages: &[Message],
@@ -1175,14 +1614,10 @@ impl OpenAICompatibleProvider {
         let request_auth = self.resolve_request_auth(&model).await?;
         let mode = request_auth.request_mode;
         let generation_settings = self.generation_settings().await;
-        let reasoning_meta = self
-            .catalog
-            .as_ref()
-            .and_then(|catalog| catalog.lookup_reasoning_metadata(&config.provider_type, &config.model));
-        let transformed_tools = self.transform_tools_for_request(
-            tools,
-            &config.model,
-        );
+        let reasoning_meta = self.catalog.as_ref().and_then(|catalog| {
+            catalog.lookup_reasoning_metadata(&config.provider_type, &config.model)
+        });
+        let transformed_tools = self.transform_tools_for_request(tools, &config.model);
         let non_system_messages = Self::non_system_messages(&transformed_messages);
 
         let mut request_body = match mode {
@@ -1218,7 +1653,9 @@ impl OpenAICompatibleProvider {
             reasoning_meta.as_ref(),
         );
         if mode == RequestMode::Responses
-            && request_auth.request_url.contains("chatgpt.com/backend-api/codex")
+            && request_auth
+                .request_url
+                .contains("chatgpt.com/backend-api/codex")
         {
             if let Some(obj) = request_body.as_object_mut() {
                 obj.remove("max_output_tokens");
@@ -1399,128 +1836,7 @@ impl Provider for OpenAICompatibleProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
-        let model = self.current_model().await;
-        let mut config = self.resolved_config();
-        config.model = model.clone();
-        let request_auth = self.resolve_request_auth(&model).await?;
-        let mode = request_auth.request_mode;
-        let generation_settings = self.generation_settings().await;
-        let reasoning_meta = self
-            .catalog
-            .as_ref()
-            .and_then(|catalog| catalog.lookup_reasoning_metadata(&config.provider_type, &config.model));
-        if mode != RequestMode::ChatCompletions {
-            return Err(OSAgentError::Provider(
-                "Streaming currently supports only chat/completions mode".to_string(),
-            ));
-        }
-
-        let transformed_messages = self.adapter.transform_messages(messages, &config);
-        let transformed_tools = self.transform_tools_for_request(
-            tools,
-            &config.model,
-        );
-        let provider_options = self
-            .adapter
-            .default_options(&config.provider_type, &config.model);
-        let mut request_body = serde_json::json!({
-            "model": model,
-            "messages": self.build_messages(&transformed_messages),
-            "tools": transformed_tools,
-            "tool_choice": "auto",
-            "stream": true,
-        });
-        if let Some(options) = provider_options.as_object() {
-            for (key, value) in options {
-                request_body[key] = value.clone();
-            }
-        }
-        Self::apply_generation_controls(
-            &mut request_body,
-            mode,
-            &config.provider_type,
-            &config.model,
-            &generation_settings,
-            reasoning_meta.as_ref(),
-        );
-
-        let mut req = self
-            .client
-            .post(&request_auth.request_url)
-            .header("Content-Type", "application/json")
-            .json(&request_body);
-
-        if !request_auth.api_key.is_empty() {
-            req = req.header(
-                "Authorization",
-                format!("Bearer {}", request_auth.api_key.as_str()),
-            );
-        }
-
-        for (key, value) in &request_auth.extra_headers {
-            req = req.header(key, value);
-        }
-
-        let event_source = req
-            .eventsource()
-            .map_err(|e| OSAgentError::Parse(e.to_string()))?;
-
-        let stream = event_source
-            .take_while(|event| {
-                futures::future::ready(match event {
-                    Ok(Event::Message(_)) => true,
-                    _ => false,
-                })
-            })
-            .filter_map(|event| async move {
-                match event {
-                    Ok(Event::Message(message)) => {
-                        if message.data == "[DONE]" {
-                            return Some(Ok(StreamEvent {
-                                event_type: "done".to_string(),
-                                content: None,
-                                tool_call: None,
-                                done: true,
-                            }));
-                        }
-
-                        let parsed: serde_json::Value = serde_json::from_str(&message.data).ok()?;
-                        let delta = &parsed["choices"][0]["delta"];
-
-                        let content = delta["content"].as_str().map(|s| s.to_string());
-
-                        let tool_call = if let Some(calls) = delta["tool_calls"].as_array() {
-                            calls.first().and_then(|call| {
-                                let id = call["id"].as_str()?.to_string();
-                                let name = call["function"]["name"].as_str()?.to_string();
-                                let arguments = call["function"]["arguments"]
-                                    .as_str()
-                                    .and_then(|s| serde_json::from_str(s).ok())
-                                    .unwrap_or(serde_json::json!({}));
-
-                                Some(ToolCall {
-                                    id,
-                                    name,
-                                    arguments,
-                                })
-                            })
-                        } else {
-                            None
-                        };
-
-                        Some(Ok(StreamEvent {
-                            event_type: "token".to_string(),
-                            content,
-                            tool_call,
-                            done: false,
-                        }))
-                    }
-                    _ => None,
-                }
-            })
-            .boxed();
-
-        Ok(stream)
+        self.complete_stream_with_retry(messages, tools).await
     }
 
     async fn model_context_window(&self) -> Option<usize> {
@@ -1611,6 +1927,32 @@ mod tests {
         assert_eq!(parsed.finish_reason, "tool_calls");
         assert_eq!(parsed.tool_calls.as_ref().map(|x| x.len()), Some(1));
         assert_eq!(parsed.usage.as_ref().map(|x| x.total), Some(15));
+        assert!(parsed.thinking.is_none());
+    }
+
+    #[test]
+    fn parses_chat_completions_thinking_blocks() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "Inspecting the workspace"
+                        },
+                        {
+                            "type": "text",
+                            "text": "Done."
+                        }
+                    ]
+                }
+            }]
+        });
+
+        let parsed = OpenAICompatibleProvider::parse_chat_completions_response(&payload);
+        assert_eq!(parsed.content.as_deref(), Some("Done."));
+        assert_eq!(parsed.thinking.as_deref(), Some("Inspecting the workspace"));
     }
 
     #[test]
@@ -1619,6 +1961,12 @@ mod tests {
             "status": "completed",
             "output_text": "done",
             "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [
+                        { "text": "Planning tool usage" }
+                    ]
+                },
                 {
                     "type": "function_call",
                     "call_id": "call_a",
@@ -1639,6 +1987,7 @@ mod tests {
         let parsed = OpenAICompatibleProvider::parse_responses_response(&payload);
         assert_eq!(parsed.finish_reason, "completed");
         assert_eq!(parsed.content.as_deref(), Some("done"));
+        assert_eq!(parsed.thinking.as_deref(), Some("Planning tool usage"));
         assert_eq!(parsed.tool_calls.as_ref().map(|x| x.len()), Some(1));
         assert_eq!(parsed.usage.as_ref().map(|x| x.reasoning), Some(Some(3)));
     }
@@ -1654,7 +2003,8 @@ mod tests {
         }]);
 
         let tool = Message::tool_result("call_123".to_string(), "ok".to_string());
-        let input = provider.build_responses_input(&[Message::user("hi".to_string()), assistant, tool]);
+        let input =
+            provider.build_responses_input(&[Message::user("hi".to_string()), assistant, tool]);
 
         assert!(input.iter().any(|item| {
             item.get("type").and_then(|v| v.as_str()) == Some("function_call")

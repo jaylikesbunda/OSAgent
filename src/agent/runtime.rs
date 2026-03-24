@@ -5,7 +5,7 @@ use crate::agent::memory::{MemoryEntry, MemoryStatus, MemoryStore};
 use crate::agent::model_catalog::ModelCatalog;
 use crate::agent::persona::{self, ActivePersona};
 use crate::agent::prompt::{self, PromptMode};
-use crate::agent::provider::{OpenAICompatibleProvider, Provider};
+use crate::agent::provider::{OpenAICompatibleProvider, Provider, StreamEvent};
 use crate::agent::provider_presets;
 use crate::agent::session::SessionManager;
 use crate::agent::subagent_manager::SubagentManager;
@@ -25,7 +25,8 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::truncation::{self, TruncationOptions};
 use chrono::Utc;
 use dashmap::DashMap;
-use futures::future::join_all;
+use futures::{future::join_all, StreamExt};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -82,6 +83,13 @@ pub struct AgentRuntime {
 struct ActiveRunInfo {
     started_at: SystemTime,
     user: String,
+}
+
+#[derive(Default)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 struct RunGuard {
@@ -209,23 +217,27 @@ impl AgentRuntime {
                 }
             }
 
-            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
-                cfg,
-                Some(catalog.clone()),
-                Some(crate::oauth::create_oauth_storage(&oauth_dir)),
-                agent_settings.clone(),
-            )?);
+            let provider = Arc::new(
+                OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
+                    cfg,
+                    Some(catalog.clone()),
+                    Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+                    agent_settings.clone(),
+                )?,
+            );
             provider_instances.push((provider_cfg.provider_type.clone(), provider));
         }
 
         if provider_instances.is_empty() {
             warn!("No providers configured - using legacy single provider config");
-            let provider = Arc::new(OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
-                config.provider.clone(),
-                Some(catalog.clone()),
-                Some(crate::oauth::create_oauth_storage(&oauth_dir)),
-                agent_settings.clone(),
-            )?);
+            let provider = Arc::new(
+                OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
+                    config.provider.clone(),
+                    Some(catalog.clone()),
+                    Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+                    agent_settings.clone(),
+                )?,
+            );
             provider_instances.push((config.provider.provider_type.clone(), provider));
         }
 
@@ -673,10 +685,9 @@ impl AgentRuntime {
             let provider = self.active_provider().await;
             let context_window = provider.model_context_window().await;
             if let Some(window) = context_window {
-                let model_limit = self.catalog.lookup_model_limit(
-                    provider.provider_type(),
-                    &provider.current_model().await,
-                );
+                let model_limit = self
+                    .catalog
+                    .lookup_model_limit(provider.provider_type(), &provider.current_model().await);
                 let input_limit = model_limit.as_ref().and_then(|l| l.input);
                 let output_limit = model_limit.as_ref().map(|l| l.output).unwrap_or(8192);
 
@@ -810,28 +821,153 @@ impl AgentRuntime {
                 self.session_manager.update_session(&session).await?;
             }
 
-            let response = tokio::select! {
+            let stream_attempt = tokio::select! {
                 _ = cancel_notify.notified() => {
-                    warn!("Operation cancelled for session {} during provider call", session_id);
+                    warn!("Operation cancelled for session {} during provider stream setup", session_id);
                     self.event_bus.emit(AgentEvent::Cancelled {
                         session_id: session_id.to_string(),
                         timestamp: SystemTime::now(),
                     });
                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
                 }
-                result = provider.complete(&api_messages, &tools) => {
-                    result.map_err(|e| {
-                        error!("Provider error in session {}: {}", session_id, e);
-                        self.event_bus.emit(AgentEvent::Error {
-                            session_id: session_id.to_string(),
-                            error: e.to_string(),
-                            recoverable: e.is_recoverable(),
-                            timestamp: SystemTime::now(),
-                        });
-                        e
-                    })?
+                result = provider.complete_stream(&api_messages, &tools) => result,
+            };
+
+            let (mut response, used_streaming) = match stream_attempt {
+                Ok(stream) => {
+                    let response = self
+                        .consume_provider_stream(session_id, &mut session, stream, cancel_notify.clone())
+                        .await
+                        .map_err(|e| {
+                            error!("Provider stream error in session {}: {}", session_id, e);
+                            self.event_bus.emit(AgentEvent::Error {
+                                session_id: session_id.to_string(),
+                                error: e.to_string(),
+                                recoverable: e.is_recoverable(),
+                                timestamp: SystemTime::now(),
+                            });
+                            e
+                        })?;
+                    (response, true)
+                }
+                Err(error) if Self::is_streaming_fallback_error(&error) => {
+                    let response = tokio::select! {
+                        _ = cancel_notify.notified() => {
+                            warn!("Operation cancelled for session {} during provider call", session_id);
+                            self.event_bus.emit(AgentEvent::Cancelled {
+                                session_id: session_id.to_string(),
+                                timestamp: SystemTime::now(),
+                            });
+                            return Err(OSAgentError::Session("Operation cancelled".to_string()));
+                        }
+                        result = provider.complete(&api_messages, &tools) => {
+                            result.map_err(|e| {
+                                error!("Provider error in session {}: {}", session_id, e);
+                                self.event_bus.emit(AgentEvent::Error {
+                                    session_id: session_id.to_string(),
+                                    error: e.to_string(),
+                                    recoverable: e.is_recoverable(),
+                                    timestamp: SystemTime::now(),
+                                });
+                                e
+                            })?
+                        }
+                    };
+                    (response, false)
+                }
+                Err(error) => {
+                    error!("Provider stream setup error in session {}: {}", session_id, error);
+                    self.event_bus.emit(AgentEvent::Error {
+                        session_id: session_id.to_string(),
+                        error: error.to_string(),
+                        recoverable: error.is_recoverable(),
+                        timestamp: SystemTime::now(),
+                    });
+                    return Err(error);
                 }
             };
+
+            if used_streaming
+                && response.content.is_none()
+                && response.tool_calls.is_none()
+                && response.finish_reason != "length"
+            {
+                warn!(
+                    "Streaming provider response for session {} had no content or tool calls; falling back to non-stream parsing",
+                    session_id
+                );
+
+                let fallback = tokio::select! {
+                    _ = cancel_notify.notified() => {
+                        warn!("Operation cancelled for session {} during provider fallback call", session_id);
+                        self.event_bus.emit(AgentEvent::Cancelled {
+                            session_id: session_id.to_string(),
+                            timestamp: SystemTime::now(),
+                        });
+                        return Err(OSAgentError::Session("Operation cancelled".to_string()));
+                    }
+                    result = provider.complete(&api_messages, &tools) => {
+                        result.map_err(|e| {
+                            error!("Provider fallback error in session {}: {}", session_id, e);
+                            self.event_bus.emit(AgentEvent::Error {
+                                session_id: session_id.to_string(),
+                                error: e.to_string(),
+                                recoverable: e.is_recoverable(),
+                                timestamp: SystemTime::now(),
+                            });
+                            e
+                        })?
+                    }
+                };
+
+                if let Some(last_message) = session.messages.last_mut() {
+                    if last_message.role == "assistant" {
+                        let had_thinking = last_message
+                            .thinking
+                            .as_deref()
+                            .map(|value| !value.trim().is_empty())
+                            .unwrap_or(false);
+                        let had_content = !last_message.content.trim().is_empty();
+
+                        if !had_thinking {
+                            last_message.thinking = fallback.thinking.clone();
+                        }
+                        if !had_content {
+                            last_message.content = fallback.content.clone().unwrap_or_default();
+                        }
+                        last_message.tool_calls = fallback.tool_calls.clone();
+                        if let Some(ref usage) = fallback.usage {
+                            last_message.tokens = Some(MessageTokens {
+                                input: usage.input,
+                                output: usage.output,
+                                total: usage.total,
+                                cached_read: usage.cached_read,
+                                cached_write: usage.cached_write,
+                                reasoning: usage.reasoning,
+                            });
+                        }
+
+                        self.session_manager.update_session(&session).await?;
+
+                        if !had_thinking {
+                            if let Some(thinking) = fallback.thinking.as_deref() {
+                                self.emit_thinking_chunks(session_id, thinking);
+                            }
+                        }
+                        if !had_content {
+                            if let Some(content) = fallback.content.as_deref() {
+                                self.event_bus.emit(AgentEvent::ResponseStart {
+                                    session_id: session_id.to_string(),
+                                    timestamp: SystemTime::now(),
+                                });
+                                self.emit_response_chunks(session_id, content);
+                            }
+                        }
+                    }
+                }
+
+                response = fallback;
+            }
 
             info!(
                 "process_message: Provider response received - content={}, tool_calls={:?}",
@@ -862,29 +998,52 @@ impl AgentRuntime {
                 });
             }
 
-            let mut assistant_message = Message::assistant(
-                response.content.clone().unwrap_or_default(),
-                response.tool_calls.clone(),
-            );
-            if let Some(ref usage) = response.usage {
-                assistant_message.tokens = Some(MessageTokens {
-                    input: usage.input,
-                    output: usage.output,
-                    total: usage.total,
-                    cached_read: usage.cached_read,
-                    cached_write: usage.cached_write,
-                    reasoning: usage.reasoning,
+            if used_streaming {
+                if let Some(last_message) = session.messages.last_mut() {
+                    last_message.tool_calls = response.tool_calls.clone();
+                    if let Some(ref usage) = response.usage {
+                        last_message.tokens = Some(MessageTokens {
+                            input: usage.input,
+                            output: usage.output,
+                            total: usage.total,
+                            cached_read: usage.cached_read,
+                            cached_write: usage.cached_write,
+                            reasoning: usage.reasoning,
+                        });
+                    }
+                }
+                self.session_manager.update_session(&session).await?;
+            } else {
+                let mut assistant_message = Message::assistant(
+                    response.content.clone().unwrap_or_default(),
+                    response.tool_calls.clone(),
+                );
+                assistant_message.thinking = response.thinking.clone();
+                if let Some(ref usage) = response.usage {
+                    assistant_message.tokens = Some(MessageTokens {
+                        input: usage.input,
+                        output: usage.output,
+                        total: usage.total,
+                        cached_read: usage.cached_read,
+                        cached_write: usage.cached_write,
+                        reasoning: usage.reasoning,
+                    });
+                }
+                session.messages.push(assistant_message);
+                self.session_manager.update_session(&session).await?;
+
+                if let Some(thinking) = response.thinking.as_deref() {
+                    self.emit_thinking_chunks(session_id, thinking);
+                }
+
+                self.event_bus.emit(AgentEvent::ResponseStart {
+                    session_id: session_id.to_string(),
+                    timestamp: SystemTime::now(),
                 });
-            }
-            session.messages.push(assistant_message);
 
-            self.event_bus.emit(AgentEvent::ResponseStart {
-                session_id: session_id.to_string(),
-                timestamp: SystemTime::now(),
-            });
-
-            if let Some(content) = response.content.as_ref() {
-                self.emit_response_chunks(session_id, content);
+                if let Some(content) = response.content.as_ref() {
+                    self.emit_response_chunks(session_id, content);
+                }
             }
 
             if let Some(tool_calls) = response.tool_calls {
@@ -1619,25 +1778,277 @@ impl AgentRuntime {
         Ok(result)
     }
 
-    fn emit_response_chunks(&self, session_id: &str, content: &str) {
-        const CHUNK_SIZE: usize = 180;
-
-        if content.trim().is_empty() {
+    fn emit_chunked_text<F>(&self, text: &str, chunk_size: usize, mut emit: F)
+    where
+        F: FnMut(String),
+    {
+        if text.trim().is_empty() {
             return;
         }
 
-        let chars: Vec<char> = content.chars().collect();
-        for chunk in chars.chunks(CHUNK_SIZE) {
-            let chunk_text: String = chunk.iter().collect();
-            if chunk_text.is_empty() {
-                continue;
+        let mut chunk_start = 0usize;
+        let mut chunk_chars = 0usize;
+
+        for (idx, ch) in text.char_indices() {
+            if chunk_chars == chunk_size {
+                emit(text[chunk_start..idx].to_string());
+                chunk_start = idx;
+                chunk_chars = 0;
             }
+            chunk_chars += 1;
+            let next_idx = idx + ch.len_utf8();
+            if next_idx == text.len() {
+                emit(text[chunk_start..next_idx].to_string());
+            }
+        }
+    }
+
+    fn emit_thinking_chunks(&self, session_id: &str, thinking: &str) {
+        const CHUNK_SIZE: usize = 180;
+
+        if thinking.trim().is_empty() {
+            return;
+        }
+
+        self.event_bus.emit(AgentEvent::ThinkingStart {
+            session_id: session_id.to_string(),
+            timestamp: SystemTime::now(),
+        });
+
+        self.emit_chunked_text(thinking, CHUNK_SIZE, |content| {
+            self.event_bus.emit(AgentEvent::ThinkingDelta {
+                session_id: session_id.to_string(),
+                content,
+                timestamp: SystemTime::now(),
+            });
+        });
+
+        self.event_bus.emit(AgentEvent::ThinkingEnd {
+            session_id: session_id.to_string(),
+            timestamp: SystemTime::now(),
+        });
+    }
+
+    fn emit_response_chunks(&self, session_id: &str, content: &str) {
+        const CHUNK_SIZE: usize = 180;
+
+        self.emit_chunked_text(content, CHUNK_SIZE, |chunk_text| {
             self.event_bus.emit(AgentEvent::ResponseChunk {
                 session_id: session_id.to_string(),
                 content: chunk_text,
                 timestamp: SystemTime::now(),
             });
+        });
+    }
+
+    fn is_streaming_fallback_error(error: &OSAgentError) -> bool {
+        matches!(error, OSAgentError::Provider(message) if message.contains("Streaming currently supports only"))
+    }
+
+    async fn maybe_persist_streaming_message(
+        &self,
+        session: &Session,
+        last_flush: &mut Instant,
+        dirty_chars: &mut usize,
+        force: bool,
+    ) -> Result<()> {
+        const FLUSH_CHARS: usize = 384;
+        const FLUSH_INTERVAL_MS: u64 = 250;
+
+        if !force
+            && *dirty_chars < FLUSH_CHARS
+            && last_flush.elapsed().as_millis() < FLUSH_INTERVAL_MS as u128
+        {
+            return Ok(());
         }
+
+        self.session_manager.update_session(session).await?;
+        *last_flush = Instant::now();
+        *dirty_chars = 0;
+        Ok(())
+    }
+
+    async fn consume_provider_stream(
+        &self,
+        session_id: &str,
+        session: &mut Session,
+        mut stream: futures::stream::BoxStream<'static, Result<StreamEvent>>,
+        cancel_notify: Arc<Notify>,
+    ) -> Result<crate::agent::provider::ProviderResponse> {
+        let assistant_index = session.messages.len();
+        session.messages.push(Message::assistant(String::new(), None));
+        self.session_manager.update_session(session).await?;
+
+        let mut response_started = false;
+        let mut thinking_started = false;
+        let mut finish_reason = "completed".to_string();
+        let mut usage: Option<crate::agent::provider::TokenUsage> = None;
+        let mut tool_calls: HashMap<usize, PendingToolCall> = HashMap::new();
+        let mut last_flush = Instant::now();
+        let mut dirty_chars = 0usize;
+
+        loop {
+            let next_event = tokio::select! {
+                _ = cancel_notify.notified() => {
+                    return Err(OSAgentError::Session("Operation cancelled".to_string()));
+                }
+                event = stream.next() => event,
+            };
+
+            let Some(event) = next_event else {
+                break;
+            };
+
+            let event = event?;
+
+            if let Some(reason) = event.finish_reason.as_ref() {
+                finish_reason = reason.clone();
+            }
+            if event.usage.is_some() {
+                usage = event.usage.clone();
+            }
+
+            if let Some(delta) = event.thinking.as_ref() {
+                let assistant = &mut session.messages[assistant_index];
+                let thinking = assistant.thinking.get_or_insert_with(String::new);
+                thinking.push_str(delta);
+                dirty_chars += delta.len();
+
+                if !thinking_started {
+                    self.event_bus.emit(AgentEvent::ThinkingStart {
+                        session_id: session_id.to_string(),
+                        timestamp: SystemTime::now(),
+                    });
+                    thinking_started = true;
+                }
+
+                self.event_bus.emit(AgentEvent::ThinkingDelta {
+                    session_id: session_id.to_string(),
+                    content: delta.clone(),
+                    timestamp: SystemTime::now(),
+                });
+            }
+
+            if let Some(delta) = event.content.as_ref() {
+                if thinking_started {
+                    self.event_bus.emit(AgentEvent::ThinkingEnd {
+                        session_id: session_id.to_string(),
+                        timestamp: SystemTime::now(),
+                    });
+                    thinking_started = false;
+                }
+                if !response_started {
+                    self.event_bus.emit(AgentEvent::ResponseStart {
+                        session_id: session_id.to_string(),
+                        timestamp: SystemTime::now(),
+                    });
+                    response_started = true;
+                }
+
+                let assistant = &mut session.messages[assistant_index];
+                assistant.content.push_str(delta);
+                dirty_chars += delta.len();
+
+                self.event_bus.emit(AgentEvent::ResponseChunk {
+                    session_id: session_id.to_string(),
+                    content: delta.clone(),
+                    timestamp: SystemTime::now(),
+                });
+            }
+
+            if !event.tool_call_deltas.is_empty() {
+                if thinking_started {
+                    self.event_bus.emit(AgentEvent::ThinkingEnd {
+                        session_id: session_id.to_string(),
+                        timestamp: SystemTime::now(),
+                    });
+                    thinking_started = false;
+                }
+                if !response_started {
+                    self.event_bus.emit(AgentEvent::ResponseStart {
+                        session_id: session_id.to_string(),
+                        timestamp: SystemTime::now(),
+                    });
+                    response_started = true;
+                }
+
+                for delta in event.tool_call_deltas {
+                    let entry = tool_calls.entry(delta.index).or_default();
+                    if let Some(id) = delta.id {
+                        entry.id = id;
+                    }
+                    if let Some(name) = delta.name {
+                        entry.name = name;
+                    }
+                    if let Some(arguments) = delta.arguments {
+                        entry.arguments.push_str(&arguments);
+                        dirty_chars += arguments.len();
+                    }
+                }
+            }
+
+            self.maybe_persist_streaming_message(session, &mut last_flush, &mut dirty_chars, false)
+                .await?;
+
+            if event.done {
+                break;
+            }
+        }
+
+        if thinking_started {
+            self.event_bus.emit(AgentEvent::ThinkingEnd {
+                session_id: session_id.to_string(),
+                timestamp: SystemTime::now(),
+            });
+        }
+
+        let tool_calls = if tool_calls.is_empty() {
+            None
+        } else {
+            let mut ordered = tool_calls.into_iter().collect::<Vec<_>>();
+            ordered.sort_by_key(|(index, _)| *index);
+            let built = ordered
+                .into_iter()
+                .filter_map(|(_, call)| {
+                    if call.name.is_empty() {
+                        return None;
+                    }
+                    Some(ToolCall {
+                        id: if call.id.is_empty() {
+                            Uuid::new_v4().to_string()
+                        } else {
+                            call.id
+                        },
+                        name: call.name,
+                        arguments: serde_json::from_str(&call.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if built.is_empty() {
+                None
+            } else {
+                Some(built)
+            }
+        };
+
+        session.messages[assistant_index].tool_calls = tool_calls.clone();
+        self.maybe_persist_streaming_message(session, &mut last_flush, &mut dirty_chars, true)
+            .await?;
+
+        Ok(crate::agent::provider::ProviderResponse {
+            content: Some(session.messages[assistant_index].content.clone())
+                .filter(|content| !content.is_empty()),
+            thinking: session.messages[assistant_index]
+                .thinking
+                .clone()
+                .filter(|thinking| !thinking.is_empty()),
+            tool_calls,
+            finish_reason,
+            retry_count: 0,
+            context_compressed: false,
+            usage,
+        })
     }
 
     fn active_persona_from_session(session: &Session) -> Option<ActivePersona> {
@@ -3025,12 +3436,14 @@ impl AgentRuntime {
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-        let provider = Arc::new(OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
-            provider_config.clone(),
-            Some(catalog),
-            Some(crate::oauth::create_oauth_storage(&oauth_dir)),
-            self.agent_settings.clone(),
-        )?);
+        let provider = Arc::new(
+            OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
+                provider_config.clone(),
+                Some(catalog),
+                Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+                self.agent_settings.clone(),
+            )?,
+        );
 
         let default_provider = self.config.read().await.default_provider.clone();
         let should_activate = default_provider.is_empty() || default_provider == provider_id;
@@ -3060,7 +3473,9 @@ impl AgentRuntime {
                 .iter()
                 .find(|(id, _)| id == &provider_id)
                 .map(|(_, p)| p.clone())
-                .ok_or_else(|| OSAgentError::Config(format!("Provider '{}' not found", provider_id)))?;
+                .ok_or_else(|| {
+                    OSAgentError::Config(format!("Provider '{}' not found", provider_id))
+                })?;
             let mut active_provider = self.provider.write().await;
             *active_provider = active;
         }

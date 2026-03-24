@@ -307,6 +307,58 @@ OSA.createSession = async function() {
     }
 };
 
+OSA.syncRunningSessionSnapshot = async function(sessionId) {
+    try {
+        const currentSession = OSA.getCurrentSession();
+        if (!currentSession || currentSession.id !== sessionId || currentSession.task_status !== 'running') {
+            return;
+        }
+
+        const res = await fetch(`/api/sessions/${sessionId}`, {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        });
+        if (!res.ok) return;
+
+        const session = await res.json();
+        if (!OSA.getCurrentSession() || OSA.getCurrentSession().id !== sessionId) return;
+        OSA.setCurrentSession(session);
+
+        const streamingMessage = OSA.getStreamingAssistantMessage();
+        const latestAssistant = OSA.getActiveTurnAssistantMessage(session);
+        if (!latestAssistant) {
+            if (streamingMessage) {
+                OSA.releaseStreamingAssistantMessage();
+            }
+            return;
+        }
+
+        if (!streamingMessage) {
+            OSA.renderMessages(session.messages || []);
+            OSA.adoptStreamingAssistantFromRenderedSession(session);
+            return;
+        }
+
+        const contentEl = streamingMessage.querySelector('.message-content');
+        const nextContent = latestAssistant.content || '';
+        if (contentEl && (contentEl.dataset.rawText || '') !== nextContent) {
+            OSA.scheduleFormattedRender(contentEl, nextContent);
+        }
+
+        if (OSA.getShowThinkingBlocks() && (latestAssistant.thinking || '').trim()) {
+            const container = OSA.ensureThinkingContainer(streamingMessage);
+            const body = container ? container.querySelector('.thinking-body') : null;
+            if (body && (body.dataset.rawText || '') !== (latestAssistant.thinking || '')) {
+                OSA.scheduleFormattedRender(body, latestAssistant.thinking || '');
+                OSA.setThinkingPreview(container, latestAssistant.thinking || '');
+            }
+        }
+
+        OSA.prepareAssistantMessageElementForStreaming(streamingMessage, latestAssistant, OSA.getShowThinkingBlocks());
+    } catch (error) {
+        console.error('Failed to sync running session snapshot:', error);
+    }
+};
+
 OSA.selectSession = async function(sessionId) {
     try {
         const res = await fetch(`/api/sessions/${sessionId}`, {
@@ -353,6 +405,9 @@ OSA.selectSession = async function(sessionId) {
             `;
         } else {
             OSA.renderMessages(session.messages);
+            if (session.task_status === 'running') {
+                OSA.adoptStreamingAssistantFromRenderedSession(session);
+            }
             if (tools && tools.length > 0) {
                 OSA.restoreToolsAtPositions(tools);
             }
@@ -383,7 +438,7 @@ OSA.selectSession = async function(sessionId) {
             const waitingForResponse = lastUserMsgIdx >= 0 && (
                 !lastMsg || lastMsg.role === 'user' || lastMsg.role === 'tool'
             );
-            if (waitingForResponse || hasPendingTools) {
+            if ((waitingForResponse || hasPendingTools) && !OSA.getStreamingAssistantMessage()) {
                 OSA.showThinkingIndicator();
             }
         }
@@ -548,6 +603,10 @@ OSA.sendMessage = async function() {
         if (!currentSession) return;
     }
 
+    if (OSA.isAgentProcessing()) {
+        return;
+    }
+
     const input = document.getElementById('message-input');
     const message = input.value.trim();
     if (!message) return;
@@ -557,9 +616,25 @@ OSA.sendMessage = async function() {
     OSA.setInputHistoryIndex(-1);
     OSA.getInputHistory().push(message);
     if (OSA.getInputHistory().length > 100) OSA.getInputHistory().shift();
+    OSA.hideThinkingIndicator();
+    OSA.releaseStreamingAssistantMessage();
     OSA.setProcessing(true);
     OSA.setHasReceivedResponse(false);
     OSA.setSendButtonStopMode(true);
+    if (currentSession) currentSession.task_status = 'running';
+    if (currentSession) {
+        if (!Array.isArray(currentSession.messages)) currentSession.messages = [];
+        currentSession.messages.push({
+            role: 'user',
+            content: message,
+            thinking: null,
+            timestamp: new Date().toISOString(),
+            tool_calls: null,
+            tool_call_id: null,
+            metadata: {},
+            tokens: null,
+        });
+    }
 
     const messagesDiv = document.getElementById('messages');
     
@@ -592,6 +667,12 @@ OSA.sendMessage = async function() {
         }
     } catch (error) {
         console.error('Failed to send message:', error);
+        if (currentSession && Array.isArray(currentSession.messages)) {
+            const last = currentSession.messages[currentSession.messages.length - 1];
+            if (last && last.role === 'user' && last.content === message) {
+                currentSession.messages.pop();
+            }
+        }
         OSA.showErrorCard(error.message);
         OSA.setProcessing(false);
         OSA.resetSendButton();
@@ -627,6 +708,7 @@ OSA._forceResetState = function() {
     OSA.setStopping(false);
     OSA.resetSendButton();
     OSA.hideThinkingIndicator();
+    OSA.pruneEmptyStreamingMessage();
     OSA.completeAssistantResponse();
     if (OSA._stopTimeout) {
         clearTimeout(OSA._stopTimeout);
@@ -693,11 +775,23 @@ OSA.connectEventSource = function(sessionId) {
                 OSA.showThinkingIndicator();
             }
         }
+
+        if (session && session.id === sessionId && session.task_status === 'running') {
+            OSA.syncRunningSessionSnapshot(sessionId);
+        }
     };
     
     es.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
+            const activeSessionId = OSA.getEventSourceSessionId();
+            const currentSession = OSA.getCurrentSession();
+            if (
+                data.session_id &&
+                (data.session_id !== activeSessionId || !currentSession || currentSession.id !== data.session_id)
+            ) {
+                return;
+            }
             OSA.handleAgentEvent(data);
         } catch (e) {
             console.error('Failed to parse event:', e);

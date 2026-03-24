@@ -144,13 +144,229 @@ OSA.hideThinkingIndicator = function() {
     }
 };
 
+OSA.clearPendingFormattedRenders = function() {
+    const frame = OSA.getPendingFormattedFrame();
+    if (frame) {
+        cancelAnimationFrame(frame);
+        OSA.setPendingFormattedFrame(null);
+    }
+    OSA.getPendingFormattedElements().clear();
+};
+
+OSA.scheduleFormattedRender = function(element, rawText) {
+    if (!element) return;
+    element.dataset.rawText = rawText;
+    OSA.getPendingFormattedElements().add(element);
+
+    if (OSA.getPendingFormattedFrame()) {
+        return;
+    }
+
+    OSA.setPendingFormattedFrame(requestAnimationFrame(() => {
+        OSA.setPendingFormattedFrame(null);
+        const pending = Array.from(OSA.getPendingFormattedElements());
+        OSA.getPendingFormattedElements().clear();
+        pending.forEach(el => {
+            if (!el || !el.isConnected) return;
+            el.innerHTML = OSA.formatMessage(el.dataset.rawText || '');
+        });
+    }));
+};
+
+OSA.getStreamingAssistantMessage = function() {
+    const domId = OSA.getStreamingAssistantDomId();
+    if (!domId) return null;
+    return document.getElementById(domId);
+};
+
+OSA.getThinkingPreview = function(text) {
+    if (!text) return '';
+    const line = text.split('\n').map(part => part.trim()).find(Boolean) || '';
+    if (line.length <= 88) return line;
+    return `${line.slice(0, 85)}...`;
+};
+
+OSA.toggleThinkingBlock = function(toggle) {
+    const container = toggle && toggle.closest ? toggle.closest('.message-thinking') : null;
+    if (!container) return;
+    container.classList.toggle('expanded');
+};
+
+OSA.renderThinkingSection = function(thinking, expanded = false) {
+    if (!OSA.getShowThinkingBlocks()) return '';
+    if (!thinking || !thinking.trim()) return '';
+    const preview = OSA.getThinkingPreview(thinking);
+    return `
+        <div class="message-thinking${expanded ? ' expanded' : ''}">
+            <button type="button" class="thinking-toggle" onclick="OSA.toggleThinkingBlock(this)">
+                <span class="thinking-toggle-icon">></span>
+                <span class="thinking-toggle-label">Thinking</span>
+                <span class="thinking-preview">${OSA.escapeHtml(preview)}</span>
+            </button>
+            <div class="thinking-body">${OSA.formatMessage(thinking)}</div>
+        </div>
+    `;
+};
+
+OSA.ensureThinkingContainer = function(message) {
+    if (!message) return null;
+    let container = message.querySelector('.message-thinking');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'message-thinking expanded streaming';
+        container.innerHTML = `
+            <button type="button" class="thinking-toggle" onclick="OSA.toggleThinkingBlock(this)">
+                <span class="thinking-toggle-icon">></span>
+                <span class="thinking-toggle-label">Thinking</span>
+                <span class="thinking-preview"></span>
+            </button>
+            <div class="thinking-body"></div>
+        `;
+        const contentEl = message.querySelector('.message-content');
+        message.insertBefore(container, contentEl);
+    }
+    return container;
+};
+
+OSA.setThinkingPreview = function(container, text) {
+    if (!container) return;
+    const previewEl = container.querySelector('.thinking-preview');
+    if (!previewEl) return;
+    const preview = OSA.getThinkingPreview(text);
+    previewEl.textContent = preview;
+    previewEl.style.display = preview ? '' : 'none';
+};
+
+OSA.ensureCurrentSessionAssistantMessage = function() {
+    const session = OSA.getCurrentSession();
+    if (!session) return null;
+    if (!Array.isArray(session.messages)) session.messages = [];
+    const last = session.messages[session.messages.length - 1];
+    if (last && last.role === 'assistant') return last;
+
+    const next = {
+        role: 'assistant',
+        content: '',
+        thinking: null,
+        timestamp: new Date().toISOString(),
+        tool_calls: null,
+        tool_call_id: null,
+        metadata: {},
+        tokens: null,
+    };
+    session.messages.push(next);
+    return next;
+};
+
+OSA.appendCurrentSessionAssistantThinking = function(content) {
+    if (!content) return;
+    const message = OSA.ensureCurrentSessionAssistantMessage();
+    if (!message) return;
+    message.thinking = (message.thinking || '') + content;
+};
+
+OSA.appendCurrentSessionAssistantContent = function(content) {
+    if (!content) return;
+    const message = OSA.ensureCurrentSessionAssistantMessage();
+    if (!message) return;
+    message.content = (message.content || '') + content;
+};
+
+OSA.prepareAssistantMessageElementForStreaming = function(messageEl, sourceMessage, expandThinking = false) {
+    if (!messageEl) return null;
+    if (!messageEl.id) {
+        messageEl.id = `assistant-stream-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    }
+    messageEl.classList.add('streaming');
+
+    const contentEl = messageEl.querySelector('.message-content');
+    if (contentEl && !contentEl.dataset.rawText) {
+        contentEl.dataset.rawText = sourceMessage?.content || '';
+    }
+
+    const thinkingEl = messageEl.querySelector('.thinking-body');
+    if (thinkingEl && !thinkingEl.dataset.rawText) {
+        thinkingEl.dataset.rawText = sourceMessage?.thinking || '';
+    }
+
+    const thinkingWrap = messageEl.querySelector('.message-thinking');
+    if (thinkingWrap && OSA.getShowThinkingBlocks()) {
+        thinkingWrap.classList.add('streaming');
+        thinkingWrap.classList.toggle('expanded', expandThinking && !!(sourceMessage?.thinking || '').trim());
+        OSA.setThinkingPreview(thinkingWrap, sourceMessage?.thinking || '');
+    }
+
+    OSA.setStreamingAssistantDomId(messageEl.id);
+    return messageEl;
+};
+
+OSA.getActiveTurnAssistantMessage = function(session) {
+    if (!session || !Array.isArray(session.messages) || session.messages.length === 0) {
+        return null;
+    }
+
+    const visible = session.messages.filter(message => message.role !== 'tool');
+    if (!visible.length) {
+        return null;
+    }
+
+    const last = visible[visible.length - 1];
+    if (!last || last.role !== 'assistant') {
+        return null;
+    }
+
+    if (!(last.content || '').trim() && !(last.thinking || '').trim()) {
+        return null;
+    }
+
+    return last;
+};
+
+OSA.adoptStreamingAssistantFromRenderedSession = function(session) {
+    if (!session || session.task_status !== 'running' || !Array.isArray(session.messages)) {
+        return null;
+    }
+
+    const assistant = OSA.getActiveTurnAssistantMessage(session);
+    if (!assistant) return null;
+
+    const candidates = Array.from(document.querySelectorAll('#messages .message.assistant'));
+    const messageEl = candidates.at(-1);
+    if (!messageEl) return null;
+
+    return OSA.prepareAssistantMessageElementForStreaming(messageEl, assistant, OSA.getShowThinkingBlocks());
+};
+
 OSA.resetStreamingMessage = function() {
+    OSA.clearPendingFormattedRenders();
     OSA.setStreamingAssistantDomId(null);
+};
+
+OSA.releaseStreamingAssistantMessage = function() {
+    const domId = OSA.getStreamingAssistantDomId();
+    if (!domId) return;
+    const message = document.getElementById(domId);
+    if (!message) {
+        OSA.resetStreamingMessage();
+        return;
+    }
+
+    message.classList.remove('streaming');
+    const thinking = message.querySelector('.message-thinking');
+    if (thinking) {
+        thinking.classList.remove('streaming');
+        thinking.classList.remove('expanded');
+    }
+
+    OSA.resetStreamingMessage();
 };
 
 OSA.createAssistantMessageShell = function() {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return null;
+
+    const emptyState = messagesDiv.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
 
     const domId = `assistant-stream-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const message = document.createElement('div');
@@ -179,18 +395,69 @@ OSA.ensureStreamingAssistantMessage = function() {
 };
 
 OSA.beginAssistantResponse = function() {
+    OSA.ensureCurrentSessionAssistantMessage();
     OSA.hideThinkingIndicator();
-    return OSA.createAssistantMessageShell();
+    return OSA.ensureStreamingAssistantMessage();
+};
+
+OSA.beginThinkingDisplay = function() {
+    OSA.ensureCurrentSessionAssistantMessage();
+    if (!OSA.getShowThinkingBlocks()) return null;
+    OSA.hideThinkingIndicator();
+    const message = OSA.ensureStreamingAssistantMessage();
+    const container = OSA.ensureThinkingContainer(message);
+    if (!container) return null;
+    container.classList.add('expanded', 'streaming');
+    OSA.setThinkingPreview(container, '');
+    return container;
+};
+
+OSA.appendThinkingChunk = function(content) {
+    if (!content) return;
+    OSA.appendCurrentSessionAssistantThinking(content);
+    if (!OSA.getShowThinkingBlocks()) return;
+    const message = OSA.ensureStreamingAssistantMessage();
+    if (!message) return;
+    const container = OSA.ensureThinkingContainer(message);
+    const body = container ? container.querySelector('.thinking-body') : null;
+    if (!body) return;
+
+    const nextText = (body.dataset.rawText || '') + content;
+    OSA.scheduleFormattedRender(body, nextText);
+    OSA.setThinkingPreview(container, nextText);
+
+    const messagesDiv = document.getElementById('messages');
+    if (messagesDiv) {
+        const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 140;
+        if (nearBottom) {
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+    }
+};
+
+OSA.completeThinkingDisplay = function() {
+    if (!OSA.getShowThinkingBlocks()) return;
+    const message = OSA.getStreamingAssistantMessage();
+    if (!message) return;
+    const container = message.querySelector('.message-thinking');
+    if (!container) return;
+    container.classList.remove('streaming');
+    const body = container.querySelector('.thinking-body');
+    const rawText = body ? (body.dataset.rawText || '').trim() : '';
+    if (rawText) {
+        OSA.setThinkingPreview(container, rawText);
+        container.classList.remove('expanded');
+    }
 };
 
 OSA.appendAssistantChunk = function(content) {
     if (!content) return;
+    OSA.appendCurrentSessionAssistantContent(content);
     const message = OSA.ensureStreamingAssistantMessage();
     if (!message) return;
     const contentEl = message.querySelector('.message-content');
     const nextText = (contentEl.dataset.rawText || '') + content;
-    contentEl.dataset.rawText = nextText;
-    contentEl.innerHTML = OSA.formatMessage(nextText);
+    OSA.scheduleFormattedRender(contentEl, nextText);
 
     const messagesDiv = document.getElementById('messages');
     if (messagesDiv) {
@@ -207,8 +474,18 @@ OSA.completeAssistantResponse = function() {
     const message = document.getElementById(domId);
     if (message) {
         message.classList.remove('streaming');
+        OSA.completeThinkingDisplay();
         const contentEl = message.querySelector('.message-content');
         const rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
+        const thinkingEl = message.querySelector('.thinking-body');
+        const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
+        if (!rawText && !thinkingText) {
+            message.remove();
+            OSA.setTurnStartTime(null);
+            OSA.resetStreamingMessage();
+            OSA.updateTodoDock();
+            return;
+        }
         const actionsEl = message.querySelector('.message-actions');
         if (actionsEl && rawText) actionsEl.style.display = '';
 
@@ -243,7 +520,9 @@ OSA.pruneEmptyStreamingMessage = function() {
     }
     const contentEl = message.querySelector('.message-content');
     const rawText = contentEl ? (contentEl.dataset.rawText || '').trim() : '';
-    if (!rawText) {
+    const thinkingEl = message.querySelector('.thinking-body');
+    const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '').trim() : '';
+    if (!rawText && !thinkingText) {
         message.remove();
         OSA.resetStreamingMessage();
     }
@@ -258,6 +537,21 @@ OSA.copyAssistantMessage = function(domId) {
     navigator.clipboard.writeText(text).then(() => {
         const btn = message.querySelector('.msg-action-btn');
         if (btn) { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 2000); }
+    });
+};
+
+OSA.copyAssistantMessageElement = function(button) {
+    const message = button && button.closest ? button.closest('.message.assistant') : null;
+    if (!message) return;
+    const contentEl = message.querySelector('.message-content');
+    const text = contentEl ? (contentEl.dataset.rawText || contentEl.textContent || '') : '';
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+        const original = button.textContent;
+        button.textContent = 'Copied!';
+        setTimeout(() => {
+            button.textContent = original;
+        }, 2000);
     });
 };
 
@@ -382,15 +676,25 @@ OSA.renderMessages = function(messages) {
     if (!messagesDiv) return;
 
     const visibleMessages = messages
-        .filter(m => m.role !== 'tool' && !(m.role === 'assistant' && (!m.content || m.content.trim() === '')))
+        .filter(m => m.role !== 'tool' && !(m.role === 'assistant' && (!m.content || m.content.trim() === '') && (!m.thinking || m.thinking.trim() === '')))
         .slice(-120);
 
     messagesDiv.innerHTML = visibleMessages
-        .map(m => {
+        .map((m, index) => {
             const ts = m.timestamp ? new Date(m.timestamp).getTime() : 0;
-            return `<div class="message ${m.role}" data-ts="${ts}">
+            const thinkingHtml = m.role === 'assistant' ? OSA.renderThinkingSection(m.thinking || '', false) : '';
+            const contentHtml = m.role === 'assistant' ? OSA.formatMessage(m.content || '') : OSA.escapeHtml(m.content || '');
+            const contentBlock = (m.role === 'assistant' && (!m.content || !m.content.trim()))
+                ? ''
+                : `<div class="message-content">${contentHtml}</div>`;
+            const actionsHtml = (m.role === 'assistant' && (m.content || '').trim())
+                ? `<div class="message-actions"><button class="msg-action-btn" onclick="OSA.copyAssistantMessageElement(this)" title="Copy">Copy</button></div>`
+                : '';
+            return `<div class="message ${m.role}" data-ts="${ts}" data-message-index="${index}">
                 <div class="message-role">${m.role === 'user' ? 'You' : 'OSA'}</div>
-                <div class="message-content">${m.role === 'assistant' ? OSA.formatMessage(m.content) : OSA.escapeHtml(m.content)}</div>
+                ${thinkingHtml}
+                ${contentBlock}
+                ${actionsHtml}
             </div>`;
         }).join('');
 

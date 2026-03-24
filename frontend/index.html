@@ -484,6 +484,16 @@
                             </select>
                             <span class="settings-field-hint" id="setting-thinking-hint">Provider/model-specific reasoning options for the active model.</span>
                         </div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Show Thinking Blocks</label>
+                                <span class="toggle-desc">Display streamed and persisted reasoning blocks in the chat transcript</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-show-thinking-blocks" onchange="OSA.onThinkingVisibilityToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div class="settings-pane" id="pane-discord">
