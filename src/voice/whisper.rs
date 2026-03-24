@@ -316,24 +316,23 @@ pub async fn install_binary() -> Result<(), String> {
         );
         download_and_extract_binary(&url, &dir, "whisper.exe").await?;
         info!("Whisper binary installed successfully");
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
     {
-        return Err("Automatic Whisper installation not available for macOS. Please install whisper.cpp manually from https://github.com/ggml-org/whisper.cpp".to_string());
+        Err("Automatic Whisper installation not available for macOS. Please install whisper.cpp manually from https://github.com/ggml-org/whisper.cpp".to_string())
     }
 
     #[cfg(target_os = "linux")]
     {
-        return Err("Automatic Whisper installation not available for Linux. Please install whisper.cpp manually from https://github.com/ggml-org/whisper.cpp".to_string());
+        Err("Automatic Whisper installation not available for Linux. Please install whisper.cpp manually from https://github.com/ggml-org/whisper.cpp".to_string())
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        return Err("Unsupported platform for automatic Whisper installation. Please install whisper.cpp manually.".to_string());
+        Err("Unsupported platform for automatic Whisper installation. Please install whisper.cpp manually.".to_string())
     }
-
-    Ok(())
 }
 
 async fn download_and_extract_binary(
