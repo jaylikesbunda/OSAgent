@@ -6,11 +6,9 @@
 
 <h1 align="center">OSA - Open Source Agent</h1>
 
-<p align="center"><strong>Your personal AI agent. Local, secure, yours.</strong></p>
+<p align="center"><strong>Your personal AI agent. Fast, local and secure.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/osagent/osagent/releases"><img src="https://img.shields.io/github/v/release/osagent/osagent?style=flat-square" alt="Release"></a>
-  <a href="https://github.com/osagent/osagent/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/osagent/osagent/release.yml?style=flat-square" alt="Build"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.70+-orange?style=flat-square" alt="Rust"></a>
 </p>
@@ -21,12 +19,6 @@
   <a href="#features">Features</a> •
   <a href="https://github.com/osagent/osagent/releases">Releases</a>
 </p>
-
----
-
-[![OSA Screenshot](docs/screenshot.png)](#)
-
----
 
 ### Installation
 
