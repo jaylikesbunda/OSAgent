@@ -377,7 +377,7 @@ mod tests {
     fn detects_critical_repeat() {
         let mut det = default_detector();
         let args = json!({"path": "a.txt"});
-        for _ in 0..21 {
+        for _ in 0..20 {
             det.record_and_check("read_file", &args, true);
         }
         let result = det.record_and_check("read_file", &args, true);
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn global_circuit_breaker() {
         let mut det = default_detector();
-        for _ in 0..31 {
+        for _ in 0..30 {
             det.record_and_check("bash", &json!({"command": "fail"}), false);
         }
         let result = det.record_and_check("bash", &json!({"command": "fail"}), false);

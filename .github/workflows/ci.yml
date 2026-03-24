@@ -85,7 +85,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libsoup-2.4-dev
+            libsoup2.4-dev \
+            libgtk-3-dev
 
       - name: Cache launcher cargo registry
         uses: actions/cache@v4
