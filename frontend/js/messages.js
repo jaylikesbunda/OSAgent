@@ -179,6 +179,24 @@ OSA.getStreamingAssistantMessage = function() {
     return document.getElementById(domId);
 };
 
+OSA.transcriptHasBlockingSiblingAfter = function(element) {
+    if (!element) return false;
+
+    let sibling = element.nextElementSibling;
+    while (sibling) {
+        if (
+            sibling.classList.contains('tool-container')
+            || sibling.classList.contains('parallel-group')
+            || sibling.classList.contains('subagent-card')
+        ) {
+            return true;
+        }
+        sibling = sibling.nextElementSibling;
+    }
+
+    return false;
+};
+
 OSA.getThinkingPreview = function(text) {
     if (!text) return '';
     const line = text.split('\n').map(part => part.trim()).find(Boolean) || '';
@@ -190,6 +208,7 @@ OSA.toggleThinkingBlock = function(toggle) {
     const container = toggle && toggle.closest ? toggle.closest('.message-thinking') : null;
     if (!container) return;
     container.classList.toggle('expanded');
+    container.dataset.userToggled = 'true';
 };
 
 OSA.renderThinkingSection = function(thinking, expanded = false) {
@@ -270,6 +289,44 @@ OSA.appendCurrentSessionAssistantContent = function(content) {
     message.content = (message.content || '') + content;
 };
 
+OSA.insertCurrentSessionToolBoundary = function(event) {
+    const session = OSA.getCurrentSession();
+    if (!session) return null;
+    if (!Array.isArray(session.messages)) session.messages = [];
+
+    const callId = event && event.tool_call_id ? event.tool_call_id : null;
+    if (callId) {
+        const existing = session.messages.find(message => message.role === 'tool' && message.tool_call_id === callId);
+        if (existing) return existing;
+    }
+
+    const parsedTimestamp = event && event.timestamp ? new Date(event.timestamp) : new Date();
+    const timestamp = Number.isNaN(parsedTimestamp.getTime())
+        ? new Date().toISOString()
+        : parsedTimestamp.toISOString();
+
+    const toolMessage = {
+        role: 'tool',
+        content: '',
+        thinking: null,
+        timestamp,
+        tool_calls: null,
+        tool_call_id: callId,
+        metadata: {},
+        tokens: null,
+    };
+
+    session.messages.push(toolMessage);
+    return toolMessage;
+};
+
+OSA.finalizeAssistantSegmentForToolCall = function(event) {
+    OSA.completeThinkingDisplay();
+    OSA.pruneEmptyStreamingMessage();
+    OSA.releaseStreamingAssistantMessage();
+    OSA.insertCurrentSessionToolBoundary(event);
+};
+
 OSA.prepareAssistantMessageElementForStreaming = function(messageEl, sourceMessage, expandThinking = false) {
     if (!messageEl) return null;
     if (!messageEl.id) {
@@ -290,7 +347,9 @@ OSA.prepareAssistantMessageElementForStreaming = function(messageEl, sourceMessa
     const thinkingWrap = messageEl.querySelector('.message-thinking');
     if (thinkingWrap && OSA.getShowThinkingBlocks()) {
         thinkingWrap.classList.add('streaming');
-        thinkingWrap.classList.toggle('expanded', expandThinking && !!(sourceMessage?.thinking || '').trim());
+        if (!thinkingWrap.dataset.userToggled) {
+            thinkingWrap.classList.toggle('expanded', expandThinking && !!(sourceMessage?.thinking || '').trim());
+        }
         OSA.setThinkingPreview(thinkingWrap, sourceMessage?.thinking || '');
     }
 
@@ -313,7 +372,9 @@ OSA.getActiveTurnAssistantMessage = function(session) {
         return null;
     }
 
-    if (!(last.content || '').trim() && !(last.thinking || '').trim()) {
+    const hasContent = !!(last.content || '').trim();
+    const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(last.thinking || '').trim();
+    if (!hasContent && !hasVisibleThinking) {
         return null;
     }
 
@@ -353,7 +414,10 @@ OSA.releaseStreamingAssistantMessage = function() {
     const thinking = message.querySelector('.message-thinking');
     if (thinking) {
         thinking.classList.remove('streaming');
-        thinking.classList.remove('expanded');
+        if (!thinking.dataset.userToggled) {
+            thinking.classList.remove('expanded');
+        }
+        delete thinking.dataset.userToggled;
     }
 
     OSA.resetStreamingMessage();
@@ -387,7 +451,19 @@ OSA.ensureStreamingAssistantMessage = function() {
     const existingId = OSA.getStreamingAssistantDomId();
     if (existingId) {
         const existing = document.getElementById(existingId);
-        if (existing) return existing;
+        if (existing) {
+            if (!OSA.transcriptHasBlockingSiblingAfter(existing)) {
+                return existing;
+            }
+
+            existing.classList.remove('streaming');
+            const thinking = existing.querySelector('.message-thinking');
+            if (thinking) {
+                thinking.classList.remove('streaming');
+                thinking.classList.remove('expanded');
+            }
+            OSA.setStreamingAssistantDomId(null);
+        }
     }
     return OSA.createAssistantMessageShell();
 };
@@ -669,16 +745,90 @@ OSA.copyCode = function(btn) {
     });
 };
 
+OSA.removeQueuedMessageElements = function() {
+    document.querySelectorAll('#messages .message.queued').forEach(el => el.remove());
+};
+
+OSA.appendUserMessageToChat = function(content, options = {}) {
+    const messagesDiv = document.getElementById('messages');
+    if (!messagesDiv) return null;
+
+    const currentSession = OSA.getCurrentSession();
+    const clientMessageId = options.clientMessageId || '';
+
+    if (currentSession) {
+        if (!Array.isArray(currentSession.messages)) currentSession.messages = [];
+        const exists = currentSession.messages.some(message => {
+            if (message.role !== 'user') return false;
+            const existingClientId = message.metadata && message.metadata.client_message_id;
+            return clientMessageId ? existingClientId === clientMessageId : message.content === content;
+        });
+
+        if (!exists) {
+            currentSession.messages.push({
+                role: 'user',
+                content,
+                thinking: null,
+                timestamp: options.timestamp || new Date().toISOString(),
+                tool_calls: null,
+                tool_call_id: null,
+                metadata: clientMessageId ? { client_message_id: clientMessageId } : {},
+                tokens: null,
+            });
+        }
+    }
+
+    if (clientMessageId) {
+        const existing = Array.from(messagesDiv.querySelectorAll('[data-client-message-id]'))
+            .find(el => el.dataset.clientMessageId === clientMessageId);
+        if (existing) return existing;
+    }
+
+    const emptyState = messagesDiv.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    const message = document.createElement('div');
+    message.className = 'message user';
+    if (clientMessageId) message.dataset.clientMessageId = clientMessageId;
+    message.innerHTML = `
+        <div class="message-role">You</div>
+        <div class="message-content">${OSA.escapeHtml(content)}</div>
+    `;
+    messagesDiv.appendChild(message);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    return message;
+};
+
+OSA.handleQueuedMessageDispatched = function(event) {
+    const currentSession = OSA.getCurrentSession();
+    if (currentSession) currentSession.task_status = 'running';
+    const queue = (OSA.getSessionQueue() || []).filter(item => item.id !== event.queue_entry_id);
+    OSA.setSessionQueue(queue);
+    OSA.removeQueuedMessageElements();
+    OSA.appendUserMessageToChat(event.content || '', {
+        clientMessageId: event.client_message_id || '',
+        timestamp: event.timestamp,
+    });
+    OSA.renderQueuedMessages(queue);
+};
+
 OSA.renderMessages = function(messages) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return;
 
     const visibleMessages = messages
-        .filter(m => m.role !== 'tool' && !(m.role === 'assistant' && (!m.content || m.content.trim() === '') && (!m.thinking || m.thinking.trim() === '')))
+        .map((message, originalIndex) => ({ message, originalIndex }))
+        .filter(({ message }) => {
+            if (message.role === 'tool') return false;
+            if (message.role !== 'assistant') return true;
+            const hasContent = !!(message.content || '').trim();
+            const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
+            return hasContent || hasVisibleThinking;
+        })
         .slice(-120);
 
     messagesDiv.innerHTML = visibleMessages
-        .map((m, index) => {
+        .map(({ message: m, originalIndex }) => {
             const ts = m.timestamp ? new Date(m.timestamp).getTime() : 0;
             const thinkingHtml = m.role === 'assistant' ? OSA.renderThinkingSection(m.thinking || '', false) : '';
             const contentHtml = m.role === 'assistant' ? OSA.formatMessage(m.content || '') : OSA.escapeHtml(m.content || '');
@@ -688,7 +838,7 @@ OSA.renderMessages = function(messages) {
             const actionsHtml = (m.role === 'assistant' && (m.content || '').trim())
                 ? `<div class="message-actions"><button class="msg-action-btn" onclick="OSA.copyAssistantMessageElement(this)" title="Copy">Copy</button></div>`
                 : '';
-            return `<div class="message ${m.role}" data-ts="${ts}" data-message-index="${index}">
+            return `<div class="message ${m.role}" data-ts="${ts}" data-message-index="${originalIndex}">
                 <div class="message-role">${m.role === 'user' ? 'You' : 'OSA'}</div>
                 ${thinkingHtml}
                 ${contentBlock}
@@ -697,6 +847,34 @@ OSA.renderMessages = function(messages) {
         }).join('');
 
     OSA.resetStreamingMessage();
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.renderQueuedMessages(OSA.getSessionQueue());
+};
+
+OSA.renderQueuedMessages = function(queueItems) {
+    const messagesDiv = document.getElementById('messages');
+    if (!messagesDiv) return;
+
+    OSA.removeQueuedMessageElements();
+
+    const items = Array.isArray(queueItems) ? queueItems : [];
+    if (items.length === 0) return;
+
+    const emptyState = messagesDiv.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    items.forEach((item, index) => {
+        const message = document.createElement('div');
+        message.className = `message user queued${item.status === 'dispatching' ? ' dispatching' : ''}`;
+        if (item.id) message.dataset.queueId = item.id;
+        message.innerHTML = `
+            <div class="message-role">${item.status === 'dispatching' ? 'Sending next' : `Queued ${index + 1}`}</div>
+            <div class="message-content">${OSA.escapeHtml(item.content || '')}</div>
+            <div class="queued-message-meta">${OSA.escapeHtml(OSA.formatRelativeDateTime(item.created_at))}</div>
+        `;
+        messagesDiv.appendChild(message);
+    });
+
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 };
 

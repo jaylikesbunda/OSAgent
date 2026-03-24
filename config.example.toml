@@ -180,6 +180,16 @@ timeout_seconds = 60
 [tools.glob]
 timeout_seconds = 60
 
+[search]
+enabled = true
+index_on_startup = true
+max_results = 20
+global_timeout_ms = 4500
+per_backend_timeout_ms = 2000
+max_parallel_backends = 5
+searxng_instance_refresh_minutes = 30
+searxng_max_instances = 2
+
 [logging]
 level = "info"  # trace, debug, info, warn, error
 audit_enabled = true

@@ -44,13 +44,26 @@ OSA.setVoiceStatus = function(message, tone = 'idle') {
     if (!status) return;
 
     if (!message) {
-        status.textContent = '';
+        status.innerHTML = '';
         status.classList.add('hidden');
         status.dataset.state = 'hidden';
         return;
     }
 
-    status.textContent = message;
+    status.innerHTML = '';
+    const text = document.createElement('span');
+    text.className = 'voice-status-text';
+    text.textContent = message;
+
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'voice-status-dismiss';
+    dismiss.setAttribute('aria-label', 'Dismiss voice status');
+    dismiss.textContent = 'x';
+    dismiss.addEventListener('click', () => OSA.clearVoiceStatus());
+
+    status.appendChild(text);
+    status.appendChild(dismiss);
     status.classList.remove('hidden');
     status.dataset.state = tone;
 };

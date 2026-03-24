@@ -289,6 +289,8 @@ OSA.createSession = async function() {
         OSA.setCurrentSession(session);
         OSA.getActiveTools().clear();
         OSA.parallelToolGroups = [];
+        OSA.setSessionQueue([]);
+        OSA.renderQueuedMessages([]);
         
         OSA.restoreContextState(session.id, null);
         OSA.connectEventSource(session.id);
@@ -305,6 +307,30 @@ OSA.createSession = async function() {
     } catch (error) {
         console.error('Failed to create session:', error);
     }
+};
+
+OSA.refreshSessionQueue = async function(sessionId) {
+    const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/queue`);
+    if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+    }
+
+    const queue = await res.json();
+    const currentSession = OSA.getCurrentSession();
+    if (currentSession && currentSession.id === sessionId) {
+        OSA.setSessionQueue(queue);
+        OSA.renderQueuedMessages(queue);
+    }
+    return queue;
+};
+
+OSA.refreshCurrentSessionQueue = function() {
+    const currentSession = OSA.getCurrentSession();
+    if (!currentSession || !currentSession.id) return Promise.resolve([]);
+    return OSA.refreshSessionQueue(currentSession.id).catch(error => {
+        console.error('Failed to refresh session queue:', error);
+        return [];
+    });
 };
 
 OSA.syncRunningSessionSnapshot = async function(sessionId) {
@@ -367,6 +393,7 @@ OSA.selectSession = async function(sessionId) {
         const session = await res.json();
         OSA.setCurrentSession(session);
         OSA.restoreContextState(session.id, session.context_state || null);
+        OSA.setSessionQueue([]);
         
         document.querySelectorAll('.tool-card, .context-tool-group, .subagent-card, .parallel-group').forEach(el => el.remove());
         OSA.getActiveTools().clear();
@@ -384,16 +411,21 @@ OSA.selectSession = async function(sessionId) {
         const messagesDiv = document.getElementById('messages');
         messagesDiv.innerHTML = '';
         
-        const [toolStartsRes, subagentsRes] = await Promise.all([
+        const [toolStartsRes, subagentsRes, queueRes] = await Promise.all([
             fetch(`/api/sessions/${sessionId}/tools`, {
                 headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
             }).catch(() => null),
             fetch(`/api/sessions/${sessionId}/subagents`, {
                 headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+            }).catch(() => null),
+            fetch(`/api/sessions/${sessionId}/queue`, {
+                headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
             }).catch(() => null)
         ]);
         const tools = (toolStartsRes && toolStartsRes.ok) ? await toolStartsRes.json() : [];
         const subagentsData = (subagentsRes && subagentsRes.ok) ? await subagentsRes.json() : { subagents: [], has_running: false };
+        const queueItems = (queueRes && queueRes.ok) ? await queueRes.json() : [];
+        OSA.setSessionQueue(queueItems);
         
         if (session.messages.length === 0) {
             messagesDiv.innerHTML = `
@@ -416,6 +448,8 @@ OSA.selectSession = async function(sessionId) {
         if (subagentsData && subagentsData.subagents && subagentsData.subagents.length > 0) {
             OSA.restoreSubagentCards(subagentsData.subagents);
         }
+
+        OSA.renderQueuedMessages(queueItems);
 
         const sessionIsRunning = session.task_status === 'running';
         const subagentsRunning = subagentsData && subagentsData.has_running;
@@ -453,14 +487,45 @@ OSA.selectSession = async function(sessionId) {
     }
 };
 
+OSA.findToolInsertBefore = function(messagesDiv, messageIndex, fallbackTimestampMs = 0) {
+    if (!messagesDiv) return null;
+
+    const allMessages = Array.from(messagesDiv.querySelectorAll('.message'));
+    const parsedMessageIndex = Number.isFinite(messageIndex) ? messageIndex : parseInt(messageIndex, 10);
+
+    if (Number.isFinite(parsedMessageIndex)) {
+        const nextByIndex = allMessages.find(el => {
+            const elIndex = parseInt(el.dataset.messageIndex || '', 10);
+            return Number.isFinite(elIndex) && elIndex > parsedMessageIndex;
+        });
+        if (nextByIndex) return nextByIndex;
+
+        const anchorByIndex = allMessages.find(el => parseInt(el.dataset.messageIndex || '', 10) === parsedMessageIndex);
+        if (anchorByIndex) return null;
+    }
+
+    if (fallbackTimestampMs > 0) {
+        for (let i = allMessages.length - 1; i >= 0; i--) {
+            const msgTs = parseInt(allMessages[i].dataset.ts, 10) || 0;
+            if (msgTs <= fallbackTimestampMs) {
+                let sibling = allMessages[i].nextElementSibling;
+                while (sibling && !sibling.classList.contains('message')) {
+                    sibling = sibling.nextElementSibling;
+                }
+                return sibling;
+            }
+        }
+    }
+
+    return allMessages[0] || null;
+};
+
 OSA.restoreToolsAtPositions = function(tools) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv || tools.length === 0) return;
 
-    const allMessages = Array.from(messagesDiv.querySelectorAll('.message'));
-    if (allMessages.length === 0) {
+    if (messagesDiv.querySelectorAll('.message').length === 0) {
         tools.forEach(t => {
-            if (OSA.isContextTool(t.tool_name)) return;
             if (t.tool_name === 'subagent') return;
             OSA.restoreToolCard(t);
         });
@@ -468,54 +533,44 @@ OSA.restoreToolsAtPositions = function(tools) {
     }
 
     const toolTs = (t) => (t.timestamp || 0) * 1000;
-    const msgTs = (el) => parseInt(el.dataset.ts, 10) || 0;
+    const toolMessageIndex = (t) => {
+        const parsed = parseInt(t.message_index, 10);
+        return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+    };
 
     const PARALLEL_WINDOW_MS = 3000;
 
-    const contextTools = [];
-    const regularTools = [];
-
-    tools.forEach(t => {
-        if (OSA.isContextTool(t.tool_name)) {
-            contextTools.push(t);
-        } else if (t.tool_name !== 'subagent') {
-            regularTools.push(t);
-        }
-    });
-
-    regularTools.sort((a, b) => toolTs(a) - toolTs(b));
+    const regularTools = tools
+        .filter(t => t.tool_name !== 'subagent')
+        .sort((a, b) => {
+            const messageDelta = toolMessageIndex(a) - toolMessageIndex(b);
+            if (messageDelta !== 0) return messageDelta;
+            return toolTs(a) - toolTs(b);
+        });
 
     const grouped = [];
     let currentGroup = null;
 
     for (const tool of regularTools) {
-        if (currentGroup && toolTs(tool) - currentGroup.startTs < PARALLEL_WINDOW_MS) {
+        if (
+            currentGroup
+            && currentGroup.messageIndex === toolMessageIndex(tool)
+            && toolTs(tool) - currentGroup.startTs < PARALLEL_WINDOW_MS
+        ) {
             currentGroup.tools.push(tool);
         } else {
-            currentGroup = { startTs: toolTs(tool), tools: [tool] };
+            currentGroup = {
+                startTs: toolTs(tool),
+                messageIndex: toolMessageIndex(tool),
+                tools: [tool]
+            };
             grouped.push(currentGroup);
         }
     }
 
     for (const group of grouped) {
         const firstTs = group.tools[0] ? toolTs(group.tools[0]) : 0;
-        let anchor = null;
-
-        for (let i = allMessages.length - 1; i >= 0; i--) {
-            if (msgTs(allMessages[i]) <= firstTs) {
-                anchor = allMessages[i];
-                break;
-            }
-        }
-
-        let insertBefore = null;
-        if (anchor) {
-            let sibling = anchor.nextElementSibling;
-            while (sibling && !sibling.classList.contains('message')) {
-                sibling = sibling.nextElementSibling;
-            }
-            insertBefore = sibling;
-        }
+        const insertBefore = OSA.findToolInsertBefore(messagesDiv, group.messageIndex, firstTs);
 
         if (group.tools.length >= 2) {
             const groupDiv = document.createElement('div');
@@ -538,25 +593,6 @@ OSA.restoreToolsAtPositions = function(tools) {
         } else {
             OSA.restoreToolCard(group.tools[0], insertBefore);
         }
-    }
-
-    if (contextTools.length > 0) {
-        contextTools.sort((a, b) => toolTs(a) - toolTs(b));
-        const firstCtxTs = toolTs(contextTools[0]);
-
-        let insertBefore = null;
-        for (let i = allMessages.length - 1; i >= 0; i--) {
-            if (msgTs(allMessages[i]) <= firstCtxTs) {
-                let sibling = allMessages[i].nextElementSibling;
-                while (sibling && !sibling.classList.contains('message')) {
-                    sibling = sibling.nextElementSibling;
-                }
-                insertBefore = sibling;
-                break;
-            }
-        }
-
-        OSA.restoreContextToolGroup(contextTools, insertBefore);
     }
 };
 
@@ -587,6 +623,8 @@ OSA.clearSessions = async function() {
         OSA.setHeaderBaseTitle('Select a session');
         document.getElementById('header-title').textContent = 'Select a session';
         OSA.setHeaderTitleRenameable(false);
+        OSA.setSessionQueue([]);
+        OSA.renderQueuedMessages([]);
         OSA.loadSessions();
         OSA.loadSessionWorkspace();
         OSA.loadSessionPersona();
@@ -603,39 +641,27 @@ OSA.sendMessage = async function() {
         if (!currentSession) return;
     }
 
-    if (OSA.isAgentProcessing()) {
-        return;
-    }
-
     const input = document.getElementById('message-input');
     const message = input.value.trim();
     if (!message) return;
+
+    const clientMessageId = OSA.generateClientMessageId();
+    const shouldQueueLocally = OSA.isAgentProcessing() || (OSA.getSessionQueue() || []).length > 0;
+    let optimisticDomId = '';
 
     input.value = '';
     OSA.hideSlashMenu();
     OSA.setInputHistoryIndex(-1);
     OSA.getInputHistory().push(message);
     if (OSA.getInputHistory().length > 100) OSA.getInputHistory().shift();
-    OSA.hideThinkingIndicator();
-    OSA.releaseStreamingAssistantMessage();
-    OSA.setProcessing(true);
-    OSA.setHasReceivedResponse(false);
-    OSA.setSendButtonStopMode(true);
-    if (currentSession) currentSession.task_status = 'running';
-    if (currentSession) {
-        if (!Array.isArray(currentSession.messages)) currentSession.messages = [];
-        currentSession.messages.push({
-            role: 'user',
-            content: message,
-            thinking: null,
-            timestamp: new Date().toISOString(),
-            tool_calls: null,
-            tool_call_id: null,
-            metadata: {},
-            tokens: null,
-        });
+    if (!shouldQueueLocally) {
+        OSA.hideThinkingIndicator();
+        OSA.releaseStreamingAssistantMessage();
+        OSA.setProcessing(true);
+        OSA.setHasReceivedResponse(false);
+        OSA.setSendButtonStopMode(true);
+        if (currentSession) currentSession.task_status = 'running';
     }
-
     const messagesDiv = document.getElementById('messages');
     
     const emptyState = messagesDiv.querySelector('.empty-state');
@@ -643,13 +669,14 @@ OSA.sendMessage = async function() {
         emptyState.remove();
     }
     
-    messagesDiv.innerHTML += `
-        <div class="message user">
-            <div class="message-role">You</div>
-            <div class="message-content">${OSA.escapeHtml(message)}</div>
-        </div>
-    `;
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    if (!shouldQueueLocally) {
+        optimisticDomId = `message-user-${clientMessageId}`;
+        const optimisticMessage = OSA.appendUserMessageToChat(message, {
+            clientMessageId,
+            timestamp: new Date().toISOString(),
+        });
+        if (optimisticMessage) optimisticMessage.id = optimisticDomId;
+    }
 
     try {
         const res = await fetch(`/api/sessions/${currentSession.id}/send`, {
@@ -658,25 +685,61 @@ OSA.sendMessage = async function() {
                 'Authorization': `Bearer ${OSA.getToken()}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ message, session_id: currentSession.id })
+            body: JSON.stringify({ message, session_id: currentSession.id, client_message_id: clientMessageId })
         });
         const data = await res.json().catch(() => ({}));
         
         if (!res.ok) {
             throw new Error(data.error || `HTTP ${res.status}`);
         }
+
+        if (data.queued) {
+            if (currentSession && Array.isArray(currentSession.messages) && !shouldQueueLocally) {
+                const last = currentSession.messages[currentSession.messages.length - 1];
+                if (last && last.role === 'user' && last.content === message) {
+                    currentSession.messages.pop();
+                }
+            }
+            if (optimisticDomId) {
+                const optimisticMessage = document.getElementById(optimisticDomId);
+                if (optimisticMessage) optimisticMessage.remove();
+            }
+
+            const nextQueue = Array.isArray(OSA.getSessionQueue()) ? [...OSA.getSessionQueue()] : [];
+            if (!nextQueue.some(item => item.client_message_id === clientMessageId)) {
+                nextQueue.push(data.queue_item || {
+                    id: clientMessageId,
+                    client_message_id: clientMessageId,
+                    content: message,
+                    status: 'pending',
+                    position: data.queue_position || (nextQueue.length + 1),
+                    created_at: new Date().toISOString(),
+                });
+            }
+            nextQueue.sort((a, b) => (a.position || 0) - (b.position || 0));
+            OSA.setSessionQueue(nextQueue);
+            OSA.renderQueuedMessages(nextQueue);
+        } else {
+            OSA.refreshCurrentSessionQueue();
+        }
     } catch (error) {
         console.error('Failed to send message:', error);
-        if (currentSession && Array.isArray(currentSession.messages)) {
+        if (currentSession && Array.isArray(currentSession.messages) && !shouldQueueLocally) {
             const last = currentSession.messages[currentSession.messages.length - 1];
             if (last && last.role === 'user' && last.content === message) {
                 currentSession.messages.pop();
             }
         }
+        if (optimisticDomId) {
+            const optimisticMessage = document.getElementById(optimisticDomId);
+            if (optimisticMessage) optimisticMessage.remove();
+        }
         OSA.showErrorCard(error.message);
-        OSA.setProcessing(false);
-        OSA.resetSendButton();
-        OSA.hideThinkingIndicator();
+        if (!shouldQueueLocally) {
+            OSA.setProcessing(false);
+            OSA.resetSendButton();
+            OSA.hideThinkingIndicator();
+        }
     }
 };
 
@@ -742,7 +805,12 @@ OSA.resetSendButton = function() {
 
 window.handleSendButtonClick = function() {
     if (OSA.isAgentProcessing()) {
-        OSA.stopGeneration();
+        const input = document.getElementById('message-input');
+        if (input && input.value.trim()) {
+            OSA.sendMessage();
+        } else {
+            OSA.stopGeneration();
+        }
     } else {
         OSA.sendMessage();
     }

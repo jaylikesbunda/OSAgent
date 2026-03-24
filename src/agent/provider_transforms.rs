@@ -199,14 +199,11 @@ impl ProviderTransforms {
             headers.push(("X-Title", "OSA".to_string()));
         }
 
-        match provider_type {
-            "anthropic" => {
-                headers.push((
-                    "anthropic-beta",
-                    "interleaved-thinking-2025-05-14".to_string(),
-                ));
-            }
-            _ => {}
+        if provider_type == "anthropic" {
+            headers.push((
+                "anthropic-beta",
+                "interleaved-thinking-2025-05-14".to_string(),
+            ));
         }
 
         headers

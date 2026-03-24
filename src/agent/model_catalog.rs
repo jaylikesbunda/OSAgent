@@ -583,7 +583,8 @@ impl ModelCatalog {
                 provider_id: provider_id.to_string(),
                 model_id: model_id.to_string(),
                 family: infer_family(model_id),
-                reasoning: model.category == "reasoning" || model.id.to_ascii_lowercase().contains("codex"),
+                reasoning: model.category == "reasoning"
+                    || model.id.to_ascii_lowercase().contains("codex"),
                 release_date: String::new(),
                 output_limit: 0,
             })
@@ -640,33 +641,33 @@ impl Default for ModelCatalog {
 }
 
 fn infer_family(model_id: &str) -> String {
-        let id = model_id.to_ascii_lowercase();
-        if id.contains("claude") {
-            return "claude".to_string();
-        }
-        if id.contains("gemini") {
-            return "gemini".to_string();
-        }
-        if id.contains("grok") {
-            return "grok".to_string();
-        }
-        if id.contains("mistral") {
-            return "mistral".to_string();
-        }
-        if id.contains("llama") {
-            return "llama".to_string();
-        }
-        if id.contains("deepseek") {
-            return "deepseek".to_string();
-        }
-        if id.contains("qwen") {
-            return "qwen".to_string();
-        }
-        if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
-            return "o".to_string();
-        }
-        if id.contains("gpt") || id.contains("codex") {
-            return "gpt".to_string();
-        }
-        String::new()
+    let id = model_id.to_ascii_lowercase();
+    if id.contains("claude") {
+        return "claude".to_string();
+    }
+    if id.contains("gemini") {
+        return "gemini".to_string();
+    }
+    if id.contains("grok") {
+        return "grok".to_string();
+    }
+    if id.contains("mistral") {
+        return "mistral".to_string();
+    }
+    if id.contains("llama") {
+        return "llama".to_string();
+    }
+    if id.contains("deepseek") {
+        return "deepseek".to_string();
+    }
+    if id.contains("qwen") {
+        return "qwen".to_string();
+    }
+    if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
+        return "o".to_string();
+    }
+    if id.contains("gpt") || id.contains("codex") {
+        return "gpt".to_string();
+    }
+    String::new()
 }

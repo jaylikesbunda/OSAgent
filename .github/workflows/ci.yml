@@ -113,5 +113,8 @@ jobs:
       - name: Check launcher formatting
         run: cargo fmt --manifest-path launcher/Cargo.toml --all -- --check
 
+      - name: Run launcher clippy
+        run: cargo clippy --manifest-path launcher/Cargo.toml --all-targets --all-features -- -D warnings
+
       - name: Build launcher
         run: cargo build --manifest-path launcher/Cargo.toml --release

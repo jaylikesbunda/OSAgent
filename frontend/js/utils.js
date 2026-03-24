@@ -45,6 +45,13 @@ OSA.parseDiscordAllowedUsers = function(raw) {
     ));
 };
 
+OSA.generateClientMessageId = function() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    return `client-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
 OSA.summarizeHistoryEvent = function(event) {
     const data = event?.data || {};
     switch (event.event_type) {

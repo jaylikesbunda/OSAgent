@@ -90,11 +90,11 @@ impl BackendError {
 
     pub fn cooldown_duration(&self) -> Option<Duration> {
         match self.kind {
-            BackendErrorKind::Blocked => Some(Duration::from_secs(10 * 60)),
-            BackendErrorKind::Parse => Some(Duration::from_secs(3 * 60)),
-            BackendErrorKind::Network | BackendErrorKind::Timeout => Some(Duration::from_secs(90)),
-            BackendErrorKind::HttpStatus(status) if status >= 500 => Some(Duration::from_secs(90)),
-            BackendErrorKind::HttpStatus(429) => Some(Duration::from_secs(5 * 60)),
+            BackendErrorKind::Blocked => Some(Duration::from_secs(5 * 60)),
+            BackendErrorKind::Parse => Some(Duration::from_secs(2 * 60)),
+            BackendErrorKind::Network | BackendErrorKind::Timeout => Some(Duration::from_secs(15)),
+            BackendErrorKind::HttpStatus(status) if status >= 500 => Some(Duration::from_secs(30)),
+            BackendErrorKind::HttpStatus(429) => Some(Duration::from_secs(6 * 60)),
             BackendErrorKind::HttpStatus(_) | BackendErrorKind::Empty => None,
         }
     }
@@ -105,6 +105,19 @@ pub type BackendResult<T> = std::result::Result<T, BackendError>;
 #[async_trait]
 pub trait SearchBackend: Send + Sync {
     fn id(&self) -> &'static str;
+
+    fn priority(&self) -> u8 {
+        100
+    }
+
+    fn min_interval(&self) -> Duration {
+        Duration::from_secs(8)
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_millis(1_800)
+    }
+
     async fn search(
         &self,
         client: &Client,

@@ -62,6 +62,43 @@ impl Session {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedMessageStatus {
+    Pending,
+    Dispatching,
+}
+
+impl QueuedMessageStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Dispatching => "dispatching",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "dispatching" => Self::Dispatching,
+            _ => Self::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    pub id: String,
+    pub session_id: String,
+    pub client_message_id: String,
+    pub content: String,
+    pub status: QueuedMessageStatus,
+    pub position: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub dispatched_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MessageTokens {
     pub input: usize,

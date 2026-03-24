@@ -19,92 +19,210 @@ on:
         required: true
         default: false
         type: boolean
-      create_github_release:
-        description: Create or update a GitHub release after building
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-core:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: osagent-linux
+            target: x86_64-unknown-linux-gnu
             binary_name: osagent
-            archive_path: osagent-linux.tar.gz
           - os: windows-latest
-            artifact_name: osagent-windows
+            target: x86_64-pc-windows-msvc
             binary_name: osagent.exe
-            archive_path: osagent-windows.zip
           - os: macos-latest
-            artifact_name: osagent-macos
+            target: aarch64-apple-darwin
             binary_name: osagent
-            archive_path: osagent-macos.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_name: osagent
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-release-cargo-registry-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-core-cargo-registry-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-release-cargo-registry-
+            ${{ runner.os }}-core-cargo-registry-
 
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-release-cargo-git-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-core-cargo-git-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-release-cargo-git-
+            ${{ runner.os }}-core-cargo-git-
 
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-release-target-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-core-target-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-release-target-
+            ${{ runner.os }}-core-target-
 
-      - name: Build native release binary
-        run: cargo build --release
+      - name: Build core binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload core binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+
+  build-launcher:
+    runs-on: ${{ matrix.os }}
+    needs: build-core
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            core_binary: osagent
+            launcher_binary: osagent-launcher
+            archive_name: osagent-linux-x86_64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            core_binary: osagent.exe
+            launcher_binary: osagent-launcher.exe
+            archive_name: osagent-windows-x86_64.zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            core_binary: osagent
+            launcher_binary: osagent-launcher
+            archive_name: osagent-macos-arm64.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            core_binary: osagent
+            launcher_binary: osagent-launcher
+            archive_name: osagent-macos-x86_64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux launcher dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libwayland-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Download core binary
+        uses: actions/download-artifact@v4
+        with:
+          name: core-${{ matrix.target }}
+          path: target/release
+
+      - name: Cache launcher cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-launcher-cargo-registry-${{ hashFiles('launcher/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-launcher-cargo-registry-
+
+      - name: Cache launcher cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-launcher-cargo-git-${{ hashFiles('launcher/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-launcher-cargo-git-
+
+      - name: Cache launcher target directory
+        uses: actions/cache@v4
+        with:
+          path: launcher/target
+          key: ${{ runner.os }}-launcher-target-${{ hashFiles('launcher/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-launcher-target-
+
+      - name: Build launcher
+        run: cargo build --manifest-path launcher/Cargo.toml --release
+
+      - name: Create package directory
+        run: mkdir -p dist/osagent
+
+      - name: Copy core binary
+        run: |
+          chmod +x target/release/${{ matrix.core_binary }} || true
+          cp target/release/${{ matrix.core_binary }} dist/osagent/
+
+      - name: Copy launcher binary
+        run: |
+          chmod +x launcher/target/release/${{ matrix.launcher_binary }} || true
+          cp launcher/target/release/${{ matrix.launcher_binary }} dist/osagent/
+
+      - name: Create README
+        shell: bash
+        run: |
+          cat > dist/osagent/README.txt << 'EOF'
+          OSAgent - Your Open Source Agent
+
+          To start:
+            1. Run osagent-launcher (or osagent-launcher.exe on Windows)
+            2. Follow the setup wizard
+            3. OSA will start at http://localhost:8765
+
+          No Rust installation required.
+          EOF
 
       - name: Package artifact (Unix)
         if: matrix.os != 'windows-latest'
-        run: tar czf ${{ matrix.archive_path }} -C target/release ${{ matrix.binary_name }}
+        run: tar czf ${{ matrix.archive_name }} -C dist osagent
 
       - name: Package artifact (Windows)
         if: matrix.os == 'windows-latest'
-        run: Compress-Archive -Path target/release/${{ matrix.binary_name }} -DestinationPath ${{ matrix.archive_path }}
+        run: Compress-Archive -Path dist/osagent -DestinationPath ${{ matrix.archive_name }}
         shell: pwsh
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.archive_path }}
+          name: package-${{ matrix.target }}
+          path: ${{ matrix.archive_name }}
 
   publish:
-    needs: build
+    needs: build-launcher
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || inputs.create_github_release
 
     steps:
       - name: Download built artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: package-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
@@ -113,5 +231,5 @@ jobs:
           name: ${{ github.event_name == 'release' && github.event.release.name || inputs.release_name }}
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || github.event.release.prerelease }}
           files: |
-            dist/**/*.tar.gz
-            dist/**/*.zip
+            dist/*.tar.gz
+            dist/*.zip

@@ -9,6 +9,8 @@ pub fn build_system_prompt(allowed_tools: &[String], mode: PromptMode) -> String
 
     sections.extend(build_identity_section(mode));
     sections.push(String::new());
+    sections.extend(build_datetime_section());
+    sections.push(String::new());
     sections.extend(build_priorities_section(mode));
     sections.push(String::new());
     sections.extend(build_safety_section());
@@ -25,6 +27,30 @@ pub fn build_system_prompt(allowed_tools: &[String], mode: PromptMode) -> String
     }
 
     sections.join("\n")
+}
+
+fn build_datetime_section() -> Vec<String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let datetime = chrono::DateTime::from_timestamp(now as i64, 0).unwrap_or_else(chrono::Utc::now);
+
+    let local: chrono::DateTime<chrono::Local> = chrono::DateTime::from(datetime);
+    let date_str = local.format("%Y-%m-%d").to_string();
+    let time_str = local.format("%H:%M:%S").to_string();
+    let tz_str = local.format("%Z").to_string();
+    let weekday = local.format("%A").to_string();
+
+    vec![
+        "# Current Time".to_string(),
+        format!("- Date: {} ({})", date_str, weekday),
+        format!("- Time: {}", time_str),
+        format!("- Timezone: {}", tz_str),
+    ]
 }
 
 fn build_identity_section(mode: PromptMode) -> Vec<String> {
@@ -87,6 +113,7 @@ fn build_workflow_section(mode: PromptMode) -> Vec<String> {
             "- Make the smallest correct change".to_string(),
             "- Validate with the narrowest useful checks".to_string(),
             "- If validation fails, fix reasonable issues and retry up to 3 times".to_string(),
+            "- If web_search fails or returns no results, try web_fetch with a likely direct URL, site-specific JSON endpoint (e.g., reddit.com/r/.../.json), or feed before giving up".to_string(),
             "- Finish with what changed, validation status, and any remaining blockers".to_string(),
             String::new(),
             "# Codebase Navigation".to_string(),
@@ -194,7 +221,7 @@ fn tool_line(name: &str) -> Option<&'static str> {
         }
         "code_node" => Some("- code_node: short JavaScript or TypeScript computations"),
         "code_bash" => Some("- code_bash: short shell-based transformations"),
-        "web_fetch" => Some("- web_fetch: fetch or extract structured data from a known URL"),
+        "web_fetch" => Some("- web_fetch: fetch a known URL as readable page text, site-aware JSON/XML/feed content, or CSS-extracted structured data. For Reddit pages, prefer the `.json` form when possible"),
         "web_search" => Some("- web_search: search the web for current information"),
         "task" => Some("- task: track substantial multi-step work only when it helps"),
         "todowrite" => Some("- todowrite: manage a persistent todo list for the session"),

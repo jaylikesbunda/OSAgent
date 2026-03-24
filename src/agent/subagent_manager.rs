@@ -425,12 +425,14 @@ impl SubagentManager {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
 
-        Ok(Arc::new(OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
-            config,
-            None,
-            Some(crate::oauth::create_oauth_storage(&oauth_dir)),
-            Arc::new(tokio::sync::RwLock::new(cfg.agent.clone())),
-        )?))
+        Ok(Arc::new(
+            OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
+                config,
+                None,
+                Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+                Arc::new(tokio::sync::RwLock::new(cfg.agent.clone())),
+            )?,
+        ))
     }
 
     async fn run_iteration(

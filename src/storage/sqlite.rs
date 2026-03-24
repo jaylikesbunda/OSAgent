@@ -12,6 +12,24 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
+    fn queued_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedMessage> {
+        let status: String = row.get(4)?;
+        let dispatched_at_ts: Option<i64> = row.get(8)?;
+        Ok(QueuedMessage {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            client_message_id: row.get(2)?,
+            content: row.get(3)?,
+            status: QueuedMessageStatus::from_str(&status),
+            position: row.get(5)?,
+            created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(6)?, 0)
+                .unwrap_or_else(Utc::now),
+            updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(7)?, 0)
+                .unwrap_or_else(Utc::now),
+            dispatched_at: dispatched_at_ts.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+        })
+    }
+
     pub fn new(database_path: &str) -> Result<Self> {
         let path = PathBuf::from(shellexpand::tilde(database_path).to_string());
         if let Some(parent) = path.parent() {
@@ -178,7 +196,21 @@ impl SqliteStorage {
                     updated_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS queued_messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    client_message_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    dispatched_at INTEGER
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_todo_session ON todo_items(session_id, position);
+                CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_id, position);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_queued_messages_client ON queued_messages(session_id, client_message_id);
 
                 CREATE TABLE IF NOT EXISTS subagent_tasks (
                     id TEXT PRIMARY KEY,
@@ -976,6 +1008,170 @@ impl SqliteStorage {
                 params![session_id],
             )
             .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    pub fn enqueue_message(
+        &self,
+        session_id: &str,
+        client_message_id: &str,
+        content: &str,
+    ) -> Result<(QueuedMessage, bool)> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+
+            let mut existing_stmt = tx
+                .prepare(
+                    "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
+                     FROM queued_messages WHERE session_id = ?1 AND client_message_id = ?2 LIMIT 1",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let existing = match existing_stmt.query_row(params![session_id, client_message_id], Self::queued_message_from_row) {
+                Ok(item) => Some(item),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(OSAgentError::Storage(error)),
+            };
+            drop(existing_stmt);
+
+            if let Some(item) = existing {
+                tx.commit().map_err(OSAgentError::Storage)?;
+                return Ok((item, false));
+            }
+
+            let next_position: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(MAX(position), 0) + 1 FROM queued_messages WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let now = Utc::now();
+            let item = QueuedMessage {
+                id: Uuid::new_v4().to_string(),
+                session_id: session_id.to_string(),
+                client_message_id: client_message_id.to_string(),
+                content: content.to_string(),
+                status: QueuedMessageStatus::Pending,
+                position: next_position,
+                created_at: now,
+                updated_at: now,
+                dispatched_at: None,
+            };
+
+            tx.execute(
+                "INSERT INTO queued_messages (id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    &item.id,
+                    &item.session_id,
+                    &item.client_message_id,
+                    &item.content,
+                    item.status.as_str(),
+                    item.position,
+                    item.created_at.timestamp(),
+                    item.updated_at.timestamp(),
+                    item.dispatched_at.map(|dt| dt.timestamp()),
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok((item, true))
+        })
+    }
+
+    pub fn list_queued_messages(&self, session_id: &str) -> Result<Vec<QueuedMessage>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
+                     FROM queued_messages
+                     WHERE session_id = ?1
+                     ORDER BY position ASC, created_at ASC",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let items = stmt
+                .query_map(params![session_id], Self::queued_message_from_row)
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+
+            Ok(items)
+        })
+    }
+
+    pub fn claim_next_queued_message(&self, session_id: &str) -> Result<Option<QueuedMessage>> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+
+            let select_sql = "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
+                              FROM queued_messages
+                              WHERE session_id = ?1 AND status = ?2
+                              ORDER BY position ASC, created_at ASC
+                              LIMIT 1";
+
+            let mut stmt = tx.prepare(select_sql).map_err(OSAgentError::Storage)?;
+            let dispatching = match stmt.query_row(
+                params![session_id, QueuedMessageStatus::Dispatching.as_str()],
+                Self::queued_message_from_row,
+            ) {
+                Ok(item) => Some(item),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(OSAgentError::Storage(error)),
+            };
+            drop(stmt);
+
+            if let Some(item) = dispatching {
+                tx.commit().map_err(OSAgentError::Storage)?;
+                return Ok(Some(item));
+            }
+
+            let mut stmt = tx.prepare(select_sql).map_err(OSAgentError::Storage)?;
+            let pending = match stmt.query_row(
+                params![session_id, QueuedMessageStatus::Pending.as_str()],
+                Self::queued_message_from_row,
+            ) {
+                Ok(item) => Some(item),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(OSAgentError::Storage(error)),
+            };
+            drop(stmt);
+
+            let Some(mut item) = pending else {
+                tx.commit().map_err(OSAgentError::Storage)?;
+                return Ok(None);
+            };
+
+            let now = Utc::now();
+            tx.execute(
+                "UPDATE queued_messages
+                 SET status = ?1, updated_at = ?2, dispatched_at = COALESCE(dispatched_at, ?2)
+                 WHERE id = ?3",
+                params![
+                    QueuedMessageStatus::Dispatching.as_str(),
+                    now.timestamp(),
+                    &item.id,
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+
+            item.status = QueuedMessageStatus::Dispatching;
+            item.updated_at = now;
+            item.dispatched_at = Some(now);
+
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(Some(item))
+        })
+    }
+
+    pub fn delete_queued_message(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM queued_messages WHERE id = ?1", params![id])
+                .map_err(OSAgentError::Storage)?;
             Ok(())
         })
     }

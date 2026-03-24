@@ -6,8 +6,7 @@ use aes_gcm::{
 };
 use base64::{
     engine::general_purpose::STANDARD as BASE64,
-    engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL,
-    Engine,
+    engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL, Engine,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -18,8 +17,8 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{
     CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu,
@@ -243,7 +242,9 @@ impl LauncherOAuthStorage {
         }
         let (nonce_bytes, ciphertext) = combined.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| e.to_string())?;
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| e.to_string())?;
         String::from_utf8(plaintext).map_err(|e| e.to_string())
     }
 
@@ -344,7 +345,12 @@ fn extract_account_id(id_token: Option<&str>, access_token: Option<&str>) -> Opt
         .and_then(parse_jwt_claims)
         .as_ref()
         .and_then(from_claims)
-        .or_else(|| access_token.and_then(parse_jwt_claims).as_ref().and_then(from_claims))
+        .or_else(|| {
+            access_token
+                .and_then(parse_jwt_claims)
+                .as_ref()
+                .and_then(from_claims)
+        })
 }
 
 async fn write_oauth_response(
@@ -389,12 +395,16 @@ async fn wait_for_oauth_callback(
     let url = reqwest::Url::parse(&format!("http://127.0.0.1{}", path))
         .map_err(|e| format!("Invalid OAuth callback URL: {}", e))?;
 
-    if let Some(error) = url.query_pairs().find_map(|(k, v)| (k == "error").then(|| v.to_string())) {
+    if let Some(error) = url
+        .query_pairs()
+        .find_map(|(k, v)| (k == "error").then(|| v.to_string()))
+    {
         let msg = url
             .query_pairs()
             .find_map(|(k, v)| (k == "error_description").then(|| v.to_string()))
             .unwrap_or(error);
-        let _ = write_oauth_response(&mut stream, "400 Bad Request", "Authorization failed", &msg).await;
+        let _ = write_oauth_response(&mut stream, "400 Bad Request", "Authorization failed", &msg)
+            .await;
         return Err(msg);
     }
 
@@ -624,6 +634,31 @@ fn get_osagent_path() -> PathBuf {
         .ok()
         .unwrap_or_else(|| PathBuf::from("."));
 
+    // Check for bundled sidecar binary first (Tauri externalBin naming)
+    let target_triple = tauri_target_triple();
+    let sidecar_name = if cfg!(windows) {
+        format!("osagent-{}.exe", target_triple)
+    } else {
+        format!("osagent-{}", target_triple)
+    };
+
+    let sidecar_candidates: Vec<PathBuf> = vec![
+        exe_path
+            .parent()
+            .map(|p| p.join(&sidecar_name))
+            .unwrap_or_default(),
+        exe_path
+            .parent()
+            .map(|p| p.join("binaries").join(&sidecar_name))
+            .unwrap_or_default(),
+    ];
+
+    for candidate in &sidecar_candidates {
+        if candidate.exists() {
+            return candidate.clone();
+        }
+    }
+
     // exe is at: .../osagent/launcher/target/release/osagent-launcher.exe
     // We need:   .../osagent/target/release/osagent.exe
     let candidates: Vec<PathBuf> = vec![
@@ -650,6 +685,36 @@ fn get_osagent_path() -> PathBuf {
     candidates[0].clone()
 }
 
+fn tauri_target_triple() -> &'static str {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return "x86_64-pc-windows-msvc";
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    return "aarch64-pc-windows-msvc";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return "x86_64-unknown-linux-gnu";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "aarch64-unknown-linux-gnu";
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return "x86_64-apple-darwin";
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return "aarch64-apple-darwin";
+    #[cfg(not(any(
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    return "unknown";
+}
+
 fn get_osagent_path_for_profile(profile: &str) -> PathBuf {
     let exe_path = std::env::current_exe()
         .ok()
@@ -660,6 +725,22 @@ fn get_osagent_path_for_profile(profile: &str) -> PathBuf {
     } else {
         "osagent"
     };
+
+    // Check for bundled sidecar first
+    let target_triple = tauri_target_triple();
+    let sidecar_name = if cfg!(windows) {
+        format!("osagent-{}.exe", target_triple)
+    } else {
+        format!("osagent-{}", target_triple)
+    };
+
+    let sidecar_path = exe_path
+        .parent()
+        .map(|p| p.join(&sidecar_name))
+        .unwrap_or_default();
+    if sidecar_path.exists() {
+        return sidecar_path;
+    }
 
     // exe is at: .../osagent/launcher/target/release/osagent-launcher.exe
     // We need:   .../osagent/target/{profile}/osagent[.exe]
@@ -852,7 +933,8 @@ fn provider_presets() -> Vec<ProviderPreset> {
             base_url: "https://api.githubcopilot.com".to_string(),
             key_label: "Copilot Token".to_string(),
             key_placeholder: "Optional for OAuth mode".to_string(),
-            key_help: "Use sign-in when available, or provide a token if supported in your setup.".to_string(),
+            key_help: "Use sign-in when available, or provide a token if supported in your setup."
+                .to_string(),
             api_key_required: false,
             default_model: "gpt-4.1".to_string(),
             models: vec![
@@ -879,7 +961,9 @@ fn provider_presets() -> Vec<ProviderPreset> {
             base_url: "http://localhost:11434/v1".to_string(),
             key_label: "Optional API Key".to_string(),
             key_placeholder: "Usually leave blank".to_string(),
-            key_help: "Local Ollama usually does not need a key. Keep Ollama running on this machine.".to_string(),
+            key_help:
+                "Local Ollama usually does not need a key. Keep Ollama running on this machine."
+                    .to_string(),
             api_key_required: false,
             default_model: "llama3.1:70b".to_string(),
             models: map_models(&OLLAMA_MODELS),
@@ -1024,10 +1108,7 @@ fn setup_catalog_presets() -> Vec<ProviderPreset> {
                 .map(|m| (m.id.clone(), m.name.clone()))
                 .collect();
             models.sort_by(|a, b| a.1.cmp(&b.1));
-            let default_model = models
-                .first()
-                .map(|m| m.0.clone())
-                .unwrap_or_else(|| "".to_string());
+            let default_model = models.first().map(|m| m.0.clone()).unwrap_or_default();
 
             ProviderPreset {
                 id: provider.id.clone(),
@@ -1071,7 +1152,11 @@ fn setup_catalog_presets() -> Vec<ProviderPreset> {
             }
             entry.models.sort_by(|a, b| a.1.cmp(&b.1));
             // Keep preset default_model if still present, otherwise fall back to first
-            if !entry.models.iter().any(|(id, _)| id == &entry.default_model) {
+            if !entry
+                .models
+                .iter()
+                .any(|(id, _)| id == &entry.default_model)
+            {
                 if let Some((model_id, _)) = entry.models.first() {
                     entry.default_model = model_id.clone();
                 }
@@ -1215,10 +1300,7 @@ fn provider_value(
         "base_url".to_string(),
         toml::Value::String(base_url.to_string()),
     );
-    table.insert(
-        "model".to_string(),
-        toml::Value::String(model.to_string()),
-    );
+    table.insert("model".to_string(), toml::Value::String(model.to_string()));
 
     if auth_mode == "oauth" {
         table.insert(
@@ -1546,9 +1628,17 @@ fn save_setup_config_file(
     // Voice section
     let stt_local = payload.stt_mode == "local";
     let tts_local = payload.tts_mode == "local";
-    let voice_stt_provider = if stt_local { "whisper-local" } else { "browser" };
+    let voice_stt_provider = if stt_local {
+        "whisper-local"
+    } else {
+        "browser"
+    };
     let voice_tts_provider = if tts_local { "piper-local" } else { "browser" };
-    let voice_lang = if payload.tts_piper_language.is_empty() { "en" } else { &payload.tts_piper_language };
+    let voice_lang = if payload.tts_piper_language.is_empty() {
+        "en"
+    } else {
+        &payload.tts_piper_language
+    };
     let whisper_model_val = if stt_local && !payload.stt_whisper_model.is_empty() {
         payload.stt_whisper_model.clone()
     } else {
@@ -1560,11 +1650,26 @@ fn save_setup_config_file(
         None
     };
     let voice = ensure_child_table(root, "voice");
-    voice.insert("enabled".to_string(), toml::Value::Boolean(stt_local || tts_local));
-    voice.insert("stt_provider".to_string(), toml::Value::String(voice_stt_provider.to_string()));
-    voice.insert("tts_provider".to_string(), toml::Value::String(voice_tts_provider.to_string()));
-    voice.insert("language".to_string(), toml::Value::String(voice_lang.to_string()));
-    voice.insert("whisper_model".to_string(), toml::Value::String(whisper_model_val));
+    voice.insert(
+        "enabled".to_string(),
+        toml::Value::Boolean(stt_local || tts_local),
+    );
+    voice.insert(
+        "stt_provider".to_string(),
+        toml::Value::String(voice_stt_provider.to_string()),
+    );
+    voice.insert(
+        "tts_provider".to_string(),
+        toml::Value::String(voice_tts_provider.to_string()),
+    );
+    voice.insert(
+        "language".to_string(),
+        toml::Value::String(voice_lang.to_string()),
+    );
+    voice.insert(
+        "whisper_model".to_string(),
+        toml::Value::String(whisper_model_val),
+    );
     if let Some(pv) = piper_voice_val {
         voice.insert("piper_voice".to_string(), toml::Value::String(pv));
     }
@@ -1730,20 +1835,20 @@ fn check_whisper_installed() -> (bool, Option<String>) {
     let binary = dir.join("whisper");
     let installed = binary.exists();
     let model = if installed {
-        std::fs::read_dir(&dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .flatten()
-                    .find(|e| {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        name.starts_with("ggml-") && name.ends_with(".bin")
-                    })
-                    .map(|e| {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        name.trim_start_matches("ggml-").trim_end_matches(".bin").to_string()
-                    })
-            })
+        std::fs::read_dir(&dir).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .find(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.starts_with("ggml-") && name.ends_with(".bin")
+                })
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.trim_start_matches("ggml-")
+                        .trim_end_matches(".bin")
+                        .to_string()
+                })
+        })
     } else {
         None
     };
@@ -1761,17 +1866,15 @@ fn check_piper_installed() -> (bool, Option<String>) {
     let binary = dir.join("piper");
     let installed = binary.exists();
     let voice = if installed {
-        std::fs::read_dir(&dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .flatten()
-                    .find(|e| e.file_name().to_string_lossy().ends_with(".onnx"))
-                    .map(|e| {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        name.trim_end_matches(".onnx").to_string()
-                    })
-            })
+        std::fs::read_dir(&dir).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .find(|e| e.file_name().to_string_lossy().ends_with(".onnx"))
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.trim_end_matches(".onnx").to_string()
+                })
+        })
     } else {
         None
     };
@@ -1798,10 +1901,18 @@ async fn stream_download(
     let total = response.content_length().unwrap_or(0);
     let mut bytes_received: u64 = 0;
     let mut last_pct: i32 = -1;
-    let mut collected: Vec<u8> = if total > 0 { Vec::with_capacity(total as usize) } else { Vec::new() };
+    let mut collected: Vec<u8> = if total > 0 {
+        Vec::with_capacity(total as usize)
+    } else {
+        Vec::new()
+    };
 
     let mut response = response;
-    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Read error: {}", e))? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Read error: {}", e))?
+    {
         bytes_received += chunk.len() as u64;
         collected.extend_from_slice(&chunk);
         if total > 0 {
@@ -1809,12 +1920,15 @@ async fn stream_download(
             if pct != last_pct && pct % 5 == 0 {
                 last_pct = pct;
                 let p = progress_offset + (bytes_received as f32 / total as f32) * progress_range;
-                let _ = window.emit("voice-progress", VoiceProgress {
-                    model_id: model_id.to_string(),
-                    stage: stage.to_string(),
-                    progress: p,
-                    message: format!("{} {}%", stage, pct),
-                });
+                let _ = window.emit(
+                    "voice-progress",
+                    VoiceProgress {
+                        model_id: model_id.to_string(),
+                        stage: stage.to_string(),
+                        progress: p,
+                        message: format!("{} {}%", stage, pct),
+                    },
+                );
             }
         }
     }
@@ -1826,16 +1940,22 @@ async fn stream_download(
 fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new("powershell")
         .args([
-            "-NoProfile", "-NonInteractive", "-Command",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
             &format!(
                 "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                archive.display(), dest.display()
+                archive.display(),
+                dest.display()
             ),
         ])
         .output()
         .map_err(|e| format!("PowerShell error: {}", e))?;
     if !output.status.success() {
-        return Err(format!("Extraction failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "Extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
     Ok(())
 }
@@ -1843,11 +1963,19 @@ fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> 
 #[allow(dead_code)]
 fn extract_tar_gz(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new("tar")
-        .args(["-xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
+        .args([
+            "-xzf",
+            &archive.to_string_lossy(),
+            "-C",
+            &dest.to_string_lossy(),
+        ])
         .output()
         .map_err(|e| format!("tar error: {}", e))?;
     if !output.status.success() {
-        return Err(format!("Extraction failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "Extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
     Ok(())
 }
@@ -1985,7 +2113,13 @@ async fn exchange_setup_oauth_code(
                 ("code_verifier", code_verifier),
             ]
             .iter()
-            .map(|(key, value)| format!("{}={}", urlencoding::encode(key), urlencoding::encode(value)))
+            .map(|(key, value)| {
+                format!(
+                    "{}={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
+                )
+            })
             .collect::<Vec<_>>()
             .join("&"),
         )
@@ -1996,7 +2130,10 @@ async fn exchange_setup_oauth_code(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("OAuth token exchange failed ({}): {}", status, body));
+        return Err(format!(
+            "OAuth token exchange failed ({}): {}",
+            status, body
+        ));
     }
 
     response
@@ -2006,17 +2143,22 @@ async fn exchange_setup_oauth_code(
 }
 
 #[tauri::command]
-async fn start_setup_oauth(payload: SetupOAuthStartPayload) -> Result<SetupOAuthStartResult, String> {
+async fn start_setup_oauth(
+    payload: SetupOAuthStartPayload,
+) -> Result<SetupOAuthStartResult, String> {
     let provider_id = payload.provider_type.trim().to_lowercase();
-    let preset = provider_preset(&provider_id)
-        .ok_or_else(|| "Unsupported provider selected".to_string())?;
+    let preset =
+        provider_preset(&provider_id).ok_or_else(|| "Unsupported provider selected".to_string())?;
 
     let flow_type = preset
         .oauth_flow_type
         .clone()
         .ok_or_else(|| format!("{} does not support sign-in", preset.name))?;
     if flow_type != "pkce" {
-        return Err(format!("{} sign-in flow is not supported in launcher", preset.name));
+        return Err(format!(
+            "{} sign-in flow is not supported in launcher",
+            preset.name
+        ));
     }
 
     // Resolution order (same convention as web UI):
@@ -2029,11 +2171,20 @@ async fn start_setup_oauth(payload: SetupOAuthStartPayload) -> Result<SetupOAuth
     );
     let client_id = std::env::var(&env_var_name)
         .ok()
-        .or_else(|| preset.oauth_client_id.clone().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            preset
+                .oauth_client_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+        })
         .or_else(|| {
             load_existing_config(&get_config_path()).and_then(|c| {
                 let id = c.provider.oauth_client_id.trim().to_string();
-                if id.is_empty() { None } else { Some(id) }
+                if id.is_empty() {
+                    None
+                } else {
+                    Some(id)
+                }
             })
         })
         .filter(|id| !id.trim().is_empty())
@@ -2064,7 +2215,12 @@ async fn start_setup_oauth(payload: SetupOAuthStartPayload) -> Result<SetupOAuth
 
     let listener = TcpListener::bind(("127.0.0.1", OPENAI_OAUTH_PORT))
         .await
-        .map_err(|e| format!("Failed to bind OAuth callback port {}: {}", OPENAI_OAUTH_PORT, e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to bind OAuth callback port {}: {}",
+                OPENAI_OAUTH_PORT, e
+            )
+        })?;
 
     let mut url = reqwest::Url::parse(&auth_base)
         .map_err(|e| format!("Invalid OAuth URL for {}: {}", preset.name, e))?;
@@ -2087,14 +2243,9 @@ async fn start_setup_oauth(payload: SetupOAuthStartPayload) -> Result<SetupOAuth
     let auth_url = url.to_string();
     open::that(&auth_url).map_err(|e| format!("Failed to open browser: {}", e))?;
     let code = wait_for_oauth_callback(listener, &state).await?;
-    let tokens = exchange_setup_oauth_code(
-        &token_url,
-        &client_id,
-        &code,
-        &redirect_uri,
-        &code_verifier,
-    )
-    .await?;
+    let tokens =
+        exchange_setup_oauth_code(&token_url, &client_id, &code, &redirect_uri, &code_verifier)
+            .await?;
 
     let storage = LauncherOAuthStorage::new(oauth_storage_path(&get_config_path()));
     storage.set_token(
@@ -2126,8 +2277,7 @@ async fn start_device_code_oauth(
     payload: DeviceCodeStartPayload,
 ) -> Result<DeviceCodeStartResult, String> {
     let provider_id = payload.provider_type.trim().to_lowercase();
-    let preset = provider_preset(&provider_id)
-        .ok_or_else(|| "Unsupported provider".to_string())?;
+    let preset = provider_preset(&provider_id).ok_or_else(|| "Unsupported provider".to_string())?;
 
     let device_code_url = preset
         .oauth_device_code_url
@@ -2176,8 +2326,7 @@ async fn poll_device_code_oauth(
     payload: DeviceCodePollPayload,
 ) -> Result<DeviceCodePollResult, String> {
     let provider_id = payload.provider_type.trim().to_lowercase();
-    let preset = provider_preset(&provider_id)
-        .ok_or_else(|| "Unsupported provider".to_string())?;
+    let preset = provider_preset(&provider_id).ok_or_else(|| "Unsupported provider".to_string())?;
 
     let client_id = preset
         .oauth_client_id
@@ -2481,7 +2630,11 @@ fn build_osagent(
     // Stop osagent if running to avoid file lock issues
     let running = *state.osagent_running.lock().unwrap();
     if running {
-        add_log(&state, "info", "Stopping OSAgent before build...".to_string());
+        add_log(
+            &state,
+            "info",
+            "Stopping OSAgent before build...".to_string(),
+        );
         let mut process = state.osagent_process.lock().unwrap();
         if let Some(mut child) = process.take() {
             let _ = child.kill();
@@ -2489,12 +2642,15 @@ fn build_osagent(
         }
         *state.osagent_pid.lock().unwrap() = None;
         *state.osagent_running.lock().unwrap() = false;
-        let _ = window.emit("osagent-status-changed", AgentStatus {
-            running: false,
-            pid: None,
-            osagent_path: state.osagent_path.to_string_lossy().to_string(),
-            config_path: state.config_path.to_string_lossy().to_string(),
-        });
+        let _ = window.emit(
+            "osagent-status-changed",
+            AgentStatus {
+                running: false,
+                pid: None,
+                osagent_path: state.osagent_path.to_string_lossy().to_string(),
+                config_path: state.config_path.to_string_lossy().to_string(),
+            },
+        );
         update_tray_menu(&window, false);
         // Give the OS a moment to release the file lock
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -2512,7 +2668,11 @@ fn build_osagent(
         .join(".osagent")
         .join("launcher_output.log");
 
-    let start_msg = format!("Building osagent ({}) in {}", profile, osagent_dir.display());
+    let start_msg = format!(
+        "Building osagent ({}) in {}",
+        profile,
+        osagent_dir.display()
+    );
     add_log(&state, "info", start_msg);
     *state.build_running.lock().unwrap() = true;
 
@@ -2626,7 +2786,7 @@ fn build_osagent(
                 let mut reader = std::io::BufReader::new(stderr);
                 let mut buf = [0u8; 1];
                 let mut line = String::new();
-                
+
                 fn process_line(
                     line: &str,
                     app_handle: &tauri::AppHandle,
@@ -2682,7 +2842,10 @@ fn build_osagent(
                                 let fraction = &after_bracket[..colon_pos].trim();
                                 let crate_name = &after_bracket[colon_pos + 1..].trim();
                                 // Remove trailing dots
-                                let crate_name = crate_name.trim_end_matches('…').trim_end_matches('.').trim();
+                                let crate_name = crate_name
+                                    .trim_end_matches('…')
+                                    .trim_end_matches('.')
+                                    .trim();
                                 Some((fraction.to_string(), crate_name.to_string()))
                             } else {
                                 None
@@ -2690,10 +2853,11 @@ fn build_osagent(
                         } else {
                             None
                         };
-                        
+
                         if let Some((fraction, crate_name)) = progress_info {
                             // Parse "469/472" to get current count
-                            let current: u32 = fraction.split('/')
+                            let current: u32 = fraction
+                                .split('/')
                                 .next()
                                 .and_then(|s| s.trim().parse().ok())
                                 .unwrap_or(0);
@@ -2712,8 +2876,7 @@ fn build_osagent(
                                 );
                             }
                         }
-                    }
-                    else if trimmed.starts_with("Finished") || trimmed.starts_with("error:") {
+                    } else if trimmed.starts_with("Finished") || trimmed.starts_with("error:") {
                         // "Finished" → success; bare "error:" summary → failure
                         let success = trimmed.starts_with("Finished");
                         if !success {
@@ -2869,36 +3032,59 @@ fn check_osagent_path(state: State<AppState>) -> String {
 fn check_voice_status() -> VoiceStatus {
     let (whisper_installed, whisper_model) = check_whisper_installed();
     let (piper_installed, piper_voice) = check_piper_installed();
-    VoiceStatus { whisper_installed, piper_installed, whisper_model, piper_voice }
+    VoiceStatus {
+        whisper_installed,
+        piper_installed,
+        whisper_model,
+        piper_voice,
+    }
 }
 
 #[tauri::command]
-async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> Result<VoiceStatus, String> {
+async fn install_voice(
+    window: tauri::Window,
+    payload: VoiceInstallPayload,
+) -> Result<VoiceStatus, String> {
     let dir = get_voice_dir().ok_or_else(|| "Could not determine home directory".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create voice dir: {}", e))?;
 
     if payload.install_whisper {
         let (binary_ok, _) = check_whisper_installed();
         if !binary_ok {
-            let _ = window.emit("voice-progress", VoiceProgress {
-                model_id: "whisper".to_string(),
-                stage: "downloading_binary".to_string(),
-                progress: 0.0,
-                message: "Downloading Whisper binary...".to_string(),
-            });
+            let _ = window.emit(
+                "voice-progress",
+                VoiceProgress {
+                    model_id: "whisper".to_string(),
+                    stage: "downloading_binary".to_string(),
+                    progress: 0.0,
+                    message: "Downloading Whisper binary...".to_string(),
+                },
+            );
 
             #[cfg(target_os = "windows")]
             {
                 let url = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.3/whisper-bin-x64.zip";
                 let archive = dir.join("whisper_archive.zip");
-                stream_download(url, &archive, &window, "whisper", "downloading_binary", 0.0, 0.25).await?;
+                stream_download(
+                    url,
+                    &archive,
+                    &window,
+                    "whisper",
+                    "downloading_binary",
+                    0.0,
+                    0.25,
+                )
+                .await?;
 
-                let _ = window.emit("voice-progress", VoiceProgress {
-                    model_id: "whisper".to_string(),
-                    stage: "extracting".to_string(),
-                    progress: 0.25,
-                    message: "Extracting Whisper binary...".to_string(),
-                });
+                let _ = window.emit(
+                    "voice-progress",
+                    VoiceProgress {
+                        model_id: "whisper".to_string(),
+                        stage: "extracting".to_string(),
+                        progress: 0.25,
+                        message: "Extracting Whisper binary...".to_string(),
+                    },
+                );
 
                 let extract_dir = dir.join("whisper_extract");
                 std::fs::create_dir_all(&extract_dir).ok();
@@ -2915,7 +3101,7 @@ async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> R
                     if let Ok(entries) = std::fs::read_dir(&extract_dir) {
                         for entry in entries.flatten() {
                             if entry.file_name() == "whisper.exe" {
-                                std::fs::copy(&entry.path(), &binary_dest).ok();
+                                std::fs::copy(entry.path(), &binary_dest).ok();
                                 break;
                             }
                         }
@@ -2926,7 +3112,7 @@ async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> R
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if name.ends_with(".dll") {
-                            let _ = std::fs::copy(&entry.path(), dir.join(&name));
+                            let _ = std::fs::copy(entry.path(), dir.join(&name));
                         }
                     }
                 }
@@ -2946,52 +3132,86 @@ async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> R
         }
 
         // Download model
-        let model_id = if payload.whisper_model.is_empty() { "base" } else { &payload.whisper_model };
+        let model_id = if payload.whisper_model.is_empty() {
+            "base"
+        } else {
+            &payload.whisper_model
+        };
         let model_path = dir.join(format!("ggml-{}.bin", model_id));
         if !model_path.exists() {
-            let _ = window.emit("voice-progress", VoiceProgress {
-                model_id: "whisper".to_string(),
-                stage: "downloading_model".to_string(),
-                progress: 0.3,
-                message: format!("Downloading Whisper {} model...", model_id),
-            });
+            let _ = window.emit(
+                "voice-progress",
+                VoiceProgress {
+                    model_id: "whisper".to_string(),
+                    stage: "downloading_model".to_string(),
+                    progress: 0.3,
+                    message: format!("Downloading Whisper {} model...", model_id),
+                },
+            );
             let url = format!(
                 "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
                 model_id
             );
-            stream_download(&url, &model_path, &window, "whisper", "downloading_model", 0.3, 0.65).await?;
+            stream_download(
+                &url,
+                &model_path,
+                &window,
+                "whisper",
+                "downloading_model",
+                0.3,
+                0.65,
+            )
+            .await?;
         }
 
-        let _ = window.emit("voice-progress", VoiceProgress {
-            model_id: "whisper".to_string(),
-            stage: "complete".to_string(),
-            progress: 0.95,
-            message: "Whisper ready!".to_string(),
-        });
+        let _ = window.emit(
+            "voice-progress",
+            VoiceProgress {
+                model_id: "whisper".to_string(),
+                stage: "complete".to_string(),
+                progress: 0.95,
+                message: "Whisper ready!".to_string(),
+            },
+        );
     }
 
     if payload.install_piper {
         let (binary_ok, _) = check_piper_installed();
         if !binary_ok {
-            let _ = window.emit("voice-progress", VoiceProgress {
-                model_id: "piper".to_string(),
-                stage: "downloading_binary".to_string(),
-                progress: 0.0,
-                message: "Downloading Piper binary...".to_string(),
-            });
+            let _ = window.emit(
+                "voice-progress",
+                VoiceProgress {
+                    model_id: "piper".to_string(),
+                    stage: "downloading_binary".to_string(),
+                    progress: 0.0,
+                    message: "Downloading Piper binary...".to_string(),
+                },
+            );
 
             #[cfg(target_os = "windows")]
             {
                 let url = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
                 let archive = dir.join("piper_archive.zip");
-                stream_download(url, &archive, &window, "piper", "downloading_binary", 0.0, 0.25).await?;
+                stream_download(
+                    url,
+                    &archive,
+                    &window,
+                    "piper",
+                    "downloading_binary",
+                    0.0,
+                    0.25,
+                )
+                .await?;
 
-                let _ = window.emit("voice-progress", VoiceProgress {
-                    model_id: "piper".to_string(),
-                    stage: "extracting".to_string(),
-                    progress: 0.25,
-                    message: "Extracting Piper binary...".to_string(),
-                });
+                let _ = window.emit(
+                    "voice-progress",
+                    VoiceProgress {
+                        model_id: "piper".to_string(),
+                        stage: "extracting".to_string(),
+                        progress: 0.25,
+                        message: "Extracting Piper binary...".to_string(),
+                    },
+                );
 
                 let extract_dir = dir.join("piper_extract");
                 std::fs::create_dir_all(&extract_dir).ok();
@@ -3007,7 +3227,7 @@ async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> R
                         for entry in entries.flatten() {
                             let name = entry.file_name().to_string_lossy().to_string();
                             if name.ends_with(".dll") || name == "libtashkeel_model.ort" {
-                                let _ = std::fs::copy(&entry.path(), dir.join(&name));
+                                let _ = std::fs::copy(entry.path(), dir.join(&name));
                             }
                         }
                     }
@@ -3029,7 +3249,16 @@ async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> R
                     "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x64.tar.gz"
                 };
                 let archive = dir.join("piper_archive.tar.gz");
-                stream_download(url, &archive, &window, "piper", "downloading_binary", 0.0, 0.25).await?;
+                stream_download(
+                    url,
+                    &archive,
+                    &window,
+                    "piper",
+                    "downloading_binary",
+                    0.0,
+                    0.25,
+                )
+                .await?;
 
                 let extract_dir = dir.join("piper_extract");
                 std::fs::create_dir_all(&extract_dir).ok();
@@ -3043,7 +3272,10 @@ async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> R
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&binary_dest, std::fs::Permissions::from_mode(0o755));
+                        let _ = std::fs::set_permissions(
+                            &binary_dest,
+                            std::fs::Permissions::from_mode(0o755),
+                        );
                     }
                     let espeak_src = piper_inner.join("espeak-ng-data");
                     let espeak_dst = dir.join("espeak-ng-data");
@@ -3060,48 +3292,75 @@ async fn install_voice(window: tauri::Window, payload: VoiceInstallPayload) -> R
         if !payload.piper_voice.is_empty() {
             let voice_path = dir.join(format!("{}.onnx", payload.piper_voice));
             if !voice_path.exists() {
-                let _ = window.emit("voice-progress", VoiceProgress {
-                    model_id: "piper".to_string(),
-                    stage: "downloading_voice".to_string(),
-                    progress: 0.3,
-                    message: format!("Downloading voice {}...", payload.piper_voice),
-                });
+                let _ = window.emit(
+                    "voice-progress",
+                    VoiceProgress {
+                        model_id: "piper".to_string(),
+                        stage: "downloading_voice".to_string(),
+                        progress: 0.3,
+                        message: format!("Downloading voice {}...", payload.piper_voice),
+                    },
+                );
 
                 // Build HuggingFace URL from voice ID convention: lang_REGION-name-quality
                 // e.g. en_US-libritts-high → en/en_US/libritts/high/en_US-libritts-high.onnx
                 let voice_url = voice_id_to_hf_url(&payload.piper_voice);
-                stream_download(&voice_url, &voice_path, &window, "piper", "downloading_voice", 0.3, 0.65).await?;
+                stream_download(
+                    &voice_url,
+                    &voice_path,
+                    &window,
+                    "piper",
+                    "downloading_voice",
+                    0.3,
+                    0.65,
+                )
+                .await?;
 
                 // Download JSON config
                 let json_url = format!("{}.json", voice_url);
                 let json_path = dir.join(format!("{}.onnx.json", payload.piper_voice));
-                let _ = stream_download(&json_url, &json_path, &window, "piper", "downloading_voice_config", 0.95, 0.04).await;
+                let _ = stream_download(
+                    &json_url,
+                    &json_path,
+                    &window,
+                    "piper",
+                    "downloading_voice_config",
+                    0.95,
+                    0.04,
+                )
+                .await;
             }
         }
 
-        let _ = window.emit("voice-progress", VoiceProgress {
-            model_id: "piper".to_string(),
-            stage: "complete".to_string(),
-            progress: 1.0,
-            message: "Piper ready!".to_string(),
-        });
+        let _ = window.emit(
+            "voice-progress",
+            VoiceProgress {
+                model_id: "piper".to_string(),
+                stage: "complete".to_string(),
+                progress: 1.0,
+                message: "Piper ready!".to_string(),
+            },
+        );
     }
 
     let (whisper_installed, whisper_model) = check_whisper_installed();
     let (piper_installed, piper_voice) = check_piper_installed();
-    Ok(VoiceStatus { whisper_installed, piper_installed, whisper_model, piper_voice })
+    Ok(VoiceStatus {
+        whisper_installed,
+        piper_installed,
+        whisper_model,
+        piper_voice,
+    })
 }
 
 fn voice_id_to_hf_url(voice_id: &str) -> String {
     // voice_id: e.g. "en_US-libritts-high" → lang=en, locale=en_US, name=libritts, quality=high
     let parts: Vec<&str> = voice_id.splitn(3, '-').collect();
     if parts.len() < 3 {
-        return format!(
-            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high/en_US-libritts-high.onnx"
-        );
+        return "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high/en_US-libritts-high.onnx".to_string();
     }
     let locale = parts[0]; // e.g. "en_US"
-    let name = parts[1];   // e.g. "libritts"
+    let name = parts[1]; // e.g. "libritts"
     let quality = parts[2]; // e.g. "high"
     let lang = locale.split('_').next().unwrap_or("en");
     format!(

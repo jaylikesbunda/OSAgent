@@ -124,6 +124,29 @@
     color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.45;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.voice-status-text {
+    flex: 1;
+}
+
+.voice-status-dismiss {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+    opacity: 0.8;
+}
+
+.voice-status-dismiss:hover {
+    opacity: 1;
 }
 
 .voice-status[data-state="ready"] {

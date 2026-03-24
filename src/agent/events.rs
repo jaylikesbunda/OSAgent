@@ -63,6 +63,13 @@ pub enum AgentEvent {
         session_id: String,
         timestamp: SystemTime,
     },
+    QueuedMessageDispatched {
+        session_id: String,
+        queue_entry_id: String,
+        client_message_id: String,
+        content: String,
+        timestamp: SystemTime,
+    },
     ContextUpdate {
         session_id: String,
         context_window: usize,
@@ -210,6 +217,7 @@ impl AgentEvent {
             AgentEvent::ResponseStart { session_id, .. } => session_id,
             AgentEvent::ResponseChunk { session_id, .. } => session_id,
             AgentEvent::ResponseComplete { session_id, .. } => session_id,
+            AgentEvent::QueuedMessageDispatched { session_id, .. } => session_id,
             AgentEvent::ContextUpdate { session_id, .. } => session_id,
             AgentEvent::Reasoning { session_id, .. } => session_id,
             AgentEvent::ThinkingStart { session_id, .. } => session_id,

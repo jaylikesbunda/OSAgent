@@ -17,6 +17,18 @@ impl SearchBackend for DuckDuckGoLiteBackend {
         "ddg_lite"
     }
 
+    fn priority(&self) -> u8 {
+        40
+    }
+
+    fn min_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(15)
+    }
+
+    fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(1_200)
+    }
+
     async fn search(
         &self,
         client: &Client,

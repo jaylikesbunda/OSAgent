@@ -16,7 +16,8 @@ use crate::indexer::CodeIndexer;
 use crate::plugin::PluginManager;
 use crate::skills::SkillLoader;
 use crate::storage::{
-    AuditEntry, Message, MessageTokens, Session, SessionEventRecord, SqliteStorage, ToolCall,
+    AuditEntry, Message, MessageTokens, QueuedMessage, Session, SessionEventRecord, SqliteStorage,
+    ToolCall,
 };
 use crate::tools::bash::BashTool;
 use crate::tools::guard::ensure_relative_path_not_backups;
@@ -173,6 +174,14 @@ fn is_repo_exploration_request(message: &str) -> bool {
     ]
     .iter()
     .any(|phrase| lower.contains(phrase))
+}
+
+fn should_continue_queue_after_run(result: &Result<String>) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(OSAgentError::Session(message)) if message == "Operation cancelled" => true,
+        _ => false,
+    }
 }
 
 impl AgentRuntime {
@@ -481,18 +490,93 @@ impl AgentRuntime {
         let runtime = self.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = runtime
-                .process_message_internal(&session_id, user_message, user.clone(), run_guard)
-                .await
-            {
+            let result = runtime
+                .process_message_internal(&session_id, user_message, user.clone(), None, None)
+                .await;
+            if let Err(error) = &result {
                 error!(
                     "Background run failed for session {} (user {}): {}",
                     session_id, user, error
                 );
             }
+            drop(run_guard);
         });
 
         Ok(())
+    }
+
+    pub fn spawn_next_queued_message_run(
+        self: Arc<Self>,
+        session_id: String,
+        user: String,
+    ) -> Result<Option<String>> {
+        if self.storage.get_session(&session_id)?.is_none() {
+            return Err(OSAgentError::Session("Session not found".to_string()));
+        }
+
+        let run_guard = match self.try_start_run(&session_id, &user) {
+            Ok(guard) => guard,
+            Err(OSAgentError::Session(message)) if message.contains("already in progress") => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let queued_message = match self.storage.claim_next_queued_message(&session_id)? {
+            Some(item) => item,
+            None => {
+                drop(run_guard);
+                return Ok(None);
+            }
+        };
+
+        let started_queue_id = queued_message.id.clone();
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let queue_entry_id = queued_message.id.clone();
+            let client_message_id = queued_message.client_message_id.clone();
+            let result = runtime
+                .process_message_internal(
+                    &session_id,
+                    queued_message.content.clone(),
+                    user.clone(),
+                    Some(serde_json::json!({
+                        "queued": true,
+                        "queue_entry_id": queue_entry_id,
+                        "client_message_id": client_message_id,
+                    })),
+                    Some(queued_message.id.clone()),
+                )
+                .await;
+
+            if let Err(error) = &result {
+                error!(
+                    "Queued run failed for session {} (user {}): {}",
+                    session_id, user, error
+                );
+            }
+
+            let should_continue = should_continue_queue_after_run(&result);
+            drop(run_guard);
+
+            if should_continue {
+                let next_runtime = runtime.clone();
+                let next_session_id = session_id.clone();
+                let next_user = user.clone();
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        next_runtime.spawn_next_queued_message_run(next_session_id, next_user)
+                    {
+                        error!(
+                            "Failed to continue queued runs for session {}: {}",
+                            session_id, error
+                        );
+                    }
+                });
+            }
+        });
+
+        Ok(Some(started_queue_id))
     }
 
     pub async fn process_message(
@@ -502,8 +586,11 @@ impl AgentRuntime {
         user: String,
     ) -> Result<String> {
         let run_guard = self.try_start_run(session_id, &user)?;
-        self.process_message_internal(session_id, user_message, user, run_guard)
-            .await
+        let result = self
+            .process_message_internal(session_id, user_message, user, None, None)
+            .await;
+        drop(run_guard);
+        result
     }
 
     async fn process_message_internal(
@@ -511,7 +598,8 @@ impl AgentRuntime {
         session_id: &str,
         user_message: String,
         user: String,
-        _run_guard: RunGuard,
+        message_metadata: Option<serde_json::Value>,
+        queue_entry_id: Option<String>,
     ) -> Result<String> {
         info!("process_message: Starting for session {}", session_id);
 
@@ -544,13 +632,39 @@ impl AgentRuntime {
         info!("Session metadata: {:?}", session.metadata);
 
         let repo_exploration_request = is_repo_exploration_request(&user_message);
+        let queued_client_message_id = message_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("client_message_id"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
 
-        session.messages.push(Message::user(user_message));
+        let mut message = Message::user(user_message.clone());
+        if let Some(metadata) = message_metadata {
+            message.metadata = metadata;
+        }
+        session.messages.push(message);
 
         // Mark session as running so frontend can restore thinking indicator on switch
         session.task_status = "running".to_string();
         if let Err(e) = self.session_manager.update_session(&session).await {
             warn!("Failed to update session task_status to running: {}", e);
+        }
+        if let Some(queue_entry_id) = queue_entry_id.as_ref() {
+            if let Err(error) = self.storage.delete_queued_message(queue_entry_id) {
+                warn!(
+                    "Failed to remove queued message {} after dispatch: {}",
+                    queue_entry_id, error
+                );
+            }
+            self.event_bus.emit(AgentEvent::QueuedMessageDispatched {
+                session_id: session_id.to_string(),
+                queue_entry_id: queue_entry_id.clone(),
+                client_message_id: queued_client_message_id
+                    .clone()
+                    .unwrap_or_else(|| queue_entry_id.clone()),
+                content: user_message.clone(),
+                timestamp: SystemTime::now(),
+            });
         }
         let _status_guard =
             TaskStatusGuard::new(session_id.to_string(), self.session_manager.clone());
@@ -836,7 +950,12 @@ impl AgentRuntime {
             let (mut response, used_streaming) = match stream_attempt {
                 Ok(stream) => {
                     let response = self
-                        .consume_provider_stream(session_id, &mut session, stream, cancel_notify.clone())
+                        .consume_provider_stream(
+                            session_id,
+                            &mut session,
+                            stream,
+                            cancel_notify.clone(),
+                        )
                         .await
                         .map_err(|e| {
                             error!("Provider stream error in session {}: {}", session_id, e);
@@ -876,7 +995,10 @@ impl AgentRuntime {
                     (response, false)
                 }
                 Err(error) => {
-                    error!("Provider stream setup error in session {}: {}", session_id, error);
+                    error!(
+                        "Provider stream setup error in session {}: {}",
+                        session_id, error
+                    );
                     self.event_bus.emit(AgentEvent::Error {
                         session_id: session_id.to_string(),
                         error: error.to_string(),
@@ -1876,7 +1998,9 @@ impl AgentRuntime {
         cancel_notify: Arc<Notify>,
     ) -> Result<crate::agent::provider::ProviderResponse> {
         let assistant_index = session.messages.len();
-        session.messages.push(Message::assistant(String::new(), None));
+        session
+            .messages
+            .push(Message::assistant(String::new(), None));
         self.session_manager.update_session(session).await?;
 
         let mut response_started = false;
@@ -3521,6 +3645,23 @@ impl AgentRuntime {
 
     pub async fn list_sessions(&self) -> Result<Vec<Session>> {
         self.session_manager.list_sessions().await
+    }
+
+    pub async fn enqueue_message(
+        &self,
+        session_id: &str,
+        client_message_id: &str,
+        content: &str,
+    ) -> Result<(QueuedMessage, bool)> {
+        if self.get_session(session_id).await?.is_none() {
+            return Err(OSAgentError::Session("Session not found".to_string()));
+        }
+        self.storage
+            .enqueue_message(session_id, client_message_id, content)
+    }
+
+    pub async fn list_queued_messages(&self, session_id: &str) -> Result<Vec<QueuedMessage>> {
+        self.storage.list_queued_messages(session_id)
     }
 
     pub async fn list_session_history(

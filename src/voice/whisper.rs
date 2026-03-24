@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 use tokio::io::AsyncWriteExt;
@@ -69,7 +69,13 @@ fn get_binary_path() -> PathBuf {
 
 #[cfg(target_os = "windows")]
 fn required_runtime_files() -> Vec<&'static str> {
-    vec!["whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "SDL2.dll"]
+    vec![
+        "whisper.dll",
+        "ggml.dll",
+        "ggml-base.dll",
+        "ggml-cpu.dll",
+        "SDL2.dll",
+    ]
 }
 
 #[cfg(not(target_os = "windows"))]

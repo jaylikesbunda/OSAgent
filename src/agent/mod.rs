@@ -1,3 +1,4 @@
+pub mod adapters;
 pub mod checkpoint;
 pub mod context_window;
 pub mod events;
@@ -6,15 +7,14 @@ pub mod memory;
 pub mod model_catalog;
 pub mod persona;
 pub mod prompt;
-pub mod provider_adapter;
 pub mod provider;
+pub mod provider_adapter;
 pub mod provider_auth;
 pub mod provider_presets;
-pub mod reasoning;
 pub mod provider_transforms;
+pub mod reasoning;
 pub mod runtime;
 pub mod session;
 pub mod subagent_manager;
-pub mod adapters;
 
 pub use runtime::AgentRuntime;

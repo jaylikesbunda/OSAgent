@@ -179,6 +179,11 @@ pub struct SearchConfig {
     pub enabled: bool,
     pub index_on_startup: bool,
     pub max_results: usize,
+    pub global_timeout_ms: u64,
+    pub per_backend_timeout_ms: u64,
+    pub max_parallel_backends: usize,
+    pub searxng_instance_refresh_minutes: u64,
+    pub searxng_max_instances: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -438,6 +443,11 @@ impl Default for SearchConfig {
             enabled: true,
             index_on_startup: true,
             max_results: 20,
+            global_timeout_ms: 4500,
+            per_backend_timeout_ms: 2000,
+            max_parallel_backends: 5,
+            searxng_instance_refresh_minutes: 30,
+            searxng_max_instances: 2,
         }
     }
 }

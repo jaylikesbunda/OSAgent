@@ -634,7 +634,7 @@ impl OpenAICompatibleProvider {
         if let Some(items) = value.as_array() {
             let mut parts = Vec::new();
             for item in items {
-                if let Some(text) = item.get("text" ).and_then(|v| v.as_str()) {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
                     parts.push(text.to_string());
                     continue;
                 }
@@ -653,7 +653,12 @@ impl OpenAICompatibleProvider {
 
         Self::join_non_empty(Self::collect_block_texts(
             value,
-            &["thinking", "reasoning", "reasoning_content", "reasoning_summary"],
+            &[
+                "thinking",
+                "reasoning",
+                "reasoning_content",
+                "reasoning_summary",
+            ],
             &["thinking", "text", "summary"],
         ))
     }
@@ -1567,9 +1572,7 @@ impl OpenAICompatibleProvider {
                                     .collect::<Vec<_>>()
                             })
                             .unwrap_or_default();
-                        let finish_reason = choice["finish_reason"]
-                            .as_str()
-                            .map(|s| s.to_string());
+                        let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
                         let usage = Self::parse_response_usage(&parsed);
 
                         if content.is_none()

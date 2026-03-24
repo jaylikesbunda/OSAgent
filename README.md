@@ -23,17 +23,30 @@
 ### Installation
 
 **All Platforms**
-Download the launcher from [Releases](https://github.com/osagent/osagent/releases/latest), then run it.
+Download the package for your platform from [Releases](https://github.com/osagent/osagent/releases/latest):
+- Windows: `osagent-windows-x86_64.zip`
+- Linux: `osagent-linux-x86_64.tar.gz`
+- macOS: `osagent-macos-arm64.tar.gz`
+
+Extract and run:
+```bash
+./osagent-launcher    # Opens setup wizard, then starts OSA
+```
+
+The package includes:
+- `osagent` — The core agent binary
+- `osagent-launcher` — GUI setup and management
 
 The launcher will:
-1. Build the core (if needed)
-2. Guide you through setup (API key, workspace)
-3. Start OSA at http://localhost:8765
+1. Guide you through setup (API key, workspace)
+2. Start OSA at http://localhost:8765
+
+No Rust installation required.
 
 ### Quick Start
 
 ```bash
-osagent-launcher    # Opens setup wizard, then starts OSA
+./osagent-launcher    # Opens setup wizard, then starts OSA
 ```
 
 ### Features

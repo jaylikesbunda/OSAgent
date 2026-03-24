@@ -69,6 +69,28 @@
     color: var(--text-primary);
 }
 
+.message.queued {
+    padding: 12px 16px;
+    border: 1px dashed var(--border-hover);
+    border-radius: var(--radius-md);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015));
+}
+
+.message.queued .message-role {
+    color: var(--text-secondary);
+}
+
+.message.queued.dispatching {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(122, 162, 247, 0.15) inset;
+}
+
+.queued-message-meta {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
 .message.assistant.streaming .message-content {
     position: relative;
 }

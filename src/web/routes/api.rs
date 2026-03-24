@@ -9,7 +9,7 @@ use crate::oauth::provider::{
 use crate::oauth::{generate_oauth_state, generate_pkce_pair, PkcePair};
 use crate::plugin::LoadedPlugin;
 use crate::skills::SkillService;
-use crate::storage::{FileSnapshotSummary, Session, StoredSessionEvent};
+use crate::storage::{FileSnapshotSummary, QueuedMessage, Session, StoredSessionEvent};
 use crate::web::auth;
 use crate::workflow::api::WorkflowState;
 use crate::workflow::artifact_store::ArtifactStore;
@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 #[derive(Clone)]
 struct PendingPkceSession {
@@ -86,6 +87,17 @@ pub struct CreateSessionRequest {
 pub struct SendMessageRequest {
     pub message: String,
     pub session_id: String,
+    pub client_message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SendMessageResponse {
+    pub accepted: bool,
+    pub session_id: String,
+    pub status: String,
+    pub queued: bool,
+    pub queue_position: Option<i64>,
+    pub queue_item: Option<QueuedMessage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,6 +258,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/sessions/:id/tools/:tool_call_id",
             post(update_session_tool),
         )
+        .route("/api/sessions/:id/queue", get(list_session_queue))
         .route("/api/sessions/:id/send", post(send_message))
         .route("/api/sessions/:id/cancel", post(cancel_session))
         .route("/api/sessions/:id/events", get(session_events))
@@ -1271,12 +1284,28 @@ async fn send_message(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<SendMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = id.clone();
-    agent
-        .clone()
-        .spawn_message_run(session_id.clone(), payload.message, "web".to_string())
+    let client_message_id = payload
+        .client_message_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let (queue_item, created) = agent
+        .enqueue_message(&session_id, &client_message_id, &payload.message)
         .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    let started_queue_id = agent
+        .clone()
+        .spawn_next_queued_message_run(session_id.clone(), "web".to_string())
         .map_err(|e| {
             let status = if matches!(&e, crate::error::OSAgentError::Session(message) if message.contains("already in progress")) {
                 StatusCode::CONFLICT
@@ -1291,11 +1320,46 @@ async fn send_message(
             )
         })?;
 
-    Ok(Json(serde_json::json!({
-        "accepted": true,
-        "session_id": session_id,
-        "status": "started"
-    })))
+    let started_this_message = started_queue_id.as_deref() == Some(queue_item.id.as_str());
+
+    Ok(Json(SendMessageResponse {
+        accepted: true,
+        session_id,
+        status: if started_this_message {
+            "started".to_string()
+        } else if created {
+            "queued".to_string()
+        } else {
+            "duplicate".to_string()
+        },
+        queued: !started_this_message,
+        queue_position: if started_this_message {
+            None
+        } else {
+            Some(queue_item.position)
+        },
+        queue_item: if started_this_message {
+            None
+        } else {
+            Some(queue_item)
+        },
+    }))
+}
+
+async fn list_session_queue(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<QueuedMessage>>, (StatusCode, Json<ErrorResponse>)> {
+    let items = agent.list_queued_messages(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(items))
 }
 
 fn strip_tool_blocks(text: &str) -> String {
@@ -1790,7 +1854,9 @@ async fn voice_transcribe(
     let voice_config = config
         .voice
         .as_ref()
-        .filter(|v| v.enabled && normalized_stt_provider(v.stt_provider.as_str()) == "whisper-local")
+        .filter(|v| {
+            v.enabled && normalized_stt_provider(v.stt_provider.as_str()) == "whisper-local"
+        })
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
@@ -2855,7 +2921,9 @@ if (window.opener) {{
         return popup_error(format!("Unknown OAuth provider: {}", provider_id));
     };
 
-    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) = provider_config {
+    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) =
+        provider_config
+    {
         let client_id = provider
             .oauth_client_id
             .clone()
@@ -2908,11 +2976,7 @@ if (window.opener) {{
     }
 
     let client = reqwest::Client::new();
-    let token_response = client
-        .post(&token_url)
-        .form(&form)
-        .send()
-        .await;
+    let token_response = client.post(&token_url).form(&form).send().await;
 
     match token_response {
         Ok(response) if response.status().is_success() => {
@@ -2940,7 +3004,13 @@ if (window.opener) {{
                 access_token: access_token.to_string(),
                 refresh_token: refresh_token.map(|s| s.to_string()),
                 expires_at,
-                scopes: Some(default_provider.scopes.iter().map(|scope| scope.to_string()).collect()),
+                scopes: Some(
+                    default_provider
+                        .scopes
+                        .iter()
+                        .map(|scope| scope.to_string())
+                        .collect(),
+                ),
                 account_id: crate::oauth::extract_account_id(
                     token_data.get("id_token").and_then(|v| v.as_str()),
                     Some(access_token),
@@ -3081,7 +3151,9 @@ async fn oauth_refresh(
         )
     })?;
 
-    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) = provider_config {
+    let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) =
+        provider_config
+    {
         let client_id = provider
             .oauth_client_id
             .clone()
@@ -3264,9 +3336,9 @@ async fn oauth_revoke(
                     .unwrap_or_default();
                 let revoke_url = provider
                     .oauth_token_url
-                        .as_ref()
-                        .map(|u| u.replace("/token", "/revoke"))
-                        .unwrap_or_else(|| match provider_id.as_str() {
+                    .as_ref()
+                    .map(|u| u.replace("/token", "/revoke"))
+                    .unwrap_or_else(|| match provider_id.as_str() {
                         "openai" => "https://auth.openai.com/oauth/revoke".to_string(),
                         "anthropic" => "https://auth.anthropic.com/oauth/revoke".to_string(),
                         "google_ai" => "https://oauth2.googleapis.io/revoke".to_string(),

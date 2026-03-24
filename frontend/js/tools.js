@@ -76,6 +76,8 @@ OSA.handleAgentEvent = function(event) {
             if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'running';
             OSA.showThinkingIndicator();
             OSA.setSendButtonStopMode(true);
+            OSA.renderQueuedMessages(OSA.getSessionQueue());
+            if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
             break;
 
         case 'thinking_start':
@@ -92,6 +94,8 @@ OSA.handleAgentEvent = function(event) {
 
         case 'response_start':
             OSA.beginAssistantResponse();
+            OSA.renderQueuedMessages(OSA.getSessionQueue());
+            if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
             break;
 
         case 'response_chunk':
@@ -100,9 +104,11 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'tool_start':
+            OSA.finalizeAssistantSegmentForToolCall(event);
             OSA.createToolCard(event);
             OSA.persistToolStart(event);
             OSA.speakToolStart(event);
+            OSA.renderQueuedMessages(OSA.getSessionQueue());
             break;
 
         case 'tool_progress':
@@ -136,6 +142,11 @@ OSA.handleAgentEvent = function(event) {
             OSA.setStopping(false);
             OSA.resetSendButton();
             OSA.scheduleSessionInspectorRefresh();
+            if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
+            break;
+
+        case 'queued_message_dispatched':
+            OSA.handleQueuedMessageDispatched(event);
             break;
 
         case 'context_update':
@@ -1156,6 +1167,8 @@ OSA.handleEventError = function(event) {
         </div>
     `;
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.renderQueuedMessages(OSA.getSessionQueue());
+    if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
 };
 
 OSA.handleEventCancelled = function(event) {
@@ -1181,6 +1194,8 @@ OSA.handleEventCancelled = function(event) {
         </div>
     `;
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.renderQueuedMessages(OSA.getSessionQueue());
+    if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
 };
 
 OSA._activeSubagents = new Map();
