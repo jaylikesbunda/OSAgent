@@ -33,15 +33,13 @@ Extract and run:
 ./osagent-launcher    # Opens setup wizard, then starts OSA
 ```
 
-The package includes:
-- `osagent` — The core agent binary
-- `osagent-launcher` — GUI setup and management
+The package includes a single portable `osagent-launcher` that bundles everything—no separate binaries needed.
 
 The launcher will:
-1. Guide you through setup (API key, workspace)
-2. Start OSA at http://localhost:8765
+1. Guide you through setup (AI provider, workspace, optional Discord bot)
+2. Extract and run the embedded OSA core at http://localhost:8765
 
-No Rust installation required.
+No Rust installation required. Discord bot is enabled by default (requires bot token during setup).
 
 ### Quick Start
 
