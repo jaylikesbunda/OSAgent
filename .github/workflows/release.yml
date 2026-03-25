@@ -97,6 +97,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-launcher-target-
 
+      - name: Cache root target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-root-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-root-target-
+
+      - name: Build osagent core first
+        run: cargo build --release --target ${{ matrix.target }}
+
       - name: Build launcher (bundles osagent core)
         run: cargo build --manifest-path launcher/Cargo.toml --release --target ${{ matrix.target }}
 

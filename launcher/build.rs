@@ -11,6 +11,7 @@ fn main() {
     let core_manifest_path = root_dir.join("Cargo.toml");
     let is_release = env::var("PROFILE").unwrap() == "release";
     let profile_dir = if is_release { "release" } else { "debug" };
+    let target_dir = env::var("TARGET").ok();
     let core_binary_name = if cfg!(windows) {
         "osagent.exe"
     } else {
@@ -19,10 +20,11 @@ fn main() {
 
     let src_dir = Path::new(&manifest_dir).join("src");
     let embedded_file = src_dir.join("core.bin");
-    let core_source = root_dir
-        .join("target")
-        .join(profile_dir)
-        .join(core_binary_name);
+    let mut core_source = root_dir.join("target");
+    if let Some(ref target) = target_dir {
+        core_source = core_source.join(target);
+    }
+    core_source = core_source.join(profile_dir).join(core_binary_name);
 
     println!("cargo:rerun-if-changed={}", core_manifest_path.display());
     println!("cargo:rerun-if-changed=../src");
