@@ -7,6 +7,7 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'benches/**'
+      - 'launcher/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -28,25 +29,28 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Build release
-        run: cargo build --release
-      
+
+      - name: Build core with Discord
+        run: cargo build --release --features discord
+
+      - name: Build launcher with embedded core
+        run: cargo build --manifest-path launcher/Cargo.toml --release
+
       - name: Run benchmarks
         run: cargo bench --bench performance -- --save-baseline ci | tee benchmark_results.txt
-      
+
       - name: Get binary size
         run: |
-          SIZE=$(ls -lh target/release/osagent | awk '{print $5}')
+          SIZE=$(ls -lh launcher/target/release/osagent-launcher | awk '{print $5}')
           echo "BINARY_SIZE=$SIZE" >> $GITHUB_ENV
           echo "Binary size: $SIZE"
-      
+
       - name: Measure startup time
         run: |
           TOTAL=0
           for i in {1..10}; do
             START=$(date +%s%N)
-            ./target/release/osagent --version > /dev/null 2>&1
+            timeout 2 ./launcher/target/release/osagent-launcher 2>/dev/null || true
             END=$(date +%s%N)
             MS=$(( (END - START) / 1000000 ))
             TOTAL=$((TOTAL + MS))
@@ -54,17 +58,17 @@ jobs:
           AVG=$((TOTAL / 10))
           echo "STARTUP_TIME=${AVG}ms" >> $GITHUB_ENV
           echo "Average startup: ${AVG}ms"
-      
+
       - name: Measure memory
         run: |
-          ./target/release/osagent --version &
+          timeout 2 ./launcher/target/release/osagent-launcher &
           PID=$!
           sleep 0.5
-          MEM=$(ps -o rss= -p $PID | awk '{printf "%.1f", $1/1024}')
+          MEM=$(ps -o rss= -p $PID 2>/dev/null | awk '{printf "%.1f", $1/1024}' || echo "0")
           kill $PID 2>/dev/null || true
           echo "MEMORY_MB=${MEM}MB" >> $GITHUB_ENV
           echo "Idle memory: ${MEM}MB"
-      
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
@@ -72,22 +76,22 @@ jobs:
           path: |
             benchmark_results.txt
             target/criterion/
-      
+
       - name: Comment PR with results
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
             const body = `## Performance Report
-            
+
             | Metric | Value |
             |--------|-------|
             | Binary Size | ${process.env.BINARY_SIZE} |
             | Startup Time | ${process.env.STARTUP_TIME} |
             | Idle Memory | ${process.env.MEMORY_MB} |
-            
+
             [View detailed results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
-            
+
             github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
