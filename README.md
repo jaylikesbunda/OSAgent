@@ -20,7 +20,7 @@
 |---|---|
 | **Runtime** | Single binary, zero deps |
 | **Cold start** | ~3ms |
-| **Memory** | ~50MB |
+| **Memory** | ~20MB |
 | **Discord bot** | Built-in |
 | **OAuth providers** | GitHub Copilot, Codex |
 | **Workflow editor** | Visual node-based |
