@@ -4,7 +4,7 @@
 
 <h1 align="center">OSAgent</h1>
 
-<p align="center"><strong>The Discord-ready AI agent. Rust-powered, zero runtime deps.</strong></p>
+<p align="center"><strong>Your open source agent. Rust-powered, with zero runtime deps.</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
@@ -21,7 +21,7 @@
 | **Runtime** | Single binary, zero deps | Node.js, Python, or Go required |
 | **Memory** | ~50-100MB | 200-500MB+ |
 | **Discord bot** | Built-in | Rare / limited |
-| **OAuth providers** | GitHub Copilot, Google, Codex | API keys only |
+| **OAuth providers** | GitHub Copilot, Codex | API keys only |
 | **Workflow editor** | Visual node-based | None |
 
 ## Features
