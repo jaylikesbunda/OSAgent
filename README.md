@@ -1,94 +1,137 @@
 <p align="center">
-  <a href="https://github.com/osagent/osagent">
-    <img src="frontend/images/thinking-indicator.png" alt="OSA Logo" width="120">
-  </a>
+  <img src="frontend/images/thinking-indicator.png" alt="OSA Logo" width="120">
 </p>
 
-<h1 align="center">OSA - Your Open Source Agent</h1>
+<h1 align="center">OSAgent</h1>
 
-<p align="center"><strong>Your personal AI agent. Fast, local and secure.</strong></p>
+<p align="center"><strong>The Discord-ready AI agent. Rust-powered, zero runtime deps.</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.70+-orange?style=flat-square" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square" alt="Rust"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
 </p>
 
-<p align="center">
-  <a href="#installation">Install</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#features">Features</a> •
-  <a href="https://github.com/osagent/osagent/releases">Releases</a>
-</p>
+---
 
-### Installation
+## Why OSAgent?
 
-**All Platforms**
-Download the package for your platform from [Releases](https://github.com/osagent/osagent/releases/latest):
-- Windows: `osagent-windows-x86_64.zip`
-- Linux: `osagent-linux-x86_64.tar.gz`
-- macOS: `osagent-macos-arm64.tar.gz`
+| | OSAgent | Alternatives |
+|---|---|---|
+| **Runtime** | Single binary, zero deps | Node.js, Python, or Go required |
+| **Memory** | ~50-100MB | 200-500MB+ |
+| **Discord bot** | Built-in | Rare / limited |
+| **OAuth providers** | GitHub Copilot, Google, Codex | API keys only |
+| **Workflow editor** | Visual node-based | None |
 
-Extract and run:
-```bash
-./osagent-launcher    # Opens setup wizard, then starts OSA
+## Features
+
+- **200+ models** — OpenRouter, OpenAI, Anthropic, Google AI, GitHub Copilot, OpenAI Codex, Ollama, Groq, DeepSeek, xAI, AWS Bedrock, Azure, and more
+- **OAuth authentication** — Sign in with GitHub Copilot, Google, or OpenAI Codex (no API keys needed)
+- **Discord bot** — Slash commands, per-channel sessions, thinking indicators, tool execution feedback
+- **Web UI** — Modern chat interface at `localhost:8765`
+- **24 tools** — File ops, code execution (Python/Node/Bash), grep/glob, web fetch, LSP, and more
+- **Voice I/O** — Whisper STT + Piper TTS with browser fallback
+- **Visual workflow editor** — Node-based drag-and-drop automation (experimental)
+- **Skills system** — Installable `.oskill` bundles for custom integrations
+
+## Quick Start
+
+### Download
+
+Grab the latest release for your platform:
+
+```
+# Windows
+osagent-launcher.exe
+
+# macOS
+osagent-launcher
+
+# Linux
+./osagent-launcher
 ```
 
-The package includes a single portable `osagent-launcher` that bundles everything—no separate binaries needed.
+### Setup Wizard
 
-The launcher will:
-1. Guide you through setup (AI provider, workspace, optional Discord bot)
-2. Extract and run the embedded OSA core at http://localhost:8765
+1. Run the launcher
+2. Choose your provider (OAuth or API key)
+3. Select a workspace folder
+4. Done — browser opens to `http://localhost:8765`
 
-No Rust installation required. Discord bot is enabled by default (requires bot token during setup).
-
-### Quick Start
+### CLI
 
 ```bash
-./osagent-launcher    # Opens setup wizard, then starts OSA
+# Start with default config
+osagent start
+
+# Start with a specific workspace
+osagent start -w /path/to/project
+
+# Install as system service (Linux/macOS)
+osagent service install
 ```
 
-### Features
+## Configuration
 
-- **Multi-Provider** — OpenRouter, OpenAI, Anthropic, Google, Ollama, Groq, DeepSeek, xAI
-- **Web UI** — Modern chat with workspaces and tool visualization
-- **Discord Bot** — Deploy as a Discord bot with slash commands, per-channel sessions, and thinking indicators
-- **Tool Execution** — Bash, Python, Node, file ops, web search
-- **Skills System** — Extend with custom integrations
-- **Voice STT/TTS** — Whisper speech-to-text and Piper local text-to-speech with browser Web Speech API support
-- **Local-First** — Runs entirely on your machine
-
-### Configuration
-
-Config is stored in `~/.osagent/config.toml`. The launcher handles setup, but you can edit manually:
+Config stored at `~/.osagent/config.toml`:
 
 ```toml
+[server]
+bind = "127.0.0.1"
+port = 8765
+password = "$2b$12$..."  # bcrypt hash (optional)
+
 [[providers]]
 provider_type = "openrouter"
 api_key = "sk-or-v1-..."
 model = "anthropic/claude-sonnet-4"
-```
 
-### Tools
+[agent]
+workspace = "~/.osagent/workspace"
+max_tokens = 4096
 
-Enable tools in `~/.osagent/config.toml`:
-```toml
 [tools]
-allowed = ["bash", "read_file", "write_file", "grep", "glob", "code_python", "code_node"]
+allowed = ["bash", "read_file", "write_file", "grep", "glob", "code_python"]
 ```
 
-### Skills
+## Discord Bot
 
-Extend OSA with custom integrations. Create a skill:
+1. Create a bot at [Discord Developer Portal](https://discord.com/developers/applications)
+2. Add token to config:
+
+```toml
+[discord]
+token = "your-bot-token"
+allowed_users = ["1234567890"]
+```
+
+3. Invite bot to server with `applications.commands` scope
+4. Use `/help` to see available commands
+
+## Skills
+
+Extend OSAgent with custom integrations:
 
 ```bash
 mkdir my-skill && cd my-skill
 # Create SKILL.md (agent instructions) and manifest.toml (metadata)
 zip -r ../my-skill.oskill *
-# Install via Settings → Skills
+# Install via Settings → Skills in the Web UI
 ```
 
-See `examples/skills/` for examples: GitHub, Spotify, Word.
+See `examples/skills/` for examples.
 
-### License
+## Building from Source
+
+```bash
+git clone https://github.com/jaylikesbunda/OSAgent.git
+cd osagent
+cargo build --release
+```
+
+The binary will be at `target/release/osagent`.
+
+## License
 
 [MIT](LICENSE)
