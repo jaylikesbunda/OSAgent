@@ -2638,7 +2638,7 @@ fn start_osagent(
                 },
             );
 
-            update_tray_menu(&window.app_handle(), true);
+            update_tray_menu(window.app_handle(), true);
 
             Ok(get_status(state))
         }
@@ -2685,7 +2685,7 @@ fn stop_osagent(window: WebviewWindow, state: State<AppState>) -> Result<AgentSt
         },
     );
 
-    update_tray_menu(&window.app_handle(), false);
+    update_tray_menu(window.app_handle(), false);
 
     Ok(AgentStatus {
         running: false,
@@ -2745,7 +2745,7 @@ fn build_osagent(
                 config_path: state.config_path.to_string_lossy().to_string(),
             },
         );
-        update_tray_menu(&window.app_handle(), false);
+        update_tray_menu(window.app_handle(), false);
         // Give the OS a moment to release the file lock
         std::thread::sleep(std::time::Duration::from_millis(500));
     }

@@ -16,13 +16,14 @@
 
 ## Why OSAgent?
 
-| | OSAgent | Alternatives |
-|---|---|---|
-| **Runtime** | Single binary, zero deps | Node.js, Python, or Go required |
-| **Memory** | ~50-100MB | 200-500MB+ |
-| **Discord bot** | Built-in | Rare / limited |
-| **OAuth providers** | GitHub Copilot, Codex | API keys only |
-| **Workflow editor** | Visual node-based | None |
+| | OSAgent |
+|---|---|
+| **Runtime** | Single binary, zero deps |
+| **Cold start** | ~3ms |
+| **Memory** | ~50-100MB |
+| **Discord bot** | Built-in |
+| **OAuth providers** | GitHub Copilot, Codex |
+| **Workflow editor** | Visual node-based |
 
 ## Features
 
