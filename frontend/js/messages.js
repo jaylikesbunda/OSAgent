@@ -520,7 +520,9 @@ OSA.completeThinkingDisplay = function() {
     const rawText = body ? (body.dataset.rawText || '').trim() : '';
     if (rawText) {
         OSA.setThinkingPreview(container, rawText);
-        container.classList.remove('expanded');
+        if (!container.dataset.userToggled) {
+            container.classList.remove('expanded');
+        }
     }
 };
 
@@ -746,7 +748,7 @@ OSA.copyCode = function(btn) {
 };
 
 OSA.removeQueuedMessageElements = function() {
-    document.querySelectorAll('#messages .message.queued').forEach(el => el.remove());
+    document.querySelectorAll('#messages .queued-notice').forEach(el => el.remove());
 };
 
 OSA.appendUserMessageToChat = function(content, options = {}) {
@@ -865,13 +867,11 @@ OSA.renderQueuedMessages = function(queueItems) {
 
     items.forEach((item, index) => {
         const message = document.createElement('div');
-        message.className = `message user queued${item.status === 'dispatching' ? ' dispatching' : ''}`;
+        message.className = `queued-notice${item.status === 'dispatching' ? ' dispatching' : ''}`;
         if (item.id) message.dataset.queueId = item.id;
-        message.innerHTML = `
-            <div class="message-role">${item.status === 'dispatching' ? 'Sending next' : `Queued ${index + 1}`}</div>
-            <div class="message-content">${OSA.escapeHtml(item.content || '')}</div>
-            <div class="queued-message-meta">${OSA.escapeHtml(OSA.formatRelativeDateTime(item.created_at))}</div>
-        `;
+        const label = item.status === 'dispatching' ? 'Sending next' : `Queued ${index + 1}`;
+        const preview = (item.content || '').slice(0, 80) + ((item.content || '').length > 80 ? '…' : '');
+        message.innerHTML = `<span class="queued-notice-label">${label}</span><span class="queued-notice-text">${OSA.escapeHtml(preview)}</span><span class="queued-notice-time">${OSA.escapeHtml(OSA.formatRelativeDateTime(item.created_at))}</span>`;
         messagesDiv.appendChild(message);
     });
 

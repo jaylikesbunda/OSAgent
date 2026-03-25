@@ -294,7 +294,7 @@
     <div id="workflow-editor" class="workflow-editor hidden"></div>
 
     <!-- Memory Edit Modal -->
-    <div id="memory-edit-modal" class="modal hidden" onclick="if(event.target===this)OSA.closeMemoryEdit()">
+    <div id="memory-edit-modal" class="modal hidden" style="z-index:1100" onclick="if(event.target===this)OSA.closeMemoryEdit()">
         <div class="modal-dialog" style="max-width:520px;width:100%;background:var(--bg-primary);border-radius:12px;padding:24px;border:1px solid var(--border)">
             <h3 style="margin:0 0 16px;font-size:16px">Edit Memory</h3>
             <input type="hidden" id="edit-memory-id" />

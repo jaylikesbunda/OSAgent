@@ -688,9 +688,9 @@ OSA.loadMemories = async function() {
         list.innerHTML = data.memories.map(m => {
             const tagStr = m.tags && m.tags.length ? `<span class="decision-meta" style="margin-left:4px">[${OSA.escapeHtml(m.tags.join(', '))}]</span>` : '';
             const sourceLabel = m.source === 'agent' ? 'Recorded by agent' : 'Added by user';
-            const encodedTitle = encodeURIComponent(m.title || '');
-            const encodedContent = encodeURIComponent(m.content || '');
-            const encodedTags = encodeURIComponent((m.tags || []).join(', '));
+            const encodedTitle = encodeURIComponent(m.title || '').replace(/'/g, '%27');
+            const encodedContent = encodeURIComponent(m.content || '').replace(/'/g, '%27');
+            const encodedTags = encodeURIComponent((m.tags || []).join(', ')).replace(/'/g, '%27');
             return `
             <div class="decision-item">
                 <div class="decision-body">
