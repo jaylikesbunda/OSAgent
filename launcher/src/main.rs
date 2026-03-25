@@ -21,9 +21,9 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{
-    AppHandle, Emitter, Manager, State, WebviewWindow,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WebviewWindow,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -3466,19 +3466,36 @@ fn voice_id_to_hf_url(voice_id: &str) -> String {
 // --- Tray Helpers ---
 
 fn update_tray_menu(app_handle: &AppHandle, running: bool) {
-    let open_launcher =
-        MenuItem::with_id(app_handle, "open_launcher", "Open Launcher", true, None::<&str>)
-            .unwrap();
+    let open_launcher = MenuItem::with_id(
+        app_handle,
+        "open_launcher",
+        "Open Launcher",
+        true,
+        None::<&str>,
+    )
+    .unwrap();
     let open_ui =
         MenuItem::with_id(app_handle, "open_ui", "Open Web UI", true, None::<&str>).unwrap();
     let toggle = if running {
-        MenuItem::with_id(app_handle, "stop_osagent", "Stop OSAgent", true, None::<&str>).unwrap()
+        MenuItem::with_id(
+            app_handle,
+            "stop_osagent",
+            "Stop OSAgent",
+            true,
+            None::<&str>,
+        )
+        .unwrap()
     } else {
-        MenuItem::with_id(app_handle, "start_osagent", "Start OSAgent", true, None::<&str>)
-            .unwrap()
+        MenuItem::with_id(
+            app_handle,
+            "start_osagent",
+            "Start OSAgent",
+            true,
+            None::<&str>,
+        )
+        .unwrap()
     };
-    let exit_item =
-        MenuItem::with_id(app_handle, "exit", "Exit", true, None::<&str>).unwrap();
+    let exit_item = MenuItem::with_id(app_handle, "exit", "Exit", true, None::<&str>).unwrap();
     let sep1 = PredefinedMenuItem::separator(app_handle).unwrap();
     let sep2 = PredefinedMenuItem::separator(app_handle).unwrap();
 
@@ -3494,11 +3511,7 @@ fn update_tray_menu(app_handle: &AppHandle, running: bool) {
 
 // --- Output Reader ---
 
-fn read_output_to_file<R: std::io::Read>(
-    reader: R,
-    app_handle: AppHandle,
-    log_path: PathBuf,
-) {
+fn read_output_to_file<R: std::io::Read>(reader: R, app_handle: AppHandle, log_path: PathBuf) {
     let buf = BufReader::new(reader);
     for line in buf.lines() {
         match line {
@@ -3659,13 +3672,18 @@ fn main() {
         ])
         .setup(|app| {
             // Build tray menu
-            let open_launcher = MenuItem::with_id(app, "open_launcher", "Open Launcher", true, None::<&str>)?;
+            let open_launcher =
+                MenuItem::with_id(app, "open_launcher", "Open Launcher", true, None::<&str>)?;
             let open_ui = MenuItem::with_id(app, "open_ui", "Open Web UI", true, None::<&str>)?;
-            let start = MenuItem::with_id(app, "start_osagent", "Start OSAgent", true, None::<&str>)?;
+            let start =
+                MenuItem::with_id(app, "start_osagent", "Start OSAgent", true, None::<&str>)?;
             let exit_item = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&open_launcher, &open_ui, &sep1, &start, &sep2, &exit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[&open_launcher, &open_ui, &sep1, &start, &sep2, &exit_item],
+            )?;
 
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .tooltip("OSAgent Launcher")
