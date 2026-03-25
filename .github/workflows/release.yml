@@ -41,10 +41,7 @@ jobs:
             target: aarch64-apple-darwin
             launcher_binary: osagent-launcher
             archive_name: osagent-macos-arm64.tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            launcher_binary: osagent-launcher
-            archive_name: osagent-macos-x86_64.tar.gz
+
 
     steps:
       - uses: actions/checkout@v4
