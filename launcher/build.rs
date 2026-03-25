@@ -22,7 +22,7 @@ fn main() {
     let core_source = root_dir
         .join("target")
         .join(profile_dir)
-        .join(&core_binary_name);
+        .join(core_binary_name);
 
     println!("cargo:rerun-if-changed={}", core_manifest_path.display());
     println!("cargo:rerun-if-changed=../src");
