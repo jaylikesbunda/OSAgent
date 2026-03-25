@@ -61,7 +61,10 @@
       stt_whisper_model: 'base',
       tts_mode: 'browser',
       tts_piper_language: 'en',
-      tts_piper_voice: 'en_US-libritts-high'
+      tts_piper_voice: 'en_US-libritts-high',
+      discord_enabled: false,
+      discord_token: '',
+      discord_user_id: ''
     },
     devicePoll: null,
     voiceUnlisten: null
@@ -125,7 +128,6 @@
     statusPid: $('#status-pid'),
     pathBinary: $('#path-binary'),
     pathConfig: $('#path-config'),
-    dashboardSetupStatus: $('#dashboard-setup-status'),
     dashboardProvider: $('#dashboard-provider'),
     dashboardWorkspace: $('#dashboard-workspace'),
     dashboardSecurity: $('#dashboard-security'),
@@ -170,7 +172,15 @@
     voiceDashProgressLabel: $('#voice-dash-progress-label'),
     voiceDashProgressFill: $('#voice-dash-progress-fill'),
     voiceDashProgressText: $('#voice-dash-progress-text'),
-    btnInstallVoiceDash: $('#btn-install-voice-dash')
+    btnInstallVoiceDash: $('#btn-install-voice-dash'),
+    // Discord
+    discordGuideToggle: $('#discord-guide-toggle'),
+    discordGuideContent: $('#discord-guide-content'),
+    discordToken: $('#discord-token'),
+    discordUserId: $('#discord-user-id'),
+    discordEnabled: $('#discord-enabled'),
+    discordReview: $('#review-discord'),
+    btnOpenDiscordDev: $('#btn-open-discord-dev')
   };
 
   function currentProvider() {
@@ -416,6 +426,9 @@
     els.reviewProvider.textContent = provider ? provider.name : '-';
     els.reviewModel.textContent = state.wizard.model || 'Provider default (change later)';
     els.reviewWorkspace.textContent = state.wizard.workspace_path || 'No folder selected';
+    els.discordReview.textContent = state.wizard.discord_enabled
+      ? (state.wizard.discord_token ? 'Enabled' : 'No token')
+      : 'Disabled';
     els.reviewConfig.textContent = state.setup ? state.setup.config_path : '-';
   }
 
@@ -464,6 +477,9 @@
     els.passwordEnabled.checked = state.wizard.password_enabled;
     els.passwordInput.value = state.wizard.password;
     els.passwordConfirm.value = state.wizard.confirm_password;
+    els.discordEnabled.checked = state.wizard.discord_enabled;
+    els.discordToken.value = state.wizard.discord_token;
+    els.discordUserId.value = state.wizard.discord_user_id;
     updatePasswordFields();
     updateWizardTabs();
   }
@@ -472,9 +488,6 @@
     els.dashboardProvider.textContent = providerDisplayName(setup.provider_type || 'Not configured');
     els.dashboardWorkspace.textContent = setup.workspace_path || '-';
     els.dashboardSecurity.textContent = setup.password_enabled ? 'Password required' : 'No password';
-    els.dashboardSetupStatus.textContent = setup.needs_setup ? 'Setup needed' : 'Setup ready';
-    els.dashboardSetupStatus.style.background = setup.needs_setup ? 'rgba(95, 79, 40, 0.25)' : 'rgba(60, 90, 65, 0.25)';
-    els.dashboardSetupStatus.style.color = setup.needs_setup ? '#d3c28f' : '#b9e0c3';
   }
 
   function applySetupState(setup) {
@@ -528,6 +541,9 @@
       state.wizard.password = '';
       state.wizard.confirm_password = '';
       state.wizard.api_key = '';
+      state.wizard.discord_enabled = false;
+      state.wizard.discord_token = '';
+      state.wizard.discord_user_id = '';
       state.wizard.step = 0;
       setProviderAuthMode('api_key');
       resetProviderValidation();
@@ -562,7 +578,10 @@
     if (state.wizard.step === 3 && !state.wizard.workspace_path.trim()) {
       return 'Choose a workspace folder to continue.';
     }
-    if (state.wizard.step === 5 && state.wizard.password_enabled) {
+    if (state.wizard.step === 5 && state.wizard.discord_enabled && !state.wizard.discord_token.trim()) {
+      // Discord enabled but no token entered - won't save Discord section, existing config preserved
+    }
+    if (state.wizard.step === 6 && state.wizard.password_enabled) {
       if (!state.wizard.password) return 'Enter a password or turn password protection off.';
       if (state.wizard.password !== state.wizard.confirm_password) return 'Passwords do not match yet.';
     }
@@ -880,7 +899,10 @@
           stt_whisper_model: state.wizard.stt_whisper_model,
           tts_mode: state.wizard.tts_mode,
           tts_piper_language: state.wizard.tts_piper_language,
-          tts_piper_voice: state.wizard.tts_piper_voice
+          tts_piper_voice: state.wizard.tts_piper_voice,
+          discord_enabled: state.wizard.discord_enabled,
+          discord_token: state.wizard.discord_token,
+          discord_allowed_users: state.wizard.discord_user_id
         }
       });
 
@@ -1130,6 +1152,27 @@
     if (els.btnDownloadVoice) {
       els.btnDownloadVoice.addEventListener('click', () => downloadVoice('wiz'));
     }
+
+    // Discord collapsible toggle
+    if (els.discordGuideToggle) {
+      els.discordGuideToggle.addEventListener('click', () => {
+        els.discordGuideToggle.classList.toggle('active');
+        els.discordGuideContent.classList.toggle('open');
+      });
+    }
+
+    // Open Discord developer portal
+    if (els.btnOpenDiscordDev) {
+      els.btnOpenDiscordDev.addEventListener('click', async () => {
+        try {
+          if (window.__TAURI__ && window.__TAURI__.shell) {
+            await window.__TAURI__.shell.open('https://discord.com/developers');
+          } else {
+            window.open('https://discord.com/developers', '_blank');
+          }
+        } catch (_e) {}
+      });
+    }
   }
 
   // ────────────────────────────────────────────────────────
@@ -1332,6 +1375,20 @@
 
     els.passwordConfirm.addEventListener('input', (event) => {
       state.wizard.confirm_password = event.target.value;
+    });
+
+    els.discordEnabled.addEventListener('change', (event) => {
+      state.wizard.discord_enabled = event.target.checked;
+      updateReview();
+    });
+
+    els.discordToken.addEventListener('input', (event) => {
+      state.wizard.discord_token = event.target.value;
+      updateReview();
+    });
+
+    els.discordUserId.addEventListener('input', (event) => {
+      state.wizard.discord_user_id = event.target.value;
     });
 
     els.wizardBack.addEventListener('click', () => {

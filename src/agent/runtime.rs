@@ -831,6 +831,11 @@ impl AgentRuntime {
                         .compact_session_history(&mut session, &active_workspace)
                         .await?
                     {
+                        if let Some(ref mut cs) = session.context_state {
+                            cs.compaction_stats.total_compactions += 1;
+                            cs.compaction_stats.total_pruned_messages += pruned;
+                            cs.compaction_stats.total_compacted_messages += compacted;
+                        }
                         self.record_session_event(
                             &mut session,
                             "compaction",
@@ -931,6 +936,16 @@ impl AgentRuntime {
                         cached_write: u.cached_write,
                         reasoning: u.reasoning,
                     }),
+                    tool_usage: session
+                        .context_state
+                        .as_ref()
+                        .map(|cs| cs.tool_usage.clone())
+                        .unwrap_or_default(),
+                    compaction_stats: session
+                        .context_state
+                        .as_ref()
+                        .map(|cs| cs.compaction_stats.clone())
+                        .unwrap_or_default(),
                 });
                 self.session_manager.update_session(&session).await?;
             }
@@ -3259,6 +3274,9 @@ impl AgentRuntime {
 
     fn message_tokens(message: &Message) -> usize {
         let mut total = Self::estimate_tokens(&message.content) + 8;
+        if let Some(thinking) = &message.thinking {
+            total += Self::estimate_tokens(thinking);
+        }
         if let Some(tool_calls) = &message.tool_calls {
             for call in tool_calls {
                 total += Self::estimate_tokens(&call.name);

@@ -321,6 +321,24 @@
         <div class="settings-modal-content">
             <div class="settings-modal-header">
                 <h2>Settings</h2>
+                <select id="settings-tab-select" class="settings-tab-select" onchange="switchSettingsTab(this.value)">
+                    <optgroup label="General">
+                        <option value="provider">Provider</option>
+                        <option value="models">Models</option>
+                        <option value="agent">Agent</option>
+                        <option value="theme">Theme</option>
+                    </optgroup>
+                    <optgroup label="Integrations">
+                        <option value="discord">Discord</option>
+                        <option value="voice">Voice</option>
+                    </optgroup>
+                    <optgroup label="Advanced">
+                        <option value="memory">Memory</option>
+                        <option value="skills">Skills</option>
+                        <option value="security">Security</option>
+                        <option value="experimental">Experimental</option>
+                    </optgroup>
+                </select>
             </div>
             <div class="settings-with-sidebar">
                 <div class="settings-sidebar">

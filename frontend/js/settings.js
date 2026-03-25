@@ -408,6 +408,8 @@ OSA.switchSettingsTab = async function(tabId) {
     document.querySelectorAll('.settings-pane').forEach(pane => {
         pane.classList.toggle('active', pane.id === `pane-${tabId}`);
     });
+    const sel = document.getElementById('settings-tab-select');
+    if (sel) sel.value = tabId;
     if (tabId === 'models' || tabId === 'provider') {
         OSA.renderSettingsProviders();
     } else if (tabId === 'voice') {

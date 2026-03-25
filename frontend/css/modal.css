@@ -101,6 +101,10 @@
     border-bottom: 1px solid var(--border);
 }
 
+.settings-tab-select {
+    display: none;
+}
+
 .settings-modal-header h2 {
     font-size: 16px;
     font-weight: 600;

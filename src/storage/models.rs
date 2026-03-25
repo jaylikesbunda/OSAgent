@@ -114,11 +114,30 @@ pub struct MessageTokens {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolUsageStats {
+    pub tool_name: String,
+    pub invocation_count: usize,
+    pub estimated_tokens: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CompactionStats {
+    pub total_compactions: usize,
+    pub total_pruned_messages: usize,
+    pub total_compacted_messages: usize,
+    pub estimated_tokens_saved: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionContextState {
     pub estimated_tokens: usize,
     pub context_window: usize,
     pub budget_tokens: usize,
     pub actual_usage: Option<MessageTokens>,
+    #[serde(default)]
+    pub tool_usage: Vec<ToolUsageStats>,
+    #[serde(default)]
+    pub compaction_stats: CompactionStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

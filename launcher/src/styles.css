@@ -772,6 +772,69 @@ button { cursor: pointer; }
   border-color: rgba(63, 185, 80, 0.4);
 }
 
+/* ── Discord setup guide ──────────────────────── */
+.discord-setup-guide {
+  margin-bottom: 14px;
+}
+
+.collapsible {
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all var(--transition);
+}
+
+.collapsible::before {
+  content: '▶';
+  font-size: 9px;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+}
+
+.collapsible:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.collapsible.active::before {
+  transform: rotate(90deg);
+}
+
+.collapsible-content {
+  display: none;
+  margin-top: 8px;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.collapsible-content.open {
+  display: block;
+}
+
+.discord-steps {
+  margin: 0 0 10px 0;
+  padding-left: 20px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+}
+
+.discord-steps li { margin-bottom: 4px; }
+.discord-steps strong { color: var(--text-primary); }
+.discord-steps em { font-style: normal; color: var(--accent); }
+
 /* ── Profile toggle (build/run) ───────────────────── */
 .profile-row {
   display: flex;

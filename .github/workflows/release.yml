@@ -24,89 +24,25 @@ permissions:
   contents: write
 
 jobs:
-  build-core:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            binary_name: osagent
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_name: osagent.exe
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            binary_name: osagent
-          - os: macos-13
-            target: x86_64-apple-darwin
-            binary_name: osagent
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-core-cargo-registry-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-core-cargo-registry-
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-core-cargo-git-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-core-cargo-git-
-
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-core-target-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-core-target-
-
-      - name: Build core binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Upload core binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: core-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
-
   build-launcher:
     runs-on: ${{ matrix.os }}
-    needs: build-core
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            core_binary: osagent
             launcher_binary: osagent-launcher
             archive_name: osagent-linux-x86_64.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            core_binary: osagent.exe
             launcher_binary: osagent-launcher.exe
             archive_name: osagent-windows-x86_64.zip
           - os: macos-latest
             target: aarch64-apple-darwin
-            core_binary: osagent
             launcher_binary: osagent-launcher
             archive_name: osagent-macos-arm64.tar.gz
           - os: macos-13
             target: x86_64-apple-darwin
-            core_binary: osagent
             launcher_binary: osagent-launcher
             archive_name: osagent-macos-x86_64.tar.gz
 
@@ -136,12 +72,6 @@ jobs:
             libsoup2.4-dev \
             libgtk-3-dev
 
-      - name: Download core binary
-        uses: actions/download-artifact@v4
-        with:
-          name: core-${{ matrix.target }}
-          path: target/release
-
       - name: Cache launcher cargo registry
         uses: actions/cache@v4
         with:
@@ -166,21 +96,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-launcher-target-
 
-      - name: Build launcher
-        run: cargo build --manifest-path launcher/Cargo.toml --release
+      - name: Build launcher (bundles osagent core)
+        run: cargo build --manifest-path launcher/Cargo.toml --release --target ${{ matrix.target }}
 
       - name: Create package directory
         run: mkdir -p dist/osagent
 
-      - name: Copy core binary
-        run: |
-          chmod +x target/release/${{ matrix.core_binary }} || true
-          cp target/release/${{ matrix.core_binary }} dist/osagent/
-
       - name: Copy launcher binary
+        shell: bash
         run: |
-          chmod +x launcher/target/release/${{ matrix.launcher_binary }} || true
-          cp launcher/target/release/${{ matrix.launcher_binary }} dist/osagent/
+          chmod +x launcher/target/${{ matrix.target }}/release/${{ matrix.launcher_binary }} || true
+          cp launcher/target/${{ matrix.target }}/release/${{ matrix.launcher_binary }} dist/osagent/
 
       - name: Create README
         shell: bash

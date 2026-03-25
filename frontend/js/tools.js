@@ -204,7 +204,7 @@ OSA.updateContextStatus = function(event) {
     
     if (!indicator || !ringProgress || !pctEl) return;
 
-    const used = event.estimated_tokens || 0;
+    const used = (event.actual_usage && event.actual_usage.total > 0) ? event.actual_usage.total : (event.estimated_tokens || 0);
     const window = event.context_window || 1;
     const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
     

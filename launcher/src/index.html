@@ -55,6 +55,10 @@
             </button>
             <button class="wizard-pill" data-step="5" type="button">
               <span class="wizard-pill-num">6</span>
+              <span class="wizard-pill-label">Discord</span>
+            </button>
+            <button class="wizard-pill" data-step="6" type="button">
+              <span class="wizard-pill-num">7</span>
               <span class="wizard-pill-label">Review</span>
             </button>
           </nav>
@@ -225,8 +229,55 @@
             </div>
           </div>
 
-          <!-- Step 6: Review + Security -->
+          <!-- Step 6: Discord Bot -->
           <div class="wizard-panel" data-step-panel="5">
+            <div class="section-heading">
+              <h2>Discord Bot <span class="optional-badge">Optional</span></h2>
+              <p>Connect OSA to Discord for AI interaction via slash commands.</p>
+            </div>
+            <div class="step-body">
+              <div class="discord-setup-guide">
+                <button class="collapsible" id="discord-guide-toggle" type="button">
+                  How to set up a Discord bot
+                </button>
+                <div class="collapsible-content" id="discord-guide-content">
+                  <ol class="discord-steps">
+                    <li>Go to <strong>discord.com/developers</strong> → "New Application" and name your bot</li>
+                    <li>In the left panel, go to <strong>Bot</strong> → Enable <strong>Message Content Intent</strong> under Privileged Gateway Intents</li>
+                    <li>Get your bot token: <strong>Bot</strong> → <strong>Build-A-Bot</strong> → <strong>Token</strong> → Click "Reset Token" → "Copy"</li>
+                    <li>Invite the bot to your server:<br>
+                      <em>OAuth2</em> → <em>URL Generator</em> → scopes: <strong>bot + applications.commands</strong> → permissions: <strong>0</strong> → Copy URL → Open in browser</li>
+                    <li>Find your Discord User ID:<br>
+                      Discord → <strong>User Settings</strong> → <strong>Advanced</strong> → Enable <strong>Developer Mode</strong><br>
+                      Right-click on yourself → <strong>Copy User ID</strong></li>
+                  </ol>
+                  <button class="btn secondary tiny" id="btn-open-discord-dev" type="button">Open discord.com/developers</button>
+                </div>
+              </div>
+              <div class="form-grid">
+                <label class="field">
+                  <span>Bot Token</span>
+                  <input id="discord-token" type="password" placeholder="MTIz..." autocomplete="off">
+                  <small>From discord.com/developers → Bot → Build-A-Bot → Token</small>
+                </label>
+                <label class="field">
+                  <span>Allowed User IDs <small>(optional)</small></span>
+                  <input id="discord-user-id" type="text" placeholder="123456789012345678, 987654321098765432" autocomplete="off">
+                  <small>Leave empty to allow all users, or enter comma-separated Discord User IDs</small>
+                </label>
+              </div>
+              <label class="toggle-card">
+                <input id="discord-enabled" type="checkbox">
+                <span>
+                  <strong>Enable Discord bot</strong>
+                  <small>Bot token is required when enabled. Requires building with <code>--features discord</code>.</small>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Step 7: Review + Security -->
+          <div class="wizard-panel" data-step-panel="6">
             <div class="section-heading">
               <h2>Ready to save</h2>
               <p>Confirm settings and set a web UI password if you want one.</p>
@@ -253,6 +304,7 @@
                 <div class="review-item"><span>Provider</span><strong id="review-provider">-</strong></div>
                 <div class="review-item"><span>Model</span><strong id="review-model">-</strong></div>
                 <div class="review-item"><span>Workspace</span><strong id="review-workspace">-</strong></div>
+                <div class="review-item"><span>Discord</span><strong id="review-discord">-</strong></div>
                 <div class="review-item"><span>Config file</span><strong id="review-config">-</strong></div>
               </div>
             </div>
@@ -275,7 +327,6 @@
                 <div class="status-label" id="status-label">Stopped</div>
                 <div class="status-pid" id="status-pid">PID: -</div>
               </div>
-              <div class="inline-status-chip" id="dashboard-setup-status">Setup ready</div>
             </div>
 
             <div class="actions dash-actions">

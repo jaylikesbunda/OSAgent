@@ -4,7 +4,10 @@ use crate::agent::provider::{OpenAICompatibleProvider, Provider};
 use crate::agent::session::SessionManager;
 use crate::config::Config;
 use crate::error::Result;
-use crate::storage::{Message, SqliteStorage, SubagentTask};
+use crate::storage::{
+    CompactionStats, Message, MessageTokens, Session, SessionContextState, SqliteStorage,
+    SubagentTask, ToolUsageStats,
+};
 use crate::tools::registry::ToolRegistry;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -341,7 +344,7 @@ impl SubagentManager {
             let _ = storage.update_session(&session);
         }
 
-        let max_iterations = 15;
+        let max_iterations = usize::MAX;
         let mut tool_count = 0;
 
         for iteration in 0..max_iterations {
@@ -389,11 +392,7 @@ impl SubagentManager {
         }
 
         let result_text = Self::extract_result(&storage, &session_id).await?;
-        Ok((
-            "completed".to_string(),
-            format!("{} (reached max iterations)", result_text),
-            tool_count,
-        ))
+        Ok(("completed".to_string(), result_text, tool_count))
     }
 
     async fn create_provider(
@@ -446,7 +445,7 @@ impl SubagentManager {
         allowed_tools: Vec<String>,
         cancel_rx: &mut mpsc::Receiver<()>,
     ) -> Result<(bool, i32)> {
-        let session = storage
+        let mut session = storage
             .get_session(&session_id)?
             .ok_or_else(|| crate::error::OSAgentError::Session("Session not found".to_string()))?;
 
@@ -457,6 +456,9 @@ impl SubagentManager {
             .into_iter()
             .filter(|t| allowed_tools.contains(&t.function.name))
             .collect::<Vec<_>>();
+
+        Self::update_context_tracking(&mut session, &session_id, &provider, &event_bus, &storage)
+            .await?;
 
         let start = Instant::now();
         let response = tokio::select! {
@@ -474,12 +476,24 @@ impl SubagentManager {
         );
 
         let mut tool_count = 0;
-        let mut session = session;
 
         session.messages.push(Message::assistant(
             response.content.clone().unwrap_or_default(),
             response.tool_calls.clone(),
         ));
+
+        if let Some(ref usage) = response.usage {
+            if let Some(ref mut cs) = session.context_state {
+                cs.actual_usage = Some(MessageTokens {
+                    input: usage.input,
+                    output: usage.output,
+                    total: usage.total,
+                    cached_read: usage.cached_read,
+                    cached_write: usage.cached_write,
+                    reasoning: usage.reasoning,
+                });
+            }
+        }
 
         let has_tool_calls =
             response.tool_calls.is_some() && !response.tool_calls.as_ref().unwrap().is_empty();
@@ -698,6 +712,66 @@ impl SubagentManager {
         } else {
             Ok(("unknown".to_string(), "Subagent task not found".to_string()))
         }
+    }
+
+    fn estimate_tokens(text: &str) -> usize {
+        let chars = text.chars().count();
+        (chars / 4).max(1)
+    }
+
+    fn message_tokens(message: &Message) -> usize {
+        let mut total = Self::estimate_tokens(&message.content) + 8;
+        if let Some(thinking) = &message.thinking {
+            total += Self::estimate_tokens(thinking);
+        }
+        if let Some(tool_calls) = &message.tool_calls {
+            for call in tool_calls {
+                total += Self::estimate_tokens(&call.name);
+                total += Self::estimate_tokens(&call.arguments.to_string());
+            }
+        }
+        if let Some(tool_call_id) = &message.tool_call_id {
+            total += Self::estimate_tokens(tool_call_id);
+        }
+        total
+    }
+
+    async fn update_context_tracking(
+        session: &mut Session,
+        session_id: &str,
+        provider: &Arc<dyn Provider>,
+        event_bus: &Arc<EventBus>,
+        storage: &Arc<SqliteStorage>,
+    ) -> Result<()> {
+        let context_window = provider.model_context_window().await;
+        if let Some(window) = context_window {
+            let estimated_tokens: usize = session.messages.iter().map(Self::message_tokens).sum();
+            let output_limit = 8192usize;
+            let reserved_output = std::cmp::min(output_limit, 8192);
+            let usable = window.saturating_sub(reserved_output);
+            let budget = ((usable as f32) * 0.8) as usize;
+
+            session.context_state = Some(SessionContextState {
+                estimated_tokens,
+                context_window: window,
+                budget_tokens: budget,
+                actual_usage: None,
+                tool_usage: Vec::new(),
+                compaction_stats: CompactionStats::default(),
+            });
+            let _ = storage.update_session(session);
+
+            event_bus.emit(AgentEvent::ContextUpdate {
+                session_id: session_id.to_string(),
+                context_window: window,
+                estimated_tokens,
+                budget_tokens: budget,
+                condensed: false,
+                actual_usage: None,
+                timestamp: SystemTime::now(),
+            });
+        }
+        Ok(())
     }
 
     pub async fn cleanup_completed(&self, days: i64) -> Result<usize> {

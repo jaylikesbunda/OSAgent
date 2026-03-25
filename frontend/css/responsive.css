@@ -26,21 +26,17 @@
         position: sticky;
         top: 0;
         z-index: 1000;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
         gap: 8px;
         padding: 8px 12px;
         min-height: auto;
     }
 
-    .sidebar-toggle {
-        order: 0;
-    }
-
     .header-title {
-        order: 1;
         flex: 1;
         min-width: 0;
-        text-align: left;
+        font-size: 12px;
     }
 
     .context-indicator,
@@ -48,52 +44,54 @@
         display: none !important;
     }
 
+    /* Workspace/persona are in the input tabs — redundant in header on mobile */
+    .mobile-workspace-btn,
+    .mobile-persona-btn {
+        display: none;
+    }
+
+    /* Thinking level is a secondary control — accessible in settings */
+    .header-thinking-control {
+        display: none;
+    }
+
     .header-controls {
-        order: 2;
-        width: 100%;
         display: flex;
         gap: 6px;
+        flex-shrink: 0;
+        margin-left: auto;
     }
 
+    /* Compact model pill: fixed width, no separate dropdown arrow */
     .model-selector {
-        flex: 1;
-        min-width: 0;
+        flex: 0 1 140px;
+        min-width: 60px;
     }
 
-    .header-thinking-control {
-        min-width: 92px;
-    }
-
-    .header-thinking-select {
+    .model-selector-input-wrap {
         width: 100%;
-        min-width: 92px;
     }
 
     .model-selector-input-wrap .model-input {
         width: 100%;
-        flex: 1;
+        font-size: 12px;
+        padding: 6px 10px;
+        border-radius: var(--radius-md);
+        border-right: 1px solid var(--border);
+    }
+
+    .model-dropdown-btn {
+        display: none;
     }
 
     .model-dropdown {
-        right: auto;
-        left: 0;
-        width: calc(100vw - 32px);
-        max-width: 340px;
-    }
-
-    .settings-btn,
-    .logout-btn {
-        padding: 6px 8px;
-        font-size: 11px;
-    }
-
-    .mobile-workspace-btn,
-    .mobile-persona-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 34px;
-        min-height: 34px;
+        position: fixed;
+        top: 52px;
+        left: 8px;
+        right: 8px;
+        width: auto;
+        max-width: none;
+        z-index: 1100;
     }
 
     .input-left-controls {
@@ -324,41 +322,35 @@
         border-radius: 0;
     }
 
+    .settings-modal-header {
+        padding: 14px 16px;
+        gap: 12px;
+    }
+
+    .settings-modal-header h2 {
+        font-size: 15px;
+    }
+
+    .settings-tab-select {
+        display: block;
+        flex: 1;
+        min-width: 0;
+        height: 36px;
+        padding: 0 10px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        color: var(--text-primary);
+        font-size: 13px;
+        cursor: pointer;
+    }
+
     .settings-with-sidebar {
         flex-direction: column;
     }
 
     .settings-sidebar {
-        width: 100%;
-        flex-shrink: 1;
-        border-right: none;
-        border-bottom: 1px solid var(--border);
-        max-height: 120px;
-        overflow-x: auto;
-        overflow-y: hidden;
-    }
-
-    .settings-sidebar-sections {
-        display: flex;
-        flex-direction: row;
-        gap: 0;
-    }
-
-    .settings-sidebar-section {
-        display: flex;
-        flex-direction: row;
-        padding: 0;
-        flex-shrink: 0;
-    }
-
-    .settings-sidebar-section-title {
         display: none;
-    }
-
-    .settings-sidebar-item {
-        padding: 10px 14px;
-        font-size: 12px;
-        white-space: nowrap;
     }
 
     .settings-main {

@@ -29,6 +29,59 @@ use tokio::net::TcpListener;
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
 
+static CORE_BINARY: &[u8] = include_bytes!("core.bin");
+static CORE_EXTRACTED_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn get_embedded_core_path() -> Option<PathBuf> {
+    if CORE_BINARY.is_empty() || CORE_BINARY == b"placeholder" {
+        return None;
+    }
+
+    let cached = CORE_EXTRACTED_PATH.get_or_init(|| {
+        let exe_path = std::env::current_exe().ok()?;
+        let exe_dir = exe_path.parent()?;
+        let core_name = if cfg!(windows) { "osagent.exe" } else { "osagent" };
+        let core_path = exe_dir.join(core_name);
+
+        if core_path.exists() {
+            return Some(core_path);
+        }
+
+        fs::write(&core_path, CORE_BINARY).ok()?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let _ = Command::new("attrib")
+                .args(["+R", core_path.to_string_lossy().as_ref()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok();
+            let _ = Command::new("attrib")
+                .args(["+H", core_path.to_string_lossy().as_ref()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok();
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(mut perms) = fs::metadata(&core_path).map(|m| m.permissions()) {
+                let mut mode = perms.mode();
+                mode |= 0o111;
+                perms.set_mode(mode);
+                let _ = fs::set_permissions(&core_path, perms);
+            }
+        }
+
+        info!("Extracted bundled osagent core to {}", core_path.display());
+        Some(core_path)
+    });
+
+    cached.clone()
+}
+
 // --- Helpers ---
 
 /// Strip ANSI/VT escape sequences (CSI, OSC, etc.) from a string.
@@ -507,6 +560,12 @@ struct SetupConfigPayload {
     tts_piper_language: String,
     #[serde(default)]
     tts_piper_voice: String,
+    #[serde(default)]
+    discord_enabled: bool,
+    #[serde(default)]
+    discord_token: String,
+    #[serde(default)]
+    discord_allowed_users: String,
 }
 
 #[derive(Deserialize)]
@@ -630,11 +689,16 @@ type SnapshotCatalog = BTreeMap<String, SnapshotProvider>;
 // --- Helper Functions ---
 
 fn get_osagent_path() -> PathBuf {
+    // First, try the embedded core bundled in the launcher
+    if let Some(embedded) = get_embedded_core_path() {
+        return embedded;
+    }
+
     let exe_path = std::env::current_exe()
         .ok()
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // Check for bundled sidecar binary first (Tauri externalBin naming)
+    // Check for bundled sidecar binary (Tauri externalBin naming)
     let target_triple = tauri_target_triple();
     let sidecar_name = if cfg!(windows) {
         format!("osagent-{}.exe", target_triple)
@@ -1672,6 +1736,24 @@ fn save_setup_config_file(
     );
     if let Some(pv) = piper_voice_val {
         voice.insert("piper_voice".to_string(), toml::Value::String(pv));
+    }
+
+    // Discord section
+    if payload.discord_enabled && !payload.discord_token.is_empty() {
+        let discord = ensure_child_table(root, "discord");
+        discord.insert("enabled".to_string(), toml::Value::Boolean(true));
+        discord.insert("token".to_string(), toml::Value::String(payload.discord_token.clone()));
+        let users: Vec<u64> = payload
+            .discord_allowed_users
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        discord.insert(
+            "allowed_users".to_string(),
+            toml::Value::Array(
+                users.iter().map(|u| toml::Value::Integer(*u as i64)).collect(),
+            ),
+        );
     }
 
     let data = toml::to_string_pretty(&document)
