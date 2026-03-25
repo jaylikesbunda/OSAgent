@@ -21,8 +21,9 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{
-    CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu,
-    SystemTrayMenuItem, Window, WindowEvent,
+    AppHandle, Emitter, Manager, State, WebviewWindow,
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -1976,7 +1977,7 @@ fn check_piper_installed() -> (bool, Option<String>) {
 async fn stream_download(
     url: &str,
     dest: &std::path::Path,
-    window: &tauri::Window,
+    window: &WebviewWindow,
     model_id: &str,
     stage: &str,
     progress_offset: f32,
@@ -2511,7 +2512,7 @@ fn browse_workspace_folder(state: State<AppState>) -> Option<String> {
 
 #[tauri::command]
 fn save_setup_config(
-    window: Window,
+    window: WebviewWindow,
     state: State<AppState>,
     payload: SetupConfigPayload,
 ) -> Result<SetupState, String> {
@@ -2530,7 +2531,7 @@ async fn validate_setup_provider(
 
 #[tauri::command]
 fn start_osagent(
-    window: Window,
+    window: WebviewWindow,
     state: State<AppState>,
     profile: Option<String>,
 ) -> Result<AgentStatus, String> {
@@ -2611,7 +2612,7 @@ fn start_osagent(
                 format!("Output log: {}", log_file_path.display()),
             );
 
-            let handle_out = window.app_handle();
+            let handle_out = window.app_handle().clone();
             let log_file_clone = log_file_path.clone();
             if let Some(out) = stdout {
                 std::thread::spawn(move || {
@@ -2619,7 +2620,7 @@ fn start_osagent(
                 });
             }
 
-            let handle_err = window.app_handle();
+            let handle_err = window.app_handle().clone();
             let log_file_clone = log_file_path.clone();
             if let Some(err) = stderr {
                 std::thread::spawn(move || {
@@ -2637,7 +2638,7 @@ fn start_osagent(
                 },
             );
 
-            update_tray_menu(&window, true);
+            update_tray_menu(&window.app_handle(), true);
 
             Ok(get_status(state))
         }
@@ -2650,7 +2651,7 @@ fn start_osagent(
 }
 
 #[tauri::command]
-fn stop_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, String> {
+fn stop_osagent(window: WebviewWindow, state: State<AppState>) -> Result<AgentStatus, String> {
     let running = *state.osagent_running.lock().unwrap();
     if !running {
         return Err("OSAgent is not running".into());
@@ -2684,7 +2685,7 @@ fn stop_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, S
         },
     );
 
-    update_tray_menu(&window, false);
+    update_tray_menu(&window.app_handle(), false);
 
     Ok(AgentStatus {
         running: false,
@@ -2695,7 +2696,7 @@ fn stop_osagent(window: Window, state: State<AppState>) -> Result<AgentStatus, S
 }
 
 #[tauri::command]
-fn restart_osagent(window: Window, app_handle: tauri::AppHandle) -> Result<AgentStatus, String> {
+fn restart_osagent(window: WebviewWindow, app_handle: AppHandle) -> Result<AgentStatus, String> {
     let state = app_handle.state::<AppState>();
     let profile = state.run_profile.lock().unwrap().clone();
     let _ = stop_osagent(window.clone(), state);
@@ -2710,13 +2711,13 @@ fn open_web_ui() {
 }
 
 #[tauri::command]
-fn hide_to_tray(window: Window) {
+fn hide_to_tray(window: WebviewWindow) {
     window.hide().ok();
 }
 
 #[tauri::command]
 fn build_osagent(
-    window: Window,
+    window: WebviewWindow,
     state: State<AppState>,
     profile: String,
 ) -> Result<String, String> {
@@ -2744,7 +2745,7 @@ fn build_osagent(
                 config_path: state.config_path.to_string_lossy().to_string(),
             },
         );
-        update_tray_menu(&window, false);
+        update_tray_menu(&window.app_handle(), false);
         // Give the OS a moment to release the file lock
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
@@ -2769,7 +2770,7 @@ fn build_osagent(
     add_log(&state, "info", start_msg);
     *state.build_running.lock().unwrap() = true;
 
-    let app_handle = window.app_handle();
+    let app_handle = window.app_handle().clone();
     let profile_clone = profile.clone();
 
     // Emit initial progress event so the frontend can show the progress section immediately.
@@ -2814,7 +2815,7 @@ fn build_osagent(
                 let state = app_handle.state::<AppState>();
                 add_log(&state, "error", format!("Failed to spawn cargo: {}", e));
                 *state.build_running.lock().unwrap() = false;
-                if let Some(win) = app_handle.get_window("main") {
+                if let Some(win) = app_handle.get_webview_window("main") {
                     let _ = win.emit(
                         "build-progress",
                         BuildProgress {
@@ -2882,7 +2883,7 @@ fn build_osagent(
 
                 fn process_line(
                     line: &str,
-                    app_handle: &tauri::AppHandle,
+                    app_handle: &AppHandle,
                     cc: &std::sync::Arc<AtomicU32>,
                     wc: &std::sync::Arc<AtomicU32>,
                     ec: &std::sync::Arc<AtomicU32>,
@@ -2910,7 +2911,7 @@ fn build_osagent(
                             .next()
                             .unwrap_or("")
                             .to_string();
-                        if let Some(win) = app_handle.get_window("main") {
+                        if let Some(win) = app_handle.get_webview_window("main") {
                             let _ = win.emit(
                                 "build-progress",
                                 BuildProgress {
@@ -2954,7 +2955,7 @@ fn build_osagent(
                                 .next()
                                 .and_then(|s| s.trim().parse().ok())
                                 .unwrap_or(0);
-                            if let Some(win) = app_handle.get_window("main") {
+                            if let Some(win) = app_handle.get_webview_window("main") {
                                 let _ = win.emit(
                                     "build-progress",
                                     BuildProgress {
@@ -2975,7 +2976,7 @@ fn build_osagent(
                         if !success {
                             ec.fetch_add(1, Ordering::Relaxed);
                         }
-                        if let Some(win) = app_handle.get_window("main") {
+                        if let Some(win) = app_handle.get_webview_window("main") {
                             let _ = win.emit(
                                 "build-progress",
                                 BuildProgress {
@@ -3078,7 +3079,7 @@ fn build_osagent(
         }
         // Emit a final progress event to ensure the frontend reaches 100% / error state
         // even if cargo didn't print a "Finished" or "error:" summary line.
-        if let Some(win) = app_handle.get_window("main") {
+        if let Some(win) = app_handle.get_webview_window("main") {
             let _ = win.emit(
                 "build-progress",
                 BuildProgress {
@@ -3099,19 +3100,19 @@ fn build_osagent(
 }
 
 #[tauri::command]
-fn show_window(window: Window) {
+fn show_window(window: WebviewWindow) {
     window.show().ok();
     window.set_focus().ok();
     window.unminimize().ok();
 }
 
 #[tauri::command]
-fn minimize_window(window: Window) {
+fn minimize_window(window: WebviewWindow) {
     window.minimize().ok();
 }
 
 #[tauri::command]
-fn exit_app(app: tauri::AppHandle, state: State<AppState>) {
+fn exit_app(app: AppHandle, state: State<AppState>) {
     terminate_osagent_processes(&state);
     app.exit(0);
 }
@@ -3135,7 +3136,7 @@ fn check_voice_status() -> VoiceStatus {
 
 #[tauri::command]
 async fn install_voice(
-    window: tauri::Window,
+    window: WebviewWindow,
     payload: VoiceInstallPayload,
 ) -> Result<VoiceStatus, String> {
     let dir = get_voice_dir().ok_or_else(|| "Could not determine home directory".to_string())?;
@@ -3464,50 +3465,38 @@ fn voice_id_to_hf_url(voice_id: &str) -> String {
 
 // --- Tray Helpers ---
 
-fn update_tray_menu(window: &Window, running: bool) {
-    let app_handle = window.app_handle();
+fn update_tray_menu(app_handle: &AppHandle, running: bool) {
+    let open_launcher =
+        MenuItem::with_id(app_handle, "open_launcher", "Open Launcher", true, None::<&str>)
+            .unwrap();
+    let open_ui =
+        MenuItem::with_id(app_handle, "open_ui", "Open Web UI", true, None::<&str>).unwrap();
+    let toggle = if running {
+        MenuItem::with_id(app_handle, "stop_osagent", "Stop OSAgent", true, None::<&str>).unwrap()
+    } else {
+        MenuItem::with_id(app_handle, "start_osagent", "Start OSAgent", true, None::<&str>)
+            .unwrap()
+    };
+    let exit_item =
+        MenuItem::with_id(app_handle, "exit", "Exit", true, None::<&str>).unwrap();
+    let sep1 = PredefinedMenuItem::separator(app_handle).unwrap();
+    let sep2 = PredefinedMenuItem::separator(app_handle).unwrap();
 
-    let open_launcher = CustomMenuItem::new("open_launcher".to_string(), "Open Launcher");
-    let open_ui = CustomMenuItem::new("open_ui".to_string(), "Open Web UI");
-    let start = CustomMenuItem::new("start_osagent".to_string(), "Start OSAgent");
-    let stop = CustomMenuItem::new("stop_osagent".to_string(), "Stop OSAgent");
-    let exit = CustomMenuItem::new("exit".to_string(), "Exit");
-
-    let tray_menu = SystemTrayMenu::new()
-        .add_item(open_launcher)
-        .add_item(open_ui)
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(if running { stop } else { start })
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(exit);
-
-    let _ = app_handle.tray_handle().set_menu(tray_menu);
-}
-
-fn build_tray() -> SystemTray {
-    let open_launcher = CustomMenuItem::new("open_launcher".to_string(), "Open Launcher");
-    let open_ui = CustomMenuItem::new("open_ui".to_string(), "Open Web UI");
-    let start = CustomMenuItem::new("start_osagent".to_string(), "Start OSAgent");
-    let exit = CustomMenuItem::new("exit".to_string(), "Exit");
-
-    let tray_menu = SystemTrayMenu::new()
-        .add_item(open_launcher)
-        .add_item(open_ui)
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(start)
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(exit);
-
-    SystemTray::new()
-        .with_menu(tray_menu)
-        .with_tooltip("OSAgent Launcher")
+    if let Ok(menu) = Menu::with_items(
+        app_handle,
+        &[&open_launcher, &open_ui, &sep1, &toggle, &sep2, &exit_item],
+    ) {
+        if let Some(tray) = app_handle.tray_by_id("main-tray") {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
 }
 
 // --- Output Reader ---
 
 fn read_output_to_file<R: std::io::Read>(
     reader: R,
-    app_handle: tauri::AppHandle,
+    app_handle: AppHandle,
     log_path: PathBuf,
 ) {
     let buf = BufReader::new(reader);
@@ -3555,7 +3544,7 @@ fn read_output_to_file<R: std::io::Read>(
                     let state = app_handle.state::<AppState>();
                     add_log_to_state(&state.logs, level, trimmed.to_string());
 
-                    let _ = app_handle.emit_all("log-line", entry);
+                    let _ = app_handle.emit("log-line", entry);
                 }
             }
             Err(_) => break,
@@ -3565,7 +3554,7 @@ fn read_output_to_file<R: std::io::Read>(
 
 // --- Process Monitor ---
 
-fn start_process_monitor(app_handle: tauri::AppHandle) {
+fn start_process_monitor(app_handle: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -3586,7 +3575,7 @@ fn start_process_monitor(app_handle: tauri::AppHandle) {
                         *running = false;
                         state.osagent_pid.lock().unwrap().take();
 
-                        let _ = app_handle.emit_all(
+                        let _ = app_handle.emit(
                             "osagent-status-changed",
                             AgentStatus {
                                 running: false,
@@ -3635,66 +3624,10 @@ fn main() {
     };
 
     tauri::Builder::default()
-        .system_tray(build_tray())
-        .on_system_tray_event(|app, event| match event {
-            SystemTrayEvent::LeftClick {
-                position: _,
-                size: _,
-                ..
-            } => {
-                if let Some(window) = app.get_window("main") {
-                    if window.is_visible().unwrap_or(false) {
-                        window.hide().ok();
-                    } else {
-                        window.show().ok();
-                        window.set_focus().ok();
-                    }
-                }
-            }
-            SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
-                "open_launcher" => {
-                    if let Some(window) = app.get_window("main") {
-                        window.show().ok();
-                        window.set_focus().ok();
-                        window.unminimize().ok();
-                    }
-                }
-                "open_ui" => {
-                    open_web_ui();
-                }
-                "start_osagent" => {
-                    if let Some(window) = app.get_window("main") {
-                        let _ = start_osagent(window, app.state(), None);
-                    }
-                }
-                "stop_osagent" => {
-                    if let Some(window) = app.get_window("main") {
-                        let _ = stop_osagent(window, app.state());
-                    }
-                }
-                "exit" => {
-                    let state = app.state::<AppState>();
-                    terminate_osagent_processes(&state);
-                    app.exit(0);
-                }
-                _ => {}
-            },
-            SystemTrayEvent::DoubleClick {
-                position: _,
-                size: _,
-                ..
-            } => {
-                if let Some(window) = app.get_window("main") {
-                    window.show().ok();
-                    window.set_focus().ok();
-                }
-            }
-            _ => {}
-        })
         .manage(app_state)
-        .on_window_event(|event| {
-            if let WindowEvent::CloseRequested { api, .. } = event.event() {
-                event.window().hide().ok();
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                window.hide().ok();
                 api.prevent_close();
             }
         })
@@ -3725,7 +3658,79 @@ fn main() {
             install_voice,
         ])
         .setup(|app| {
-            start_process_monitor(app.handle());
+            // Build tray menu
+            let open_launcher = MenuItem::with_id(app, "open_launcher", "Open Launcher", true, None::<&str>)?;
+            let open_ui = MenuItem::with_id(app, "open_ui", "Open Web UI", true, None::<&str>)?;
+            let start = MenuItem::with_id(app, "start_osagent", "Start OSAgent", true, None::<&str>)?;
+            let exit_item = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&open_launcher, &open_ui, &sep1, &start, &sep2, &exit_item])?;
+
+            let _tray = TrayIconBuilder::with_id("main-tray")
+                .tooltip("OSAgent Launcher")
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                window.hide().ok();
+                            } else {
+                                window.show().ok();
+                                window.set_focus().ok();
+                            }
+                        }
+                    }
+                    TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            window.show().ok();
+                            window.set_focus().ok();
+                        }
+                    }
+                    _ => {}
+                })
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open_launcher" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            window.show().ok();
+                            window.set_focus().ok();
+                            window.unminimize().ok();
+                        }
+                    }
+                    "open_ui" => {
+                        open_web_ui();
+                    }
+                    "start_osagent" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = start_osagent(window, app.state(), None);
+                        }
+                    }
+                    "stop_osagent" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = stop_osagent(window, app.state());
+                        }
+                    }
+                    "exit" => {
+                        let state = app.state::<AppState>();
+                        terminate_osagent_processes(&state);
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
+            start_process_monitor(app.handle().clone());
 
             let state = app.state::<AppState>();
             add_log(&state, "info", "OSAgent Launcher initialized".into());

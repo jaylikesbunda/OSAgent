@@ -1,0 +1,8 @@
+{
+  "identifier": "default",
+  "description": "Default capability for OSAgent Launcher",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

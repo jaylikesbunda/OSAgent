@@ -3,8 +3,8 @@
   'use strict';
 
   const tauri = window.__TAURI__ || {};
-  const invoke = tauri.invoke;
-  const listen = tauri.listen;
+  const invoke = tauri.core?.invoke ?? tauri.invoke;
+  const listen = tauri.event?.listen ?? tauri.listen;
   const tauriWindow = tauri.window;
 
   const WHISPER_MODELS = [
@@ -1511,10 +1511,12 @@
   }
 
   function bindTitlebarDrag() {
-    if (!els.titlebar || !tauriWindow || !tauriWindow.appWindow) return;
+    if (!els.titlebar || !tauriWindow) return;
+    const appWindow = tauriWindow.appWindow ?? tauriWindow.getCurrentWindow?.();
+    if (!appWindow) return;
     els.titlebar.addEventListener('mousedown', (event) => {
       if (event.target.closest('.titlebar-controls')) return;
-      tauriWindow.appWindow.startDragging();
+      appWindow.startDragging();
     });
   }
 

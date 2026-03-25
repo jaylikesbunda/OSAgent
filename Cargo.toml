@@ -102,6 +102,7 @@ rfd = "0.15"
 tokio-test = "0.4"
 tempfile = "3.9"
 criterion = { version = "0.5", features = ["async_tokio"] }
+memory-stats = "1.0"
 
 [[bin]]
 name = "osagent"

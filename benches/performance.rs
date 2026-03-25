@@ -1,8 +1,13 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use memory_stats::memory_stats;
 use std::fs;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+fn get_memory_bytes() -> Option<usize> {
+    memory_stats().map(|m| m.physical_mem)
+}
 
 fn bench_startup_time(c: &mut Criterion) {
     let binary = "./target/release/osagent";
@@ -32,33 +37,56 @@ fn bench_file_operations(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let temp_dir = TempDir::new().unwrap();
 
-    // Create test files
     let small_file = temp_dir.path().join("small.txt");
     let medium_file = temp_dir.path().join("medium.txt");
     let large_file = temp_dir.path().join("large.txt");
 
-    fs::write(&small_file, "x".repeat(1024)).unwrap(); // 1KB
-    fs::write(&medium_file, "x".repeat(1024 * 1024)).unwrap(); // 1MB
-    fs::write(&large_file, "x".repeat(10 * 1024 * 1024)).unwrap(); // 10MB
+    fs::write(&small_file, "x".repeat(1024)).unwrap();
+    fs::write(&medium_file, "x".repeat(1024 * 1024)).unwrap();
+    fs::write(&large_file, "x".repeat(10 * 1024 * 1024)).unwrap();
 
     let mut group = c.benchmark_group("file_read");
 
     group.throughput(Throughput::Bytes(1024));
     group.bench_function("1kb", |b| {
-        b.to_async(&rt)
-            .iter(|| async { tokio::fs::read_to_string(&small_file).await.unwrap() })
+        let small_file = small_file.clone();
+        b.iter_custom(|_| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let start = Instant::now();
+            rt.block_on(async { tokio::fs::read_to_string(&small_file).await.unwrap() });
+            let elapsed = start.elapsed();
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            elapsed
+        })
     });
 
     group.throughput(Throughput::Bytes(1024 * 1024));
     group.bench_function("1mb", |b| {
-        b.to_async(&rt)
-            .iter(|| async { tokio::fs::read_to_string(&medium_file).await.unwrap() })
+        let medium_file = medium_file.clone();
+        b.iter_custom(|_| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let start = Instant::now();
+            rt.block_on(async { tokio::fs::read_to_string(&medium_file).await.unwrap() });
+            let elapsed = start.elapsed();
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            elapsed
+        })
     });
 
     group.throughput(Throughput::Bytes(10 * 1024 * 1024));
     group.bench_function("10mb", |b| {
-        b.to_async(&rt)
-            .iter(|| async { tokio::fs::read_to_string(&large_file).await.unwrap() })
+        let large_file = large_file.clone();
+        b.iter_custom(|_| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let start = Instant::now();
+            rt.block_on(async { tokio::fs::read_to_string(&large_file).await.unwrap() });
+            let elapsed = start.elapsed();
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            elapsed
+        })
     });
 
     group.finish();
@@ -76,16 +104,34 @@ fn bench_json_parsing(c: &mut Criterion) {
 
     group.bench_function("parse_small", |b| {
         let raw = serde_json::to_string(&small_json).unwrap();
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(&raw)))
+        b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let result = serde_json::from_str::<serde_json::Value>(black_box(&raw));
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            result
+        })
     });
 
     group.bench_function("parse_medium", |b| {
         let raw = serde_json::to_string(&medium_json).unwrap();
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(&raw)))
+        b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let result = serde_json::from_str::<serde_json::Value>(black_box(&raw));
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            result
+        })
     });
 
     group.bench_function("serialize_medium", |b| {
-        b.iter(|| serde_json::to_string(black_box(&medium_json)))
+        b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let result = serde_json::to_string(black_box(&medium_json));
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            result
+        })
     });
 
     group.finish();
@@ -116,10 +162,13 @@ fn bench_hashmap_operations(c: &mut Criterion) {
 
     group.bench_function("insert_1000", |b| {
         b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
             let mut map = HashMap::new();
             for i in 0..1000 {
                 map.insert(format!("key_{}", i), i);
             }
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
             map
         })
     });
@@ -129,10 +178,13 @@ fn bench_hashmap_operations(c: &mut Criterion) {
 
     group.bench_function("lookup_1000", |b| {
         b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
             let mut sum = 0;
             for i in 0..1000 {
                 sum += prepopulated.get(&format!("key_{}", i)).unwrap();
             }
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
             sum
         })
     });
@@ -145,9 +197,25 @@ fn bench_string_operations(c: &mut Criterion) {
 
     let strings: Vec<String> = (0..1000).map(|i| format!("string_number_{}", i)).collect();
 
-    group.bench_function("concat_1000", |b| b.iter(|| strings.join("\n")));
+    group.bench_function("concat_1000", |b| {
+        b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let result = strings.join("\n");
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            result
+        })
+    });
 
-    group.bench_function("clone_1000", |b| b.iter(|| strings.to_vec()));
+    group.bench_function("clone_1000", |b| {
+        b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
+            let result = strings.to_vec();
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
+            result
+        })
+    });
 
     group.finish();
 }
@@ -162,6 +230,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 
     group.bench_function("insert_1000", |b| {
         b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
             let mut conn = Connection::open(&db_path).unwrap();
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, data TEXT)",
@@ -179,10 +248,11 @@ fn bench_sqlite_operations(c: &mut Criterion) {
             }
             tx.commit().unwrap();
             fs::remove_file(&db_path).ok();
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
         })
     });
 
-    // Pre-populate for read test
     let mut conn = Connection::open(&db_path).unwrap();
     conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", [])
         .unwrap();
@@ -199,12 +269,15 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 
     group.bench_function("select_1000", |b| {
         b.iter(|| {
+            let before = get_memory_bytes().unwrap_or(0);
             let mut stmt = conn.prepare("SELECT data FROM test LIMIT 1000").unwrap();
             let rows: Vec<String> = stmt
                 .query_map([], |row| row.get(0))
                 .unwrap()
                 .map(|r| r.unwrap())
                 .collect();
+            let after = get_memory_bytes().unwrap_or(0);
+            println!("  Memory delta: {} bytes", after.saturating_sub(before));
             rows.len()
         })
     });
