@@ -40,7 +40,11 @@ fn get_embedded_core_path() -> Option<PathBuf> {
     let cached = CORE_EXTRACTED_PATH.get_or_init(|| {
         let exe_path = std::env::current_exe().ok()?;
         let exe_dir = exe_path.parent()?;
-        let core_name = if cfg!(windows) { "osagent.exe" } else { "osagent" };
+        let core_name = if cfg!(windows) {
+            "osagent.exe"
+        } else {
+            "osagent"
+        };
         let core_path = exe_dir.join(core_name);
 
         if core_path.exists() {
@@ -1742,7 +1746,10 @@ fn save_setup_config_file(
     if payload.discord_enabled && !payload.discord_token.is_empty() {
         let discord = ensure_child_table(root, "discord");
         discord.insert("enabled".to_string(), toml::Value::Boolean(true));
-        discord.insert("token".to_string(), toml::Value::String(payload.discord_token.clone()));
+        discord.insert(
+            "token".to_string(),
+            toml::Value::String(payload.discord_token.clone()),
+        );
         let users: Vec<u64> = payload
             .discord_allowed_users
             .split(',')
@@ -1751,7 +1758,10 @@ fn save_setup_config_file(
         discord.insert(
             "allowed_users".to_string(),
             toml::Value::Array(
-                users.iter().map(|u| toml::Value::Integer(*u as i64)).collect(),
+                users
+                    .iter()
+                    .map(|u| toml::Value::Integer(*u as i64))
+                    .collect(),
             ),
         );
     }
