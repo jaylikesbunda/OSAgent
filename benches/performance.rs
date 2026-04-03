@@ -359,7 +359,12 @@ fn sample_node_log(run_id: &str, idx: usize) -> NodeLog {
         id: Uuid::new_v4().to_string(),
         run_id: run_id.to_string(),
         node_id: format!("node-{}", idx),
-        node_type: if idx.is_multiple_of(2) { "agent" } else { "transform" }.to_string(),
+        node_type: if idx.is_multiple_of(2) {
+            "agent"
+        } else {
+            "transform"
+        }
+        .to_string(),
         status: "completed".to_string(),
         input_json: Some(serde_json::json!({"index": idx, "input": "bench"}).to_string()),
         output_json: Some(serde_json::json!({"index": idx, "output": "ok"}).to_string()),
