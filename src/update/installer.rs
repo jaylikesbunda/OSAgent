@@ -9,7 +9,7 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio::time::Duration;
 
-const CDN_BASE_URL: &str = "https://releases.osagent.dev";
+const CDN_BASE_URL: &str = "https://2c8b11c572ea0e7bbc6ac6f5a87d81c8.r2.cloudflarestorage.com/osagent-releases";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

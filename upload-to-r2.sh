@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR"
 
 TAG="${1:?Usage: $0 <tag> [artifact_dir]}"
 ARTIFACT_DIR="${2:-release}"
-CDN_BASE_URL="https://releases.osagent.dev"
+CDN_BASE_URL="https://2c8b11c572ea0e7bbc6ac6f5a87d81c8.r2.cloudflarestorage.com/osagent-releases"
 BUCKET="${R2_BUCKET:-osagent-releases}"
 PREFIX="${R2_RELEASE_PREFIX:-releases}"
 LINUX_ARCHIVE="osagent-linux-x86_64.tar.gz"
