@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
                 info!("Verbose logging enabled");
             }
 
-            info!("Starting OSA v{}", env!("CARGO_PKG_VERSION"));
+            info!("Starting OSA v{}", update::build_version());
             info!("Config: {}", config_path);
 
             for workspace in config.list_workspaces() {
@@ -331,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
                 .parse::<update::UpdateChannel>()
                 .unwrap_or(update::UpdateChannel::Stable);
 
-            let checker = update::UpdateChecker::new(env!("CARGO_PKG_VERSION"));
+            let checker = update::UpdateChecker::new(update::build_version());
 
             info!("Checking for updates (channel: {})...", channel);
             let result = checker.check(channel).await;

@@ -146,5 +146,5 @@ impl UpdateChecker {
 }
 
 pub fn get_current_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    crate::update::build_version().to_string()
 }

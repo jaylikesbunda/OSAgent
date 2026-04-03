@@ -277,6 +277,56 @@ fn copy_with_retries(src: &str, dst: &str) -> bool {
     false
 }
 
+#[cfg(windows)]
+fn copy_windows_runtime_files(new_path: &str, old_path: &str) -> bool {
+    let Some(new_dir) = PathBuf::from(new_path).parent().map(|p| p.to_path_buf()) else {
+        return true;
+    };
+    let Some(old_dir) = PathBuf::from(old_path).parent().map(|p| p.to_path_buf()) else {
+        return true;
+    };
+
+    let entries = match fs::read_dir(&new_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log_msg(&format!("Failed to read staged runtime directory: {}", e));
+            return false;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log_msg(&format!("Failed to read staged runtime entry: {}", e));
+                return false;
+            }
+        };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_runtime_dll = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("dll"))
+            .unwrap_or(false);
+        if !is_runtime_dll {
+            continue;
+        }
+
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let dest = old_dir.join(name);
+        if !copy_with_retries(&path.to_string_lossy(), &dest.to_string_lossy()) {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn launch_new(launch_path: &str) -> bool {
     log_msg(&format!("Launching new binary: {}", launch_path));
     let result = Command::new(launch_path).spawn();
@@ -410,6 +460,14 @@ fn main() {
             "Failed to copy {} -> {} after {} attempts",
             new_path, old_path, MAX_COPY_ATTEMPTS
         );
+        log_msg(&err);
+        write_failure(&err, &old_path, &new_path);
+        process::exit(1);
+    }
+
+    #[cfg(windows)]
+    if !copy_windows_runtime_files(&new_path, &old_path) {
+        let err = format!("Failed to copy Windows runtime files from {}", new_path);
         log_msg(&err);
         write_failure(&err, &old_path, &new_path);
         process::exit(1);

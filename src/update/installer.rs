@@ -59,6 +59,41 @@ pub struct UpdateInstaller {
     client: Client,
 }
 
+#[cfg(windows)]
+fn copy_windows_runtime_files(src_launcher: &Path, staged_dir: &Path) -> Result<(), String> {
+    let Some(src_dir) = src_launcher.parent() else {
+        return Ok(());
+    };
+
+    for entry in std::fs::read_dir(src_dir)
+        .map_err(|e| format!("Failed to read launcher directory: {}", e))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read launcher directory entry: {}", e))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let is_runtime_dll = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("dll"))
+            .unwrap_or(false);
+        if !is_runtime_dll {
+            continue;
+        }
+
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let dest = staged_dir.join(name);
+        std::fs::copy(&path, &dest)
+            .map_err(|e| format!("Failed to copy runtime file to staging: {}", e))?;
+    }
+
+    Ok(())
+}
+
 impl UpdateInstaller {
     pub fn new() -> Self {
         let client = Client::builder()
@@ -356,6 +391,9 @@ impl UpdateInstaller {
             std::fs::copy(&launcher_path, &staged_launcher)
                 .map_err(|e| format!("Failed to copy launcher to staging: {}", e))?;
         }
+
+        #[cfg(windows)]
+        copy_windows_runtime_files(&launcher_path, &staged_dir)?;
 
         #[cfg(unix)]
         {

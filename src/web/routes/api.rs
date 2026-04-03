@@ -4271,7 +4271,7 @@ async fn check_update(
         .and_then(|c| c.parse::<crate::update::UpdateChannel>().ok())
         .unwrap_or(crate::update::UpdateChannel::Stable);
 
-    let checker = crate::update::UpdateChecker::new(env!("CARGO_PKG_VERSION"));
+    let checker = crate::update::UpdateChecker::new(crate::update::build_version());
 
     let result = checker.check(channel).await;
 

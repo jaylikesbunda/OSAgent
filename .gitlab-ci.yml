@@ -94,6 +94,8 @@ build:linux:
   script:
     - *setup_rust
     - *install_linux_deps
+    - export RELEASE_TAG="${CI_COMMIT_TAG:-$[[ inputs.release-tag ]]}"
+    - export OSAGENT_APP_VERSION="${RELEASE_TAG#v}"
     - cargo build --release --features discord
     - CARGO_TARGET_DIR="$CI_PROJECT_DIR/updater/target" cargo build --manifest-path updater/Cargo.toml --release
     - CARGO_TARGET_DIR="$CI_PROJECT_DIR/launcher/target" OSAGENT_CORE_SOURCE="$CI_PROJECT_DIR/target/release/osagent" OSAGENT_UPDATER_SOURCE="$CI_PROJECT_DIR/updater/target/release/osagent-updater" cargo build --manifest-path launcher/Cargo.toml --release
@@ -117,12 +119,15 @@ build:windows:
     - *setup_rust
     - *install_linux_deps
     - *install_windows_cross_deps
+    - export RELEASE_TAG="${CI_COMMIT_TAG:-$[[ inputs.release-tag ]]}"
+    - export OSAGENT_APP_VERSION="${RELEASE_TAG#v}"
     - cargo build --release --target x86_64-pc-windows-gnu --features discord
     - CARGO_TARGET_DIR="$CI_PROJECT_DIR/updater/target" cargo build --release --target x86_64-pc-windows-gnu --manifest-path updater/Cargo.toml
     - CARGO_TARGET_DIR="$CI_PROJECT_DIR/launcher/target" OSAGENT_CORE_SOURCE="$CI_PROJECT_DIR/target/x86_64-pc-windows-gnu/release/osagent.exe" OSAGENT_UPDATER_SOURCE="$CI_PROJECT_DIR/updater/target/x86_64-pc-windows-gnu/release/osagent-updater.exe" cargo build --release --target x86_64-pc-windows-gnu --manifest-path launcher/Cargo.toml
     - mkdir -p dist/windows-x86_64
     - cp launcher/target/x86_64-pc-windows-gnu/release/osagent-launcher.exe dist/windows-x86_64/osagent-launcher.exe
-    - zip -j osagent-windows-x86_64.zip dist/windows-x86_64/osagent-launcher.exe
+    - cp launcher/target/x86_64-pc-windows-gnu/release/*.dll dist/windows-x86_64/ 2>/dev/null || true
+    - zip -j osagent-windows-x86_64.zip dist/windows-x86_64/*
     - sha256sum osagent-windows-x86_64.zip > osagent-windows-x86_64.zip.sha256
   artifacts:
     name: windows-x86_64
