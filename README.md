@@ -50,7 +50,7 @@ osagent-launcher.exe
 ./osagent-launcher
 ```
 
-Windows and Linux releases are published on GitLab. Auto-updates are served from Cloudflare R2 via `https://2c8b11c572ea0e7bbc6ac6f5a87d81c8.r2.cloudflarestorage.com/osagent-releases/releases/latest.json`.
+Windows and Linux releases are published on GitLab. Auto-updates are served from Cloudflare R2 via `https://osa.fuckyourcdn.com/releases/latest.json`.
 
 ### Setup Wizard
 

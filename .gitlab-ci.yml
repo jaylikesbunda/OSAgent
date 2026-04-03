@@ -17,7 +17,7 @@ variables:
   RUST_MIN_STACK: "8388608"
   R2_BUCKET: "osagent-releases"
   R2_RELEASE_PREFIX: "releases"
-  CDN_BASE_URL: "https://releases.osagent.dev"
+  CDN_BASE_URL: "https://osa.fuckyourcdn.com"
 
 .setup_rust: &setup_rust |
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component rustfmt,clippy

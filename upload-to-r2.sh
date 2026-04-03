@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR"
 
 TAG="${1:?Usage: $0 <tag> [artifact_dir]}"
 ARTIFACT_DIR="${2:-release}"
-CDN_BASE_URL="https://2c8b11c572ea0e7bbc6ac6f5a87d81c8.r2.cloudflarestorage.com/osagent-releases"
+CDN_BASE_URL="https://osa.fuckyourcdn.com"
 BUCKET="${R2_BUCKET:-osagent-releases}"
 PREFIX="${R2_RELEASE_PREFIX:-releases}"
 LINUX_ARCHIVE="osagent-linux-x86_64.tar.gz"
@@ -44,6 +44,13 @@ require_file "${ARTIFACT_DIR}/${WINDOWS_CHECKSUM}"
 
 R2_PATH="${PREFIX}/${TAG}"
 VERSION="${TAG#v}"
+MANIFEST_CHANNEL="stable"
+
+case "${TAG,,}" in
+    *alpha*|*beta*|*rc*)
+        MANIFEST_CHANNEL="beta"
+        ;;
+esac
 
 echo "=== Uploading ${TAG} to R2 ==="
 echo "CDN URL:  ${CDN_BASE_URL}/${R2_PATH}/"
@@ -57,7 +64,7 @@ cat > "${ARTIFACT_DIR}/release-manifest.json" <<EOF
   "tag": "${TAG}",
   "version": "${VERSION}",
   "released_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "channel": "stable",
+  "channel": "${MANIFEST_CHANNEL}",
   "assets": {
     "linux-x86_64": {
       "archive": "${LINUX_ARCHIVE}",

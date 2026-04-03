@@ -4,8 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const CDN_BASE_URL: &str =
-    "https://2c8b11c572ea0e7bbc6ac6f5a87d81c8.r2.cloudflarestorage.com/osagent-releases";
+const CDN_BASE_URL: &str = "https://osa.fuckyourcdn.com";
 const USER_AGENT: &str = "osagent-update-checker/0.1.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

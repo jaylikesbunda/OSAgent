@@ -19,7 +19,7 @@ Optional:
 
 - `R2_BUCKET` if you do not want the default `osagent-releases`
 - `R2_RELEASE_PREFIX` if you do not want the default `releases`
-- `CDN_BASE_URL` if you do not want the default `https://2c8b11c572ea0e7bbc6ac6f5a87d81c8.r2.cloudflarestorage.com/osagent-releases`
+- `CDN_BASE_URL` if you do not want the default `https://osa.fuckyourcdn.com`
 - `GITLAB_RELEASE_TOKEN` if your runner cannot create releases with `CI_JOB_TOKEN`
 
 ## Release Flow

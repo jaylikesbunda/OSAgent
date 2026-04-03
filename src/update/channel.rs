@@ -42,7 +42,8 @@ pub enum UpdateChannelSource {
 }
 
 pub fn is_beta_tag(tag: &str) -> bool {
-    tag.to_lowercase().contains("beta")
+    let lower = tag.to_lowercase();
+    lower.contains("beta") || lower.contains("rc") || lower.contains("alpha")
 }
 
 pub fn resolve_effective_channel(
