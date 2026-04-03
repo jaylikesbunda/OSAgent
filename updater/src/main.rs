@@ -120,6 +120,8 @@ mod platform {
 
 #[cfg(unix)]
 mod platform {
+    use std::process;
+
     pub fn spawn_detached(cmd: &mut process::Command) -> std::io::Result<process::Child> {
         cmd.spawn()
     }
