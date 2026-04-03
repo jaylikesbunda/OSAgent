@@ -76,8 +76,10 @@ test:
 
 build:linux:
   stage: build
-  only:
-    - tags
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
   script:
     - *setup_rust
     - *install_linux_deps
@@ -97,8 +99,10 @@ build:linux:
 
 build:windows:
   stage: build
-  only:
-    - tags
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
   script:
     - *setup_rust
     - *install_linux_deps
@@ -118,8 +122,10 @@ build:windows:
 
 publish:r2:
   stage: release
-  only:
-    - tags
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
   dependencies:
     - build:linux
     - build:windows
@@ -140,8 +146,10 @@ publish:r2:
 
 release:gitlab:
   stage: release
-  only:
-    - tags
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
   needs:
     - publish:r2
   script:
