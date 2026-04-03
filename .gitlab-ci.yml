@@ -48,8 +48,8 @@ variables:
   rustup target add x86_64-pc-windows-gnu
 
 .install_aws_cli: &install_aws_cli |
-  python3 -m pip install --user awscli
-  export PATH="$HOME/.local/bin:$PATH"
+  apt-get update
+  apt-get install -y awscli
 
 quick:fmt:
   stage: quick
