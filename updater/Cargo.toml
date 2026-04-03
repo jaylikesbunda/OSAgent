@@ -1,0 +1,19 @@
+[package]
+name = "osagent-updater"
+version = "0.1.0"
+edition = "2021"
+description = "OSAgent self-update helper"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs-next = "2.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

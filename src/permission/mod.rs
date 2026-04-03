@@ -15,9 +15,23 @@ pub enum PermissionAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
+    pub id: String,
     pub permission: String,
     pub pattern: String,
     pub action: PermissionAction,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl PermissionRule {
+    pub fn new(permission: String, pattern: String, action: PermissionAction) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            permission,
+            pattern,
+            action,
+            created_at: chrono::Utc::now(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

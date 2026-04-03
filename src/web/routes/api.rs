@@ -1,7 +1,7 @@
 use crate::agent::memory::MemoryEntry;
 use crate::agent::persona::{ActivePersona, PersonaOption};
 use crate::agent::runtime::AgentRuntime;
-use crate::config::{Config, DiscordConfig, WorkspaceConfig, WorkspacePermission};
+use crate::config::{Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission};
 use crate::external::{PermissionAction, PermissionPrompt};
 use crate::oauth::provider::{
     get_oauth_provider, is_device_code_oauth_provider, is_pkce_oauth_provider, OAuthFlowType,
@@ -19,7 +19,7 @@ use axum::{
     extract::{Extension, Json, Path, Query},
     http::StatusCode,
     response::{sse::Event, Sse},
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use futures::stream::Stream;
@@ -72,6 +72,20 @@ pub struct ChangePasswordRequest {
 #[derive(Debug, Serialize)]
 pub struct RestartResponse {
     pub restarting: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiscordBotStatusResponse {
+    pub available: bool,
+    pub enabled: bool,
+    pub configured: bool,
+    pub running: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiscordBotActionResponse {
+    pub running: bool,
+    pub message: String,
 }
 
 #[allow(dead_code)]
@@ -216,6 +230,9 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/discord/status", get(get_discord_bot_status))
+        .route("/api/discord/start", post(start_discord_bot))
+        .route("/api/discord/stop", post(stop_discord_bot))
         .route("/api/reasoning/options", get(get_reasoning_options))
         .route(
             "/api/workspaces",
@@ -229,6 +246,11 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route(
             "/api/workspaces/:id",
             post(update_workspace).delete(delete_workspace),
+        )
+        .route("/api/workspaces/:id/paths", post(add_workspace_path))
+        .route(
+            "/api/workspaces/:id/paths/:path_index",
+            patch(update_workspace_path).delete(remove_workspace_path),
         )
         .route(
             "/api/sessions/:id/workspace",
@@ -263,6 +285,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/sessions/:id/cancel", post(cancel_session))
         .route("/api/sessions/:id/events", get(session_events))
         .route("/api/sessions/:id/history", get(session_history))
+        .route("/api/sessions/:id/todos", get(session_todos))
         .route("/api/sessions/:id/snapshots", get(list_file_snapshots))
         .route(
             "/api/sessions/:id/snapshots/revert",
@@ -328,12 +351,20 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/permissions", get(list_permission_prompts))
         .route("/api/permissions/respond", post(respond_permission_prompt))
         .route("/api/permissions/check", post(check_permission))
+        .route(
+            "/api/permissions/rules",
+            get(list_permission_rules).post(create_permission_rule),
+        )
+        .route("/api/permissions/rules/:id", delete(delete_permission_rule))
         .route("/api/questions/answer", post(answer_question))
         .route("/api/plugins", get(list_plugins))
         .route("/api/plugins/enable", post(enable_plugin))
         .route("/api/plugins/disable", post(disable_plugin))
         .route("/api/plugins/reload", post(reload_plugins))
         .route("/api/update/check", get(check_update))
+        .route("/api/update/download", post(download_update))
+        .route("/api/update/install", post(install_update))
+        .route("/api/update/status", get(update_status))
         .layer(Extension(config))
         .layer(Extension(agent))
         .layer(Extension(Arc::new(secret)))
@@ -347,12 +378,58 @@ pub struct WorkspaceListResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct WorkspacePathRequest {
+    pub path: String,
+    pub permission: Option<WorkspacePermission>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct WorkspaceRequest {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub path: String,
+    #[serde(default)]
+    pub paths: Vec<WorkspacePathRequest>,
     pub description: Option<String>,
     pub permission: Option<WorkspacePermission>,
+}
+
+impl WorkspaceRequest {
+    pub fn to_workspace_paths(&self) -> Vec<WorkspacePath> {
+        if !self.paths.is_empty() {
+            self.paths
+                .iter()
+                .filter_map(|wp| {
+                    let path = wp.path.trim();
+                    if path.is_empty() {
+                        return None;
+                    }
+
+                    Some(WorkspacePath {
+                        path: path.to_string(),
+                        permission: wp
+                            .permission
+                            .clone()
+                            .unwrap_or(WorkspacePermission::ReadWrite),
+                        description: wp.description.clone(),
+                    })
+                })
+                .collect()
+        } else if !self.path.is_empty() {
+            vec![WorkspacePath {
+                path: self.path.trim().to_string(),
+                permission: self
+                    .permission
+                    .clone()
+                    .unwrap_or(WorkspacePermission::ReadWrite),
+                description: self.description.clone(),
+            }]
+        } else {
+            vec![]
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -546,6 +623,96 @@ async fn get_config(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<Conf
     Json(agent.get_config().await)
 }
 
+async fn get_discord_bot_status(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Json<DiscordBotStatusResponse> {
+    let config = agent.get_config().await;
+    let discord = config.discord.unwrap_or_default();
+
+    #[cfg(feature = "discord")]
+    let running = crate::discord::is_discord_bot_running().await;
+    #[cfg(not(feature = "discord"))]
+    let running = false;
+
+    Json(DiscordBotStatusResponse {
+        available: cfg!(feature = "discord"),
+        enabled: discord.enabled,
+        configured: !discord.token.trim().is_empty(),
+        running,
+    })
+}
+
+async fn start_discord_bot(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+) -> Result<Json<DiscordBotActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !cfg!(feature = "discord") {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Discord support is not compiled into this build".to_string(),
+            }),
+        ));
+    }
+
+    let config = agent.get_config().await;
+    let discord = config.discord.unwrap_or_default();
+
+    if !discord.enabled {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Discord bot is disabled in settings".to_string(),
+            }),
+        ));
+    }
+
+    if discord.token.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Discord bot token is missing".to_string(),
+            }),
+        ));
+    }
+
+    #[cfg(feature = "discord")]
+    crate::discord::spawn_discord_bot(discord, config_path, agent)
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+
+    Ok(Json(DiscordBotActionResponse {
+        running: true,
+        message: "Discord bot starting".to_string(),
+    }))
+}
+
+async fn stop_discord_bot(
+) -> Result<Json<DiscordBotActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !cfg!(feature = "discord") {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Discord support is not compiled into this build".to_string(),
+            }),
+        ));
+    }
+
+    #[cfg(feature = "discord")]
+    let stopped = crate::discord::stop_discord_bot().await;
+    #[cfg(not(feature = "discord"))]
+    let stopped = false;
+
+    Ok(Json(DiscordBotActionResponse {
+        running: false,
+        message: if stopped {
+            "Discord bot stopped".to_string()
+        } else {
+            "Discord bot was not running".to_string()
+        },
+    }))
+}
+
 async fn get_reasoning_options(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -643,14 +810,21 @@ async fn create_workspace(
     Extension(config_path): Extension<PathBuf>,
     Json(payload): Json<WorkspaceRequest>,
 ) -> Result<Json<WorkspaceConfig>, (StatusCode, Json<ErrorResponse>)> {
-    if payload.id.trim().is_empty()
-        || payload.name.trim().is_empty()
-        || payload.path.trim().is_empty()
-    {
+    if payload.id.trim().is_empty() || payload.name.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "Workspace id, name, and path are required".to_string(),
+                error: "Workspace id and name are required".to_string(),
+            }),
+        ));
+    }
+
+    let paths = payload.to_workspace_paths();
+    if paths.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "At least one workspace path is required".to_string(),
             }),
         ));
     }
@@ -658,7 +832,8 @@ async fn create_workspace(
     let workspace = WorkspaceConfig {
         id: payload.id.trim().to_string(),
         name: payload.name.trim().to_string(),
-        path: payload.path.trim().to_string(),
+        paths,
+        path: String::new(),
         description: payload.description,
         permission: payload.permission.unwrap_or(WorkspacePermission::ReadWrite),
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -690,10 +865,21 @@ async fn update_workspace(
     Path(id): Path<String>,
     Json(payload): Json<WorkspaceRequest>,
 ) -> Result<Json<WorkspaceConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let paths = payload.to_workspace_paths();
+    if paths.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "At least one workspace path is required".to_string(),
+            }),
+        ));
+    }
+
     let workspace = WorkspaceConfig {
         id,
         name: payload.name.trim().to_string(),
-        path: payload.path.trim().to_string(),
+        paths,
+        path: String::new(),
         description: payload.description,
         permission: payload.permission.unwrap_or(WorkspacePermission::ReadWrite),
         created_at: String::new(),
@@ -732,6 +918,116 @@ async fn delete_workspace(
             }),
         )
     })?;
+    agent.save_config(&config_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(StatusCode::OK)
+}
+
+async fn add_workspace_path(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Path(id): Path<String>,
+    Json(payload): Json<WorkspacePathRequest>,
+) -> Result<Json<WorkspaceConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let path = WorkspacePath {
+        path: payload.path,
+        permission: payload.permission.unwrap_or(WorkspacePermission::ReadWrite),
+        description: payload.description,
+    };
+
+    agent.add_workspace_path(&id, path).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    agent.save_config(&config_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    let workspace = agent.get_workspace(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(workspace))
+}
+
+async fn update_workspace_path(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Path((id, path_index)): Path<(String, usize)>,
+    Json(payload): Json<WorkspacePathRequest>,
+) -> Result<Json<WorkspaceConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let path = WorkspacePath {
+        path: payload.path,
+        permission: payload.permission.unwrap_or(WorkspacePermission::ReadWrite),
+        description: payload.description,
+    };
+
+    agent
+        .update_workspace_path(&id, path_index, path)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    agent.save_config(&config_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    let workspace = agent.get_workspace(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(workspace))
+}
+
+async fn remove_workspace_path(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Path((id, path_index)): Path<(String, usize)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    agent
+        .remove_workspace_path(&id, path_index)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
     agent.save_config(&config_path).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1466,6 +1762,22 @@ async fn session_history(
     Ok(Json(history))
 }
 
+async fn session_todos(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<crate::tools::todo::TodoItem>>, (StatusCode, Json<ErrorResponse>)> {
+    let todos = agent.list_todo_items(&session_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(todos))
+}
+
 async fn list_file_snapshots(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(session_id): Path<String>,
@@ -2025,6 +2337,18 @@ pub struct CheckPermissionResponse {
     pub action: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreatePermissionRuleRequest {
+    pub permission: String,
+    pub pattern: String,
+    pub action: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PermissionRuleResponse {
+    pub rules: Vec<crate::permission::PermissionRule>,
+}
+
 async fn list_permission_prompts(
     Extension(agent): Extension<Arc<AgentRuntime>>,
 ) -> Result<Json<PermissionPromptResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -2070,6 +2394,82 @@ async fn check_permission(
             PermissionAction::Ask => "ask".to_string(),
         },
     }))
+}
+
+async fn list_permission_rules(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<PermissionRuleResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let rules = agent.get_permission_rules().await;
+    Ok(Json(PermissionRuleResponse { rules }))
+}
+
+async fn create_permission_rule(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Json(payload): Json<CreatePermissionRuleRequest>,
+) -> Result<Json<crate::permission::PermissionRule>, (StatusCode, Json<ErrorResponse>)> {
+    let action = match payload.action.as_str() {
+        "allow" => crate::permission::PermissionAction::Allow,
+        "deny" => crate::permission::PermissionAction::Deny,
+        "ask" => crate::permission::PermissionAction::Ask,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Invalid action '{}'. Must be 'allow', 'deny', or 'ask'.",
+                        payload.action
+                    ),
+                }),
+            ));
+        }
+    };
+
+    let rule = crate::permission::PermissionRule::new(payload.permission, payload.pattern, action);
+
+    agent.add_permission_rule(rule.clone()).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    agent.save_config(&config_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(rule))
+}
+
+async fn delete_permission_rule(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    agent.remove_permission_rule(&id).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    agent.save_config(&config_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(StatusCode::OK)
 }
 
 #[derive(Debug, Serialize)]
@@ -3855,19 +4255,197 @@ async fn voice_delete_model(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct CheckUpdateQuery {
+    channel: Option<String>,
+}
+
 async fn check_update(
     Extension(config): Extension<Config>,
+    Query(params): Query<CheckUpdateQuery>,
 ) -> Result<Json<crate::update::UpdateCheckResult>, (StatusCode, Json<ErrorResponse>)> {
-    let channel = config
-        .update
+    let channel = params
         .channel
-        .parse::<crate::update::UpdateChannel>()
+        .as_deref()
+        .or(Some(config.update.channel.as_str()))
+        .and_then(|c| c.parse::<crate::update::UpdateChannel>().ok())
         .unwrap_or(crate::update::UpdateChannel::Stable);
 
-    let checker =
-        crate::update::UpdateChecker::with_repo(env!("CARGO_PKG_VERSION"), &config.update.repo);
+    let checker = crate::update::UpdateChecker::new(env!("CARGO_PKG_VERSION"));
 
     let result = checker.check(channel).await;
 
     Ok(Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadUpdateRequest {
+    tag: String,
+    channel: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateStatusResponse {
+    status: String,
+    progress: Option<f32>,
+    bytes_downloaded: Option<u64>,
+    total_bytes: Option<u64>,
+    tag: Option<String>,
+    version: Option<String>,
+    message: Option<String>,
+}
+
+async fn download_update(
+    Extension(config): Extension<Config>,
+    Json(payload): Json<DownloadUpdateRequest>,
+) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let channel = payload
+        .channel
+        .as_ref()
+        .and_then(|c| c.parse::<crate::update::UpdateChannel>().ok())
+        .unwrap_or(crate::update::UpdateChannel::Stable);
+
+    let installer = crate::update::UpdateInstaller::new();
+
+    let (tag, archive_name, download_url) = installer
+        .find_release_for_platform(channel)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "No release found for this platform and channel".to_string(),
+                }),
+            )
+        })?;
+
+    let archive_path = installer
+        .download_release(&download_url, &tag, &archive_name, |downloaded, total| {
+            tracing::debug!(
+                "Download progress: {}/{} bytes ({:.1}%)",
+                downloaded,
+                total,
+                if total > 0 {
+                    (downloaded as f64 / total as f64 * 100.0) as f32
+                } else {
+                    0.0
+                }
+            );
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Download failed: {}", e),
+                }),
+            )
+        })?;
+
+    let staged_launcher = installer
+        .prepare_update(&archive_path, &tag)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to prepare update: {}", e),
+                }),
+            )
+        })?;
+
+    let _ = std::fs::remove_file(&archive_path).ok();
+
+    installer
+        .mark_update_pending(&tag, &staged_launcher)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to mark update as pending: {}", e),
+                }),
+            )
+        })?;
+
+    let version = tag.trim_start_matches('v').to_string();
+
+    Ok(Json(UpdateStatusResponse {
+        status: "ready".to_string(),
+        progress: Some(100.0),
+        bytes_downloaded: None,
+        total_bytes: None,
+        tag: Some(tag),
+        version: Some(version),
+        message: Some("Update ready to install".to_string()),
+    }))
+}
+
+async fn install_update(
+    Extension(config): Extension<Config>,
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Json(payload): Json<DownloadUpdateRequest>,
+) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let installer = crate::update::UpdateInstaller::new();
+
+    let pending = crate::update::get_pending_update().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No pending update found. Download an update first.".to_string(),
+            }),
+        )
+    })?;
+
+    installer
+        .mark_update_pending(&pending.tag, &pending.launcher_path)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+
+    agent.signal_shutdown();
+
+    Ok(Json(UpdateStatusResponse {
+        status: "restarting".to_string(),
+        progress: None,
+        bytes_downloaded: None,
+        total_bytes: None,
+        tag: Some(pending.tag),
+        version: None,
+        message: Some("Shutting down for update...".to_string()),
+    }))
+}
+
+async fn update_status() -> Json<UpdateStatusResponse> {
+    let pending = crate::update::get_pending_update();
+
+    if let Some(pending) = pending {
+        return Json(UpdateStatusResponse {
+            status: "ready".to_string(),
+            progress: Some(100.0),
+            bytes_downloaded: None,
+            total_bytes: None,
+            tag: Some(pending.tag.clone()),
+            version: Some(pending.tag.trim_start_matches('v').to_string()),
+            message: Some("Update ready to install".to_string()),
+        });
+    }
+
+    Json(UpdateStatusResponse {
+        status: "idle".to_string(),
+        progress: None,
+        bytes_downloaded: None,
+        total_bytes: None,
+        tag: None,
+        version: None,
+        message: None,
+    })
 }

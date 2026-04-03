@@ -190,6 +190,13 @@ pub enum AgentEvent {
         tool_count: i32,
         timestamp: SystemTime,
     },
+    CoordinatorPhase {
+        session_id: String,
+        parent_session_id: String,
+        phase: String,
+        workers_spawned: usize,
+        timestamp: SystemTime,
+    },
 }
 
 pub struct QuestionChannel {
@@ -236,6 +243,7 @@ impl AgentEvent {
             AgentEvent::SubagentCreated { session_id, .. } => session_id,
             AgentEvent::SubagentProgress { session_id, .. } => session_id,
             AgentEvent::SubagentCompleted { session_id, .. } => session_id,
+            AgentEvent::CoordinatorPhase { session_id, .. } => session_id,
         }
     }
 }

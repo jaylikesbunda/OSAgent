@@ -1,11 +1,10 @@
 use crate::update::channel::{is_beta_tag, UpdateChannel};
-use crate::update::version::is_newer;
+use crate::update::version::{is_newer, is_prerelease_of};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const GITHUB_API_BASE: &str = "https://api.github.com";
-const DEFAULT_REPO: &str = "owner/osagent";
+const CDN_BASE_URL: &str = "https://releases.osagent.dev";
 const USER_AGENT: &str = "osagent-update-checker/0.1.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,27 +20,30 @@ pub struct UpdateCheckResult {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    name: String,
-    html_url: String,
-    body: Option<String>,
-    prerelease: bool,
-    draft: bool,
+struct CdnManifest {
+    tag: String,
+    version: String,
+    released_at: Option<String>,
+    channel: Option<String>,
+    #[serde(default)]
+    assets: std::collections::HashMap<String, CdnAssetEntry>,
+    #[serde(default)]
+    sha256: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CdnAssetEntry {
+    archive: String,
+    url: String,
 }
 
 pub struct UpdateChecker {
     client: Client,
-    repo: String,
     current_version: String,
 }
 
 impl UpdateChecker {
     pub fn new(current_version: &str) -> Self {
-        Self::with_repo(current_version, DEFAULT_REPO)
-    }
-
-    pub fn with_repo(current_version: &str, repo: &str) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent(USER_AGENT)
@@ -50,34 +52,64 @@ impl UpdateChecker {
 
         Self {
             client,
-            repo: repo.to_string(),
             current_version: current_version.to_string(),
         }
     }
 
     pub async fn check(&self, channel: UpdateChannel) -> UpdateCheckResult {
         let checked_at = chrono::Utc::now();
+        let url = format!("{CDN_BASE_URL}/releases/latest.json");
 
-        match self.fetch_releases().await {
-            Ok(releases) => {
-                let filtered = self.filter_by_channel(releases, channel);
+        match self.client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<CdnManifest>().await {
+                    Ok(manifest) => {
+                        let manifest_channel = manifest.channel.as_deref().unwrap_or("stable");
+                        if channel == UpdateChannel::Stable && is_beta_tag(&manifest.tag) {
+                            return UpdateCheckResult {
+                                current_version: self.current_version.clone(),
+                                latest_version: None,
+                                update_available: false,
+                                channel,
+                                release_url: None,
+                                release_notes: None,
+                                checked_at,
+                                error: None,
+                            };
+                        }
+                        if channel == UpdateChannel::Beta
+                            && !is_beta_tag(&manifest.tag)
+                            && manifest_channel != "beta"
+                        {
+                            return UpdateCheckResult {
+                                current_version: self.current_version.clone(),
+                                latest_version: None,
+                                update_available: false,
+                                channel,
+                                release_url: None,
+                                release_notes: None,
+                                checked_at,
+                                error: None,
+                            };
+                        }
 
-                if let Some(latest) = filtered.first() {
-                    let latest_version = latest.tag_name.trim_start_matches('v').to_string();
-                    let update_available = is_newer(&latest_version, &self.current_version);
+                        let latest_version = manifest.version.clone();
+                        let update_available = is_newer(&latest_version, &self.current_version)
+                            || (channel == UpdateChannel::Beta
+                                && is_prerelease_of(&latest_version, &self.current_version));
 
-                    UpdateCheckResult {
-                        current_version: self.current_version.clone(),
-                        latest_version: Some(latest_version),
-                        update_available,
-                        channel,
-                        release_url: Some(latest.html_url.clone()),
-                        release_notes: latest.body.clone(),
-                        checked_at,
-                        error: None,
+                        UpdateCheckResult {
+                            current_version: self.current_version.clone(),
+                            latest_version: Some(latest_version),
+                            update_available,
+                            channel,
+                            release_url: Some(format!("{CDN_BASE_URL}/releases/{}/", manifest.tag)),
+                            release_notes: None,
+                            checked_at,
+                            error: None,
+                        }
                     }
-                } else {
-                    UpdateCheckResult {
+                    Err(e) => UpdateCheckResult {
                         current_version: self.current_version.clone(),
                         latest_version: None,
                         update_available: false,
@@ -85,10 +117,20 @@ impl UpdateChecker {
                         release_url: None,
                         release_notes: None,
                         checked_at,
-                        error: Some("No releases found for channel".to_string()),
-                    }
+                        error: Some(format!("Failed to parse manifest: {}", e)),
+                    },
                 }
             }
+            Ok(response) => UpdateCheckResult {
+                current_version: self.current_version.clone(),
+                latest_version: None,
+                update_available: false,
+                channel,
+                release_url: None,
+                release_notes: None,
+                checked_at,
+                error: Some(format!("Manifest returned HTTP {}", response.status())),
+            },
             Err(e) => UpdateCheckResult {
                 current_version: self.current_version.clone(),
                 latest_version: None,
@@ -97,45 +139,9 @@ impl UpdateChecker {
                 release_url: None,
                 release_notes: None,
                 checked_at,
-                error: Some(format!("Failed to fetch releases: {}", e)),
+                error: Some(format!("Failed to fetch manifest: {}", e)),
             },
         }
-    }
-
-    async fn fetch_releases(&self) -> Result<Vec<GitHubRelease>, reqwest::Error> {
-        let url = format!("{}/repos/{}/releases", GITHUB_API_BASE, self.repo);
-        let response = self.client.get(&url).send().await?;
-        let releases: Vec<GitHubRelease> = response.json().await?;
-        Ok(releases.into_iter().filter(|r| !r.draft).collect())
-    }
-
-    fn filter_by_channel(
-        &self,
-        releases: Vec<GitHubRelease>,
-        channel: UpdateChannel,
-    ) -> Vec<GitHubRelease> {
-        let mut filtered: Vec<GitHubRelease> = match channel {
-            UpdateChannel::Stable => releases
-                .into_iter()
-                .filter(|r| !r.prerelease && !is_beta_tag(&r.tag_name))
-                .collect(),
-            UpdateChannel::Beta => releases
-                .into_iter()
-                .filter(|r| r.prerelease || is_beta_tag(&r.tag_name))
-                .collect(),
-            UpdateChannel::Dev => releases,
-        };
-
-        filtered.sort_by(|a, b| {
-            let v_a = crate::update::version::parse_version(&a.tag_name);
-            let v_b = crate::update::version::parse_version(&b.tag_name);
-            match (v_a, v_b) {
-                (Some(va), Some(vb)) => vb.cmp(&va),
-                _ => std::cmp::Ordering::Equal,
-            }
-        });
-
-        filtered
     }
 }
 

@@ -122,6 +122,36 @@ OSA.onThinkingVisibilityToggleChange = function() {
     OSA.applyThinkingVisibilitySetting(checkbox ? checkbox.checked : true);
 };
 
+OSA.DEFAULT_IDENTITY = "You are OSA, a technical workspace agent optimized for software engineering. Provide precise, actionable assistance for code analysis, debugging, and file operations.";
+
+OSA.DEFAULT_PRIORITIES = "- Answer directly from knowledge when confident\n- Use tools only when uncertain or when current data is required\n- Arithmetic: work step by step, don't rely on memory\n- Keep tool calls minimal and purposeful\n- One tool call is often enough for simple tasks";
+
+OSA.onCustomIdentityToggleChange = function() {
+    const checkbox = document.getElementById('setting-use-custom-identity');
+    const field = document.getElementById('custom-identity-field');
+    const textarea = document.getElementById('setting-custom-identity');
+    if (field) {
+        field.style.display = checkbox && checkbox.checked ? '' : 'none';
+        // Populate with default if empty and being enabled
+        if (checkbox && checkbox.checked && textarea && !textarea.value.trim()) {
+            textarea.value = OSA.DEFAULT_IDENTITY;
+        }
+    }
+};
+
+OSA.onCustomPrioritiesToggleChange = function() {
+    const checkbox = document.getElementById('setting-use-custom-priorities');
+    const field = document.getElementById('custom-priorities-field');
+    const textarea = document.getElementById('setting-custom-priorities');
+    if (field) {
+        field.style.display = checkbox && checkbox.checked ? '' : 'none';
+        // Populate with default if empty and being enabled
+        if (checkbox && checkbox.checked && textarea && !textarea.value.trim()) {
+            textarea.value = OSA.DEFAULT_PRIORITIES;
+        }
+    }
+};
+
 OSA.openSettings = async function() {
     document.getElementById('settings-modal').classList.remove('hidden');
     await OSA.loadSettings();
@@ -144,10 +174,21 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-model').value = config.provider?.model || '';
         const discord = config.discord || {};
         document.getElementById('setting-discord-enabled').value = discord.enabled ? 'true' : 'false';
+        document.getElementById('setting-discord-token').value = discord.token || '';
         document.getElementById('setting-discord-allowed-users').value = (discord.allowed_users || []).join('\n');
         document.getElementById('setting-max-tokens').value = config.agent?.max_tokens || 4096;
         document.getElementById('setting-temperature').value = config.agent?.temperature || 0.7;
         document.getElementById('setting-show-thinking-blocks').checked = OSA.getShowThinkingBlocks();
+        
+        // Load custom prompt sections
+        const customIdentity = config.agent?.custom_identity || '';
+        const customPriorities = config.agent?.custom_priorities || [];
+        document.getElementById('setting-use-custom-identity').checked = !!customIdentity;
+        document.getElementById('setting-custom-identity').value = customIdentity;
+        document.getElementById('custom-identity-field').style.display = customIdentity ? '' : 'none';
+        document.getElementById('setting-use-custom-priorities').checked = customPriorities.length > 0;
+        document.getElementById('setting-custom-priorities').value = customPriorities.join('\n');
+        document.getElementById('custom-priorities-field').style.display = customPriorities.length > 0 ? '' : 'none';
         await OSA.refreshThinkingOptions(
             OSA.currentModelProviderId || config.default_provider,
             OSA.currentModelId || config.default_model || config.provider?.model || '',
@@ -195,6 +236,7 @@ OSA.loadSettings = async function() {
         
         await OSA.loadMemories();
         await OSA.loadVoiceInstallStatus();
+        await OSA.loadDiscordBotStatus();
         await OSA.renderSettingsProviders();
     } catch (error) {
         console.error('Failed to load settings:', error);
@@ -251,15 +293,30 @@ OSA.saveSettings = async function() {
     newConfig.discord = {
         ...(newConfig.discord || {}),
         enabled: document.getElementById('setting-discord-enabled').value === 'true',
+        token: document.getElementById('setting-discord-token').value || '',
         allowed_users: allowedDiscordUsers
     };
+    // Process custom priorities: split by newline and filter empty lines
+    const customPrioritiesText = document.getElementById('setting-custom-priorities').value || '';
+    const customPriorities = customPrioritiesText
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+    
+    const useCustomIdentity = document.getElementById('setting-use-custom-identity').checked;
+    const customIdentity = useCustomIdentity ? (document.getElementById('setting-custom-identity').value || '').trim() : null;
+    
+    const useCustomPriorities = document.getElementById('setting-use-custom-priorities').checked;
+    
     newConfig.agent = {
         ...newConfig.agent,
         max_tokens: parseInt(document.getElementById('setting-max-tokens').value) || 4096,
         temperature: parseFloat(document.getElementById('setting-temperature').value) || 0.7,
         thinking_level: document.getElementById('setting-thinking-level').value || 'auto',
         memory_enabled: document.getElementById('setting-memory-enabled').checked,
-        memory_file: document.getElementById('setting-memory-file').value || '~/.osagent/memories.json'
+        memory_file: document.getElementById('setting-memory-file').value || '~/.osagent/memories.json',
+        custom_identity: customIdentity || null,
+        custom_priorities: useCustomPriorities && customPriorities.length > 0 ? customPriorities : null
     };
     const previousVoice = OSA.normalizeVoiceConfig(newConfig.voice || {});
     newConfig.voice = OSA.normalizeVoiceConfig({
@@ -583,6 +640,92 @@ OSA.restartServer = async function() {
     }
 };
 
+OSA.renderDiscordBotStatus = function(status, message) {
+    const statusEl = document.getElementById('discord-bot-status');
+    const messageEl = document.getElementById('discord-bot-message');
+    const startBtn = document.getElementById('btn-discord-start');
+    const stopBtn = document.getElementById('btn-discord-stop');
+    if (!statusEl || !messageEl || !startBtn || !stopBtn) return;
+
+    statusEl.classList.remove('is-running', 'is-stopped', 'is-unavailable');
+
+    if (!status.available) {
+        statusEl.textContent = 'Discord support is unavailable in this build';
+        statusEl.classList.add('is-unavailable');
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+    } else if (status.running) {
+        statusEl.textContent = 'Bot is running';
+        statusEl.classList.add('is-running');
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+    } else {
+        const enabled = status.enabled ? 'enabled' : 'disabled';
+        const configured = status.configured ? 'token saved' : 'token missing';
+        statusEl.textContent = `Bot is stopped (${enabled}, ${configured})`;
+        statusEl.classList.add('is-stopped');
+        startBtn.disabled = !status.enabled || !status.configured;
+        stopBtn.disabled = true;
+    }
+
+    messageEl.textContent = message || '';
+};
+
+OSA.loadDiscordBotStatus = async function(message) {
+    try {
+        const res = await fetch('/api/discord/status', {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        });
+        const status = await res.json();
+        if (!res.ok) throw new Error(status.error || `HTTP ${res.status}`);
+        OSA.renderDiscordBotStatus(status, message);
+    } catch (error) {
+        OSA.renderDiscordBotStatus({ available: false, enabled: false, configured: false, running: false }, error.message);
+    }
+};
+
+OSA.startDiscordBot = async function() {
+    const startBtn = document.getElementById('btn-discord-start');
+    const stopBtn = document.getElementById('btn-discord-stop');
+    if (!startBtn || !stopBtn) return;
+
+    startBtn.disabled = true;
+    stopBtn.disabled = true;
+
+    try {
+        const res = await fetch('/api/discord/start', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadDiscordBotStatus(data.message || 'Discord bot starting');
+    } catch (error) {
+        await OSA.loadDiscordBotStatus(error.message);
+    }
+};
+
+OSA.stopDiscordBot = async function() {
+    const startBtn = document.getElementById('btn-discord-start');
+    const stopBtn = document.getElementById('btn-discord-stop');
+    if (!startBtn || !stopBtn) return;
+
+    startBtn.disabled = true;
+    stopBtn.disabled = true;
+
+    try {
+        const res = await fetch('/api/discord/stop', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadDiscordBotStatus(data.message || 'Discord bot stopped');
+    } catch (error) {
+        await OSA.loadDiscordBotStatus(error.message);
+    }
+};
+
 OSA.updateWorkflowButtonVisibility = function(enabled) {
     const btn = document.getElementById('workflow-btn');
     if (btn) {
@@ -786,6 +929,218 @@ OSA.saveMemoryEdit = async function() {
         await OSA.loadMemories();
     } catch (error) {
         alert(`Failed to save memory: ${error.message}`);
+    }
+};
+
+OSA.pendingUpdateTag = null;
+OSA.pendingUpdateVersion = null;
+OSA.currentVersion = null;
+
+OSA.checkForUpdates = async function() {
+    const btn = document.getElementById('btn-check-update');
+    const statusDisplay = document.getElementById('update-status-display');
+    const versionRow = document.getElementById('update-version-row');
+    const latestVersion = document.getElementById('update-latest-version');
+    const channel = document.getElementById('update-channel-select')?.value || 'stable';
+    
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+    statusDisplay.className = 'update-status-display checking';
+    statusDisplay.querySelector('.update-status-text').textContent = 'Checking for updates...';
+    versionRow.classList.add('hidden');
+    document.getElementById('btn-download-update')?.classList.add('hidden');
+    document.getElementById('btn-install-update')?.classList.add('hidden');
+    document.getElementById('btn-view-release')?.classList.add('hidden');
+    document.getElementById('update-release-notes')?.classList.add('hidden');
+    
+    try {
+        const result = await OSA.getJson('/api/update/check?channel=' + encodeURIComponent(channel));
+        
+        btn.disabled = false;
+        btn.textContent = 'Check for Updates';
+        
+        if (!OSA.currentVersion) {
+            OSA.currentVersion = result.current_version;
+            document.getElementById('update-current-version').textContent = result.current_version;
+        }
+        
+        if (result.update_available) {
+            const latest = result.latest_version || 'unknown';
+            latestVersion.textContent = latest;
+            versionRow.classList.remove('hidden');
+            statusDisplay.className = 'update-status-display update-available';
+            statusDisplay.querySelector('.update-status-text').textContent = 'Update available: v' + latest;
+            
+            OSA.pendingUpdateTag = result.release_url?.split('/tag/')[1] || latest;
+            OSA.pendingUpdateVersion = latest;
+            
+            const downloadBtn = document.getElementById('btn-download-update');
+            if (downloadBtn) {
+                downloadBtn.classList.remove('hidden');
+                downloadBtn.disabled = false;
+                downloadBtn.textContent = 'Download Update';
+            }
+            
+            const viewRelease = document.getElementById('btn-view-release');
+            if (viewRelease && result.release_url) {
+                viewRelease.href = result.release_url;
+                viewRelease.classList.remove('hidden');
+            }
+            
+            if (result.release_notes) {
+                const notesDiv = document.getElementById('update-release-notes');
+                const notesContent = document.getElementById('release-notes-content');
+                if (notesDiv && notesContent) {
+                    notesContent.textContent = result.release_notes;
+                    notesDiv.classList.remove('hidden');
+                }
+            }
+        } else {
+            statusDisplay.className = 'update-status-display up-to-date';
+            statusDisplay.querySelector('.update-status-text').textContent = 'You are up to date!';
+        }
+    } catch (error) {
+        btn.disabled = false;
+        btn.textContent = 'Check for Updates';
+        statusDisplay.className = 'update-status-display error';
+        statusDisplay.querySelector('.update-status-text').textContent = 'Error checking for updates: ' + (error.message || 'Unknown error');
+    }
+};
+
+OSA.downloadUpdate = async function() {
+    if (!OSA.pendingUpdateTag) {
+        alert('No update to download. Please check for updates first.');
+        return;
+    }
+    
+    const btn = document.getElementById('btn-download-update');
+    const progressContainer = document.getElementById('update-progress-container');
+    const progressFill = document.getElementById('update-progress-fill');
+    const progressText = document.getElementById('update-progress-text');
+    const channel = document.getElementById('update-channel-select')?.value || 'stable';
+    
+    btn.disabled = true;
+    btn.textContent = 'Downloading...';
+    progressContainer.classList.remove('hidden');
+    progressFill.style.width = '0%';
+    progressText.textContent = '0%';
+    
+    try {
+        const response = await fetch('/api/update/download', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + OSA.getToken(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ tag: OSA.pendingUpdateTag, channel: channel })
+        });
+        
+        const result = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(result.error || 'Download failed');
+        }
+        
+        progressFill.style.width = '100%';
+        progressText.textContent = '100%';
+        
+        const installBtn = document.getElementById('btn-install-update');
+        if (installBtn) {
+            installBtn.classList.remove('hidden');
+            installBtn.disabled = false;
+            installBtn.textContent = 'Install & Restart';
+        }
+        
+        btn.classList.add('hidden');
+    } catch (error) {
+        btn.disabled = false;
+        btn.textContent = 'Download Update';
+        const statusDisplay = document.getElementById('update-status-display');
+        statusDisplay.className = 'update-status-display error';
+        statusDisplay.querySelector('.update-status-text').textContent = 'Download failed: ' + (error.message || 'Unknown error');
+    }
+};
+
+OSA.installUpdate = async function() {
+    if (!OSA.pendingUpdateTag) {
+        alert('No update to install. Please download an update first.');
+        return;
+    }
+    
+    const btn = document.getElementById('btn-install-update');
+    btn.disabled = true;
+    btn.textContent = 'Restarting...';
+    
+    try {
+        const response = await fetch('/api/update/install', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + OSA.getToken(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ tag: OSA.pendingUpdateTag })
+        });
+        
+        const result = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(result.error || 'Install failed');
+        }
+        
+        const statusDisplay = document.getElementById('update-status-display');
+        statusDisplay.className = 'update-status-display checking';
+        statusDisplay.querySelector('.update-status-text').textContent = 'Restarting... Please wait.';
+        
+        setTimeout(function() {
+            window.location.reload();
+        }, 3000);
+    } catch (error) {
+        btn.disabled = false;
+        btn.textContent = 'Install & Restart';
+        const statusDisplay = document.getElementById('update-status-display');
+        statusDisplay.className = 'update-status-display error';
+        statusDisplay.querySelector('.update-status-text').textContent = 'Install failed: ' + (error.message || 'Unknown error');
+    }
+};
+
+OSA.loadUpdateStatus = async function() {
+    try {
+        const result = await OSA.getJson('/api/update/status');
+        
+        if (result.tag && result.status === 'ready') {
+            OSA.pendingUpdateTag = result.tag;
+            OSA.pendingUpdateVersion = result.version;
+            
+            const installBtn = document.getElementById('btn-install-update');
+            if (installBtn) {
+                installBtn.classList.remove('hidden');
+                installBtn.disabled = false;
+                installBtn.textContent = 'Install & Restart';
+            }
+            
+            const statusDisplay = document.getElementById('update-status-display');
+            statusDisplay.className = 'update-status-display update-available';
+            statusDisplay.querySelector('.update-status-text').textContent = 'Update ready: v' + result.version;
+            
+            const versionRow = document.getElementById('update-version-row');
+            const latestVersion = document.getElementById('update-latest-version');
+            latestVersion.textContent = result.version;
+            versionRow.classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('Failed to load update status:', error);
+    }
+};
+
+OSA.initUpdatesPane = function() {
+    const versionDisplay = document.getElementById('update-current-version');
+    if (versionDisplay && !OSA.currentVersion) {
+        OSA.getJson('/api/update/check?channel=stable').then(function(result) {
+            OSA.currentVersion = result.current_version;
+            versionDisplay.textContent = result.current_version;
+        }).catch(function() {
+            versionDisplay.textContent = 'Unknown';
+        });
     }
 };
 

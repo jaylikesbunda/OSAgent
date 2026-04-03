@@ -612,6 +612,33 @@
     cursor: not-allowed;
 }
 
+.btn-primary {
+    padding: 8px 18px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+    border: none;
+    border-radius: var(--radius-md);
+    color: white;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.btn-primary:hover:not(:disabled) {
+    opacity: 0.9;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px var(--accent-dim);
+}
+
+.btn-primary:active {
+    transform: translateY(0);
+}
+
+.btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 .btn-ghost {
     padding: 8px 18px;
     background: transparent;
@@ -836,6 +863,47 @@
     color: var(--warning);
     font-size: 13px;
     margin-top: 14px;
+}
+
+.discord-bot-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.discord-bot-status.is-running {
+    border-color: rgba(74, 222, 128, 0.3);
+    background: var(--success-dim);
+    color: var(--success);
+}
+
+.discord-bot-status.is-stopped {
+    border-color: rgba(251, 191, 36, 0.3);
+    background: var(--warning-dim);
+    color: var(--warning);
+}
+
+.discord-bot-status.is-unavailable {
+    border-color: rgba(255, 107, 107, 0.3);
+    background: var(--error-dim);
+    color: var(--error);
+}
+
+.discord-bot-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.discord-bot-actions .btn-danger {
+    padding: 8px 18px;
+    font-size: 13px;
 }
 
 /* ---- Warning Button ---- */
@@ -2022,4 +2090,121 @@
         flex-direction: column;
         align-items: flex-start;
     }
+}
+
+/* Updates Pane Styles */
+.update-info-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.update-label {
+    color: var(--text-muted);
+    font-size: 13px;
+    min-width: 70px;
+}
+
+.update-value {
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.update-channel-select {
+    width: auto;
+    min-width: 180px;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.update-channel-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.update-status-display {
+    padding: 12px 16px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    margin-bottom: 10px;
+}
+
+.update-status-display.up-to-date {
+    background: rgba(0, 200, 100, 0.1);
+    color: #00c864;
+}
+
+.update-status-display.update-available {
+    background: rgba(255, 180, 0, 0.1);
+    color: #ffb400;
+}
+
+.update-status-display.checking {
+    background: rgba(100, 150, 255, 0.1);
+    color: #6496ff;
+}
+
+.update-status-display.error {
+    background: rgba(255, 80, 80, 0.1);
+    color: #ff5050;
+}
+
+.update-version-row {
+    margin-top: 8px;
+}
+
+.update-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.update-progress {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.update-progress .progress-bar {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.update-progress .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s;
+    width: 0%;
+}
+
+.update-progress .progress-text {
+    font-size: 12px;
+    color: var(--text-muted);
+    min-width: 40px;
+}
+
+.release-notes-content {
+    background: var(--bg-secondary);
+    padding: 16px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+    line-height: 1.5;
+}
 }

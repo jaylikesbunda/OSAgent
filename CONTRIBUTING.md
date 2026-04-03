@@ -42,32 +42,35 @@ Feature requests are welcome! Please open an issue with:
 
 - Rust 1.75 or later
 - Git
+- PowerShell 5.1 or later for the canonical Windows build flow
 - A code editor (VS Code, IntelliJ, etc.)
 
 ### Building
 
-```bash
-git clone https://github.com/YOUR_USERNAME/osagent.git
+```powershell
+git clone https://gitlab.com/YOUR_NAMESPACE/osagent.git
 cd osagent
-cargo build
+.\build-launcher.ps1
 ```
+
+Use `.\build-launcher.ps1 -Checks` before pushing changes. It runs the same core-first, updater-second, launcher-last flow used for releases.
 
 ### Testing
 
-```bash
-cargo test
+```powershell
+.\build-launcher.ps1 -Checks
 ```
 
 ### Formatting
 
 ```bash
-cargo fmt
+cargo fmt --all
 ```
 
 ### Linting
 
 ```bash
-cargo clippy
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## Project Structure

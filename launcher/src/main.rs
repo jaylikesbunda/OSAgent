@@ -32,6 +32,8 @@ use tracing_subscriber::EnvFilter;
 
 static CORE_BINARY: &[u8] = include_bytes!("core.bin");
 static CORE_EXTRACTED_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static UPDATER_BINARY: &[u8] = include_bytes!("updater.bin");
+static UPDATER_EXTRACTED_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 fn get_embedded_core_path() -> Option<PathBuf> {
     if CORE_BINARY.is_empty() || CORE_BINARY == b"placeholder" {
@@ -82,6 +84,60 @@ fn get_embedded_core_path() -> Option<PathBuf> {
 
         info!("Extracted bundled osagent core to {}", core_path.display());
         Some(core_path)
+    });
+
+    cached.clone()
+}
+
+fn get_embedded_updater_path() -> Option<PathBuf> {
+    if UPDATER_BINARY.is_empty() || UPDATER_BINARY == b"placeholder" {
+        return None;
+    }
+
+    let cached = UPDATER_EXTRACTED_PATH.get_or_init(|| {
+        let exe_path = std::env::current_exe().ok()?;
+        let exe_dir = exe_path.parent()?;
+        let updater_name = if cfg!(windows) {
+            "osagent-updater.exe"
+        } else {
+            "osagent-updater"
+        };
+        let updater_path = exe_dir.join(updater_name);
+
+        if updater_path.exists() {
+            return Some(updater_path);
+        }
+
+        fs::write(&updater_path, UPDATER_BINARY).ok()?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let _ = Command::new("attrib")
+                .args(["+R", updater_path.to_string_lossy().as_ref()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok();
+            let _ = Command::new("attrib")
+                .args(["+H", updater_path.to_string_lossy().as_ref()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok();
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(mut perms) = fs::metadata(&updater_path).map(|m| m.permissions()) {
+                let mut mode = perms.mode();
+                mode |= 0o111;
+                perms.set_mode(mode);
+                let _ = fs::set_permissions(&updater_path, perms);
+            }
+        }
+
+        info!("Extracted bundled updater to {}", updater_path.display());
+        Some(updater_path)
     });
 
     cached.clone()
@@ -3565,49 +3621,296 @@ fn read_output_to_file<R: std::io::Read>(reader: R, app_handle: AppHandle, log_p
     }
 }
 
-// --- Process Monitor ---
+// --- Pending Update Application ---
 
-fn start_process_monitor(app_handle: AppHandle) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LauncherPendingUpdate {
+    tag: String,
+    launcher_path: std::path::PathBuf,
+    #[allow(dead_code)]
+    created_at: chrono::DateTime<chrono::Utc>,
+}
 
-        let state = app_handle.state::<AppState>();
-        let mut running = state.osagent_running.lock().unwrap();
+fn get_pending_update_path() -> Option<std::path::PathBuf> {
+    dirs_next::home_dir().map(|h| h.join(".osagent").join("pending_update.json"))
+}
 
-        if *running {
-            let mut process = state.osagent_process.lock().unwrap();
-            if let Some(ref mut child) = *process {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        let code = status.code().unwrap_or(-1);
-                        add_log(
-                            &state,
-                            "warn",
-                            format!("OSAgent exited with code: {}", code),
-                        );
-                        *running = false;
-                        state.osagent_pid.lock().unwrap().take();
+fn spawn_updater_and_exit(launcher_path: &std::path::Path, new_launcher_path: &std::path::Path) -> bool {
+    let current_exe = launcher_path.to_string_lossy().to_string();
+    let new_exe = new_launcher_path.to_string_lossy().to_string();
+    let cleanup_dir = new_launcher_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
 
-                        let _ = app_handle.emit(
-                            "osagent-status-changed",
-                            AgentStatus {
-                                running: false,
-                                pid: None,
-                                osagent_path: state.osagent_path.to_string_lossy().to_string(),
-                                config_path: state.config_path.to_string_lossy().to_string(),
-                            },
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        add_log(&state, "error", format!("Failed to check process: {}", e));
-                        *running = false;
-                        state.osagent_pid.lock().unwrap().take();
-                    }
+    if let Some(updater_path) = get_embedded_updater_path() {
+        info!("Using embedded updater: {}", updater_path.display());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            use std::process::Command;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+
+            let result = Command::new(&updater_path)
+                .args([
+                    "--pid",
+                    &std::process::id().to_string(),
+                    "--old",
+                    &current_exe,
+                    "--new",
+                    &new_exe,
+                    "--launch",
+                    &current_exe,
+                    "--cleanup",
+                    &cleanup_dir,
+                ])
+                .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+                .spawn();
+
+            match result {
+                Ok(_) => {
+                    info!("Updater spawned successfully, exiting launcher for update");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    info!("Updater spawn failed: {}, falling back to bat script", e);
                 }
             }
         }
+
+        #[cfg(not(windows))]
+        {
+            use std::process::Command;
+
+            let result = Command::new(&updater_path)
+                .args([
+                    "--pid",
+                    &std::process::id().to_string(),
+                    "--old",
+                    &current_exe,
+                    "--new",
+                    &new_exe,
+                    "--launch",
+                    &current_exe,
+                    "--cleanup",
+                    &cleanup_dir,
+                ])
+                .spawn();
+
+            match result {
+                Ok(_) => {
+                    info!("Updater spawned successfully, exiting launcher for update");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    info!("Updater spawn failed: {}, falling back to script", e);
+                }
+            }
+        }
+    } else {
+        info!("Embedded updater not available, falling back to legacy script");
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+
+        let bat_path = std::env::temp_dir().join("osagent-update.bat");
+        let bat = format!(
+            "@echo off\r\ntimeout /t 3 /nobreak >nul\r\ncopy /Y \"{new_exe}\" \"{current_exe}\"\r\ndel \"{new_exe}\"\r\nstart \"\" \"{current_exe}\"\r\ndel \"%~f0\"\r\n"
+        );
+
+        if let Err(e) = std::fs::write(&bat_path, bat) {
+            info!("Failed to write updater bat: {}", e);
+            return false;
+        }
+
+        info!("Spawning updater bat: {}", bat_path.display());
+
+        let spawned = Command::new("cmd")
+            .args(["/c", "start", "/min", "", bat_path.to_string_lossy().as_ref()])
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn();
+
+        match spawned {
+            Ok(_) => {
+                info!("Updater bat spawned, exiting launcher for update");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                info!("Failed to spawn updater bat: {}", e);
+                false
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        info!("Auto-update not supported on this platform without embedded updater");
+        false
+    }
+}
+
+fn apply_pending_update_if_any() -> bool {
+    let pending_path = match get_pending_update_path() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    if !pending_path.exists() {
+        return false;
+    }
+
+    let json = match std::fs::read_to_string(&pending_path) {
+        Ok(j) => j,
+        Err(e) => {
+            info!("Failed to read pending update file: {}", e);
+            return false;
+        }
+    };
+
+    let pending: LauncherPendingUpdate = match serde_json::from_str(&json) {
+        Ok(p) => p,
+        Err(e) => {
+            info!("Failed to parse pending update file: {}", e);
+            let _ = std::fs::remove_file(&pending_path);
+            return false;
+        }
+    };
+
+    if !pending.launcher_path.exists() {
+        info!("Staged binary does not exist: {}", pending.launcher_path.display());
+        let _ = std::fs::remove_file(&pending_path);
+        return false;
+    }
+
+    let launcher_path = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            info!("Failed to get current exe path: {}", e);
+            return false;
+        }
+    };
+
+    info!("Startup: pending update {} found, applying", pending.tag);
+    let _ = std::fs::remove_file(&pending_path);
+    spawn_updater_and_exit(&launcher_path, &pending.launcher_path)
+}
+
+// --- Process Monitor ---
+
+fn start_process_monitor(app_handle: AppHandle) {
+    std::thread::spawn(move || {
+        info!("Starting process monitor thread");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let state = app_handle.state::<AppState>();
+
+        loop {
+            // Check for pending update each iteration
+            if check_and_apply_pending_update(&app_handle) {
+                return;
+            }
+
+            // Monitor osagent process status
+            {
+                let mut running = state.osagent_running.lock().unwrap();
+                if *running {
+                    let mut process = state.osagent_process.lock().unwrap();
+                    if let Some(ref mut child) = *process {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                let code = status.code().unwrap_or(-1);
+                                add_log(
+                                    &state,
+                                    "warn",
+                                    format!("OSAgent exited with code: {}", code),
+                                );
+                                *running = false;
+                                state.osagent_pid.lock().unwrap().take();
+
+                                let _ = app_handle.emit(
+                                    "osagent-status-changed",
+                                    AgentStatus {
+                                        running: false,
+                                        pid: None,
+                                        osagent_path: state.osagent_path.to_string_lossy().to_string(),
+                                        config_path: state.config_path.to_string_lossy().to_string(),
+                                    },
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                add_log(&state, "error", format!("Failed to check process: {}", e));
+                                *running = false;
+                                state.osagent_pid.lock().unwrap().take();
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
     });
+}
+
+fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
+    let pending_path = match get_pending_update_path() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    if !pending_path.exists() {
+        return false;
+    }
+
+    let state = app_handle.state::<AppState>();
+    add_log(&state, "info", format!("Pending update file found: {}", pending_path.display()));
+
+    let json = match std::fs::read_to_string(&pending_path) {
+        Ok(j) => j,
+        Err(e) => {
+            add_log(&state, "error", format!("Failed to read pending update file: {}", e));
+            return false;
+        }
+    };
+
+    let pending: LauncherPendingUpdate = match serde_json::from_str(&json) {
+        Ok(p) => p,
+        Err(e) => {
+            add_log(&state, "error", format!("Failed to parse pending update file: {}", e));
+            let _ = std::fs::remove_file(&pending_path);
+            return false;
+        }
+    };
+
+    add_log(&state, "info", format!("Pending update: tag={}, binary={}", pending.tag, pending.launcher_path.display()));
+
+    if !pending.launcher_path.exists() {
+        add_log(&state, "error", format!("Staged binary missing: {}", pending.launcher_path.display()));
+        let _ = std::fs::remove_file(&pending_path);
+        return false;
+    }
+
+    let launcher_path = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            add_log(&state, "error", format!("Failed to get current exe: {}", e));
+            return false;
+        }
+    };
+
+    add_log(&state, "info", format!("Applying update {}...", pending.tag));
+    let _ = std::fs::remove_file(&pending_path);
+
+    terminate_osagent_processes(&state);
+    spawn_updater_and_exit(&launcher_path, &pending.launcher_path)
 }
 
 // --- Main Entry ---
@@ -3617,6 +3920,11 @@ fn main() {
         .with_max_level(Level::INFO)
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    if apply_pending_update_if_any() {
+        info!("Update pending, launcher will restart shortly...");
+        std::process::exit(0);
+    }
 
     let osagent_path = get_osagent_path();
     let config_path = get_config_path();

@@ -1,0 +1,260 @@
+stages:
+  - quick
+  - test
+  - build
+  - release
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  RUST_MIN_STACK: "8388608"
+  R2_BUCKET: "osagent-releases"
+  R2_RELEASE_PREFIX: "releases"
+  CDN_BASE_URL: "https://releases.osagent.dev"
+
+.setup_rust: &setup_rust |
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component rustfmt,clippy
+  source "$CARGO_HOME/env" 2>/dev/null || true
+
+.install_linux_deps: &install_linux_deps |
+  apt-get update
+  apt-get install -y \
+    libwebkit2gtk-4.1-dev \
+    libjavascriptcoregtk-4.1-dev \
+    libwayland-dev \
+    build-essential \
+    curl \
+    wget \
+    file \
+    libxdo-dev \
+    libssl-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    libsoup-3.0-dev \
+    libgtk-3-dev \
+    zip \
+    python3-pip
+
+.install_windows_cross_deps: &install_windows_cross_deps |
+  apt-get update
+  apt-get install -y mingw-w64 clang
+  cargo install cross --locked
+
+.install_aws_cli: &install_aws_cli |
+  python3 -m pip install --user awscli
+  export PATH="$HOME/.local/bin:$PATH"
+
+quick:fmt:
+  stage: quick
+  only:
+    - main
+    - develop
+    - merge_requests
+  script:
+    - *setup_rust
+    - cargo fmt --all -- --check
+
+quick:clippy:
+  stage: quick
+  only:
+    - main
+    - develop
+    - merge_requests
+  script:
+    - *setup_rust
+    - *install_linux_deps
+    - cargo clippy --all-targets --all-features -- -D warnings
+
+test:
+  stage: test
+  only:
+    - main
+    - develop
+  script:
+    - *setup_rust
+    - *install_linux_deps
+    - cargo test --all-features --verbose
+
+build:linux:
+  stage: build
+  only:
+    - tags
+  script:
+    - *setup_rust
+    - *install_linux_deps
+    - cargo build --release --features discord
+    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/updater/target" cargo build --manifest-path updater/Cargo.toml --release
+    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/launcher/target" OSAGENT_CORE_SOURCE="$CI_PROJECT_DIR/target/release/osagent" OSAGENT_UPDATER_SOURCE="$CI_PROJECT_DIR/updater/target/release/osagent-updater" cargo build --manifest-path launcher/Cargo.toml --release
+    - mkdir -p dist/linux-x86_64
+    - cp launcher/target/release/osagent-launcher dist/linux-x86_64/osagent-launcher
+    - chmod +x dist/linux-x86_64/osagent-launcher
+    - tar czf osagent-linux-x86_64.tar.gz -C dist/linux-x86_64 osagent-launcher
+    - sha256sum osagent-linux-x86_64.tar.gz > osagent-linux-x86_64.tar.gz.sha256
+  artifacts:
+    name: linux-x86_64
+    paths:
+      - osagent-linux-x86_64.tar.gz
+      - osagent-linux-x86_64.tar.gz.sha256
+
+build:windows:
+  stage: build
+  only:
+    - tags
+  script:
+    - *setup_rust
+    - *install_linux_deps
+    - *install_windows_cross_deps
+    - cross build --release --target x86_64-pc-windows-gnu --features discord
+    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/updater/target" cross build --release --target x86_64-pc-windows-gnu --manifest-path updater/Cargo.toml
+    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/launcher/target" OSAGENT_CORE_SOURCE="$CI_PROJECT_DIR/target/x86_64-pc-windows-gnu/release/osagent.exe" OSAGENT_UPDATER_SOURCE="$CI_PROJECT_DIR/updater/target/x86_64-pc-windows-gnu/release/osagent-updater.exe" cross build --release --target x86_64-pc-windows-gnu --manifest-path launcher/Cargo.toml
+    - mkdir -p dist/windows-x86_64
+    - cp launcher/target/x86_64-pc-windows-gnu/release/osagent-launcher.exe dist/windows-x86_64/osagent-launcher.exe
+    - zip -j osagent-windows-x86_64.zip dist/windows-x86_64/osagent-launcher.exe
+    - sha256sum osagent-windows-x86_64.zip > osagent-windows-x86_64.zip.sha256
+  artifacts:
+    name: windows-x86_64
+    paths:
+      - osagent-windows-x86_64.zip
+      - osagent-windows-x86_64.zip.sha256
+
+publish:r2:
+  stage: release
+  only:
+    - tags
+  dependencies:
+    - build:linux
+    - build:windows
+  script:
+    - *install_linux_deps
+    - *install_aws_cli
+    - mkdir -p release
+    - cp osagent-linux-x86_64.tar.gz release/
+    - cp osagent-linux-x86_64.tar.gz.sha256 release/
+    - cp osagent-windows-x86_64.zip release/
+    - cp osagent-windows-x86_64.zip.sha256 release/
+    - chmod +x upload-to-r2.sh
+    - ./upload-to-r2.sh "$CI_COMMIT_TAG" release
+  artifacts:
+    name: release
+    paths:
+      - release/release-manifest.json
+
+release:gitlab:
+  stage: release
+  only:
+    - tags
+  needs:
+    - publish:r2
+  script:
+    - |
+      if [ -n "$GITLAB_RELEASE_TOKEN" ]; then
+        AUTH_HEADER="PRIVATE-TOKEN: $GITLAB_RELEASE_TOKEN"
+      else
+        AUTH_HEADER="JOB-TOKEN: $CI_JOB_TOKEN"
+      fi
+    - TAG="$CI_COMMIT_TAG"
+    - RELEASE_DIR_URL="$CDN_BASE_URL/$R2_RELEASE_PREFIX/$TAG"
+    - CREATE_PAYLOAD="release-create.json"
+    - UPDATE_PAYLOAD="release-update.json"
+    - |
+      cat > "$CREATE_PAYLOAD" <<EOF
+      {
+        "name": "OSAgent ${TAG}",
+        "tag_name": "${TAG}",
+        "description": "Launcher release for Windows and Linux. Auto-updates are served from Cloudflare R2 via ${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json.",
+        "assets": {
+          "links": [
+            {
+              "name": "osagent-linux-x86_64.tar.gz",
+              "url": "${RELEASE_DIR_URL}/osagent-linux-x86_64.tar.gz",
+              "link_type": "package"
+            },
+            {
+              "name": "osagent-linux-x86_64.tar.gz.sha256",
+              "url": "${RELEASE_DIR_URL}/osagent-linux-x86_64.tar.gz.sha256",
+              "link_type": "other"
+            },
+            {
+              "name": "osagent-windows-x86_64.zip",
+              "url": "${RELEASE_DIR_URL}/osagent-windows-x86_64.zip",
+              "link_type": "package"
+            },
+            {
+              "name": "osagent-windows-x86_64.zip.sha256",
+              "url": "${RELEASE_DIR_URL}/osagent-windows-x86_64.zip.sha256",
+              "link_type": "other"
+            },
+            {
+              "name": "release-manifest.json",
+              "url": "${RELEASE_DIR_URL}/release-manifest.json",
+              "link_type": "other"
+            },
+            {
+              "name": "latest.json",
+              "url": "${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json",
+              "link_type": "other"
+            }
+          ]
+        }
+      }
+      EOF
+    - |
+      cat > "$UPDATE_PAYLOAD" <<EOF
+      {
+        "name": "OSAgent ${TAG}",
+        "description": "Launcher release for Windows and Linux. Auto-updates are served from Cloudflare R2 via ${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json.",
+        "assets": {
+          "links": [
+            {
+              "name": "osagent-linux-x86_64.tar.gz",
+              "url": "${RELEASE_DIR_URL}/osagent-linux-x86_64.tar.gz",
+              "link_type": "package"
+            },
+            {
+              "name": "osagent-linux-x86_64.tar.gz.sha256",
+              "url": "${RELEASE_DIR_URL}/osagent-linux-x86_64.tar.gz.sha256",
+              "link_type": "other"
+            },
+            {
+              "name": "osagent-windows-x86_64.zip",
+              "url": "${RELEASE_DIR_URL}/osagent-windows-x86_64.zip",
+              "link_type": "package"
+            },
+            {
+              "name": "osagent-windows-x86_64.zip.sha256",
+              "url": "${RELEASE_DIR_URL}/osagent-windows-x86_64.zip.sha256",
+              "link_type": "other"
+            },
+            {
+              "name": "release-manifest.json",
+              "url": "${RELEASE_DIR_URL}/release-manifest.json",
+              "link_type": "other"
+            },
+            {
+              "name": "latest.json",
+              "url": "${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json",
+              "link_type": "other"
+            }
+          ]
+        }
+      }
+      EOF
+    - RELEASE_API="$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
+    - STATUS=$(curl --silent --output release-check.json --write-out "%{http_code}" --header "$AUTH_HEADER" "$RELEASE_API/$TAG")
+    - |
+      if [ "$STATUS" = "200" ]; then
+        curl --silent --show-error --fail --request PUT \
+          --header "$AUTH_HEADER" \
+          --header "Content-Type: application/json" \
+          --data @"$UPDATE_PAYLOAD" \
+          "$RELEASE_API/$TAG"
+      elif [ "$STATUS" = "404" ]; then
+        curl --silent --show-error --fail --request POST \
+          --header "$AUTH_HEADER" \
+          --header "Content-Type: application/json" \
+          --data @"$CREATE_PAYLOAD" \
+          "$RELEASE_API"
+      else
+        echo "Failed to inspect GitLab release state (HTTP $STATUS)"
+        cat release-check.json
+        exit 1
+      fi

@@ -1,6 +1,8 @@
-/target
-/launcher/target
-/icon-gen/target
+# Rust build artifacts
+/target/
+/launcher/target/
+/updater/target/
+/icon-gen/target/
 **/*.rs.bk
 *.pdb
 
@@ -13,7 +15,7 @@
 *.pem
 *.crt
 
-# OSA specific
+# OSA runtime files
 .osagent/
 config.toml
 *.db
@@ -26,6 +28,11 @@ config.toml
 *.log
 *.cache
 
+# Optimization / prompt_eval output
+prompt_eval_results/
+prompt_eval_workspace/
+memory.json
+
 # Frontend / JS build output
 node_modules/
 frontend/node_modules/
@@ -33,6 +40,12 @@ dist/
 build/
 coverage/
 *.tsbuildinfo
+
+# Tauri generated schemas (build artifacts)
+launcher/gen/
+
+# Claude Code local settings (user-specific paths and permissions)
+.claude/
 
 # IDE
 .vscode/
@@ -45,15 +58,23 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Build artifacts
+# Compiled binaries (should not be committed)
 *.exe
 *.dll
 *.so
 *.dylib
-benchmark_results/
+launcher/src/core.bin
+launcher/src/updater.bin
+
+# Generated / source image assets
 /icon-gen
 frontend/images/thinking icon.psd
 frontend/images/osagent.ico
 frontend/images/300x300-logo.png
 frontend/images/3Kx3K-logo.png
+
+# Legacy / temp directories
 /legacy-launcher
+/targetverify-release-thinking-fix
+/test_cases
+/benchmark_results/

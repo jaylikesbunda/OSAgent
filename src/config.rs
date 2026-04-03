@@ -1,5 +1,6 @@
 use crate::error::{OSAgentError, Result};
 use crate::external::ExternalPermissionConfig;
+use crate::permission::{PermissionAction, PermissionRule};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -69,8 +70,23 @@ pub struct AgentConfig {
     pub thinking_level: String,
     pub checkpoint_enabled: bool,
     pub checkpoint_interval: usize,
+    pub max_iterations: usize,
     pub memory_enabled: bool,
     pub memory_file: String,
+    #[serde(default)]
+    pub permission_rules: Vec<PermissionRule>,
+    #[serde(default)]
+    pub custom_identity: Option<String>,
+    #[serde(default)]
+    pub custom_priorities: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WorkspacePath {
+    pub path: String,
+    pub permission: WorkspacePermission,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,8 +94,12 @@ pub struct AgentConfig {
 pub struct WorkspaceConfig {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub paths: Vec<WorkspacePath>,
+    #[serde(skip)]
     pub path: String,
     pub description: Option<String>,
+    #[serde(default)]
     pub permission: WorkspacePermission,
     pub created_at: String,
     pub last_used: Option<String>,
@@ -92,6 +112,18 @@ pub enum WorkspacePermission {
     ReadOnly,
     #[default]
     ReadWrite,
+}
+
+impl WorkspaceConfig {
+    pub fn resolved_path(&self) -> String {
+        if let Some(wp) = self.paths.iter().find(|wp| !wp.path.trim().is_empty()) {
+            wp.path.clone()
+        } else if !self.path.is_empty() {
+            self.path.clone()
+        } else {
+            String::new()
+        }
+    }
 }
 
 impl WorkspacePermission {
@@ -220,7 +252,6 @@ pub struct PluginConfig {
 pub struct UpdateConfig {
     pub enabled: bool,
     pub channel: String,
-    pub repo: String,
     pub check_on_startup: bool,
     pub check_interval_hours: u64,
 }
@@ -230,7 +261,6 @@ impl Default for UpdateConfig {
         Self {
             enabled: true,
             channel: "stable".to_string(),
-            repo: "owner/osagent".to_string(),
             check_on_startup: true,
             check_interval_hours: 24,
         }
@@ -280,7 +310,12 @@ impl Default for WorkspaceConfig {
         Self {
             id: "default".to_string(),
             name: "Default Workspace".to_string(),
-            path: default_workspace_path(),
+            paths: vec![WorkspacePath {
+                path: default_workspace_path(),
+                permission: WorkspacePermission::ReadWrite,
+                description: Some("Default working directory".to_string()),
+            }],
+            path: String::new(),
             description: Some("Default working directory".to_string()),
             permission: WorkspacePermission::ReadWrite,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -300,8 +335,12 @@ impl Default for AgentConfig {
             thinking_level: "auto".to_string(),
             checkpoint_enabled: true,
             checkpoint_interval: 5,
+            max_iterations: 50,
             memory_enabled: false,
             memory_file: default_memory_file(),
+            permission_rules: vec![],
+            custom_identity: None,
+            custom_priorities: None,
         }
     }
 }
@@ -477,9 +516,11 @@ impl Default for ToolsConfig {
                 "todoread".to_string(),
                 "question".to_string(),
                 "skill".to_string(),
+                "skill_list".to_string(),
                 "lsp".to_string(),
                 "plan_exit".to_string(),
                 "subagent".to_string(),
+                "coordinator".to_string(),
                 "process".to_string(),
                 "codesearch".to_string(),
                 "record_memory".to_string(),
@@ -627,6 +668,37 @@ impl Config {
         }
     }
 
+    pub fn migrate_workspace_paths(&mut self) {
+        for ws in &mut self.agent.workspaces {
+            if ws.paths.is_empty() && !ws.path.is_empty() {
+                ws.paths.push(WorkspacePath {
+                    path: shellexpand::tilde(&ws.path).to_string(),
+                    permission: ws.permission.clone(),
+                    description: Some("Primary workspace directory".to_string()),
+                });
+            }
+
+            ws.paths = ws
+                .paths
+                .iter()
+                .filter_map(|wp| {
+                    let expanded = shellexpand::tilde(&wp.path).to_string();
+                    if expanded.trim().is_empty() {
+                        None
+                    } else {
+                        Some(WorkspacePath {
+                            path: expanded,
+                            permission: wp.permission.clone(),
+                            description: wp.description.clone(),
+                        })
+                    }
+                })
+                .collect();
+
+            ws.path = ws.resolved_path();
+        }
+    }
+
     pub fn active_provider(&self) -> Option<&ProviderConfig> {
         if let Some(id) = self.default_provider.strip_prefix("env:") {
             if let Ok(key) = std::env::var(id) {
@@ -664,6 +736,8 @@ impl Config {
     }
 
     pub fn ensure_workspace_defaults(&mut self) {
+        self.migrate_workspace_paths();
+
         let fallback_path = if self.agent.workspace.trim().is_empty() {
             default_workspace_path()
         } else {
@@ -677,7 +751,42 @@ impl Config {
             if ws.id.trim().is_empty() || !seen.insert(ws.id.clone()) {
                 continue;
             }
-            ws.path = shellexpand::tilde(&ws.path).to_string();
+
+            ws.paths = ws
+                .paths
+                .iter()
+                .filter_map(|wp| {
+                    let expanded = shellexpand::tilde(&wp.path).to_string();
+                    if expanded.trim().is_empty() {
+                        None
+                    } else {
+                        Some(WorkspacePath {
+                            path: expanded,
+                            permission: wp.permission.clone(),
+                            description: wp.description.clone(),
+                        })
+                    }
+                })
+                .collect();
+
+            if ws.paths.is_empty() && !ws.path.trim().is_empty() {
+                ws.paths.push(WorkspacePath {
+                    path: shellexpand::tilde(&ws.path).to_string(),
+                    permission: ws.permission.clone(),
+                    description: Some("Primary workspace directory".to_string()),
+                });
+            }
+
+            if ws.id == "default" && ws.paths.is_empty() {
+                ws.paths.push(WorkspacePath {
+                    path: fallback_path.clone(),
+                    permission: WorkspacePermission::ReadWrite,
+                    description: Some("Default working directory".to_string()),
+                });
+            }
+
+            ws.path = ws.resolved_path();
+
             if ws.name.trim().is_empty() {
                 ws.name = ws.id.clone();
             }
@@ -691,6 +800,11 @@ impl Config {
             cleaned.push(WorkspaceConfig {
                 id: "default".to_string(),
                 name: "Default Workspace".to_string(),
+                paths: vec![WorkspacePath {
+                    path: fallback_path.clone(),
+                    permission: WorkspacePermission::ReadWrite,
+                    description: Some("Default working directory".to_string()),
+                }],
                 path: fallback_path.clone(),
                 description: Some("Default working directory".to_string()),
                 permission: WorkspacePermission::ReadWrite,
@@ -710,7 +824,12 @@ impl Config {
         self.agent.active_workspace = Some(active_id.clone());
 
         if let Some(active) = self.agent.workspaces.iter().find(|w| w.id == active_id) {
-            self.agent.workspace = active.path.clone();
+            let active_path = active.resolved_path();
+            if !active_path.trim().is_empty() {
+                self.agent.workspace = active_path;
+            } else {
+                self.agent.workspace = fallback_path;
+            }
         }
     }
 
@@ -742,15 +861,59 @@ impl Config {
 
     pub fn get_workspace_by_path(&self, path: &str) -> Option<WorkspaceConfig> {
         let expanded = shellexpand::tilde(path).to_string();
-        self.list_workspaces()
-            .into_iter()
-            .find(|w| w.path == expanded)
+        let path_canonical = Path::new(&expanded).canonicalize().ok();
+
+        for ws in self.list_workspaces() {
+            for wp in &ws.paths {
+                if wp.path == expanded {
+                    return Some(ws);
+                }
+                if let (Some(pc), Some(wpc)) =
+                    (&path_canonical, Path::new(&wp.path).canonicalize().ok())
+                {
+                    if pc.starts_with(&wpc) {
+                        return Some(ws);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_workspace_for_path(&self, path: &str) -> Option<(WorkspaceConfig, WorkspacePath)> {
+        let expanded = shellexpand::tilde(path).to_string();
+        let path_canonical = Path::new(&expanded).canonicalize().ok();
+
+        for ws in self.list_workspaces() {
+            for wp in &ws.paths {
+                if wp.path == expanded {
+                    return Some((ws.clone(), wp.clone()));
+                }
+                if let (Some(pc), Some(wpc)) =
+                    (&path_canonical, Path::new(&wp.path).canonicalize().ok())
+                {
+                    if pc.starts_with(&wpc) {
+                        return Some((ws.clone(), wp.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn is_path_in_workspace(&self, path: &str) -> bool {
+        self.get_workspace_for_path(path).is_some()
     }
 
     pub fn is_workspace_writable_for_path(&self, path: &str) -> bool {
-        self.get_workspace_by_path(path)
-            .map(|workspace| workspace.permission.allows_writes())
+        self.get_workspace_for_path(path)
+            .map(|(_, wp)| wp.permission.allows_writes())
             .unwrap_or(true)
+    }
+
+    pub fn get_path_permission(&self, path: &str) -> Option<WorkspacePermission> {
+        self.get_workspace_for_path(path)
+            .map(|(_, wp)| wp.permission)
     }
 
     pub fn add_workspace(&mut self, mut workspace: WorkspaceConfig) -> Result<()> {
@@ -762,7 +925,11 @@ impl Config {
             )));
         }
 
-        workspace.path = shellexpand::tilde(&workspace.path).to_string();
+        for wp in &mut workspace.paths {
+            wp.path = shellexpand::tilde(&wp.path).to_string();
+        }
+        workspace.paths.retain(|wp| !wp.path.trim().is_empty());
+        workspace.path = workspace.resolved_path();
         if workspace.created_at.trim().is_empty() {
             workspace.created_at = chrono::Utc::now().to_rfc3339();
         }
@@ -778,7 +945,11 @@ impl Config {
             .iter()
             .position(|w| w.id == workspace.id)
         {
-            workspace.path = shellexpand::tilde(&workspace.path).to_string();
+            for wp in &mut workspace.paths {
+                wp.path = shellexpand::tilde(&wp.path).to_string();
+            }
+            workspace.paths.retain(|wp| !wp.path.trim().is_empty());
+            workspace.path = workspace.resolved_path();
             if workspace.created_at.trim().is_empty() {
                 workspace.created_at = self.agent.workspaces[idx].created_at.clone();
             }
@@ -790,6 +961,94 @@ impl Config {
             "Workspace with ID '{}' not found",
             workspace.id
         )))
+    }
+
+    pub fn add_workspace_path(
+        &mut self,
+        workspace_id: &str,
+        mut path: WorkspacePath,
+    ) -> Result<()> {
+        self.ensure_workspace_defaults();
+        let ws = self
+            .agent
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or_else(|| {
+                OSAgentError::Config(format!("Workspace '{}' not found", workspace_id))
+            })?;
+
+        path.path = shellexpand::tilde(&path.path).to_string();
+        ws.paths.push(path);
+        ws.paths.retain(|wp| !wp.path.trim().is_empty());
+        ws.path = ws.resolved_path();
+        Ok(())
+    }
+
+    pub fn remove_workspace_path(&mut self, workspace_id: &str, path_index: usize) -> Result<()> {
+        self.ensure_workspace_defaults();
+        let ws = self
+            .agent
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or_else(|| {
+                OSAgentError::Config(format!("Workspace '{}' not found", workspace_id))
+            })?;
+
+        if ws.paths.len() <= 1 {
+            return Err(OSAgentError::Config(
+                "Cannot remove the last path from a workspace".to_string(),
+            ));
+        }
+
+        if path_index >= ws.paths.len() {
+            return Err(OSAgentError::Config(format!(
+                "Path index {} out of bounds",
+                path_index
+            )));
+        }
+
+        ws.paths.remove(path_index);
+        ws.path = ws.resolved_path();
+        Ok(())
+    }
+
+    pub fn update_workspace_path(
+        &mut self,
+        workspace_id: &str,
+        path_index: usize,
+        mut path: WorkspacePath,
+    ) -> Result<()> {
+        self.ensure_workspace_defaults();
+        let ws = self
+            .agent
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or_else(|| {
+                OSAgentError::Config(format!("Workspace '{}' not found", workspace_id))
+            })?;
+
+        if path_index >= ws.paths.len() {
+            return Err(OSAgentError::Config(format!(
+                "Path index {} out of bounds",
+                path_index
+            )));
+        }
+
+        path.path = shellexpand::tilde(&path.path).to_string();
+        ws.paths[path_index] = path;
+        ws.paths.retain(|wp| !wp.path.trim().is_empty());
+        ws.path = ws.resolved_path();
+        Ok(())
+    }
+
+    pub fn get_workspace_paths(&self, workspace_id: &str) -> Option<Vec<WorkspacePath>> {
+        self.list_workspaces()
+            .into_iter()
+            .find(|w| w.id == workspace_id)
+            .map(|w| w.paths)
     }
 
     pub fn remove_workspace(&mut self, id: &str) -> Result<()> {
@@ -813,6 +1072,53 @@ impl Config {
             self.agent.active_workspace = Some("default".to_string());
         }
         Ok(())
+    }
+
+    pub fn add_permission_rule(&mut self, mut rule: PermissionRule) -> Result<()> {
+        if rule.id.is_empty() {
+            rule.id = uuid::Uuid::new_v4().to_string();
+        }
+        self.agent.permission_rules.push(rule);
+        Ok(())
+    }
+
+    pub fn remove_permission_rule(&mut self, rule_id: &str) -> Result<()> {
+        let before = self.agent.permission_rules.len();
+        self.agent.permission_rules.retain(|r| r.id != rule_id);
+        if self.agent.permission_rules.len() == before {
+            return Err(OSAgentError::Config(format!(
+                "Permission rule '{}' not found",
+                rule_id
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn get_permission_rules(&self) -> Vec<PermissionRule> {
+        self.agent.permission_rules.clone()
+    }
+
+    pub fn evaluate_permission_rule(
+        &self,
+        tool_name: &str,
+        path: &str,
+    ) -> Option<PermissionAction> {
+        let path = shellexpand::tilde(path).to_string();
+        for rule in &self.agent.permission_rules {
+            let matches_tool = rule.permission == "all" || rule.permission == tool_name;
+            if !matches_tool {
+                continue;
+            }
+            let matches_path = if let Ok(matcher) = globset::Glob::new(&rule.pattern) {
+                matcher.compile_matcher().is_match(&path)
+            } else {
+                false
+            };
+            if matches_path {
+                return Some(rule.action.clone());
+            }
+        }
+        None
     }
 }
 

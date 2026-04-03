@@ -116,14 +116,15 @@
 }
 
 .todo-dock {
-    max-width: 980px;
-    margin: 8px auto 0;
+    width: min(1120px, calc(100% - 32px));
+    max-width: 1120px;
+    margin: 12px auto 18px;
     padding: 10px 14px;
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 14px;
     cursor: pointer;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, background 0.15s;
 }
 
 .todo-dock:hover {
@@ -138,30 +139,21 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
 }
 
-.dock-header-left {
+.dock-copy {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
+    gap: 2px;
     min-width: 0;
-}
-
-.dock-icon {
-    font-size: 14px;
-    flex-shrink: 0;
+    flex: 1 1 auto;
 }
 
 .dock-counter {
-    font-family: 'SF Mono', Monaco, monospace;
     font-size: 12px;
     font-weight: 600;
     color: var(--text-primary);
-}
-
-.dock-sep {
-    color: var(--text-muted);
-    font-size: 12px;
 }
 
 .dock-active-task {
@@ -176,74 +168,74 @@
     font-size: 10px;
     color: var(--text-muted);
     transition: transform 0.2s;
+    flex-shrink: 0;
 }
 
 .todo-dock .dock-chevron {
     transition: transform 0.2s, opacity 0.2s;
 }
 
-.dock-progress {
-    height: 2px;
-    background: var(--bg-secondary);
-    border-radius: 1px;
-    margin-top: 10px;
-    overflow: hidden;
-}
-
-.dock-progress-fill {
-    height: 100%;
-    background: var(--text-primary);
-    border-radius: 1px;
-    width: 0%;
-    transition: width 0.4s ease;
-}
-
 .dock-list {
     margin-top: 10px;
-    max-height: 200px;
+    max-height: 220px;
     overflow-y: auto;
-}
-
-.dock-group-label {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 4px;
-    margin-top: 10px;
-}
-
-.dock-group-label:first-child {
-    margin-top: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
 }
 
 .dock-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
-    padding: 5px 0;
+    padding: 2px 0;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-primary);
 }
 
 .dock-item.completed {
     text-decoration: line-through;
-    opacity: 0.5;
+    opacity: 0.55;
 }
 
-.dock-item-icon {
+.dock-item.cancelled {
+    text-decoration: line-through;
+    opacity: 0.55;
+}
+
+.dock-item-marker {
     width: 16px;
-    text-align: center;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
-    font-size: 11px;
+    margin-top: 1px;
 }
 
-.dock-item.in_progress .dock-item-icon {
+.dock-item-check {
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
     color: var(--text-primary);
+}
+
+.dock-item-pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--text-primary);
+    display: inline-block;
     animation: badgePulse 1.5s ease-in-out infinite;
 }
 
-.dock-item.completed .dock-item-icon {
-    color: #22c55e;
+.dock-item-text {
+    min-width: 0;
+    line-height: 1.4;
+    word-break: break-word;
 }

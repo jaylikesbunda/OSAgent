@@ -198,6 +198,14 @@ audit_file = "~/.osagent/audit.log"
 [storage]
 database = "~/.osagent/osagent.db"
 
+# --- Update Configuration ---
+# Updates are served from Cloudflare R2 CDN.
+# [update]
+# enabled = true
+# channel = "stable"          # stable, beta, dev
+# check_on_startup = true
+# check_interval_hours = 24
+
 # Available provider presets and their models:
 #   openrouter:  200+ models via openrouter.ai (Claude, GPT, Gemini, Llama, etc.)
 #   openai:      GPT-4.1, GPT-4.1 Mini, GPT-4o, GPT-4o Mini, o3-mini

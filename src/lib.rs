@@ -14,6 +14,8 @@
 
 pub mod agent;
 pub mod config;
+#[cfg(feature = "discord")]
+pub mod discord;
 pub mod error;
 pub mod external;
 pub mod indexer;
@@ -21,10 +23,10 @@ pub mod lsp;
 pub mod oauth;
 pub mod permission;
 pub mod plugin;
+pub mod prompt_eval;
 pub mod skills;
 pub mod storage;
 pub mod tools;
-pub mod tts;
 pub mod update;
 pub mod voice;
 pub mod web;

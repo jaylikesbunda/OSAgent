@@ -51,8 +51,11 @@ jobs:
       - name: Build core with Discord
         run: cargo build --release --features discord
 
+      - name: Build updater
+        run: CARGO_TARGET_DIR="$GITHUB_WORKSPACE/updater/target" cargo build --manifest-path updater/Cargo.toml --release
+
       - name: Build launcher with embedded core
-        run: cargo build --manifest-path launcher/Cargo.toml --release
+        run: CARGO_TARGET_DIR="$GITHUB_WORKSPACE/launcher/target" OSAGENT_CORE_SOURCE="$GITHUB_WORKSPACE/target/release/osagent" OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater" cargo build --manifest-path launcher/Cargo.toml --release
 
       - name: Run benchmarks
         run: cargo bench --bench performance -- --save-baseline ci | tee benchmark_results.txt

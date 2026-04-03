@@ -1,5 +1,10 @@
 window.OSA = window.OSA || {};
 
+OSA.isHiddenSyntheticMessage = function(message) {
+    if (!message || !message.metadata) return false;
+    return !!message.metadata.synthetic;
+};
+
 OSA.showThinkingIndicator = function() {
     const messagesDiv = document.getElementById('messages');
     const existing = document.getElementById('thinking-indicator');
@@ -259,7 +264,7 @@ OSA.ensureCurrentSessionAssistantMessage = function() {
     if (!session) return null;
     if (!Array.isArray(session.messages)) session.messages = [];
     const last = session.messages[session.messages.length - 1];
-    if (last && last.role === 'assistant') return last;
+    if (last && last.role === 'assistant' && !OSA.isHiddenSyntheticMessage(last)) return last;
 
     const next = {
         role: 'assistant',
@@ -362,7 +367,11 @@ OSA.getActiveTurnAssistantMessage = function(session) {
         return null;
     }
 
-    const visible = session.messages.filter(message => message.role !== 'tool');
+    const visible = session.messages.filter(message => {
+        if (message.role === 'tool') return false;
+        if (OSA.isHiddenSyntheticMessage(message)) return false;
+        return true;
+    });
     if (!visible.length) {
         return null;
     }
@@ -822,6 +831,7 @@ OSA.renderMessages = function(messages) {
         .map((message, originalIndex) => ({ message, originalIndex }))
         .filter(({ message }) => {
             if (message.role === 'tool') return false;
+            if (OSA.isHiddenSyntheticMessage(message)) return false;
             if (message.role !== 'assistant') return true;
             const hasContent = !!(message.content || '').trim();
             const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
@@ -882,9 +892,12 @@ OSA.updateTodoDock = function() {
     const dock = document.getElementById('todo-dock');
     if (!dock) return;
     const todos = OSA.getSessionTodos() || [];
-    const active = todos.filter(t => t.status === 'in_progress');
     const completed = todos.filter(t => t.status === 'completed');
     const total = todos.length;
+    const active = todos.find(t => t.status === 'in_progress')
+        || todos.find(t => t.status === 'pending')
+        || [...todos].reverse().find(t => t.status === 'completed' || t.status === 'cancelled')
+        || todos[0];
 
     if (total === 0) {
         dock.classList.add('hidden');
@@ -895,23 +908,20 @@ OSA.updateTodoDock = function() {
 
     const counterEl = dock.querySelector('.dock-counter');
     if (counterEl) {
-        counterEl.textContent = `${completed.length}/${total}`;
+        counterEl.textContent = `${completed.length} of ${total} todos completed`;
     }
 
     const activeEl = dock.querySelector('.dock-active-task');
     if (activeEl) {
-        activeEl.textContent = active.length ? active[0].content : (completed.length === total ? 'All tasks completed' : 'No active task');
+        activeEl.textContent = active?.content || (completed.length === total ? 'All tasks completed' : 'No active task');
     }
 
-    const progressBar = dock.querySelector('.dock-progress-fill');
-    if (progressBar) {
-        const pct = total > 0 ? Math.round((completed.length / total) * 100) : 0;
-        progressBar.style.width = `${pct}%`;
+    const chevron = dock.querySelector('.dock-chevron');
+    if (chevron) {
+        chevron.style.transform = OSA.getTodoDockExpanded() ? 'rotate(180deg)' : 'rotate(0deg)';
     }
 
-    if (OSA.getTodoDockExpanded()) {
-        OSA.renderTodoDockList(dock, todos);
-    }
+    OSA.renderTodoDockList(dock, todos);
 };
 
 OSA.toggleTodoDock = function() {
@@ -930,27 +940,22 @@ OSA.renderTodoDockList = function(dock, todos) {
     }
 
     list.style.display = '';
-    const byStatus = { in_progress: [], pending: [], completed: [], cancelled: [] };
-    todos.forEach(t => {
-        const s = (t.status || 'pending').toLowerCase();
-        if (byStatus[s]) byStatus[s].push(t);
+    const order = { in_progress: 0, pending: 1, completed: 2, cancelled: 3 };
+    const sorted = [...todos].sort((a, b) => {
+        const left = order[(a.status || 'pending').toLowerCase()] ?? 99;
+        const right = order[(b.status || 'pending').toLowerCase()] ?? 99;
+        if (left !== right) return left - right;
+        return (a.position ?? 0) - (b.position ?? 0);
     });
 
-    let html = '';
-    const renderGroup = (items, label) => {
-        if (!items.length) return '';
-        let h = `<div class="dock-group-label">${label}</div>`;
-        items.forEach(t => {
-            const status = (t.status || 'pending').toLowerCase();
-            const icon = status === 'completed' ? '&#x2713;' : status === 'in_progress' ? '&#x25CF;' : '&#x25CB;';
-            h += `<div class="dock-item ${status}"><span class="dock-item-icon">${icon}</span><span class="dock-item-text">${OSA.escapeHtml(t.content || '')}</span></div>`;
-        });
-        return h;
-    };
-    html += renderGroup(byStatus.in_progress, 'In Progress');
-    html += renderGroup(byStatus.pending, 'Pending');
-    html += renderGroup(byStatus.completed, 'Completed');
-    list.innerHTML = html;
+    list.innerHTML = sorted.map(t => {
+        const status = (t.status || 'pending').toLowerCase();
+        const done = status === 'completed' || status === 'cancelled';
+        const marker = status === 'in_progress'
+            ? '<span class="dock-item-pulse"></span>'
+            : `<span class="dock-item-check">${done ? '&#10003;' : ''}</span>`;
+        return `<div class="dock-item ${status}"><span class="dock-item-marker">${marker}</span><span class="dock-item-text">${OSA.escapeHtml(t.content || '')}</span></div>`;
+    }).join('');
 };
 
 window.copyAssistantMessage = OSA.copyAssistantMessage;

@@ -11,22 +11,37 @@ use std::time::Duration;
 
 pub struct BashTool {
     config: BashToolConfig,
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     writable: bool,
 }
 
 impl BashTool {
+    fn default_workspace(&self) -> Result<PathBuf> {
+        self.workspaces.first().cloned().ok_or_else(|| {
+            OSAgentError::ToolExecution(
+                "No workspace configured. Set a workspace path in settings.".to_string(),
+            )
+        })
+    }
+
     pub fn new(config: Config) -> Self {
         let writable = config.is_workspace_writable_for_path(&config.agent.workspace);
-        let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
-
-        if !workspace.exists() {
-            let _ = std::fs::create_dir_all(&workspace);
-        }
+        let workspaces: Vec<PathBuf> = config
+            .get_active_workspace()
+            .paths
+            .iter()
+            .map(|wp| {
+                let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+                if !path.exists() {
+                    let _ = std::fs::create_dir_all(&path);
+                }
+                path.canonicalize().unwrap_or(path)
+            })
+            .collect();
 
         Self {
             config: config.tools.bash,
-            workspace,
+            workspaces,
             writable,
         }
     }
@@ -90,8 +105,14 @@ impl BashTool {
     }
 
     fn validate_workdir(&self, workdir: Option<&str>) -> Result<PathBuf> {
+        let default_ws = self.workspaces.first().ok_or_else(|| {
+            OSAgentError::ToolExecution(
+                "No workspace configured. Set a workspace path in settings.".to_string(),
+            )
+        })?;
+
         let Some(workdir) = workdir.map(str::trim).filter(|value| !value.is_empty()) else {
-            return Ok(self.workspace.clone());
+            return Ok(default_ws.clone());
         };
 
         ensure_relative_path_not_backups(workdir)?;
@@ -102,8 +123,8 @@ impl BashTool {
             ));
         }
 
-        let resolved = self.workspace.join(workdir);
-        if !resolved.starts_with(&self.workspace) {
+        let resolved = default_ws.join(workdir);
+        if !self.workspaces.iter().any(|ws| resolved.starts_with(ws)) {
             return Err(OSAgentError::ToolExecution(
                 "workdir must stay inside the workspace".to_string(),
             ));
@@ -444,7 +465,7 @@ impl Tool for BashTool {
 
                 if !output_result.status.success() {
                     Ok(maybe_store_large_output(
-                        &self.workspace,
+                        &self.default_workspace()?,
                         self.writable,
                         "bash",
                         &format!(
@@ -456,14 +477,14 @@ impl Tool for BashTool {
                     ))
                 } else if stderr.is_empty() {
                     Ok(maybe_store_large_output(
-                        &self.workspace,
+                        &self.default_workspace()?,
                         self.writable,
                         "bash",
                         &stdout,
                     ))
                 } else {
                     Ok(maybe_store_large_output(
-                        &self.workspace,
+                        &self.default_workspace()?,
                         self.writable,
                         "bash",
                         &format!("{}\n{}", stdout, stderr),

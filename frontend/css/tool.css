@@ -76,6 +76,28 @@
     background: var(--bg-hover);
 }
 
+/* ---- Inline variant (compact, expandable) ---- */
+
+.tool-inline {
+    background: transparent;
+    border: none;
+    padding: 2px 0;
+}
+
+.tool-trigger-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    transition: background 0.15s ease;
+    cursor: pointer;
+}
+
+.tool-trigger-inline:hover {
+    background: var(--bg-hover);
+}
+
 /* ---- Panel variant (expandable) ---- */
 
 .tool-panel {
@@ -372,6 +394,45 @@
     color: #ef4444;
 }
 
+/* ---- Context inline (simplified) ---- */
+
+.context-inline-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 2px 0;
+    margin-bottom: 4px;
+}
+
+.context-inline-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 4px;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.context-inline-action {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.context-inline-detail {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.context-inline-status {
+    font-size: 10px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
 /* ---- Subagent card ---- */
 
 .subagent-card {
@@ -498,14 +559,22 @@
 }
 
 .subagent-context-ring {
-    display: flex;
+    position: relative;
+    display: inline-flex;
     align-items: center;
-    gap: 2px;
+    justify-content: center;
     cursor: default;
+    width: 22px;
+    height: 22px;
 }
 
 .subagent-context-ring svg {
     transform: rotate(-90deg);
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 22px;
+    height: 22px;
 }
 
 .subagent-context-ring .context-ring-bg {
@@ -531,10 +600,15 @@
 }
 
 .subagent-context-pct {
-    font-size: 9px;
-    font-weight: 600;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 7px;
+    font-weight: 700;
     color: var(--text-secondary);
-    min-width: 22px;
+    line-height: 1;
+    pointer-events: none;
 }
 
 .subagent-body {
@@ -630,4 +704,56 @@
 .subagent-btn-cancel:hover {
     color: #ef4444;
     border-color: #ef4444;
+}
+
+/* ---- Coordinator status ---- */
+
+.coordinator-card {
+    max-width: 800px;
+    margin: 0 auto 12px;
+    border-radius: 8px;
+    overflow: hidden;
+    animation: toolSlideIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.coordinator-active {
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent);
+}
+
+.coordinator-complete {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    opacity: 0.8;
+}
+
+.coordinator-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+}
+
+.coordinator-icon {
+    font-size: 14px;
+}
+
+.coordinator-spinner {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.coordinator-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.coordinator-workers {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-left: auto;
 }

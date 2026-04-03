@@ -1,5 +1,11 @@
 use thiserror::Error;
 
+impl From<tokio::task::JoinError> for OSAgentError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        OSAgentError::Unknown(format!("Task join error: {}", e))
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum OSAgentError {
     #[error("Configuration error: {0}")]
@@ -13,6 +19,9 @@ pub enum OSAgentError {
 
     #[error("Tool not allowed: {0}")]
     ToolNotAllowed(String),
+
+    #[error("External path access requires permission: {path}")]
+    ExternalPathAccess { path: String },
 
     #[allow(dead_code)]
     #[error("Invalid parameters: expected {expected}, got {got}")]

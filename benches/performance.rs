@@ -1,9 +1,13 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use memory_stats::memory_stats;
+use osagent::storage::{Message as StorageMessage, SqliteStorage};
+use osagent::workflow::db::WorkflowDb;
+use osagent::workflow::types::{NodeLog, Workflow, WorkflowRun, WorkflowVersion};
 use std::fs;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use uuid::Uuid;
 
 fn get_memory_bytes() -> Option<usize> {
     memory_stats().map(|m| m.physical_mem)
@@ -224,7 +228,8 @@ fn bench_sqlite_operations(c: &mut Criterion) {
     use rusqlite::Connection;
 
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("bench.db");
+    let db_path = temp_dir.path().join("insert_bench.db");
+    let select_db_path = temp_dir.path().join("select_bench.db");
 
     let mut group = c.benchmark_group("sqlite");
 
@@ -253,7 +258,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
         })
     });
 
-    let mut conn = Connection::open(&db_path).unwrap();
+    let mut conn = Connection::open(&select_db_path).unwrap();
     conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", [])
         .unwrap();
     let tx = conn.transaction().unwrap();
@@ -285,6 +290,261 @@ fn bench_sqlite_operations(c: &mut Criterion) {
     group.finish();
 }
 
+fn sample_storage_messages(count: usize) -> Vec<StorageMessage> {
+    (0..count)
+        .map(|i| StorageMessage::user(format!("message {}", i)))
+        .collect()
+}
+
+fn sample_workflow() -> Workflow {
+    Workflow {
+        id: Uuid::new_v4().to_string(),
+        name: "bench workflow".to_string(),
+        description: Some("workflow benchmark".to_string()),
+        current_version: 1,
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn sample_workflow_version(workflow_id: &str) -> WorkflowVersion {
+    WorkflowVersion {
+        id: Uuid::new_v4().to_string(),
+        workflow_id: workflow_id.to_string(),
+        version: 1,
+        graph_json: serde_json::json!({
+            "nodes": [
+                {
+                    "id": "trigger-1",
+                    "node_type": "trigger",
+                    "position": {"x": 0.0, "y": 0.0},
+                    "config": {}
+                },
+                {
+                    "id": "output-1",
+                    "node_type": "output",
+                    "position": {"x": 200.0, "y": 0.0},
+                    "config": {"format": "text", "template": "done"}
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-1",
+                    "source_node_id": "trigger-1",
+                    "source_port": "out",
+                    "target_node_id": "output-1",
+                    "target_port": "in"
+                }
+            ]
+        })
+        .to_string(),
+        created_at: String::new(),
+    }
+}
+
+fn sample_workflow_run(workflow_id: &str) -> WorkflowRun {
+    WorkflowRun {
+        id: Uuid::new_v4().to_string(),
+        workflow_id: workflow_id.to_string(),
+        workflow_version: 1,
+        status: "running".to_string(),
+        started_at: String::new(),
+        completed_at: None,
+        error_message: None,
+    }
+}
+
+fn sample_node_log(run_id: &str, idx: usize) -> NodeLog {
+    NodeLog {
+        id: Uuid::new_v4().to_string(),
+        run_id: run_id.to_string(),
+        node_id: format!("node-{}", idx),
+        node_type: if idx % 2 == 0 { "agent" } else { "transform" }.to_string(),
+        status: "completed".to_string(),
+        input_json: Some(serde_json::json!({"index": idx, "input": "bench"}).to_string()),
+        output_json: Some(serde_json::json!({"index": idx, "output": "ok"}).to_string()),
+        started_at: String::new(),
+        completed_at: None,
+    }
+}
+
+fn bench_app_storage_operations(c: &mut Criterion) {
+    let temp_dir = TempDir::new().unwrap();
+    let mut group = c.benchmark_group("app_storage");
+
+    group.bench_function("open_and_migrate", |b| {
+        b.iter(|| {
+            let db_path = temp_dir
+                .path()
+                .join(format!("storage_init_{}.db", Uuid::new_v4()));
+            let storage = SqliteStorage::new(&db_path.to_string_lossy()).unwrap();
+            drop(storage);
+            fs::remove_file(db_path).ok();
+        })
+    });
+
+    let create_path = temp_dir.path().join("storage_create.db");
+    let create_storage = SqliteStorage::new(&create_path.to_string_lossy()).unwrap();
+    group.bench_function("create_session", |b| {
+        b.iter(|| {
+            create_storage
+                .create_session(
+                    "gpt-4o-mini".to_string(),
+                    "openai".to_string(),
+                    Some("bench session".to_string()),
+                )
+                .unwrap()
+        })
+    });
+
+    let read_path = temp_dir.path().join("storage_read.db");
+    let read_storage = SqliteStorage::new(&read_path.to_string_lossy()).unwrap();
+    let mut read_session = read_storage
+        .create_session(
+            "gpt-4o-mini".to_string(),
+            "openai".to_string(),
+            Some("bench read".to_string()),
+        )
+        .unwrap();
+    read_session.messages = sample_storage_messages(100);
+    read_session.context_state = Some(osagent::storage::SessionContextState {
+        estimated_tokens: 8_192,
+        context_window: 128_000,
+        budget_tokens: 32_000,
+        actual_usage: None,
+        tool_usage: vec![],
+        compaction_stats: Default::default(),
+    });
+    read_storage.update_session(&read_session).unwrap();
+    let read_session_id = read_session.id.clone();
+    group.bench_function("get_session_100_messages", |b| {
+        b.iter(|| {
+            read_storage
+                .get_session(black_box(&read_session_id))
+                .unwrap()
+        })
+    });
+
+    let update_path = temp_dir.path().join("storage_update.db");
+    let update_storage = SqliteStorage::new(&update_path.to_string_lossy()).unwrap();
+    let update_session = update_storage
+        .create_session(
+            "gpt-4o-mini".to_string(),
+            "openai".to_string(),
+            Some("bench update".to_string()),
+        )
+        .unwrap();
+    let mut update_payload = update_session.clone();
+    update_payload.messages = sample_storage_messages(100);
+    update_payload.metadata = serde_json::json!({"name": "bench update", "iteration": 1});
+    update_payload.context_state = Some(osagent::storage::SessionContextState {
+        estimated_tokens: 8_192,
+        context_window: 128_000,
+        budget_tokens: 32_000,
+        actual_usage: None,
+        tool_usage: vec![],
+        compaction_stats: Default::default(),
+    });
+    group.bench_function("update_session_100_messages", |b| {
+        b.iter(|| {
+            update_storage
+                .update_session(black_box(&update_payload))
+                .unwrap()
+        })
+    });
+
+    let list_path = temp_dir.path().join("storage_list.db");
+    let list_storage = SqliteStorage::new(&list_path.to_string_lossy()).unwrap();
+    for i in 0..1000 {
+        list_storage
+            .create_session(
+                "gpt-4o-mini".to_string(),
+                "openai".to_string(),
+                Some(format!("session {}", i)),
+            )
+            .unwrap();
+    }
+    group.bench_function("list_sessions_1000", |b| {
+        b.iter(|| list_storage.list_sessions().unwrap())
+    });
+
+    group.finish();
+}
+
+fn bench_workflow_db_operations(c: &mut Criterion) {
+    let temp_dir = TempDir::new().unwrap();
+    let mut group = c.benchmark_group("workflow_db");
+
+    group.bench_function("init_tables", |b| {
+        b.iter(|| {
+            let db_path = temp_dir
+                .path()
+                .join(format!("workflow_init_{}.db", Uuid::new_v4()));
+            let workflow_db = WorkflowDb::new(db_path.clone());
+            workflow_db.init_tables().unwrap();
+            fs::remove_file(db_path).ok();
+        })
+    });
+
+    let create_path = temp_dir.path().join("workflow_create.db");
+    let create_db = WorkflowDb::new(create_path.clone());
+    create_db.init_tables().unwrap();
+    group.bench_function("create_workflow", |b| {
+        b.iter(|| {
+            create_db
+                .create_workflow(black_box(&sample_workflow()))
+                .unwrap()
+        })
+    });
+
+    let version_path = temp_dir.path().join("workflow_version.db");
+    let version_db = WorkflowDb::new(version_path.clone());
+    version_db.init_tables().unwrap();
+    let workflow = sample_workflow();
+    version_db.create_workflow(&workflow).unwrap();
+    let version = sample_workflow_version(&workflow.id);
+    version_db.create_version(&version).unwrap();
+    group.bench_function("get_version", |b| {
+        b.iter(|| {
+            version_db
+                .get_version(black_box(&workflow.id), black_box(1))
+                .unwrap()
+        })
+    });
+
+    let list_path = temp_dir.path().join("workflow_list.db");
+    let list_db = WorkflowDb::new(list_path.clone());
+    list_db.init_tables().unwrap();
+    for _ in 0..1000 {
+        let workflow = sample_workflow();
+        list_db.create_workflow(&workflow).unwrap();
+    }
+    group.bench_function("list_workflows_1000", |b| {
+        b.iter(|| list_db.list_workflows().unwrap())
+    });
+
+    let logs_path = temp_dir.path().join("workflow_logs.db");
+    let logs_db = WorkflowDb::new(logs_path.clone());
+    logs_db.init_tables().unwrap();
+    let logs_workflow = sample_workflow();
+    logs_db.create_workflow(&logs_workflow).unwrap();
+    logs_db
+        .create_version(&sample_workflow_version(&logs_workflow.id))
+        .unwrap();
+    let run = sample_workflow_run(&logs_workflow.id);
+    logs_db.create_run(&run).unwrap();
+    for i in 0..1000 {
+        logs_db
+            .create_node_log(&sample_node_log(&run.id, i))
+            .unwrap();
+    }
+    group.bench_function("get_node_logs_1000", |b| {
+        b.iter(|| logs_db.get_node_logs(black_box(&run.id)).unwrap())
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -297,7 +557,9 @@ criterion_group! {
         bench_regex_search,
         bench_hashmap_operations,
         bench_string_operations,
-        bench_sqlite_operations
+        bench_sqlite_operations,
+        bench_app_storage_operations,
+        bench_workflow_db_operations
 }
 
 criterion_main!(benches);

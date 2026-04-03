@@ -7,72 +7,20 @@ on:
     branches: [ main ]
 
 jobs:
-  core:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable]
-    
+  quick:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-      
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-git-
-      
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-target-
-      
+
       - name: Check formatting
-        run: cargo fmt -- --check
-      
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      
-      - name: Run tests
-        run: cargo test --all-features --verbose
-      
-      - name: Build
-        run: cargo build --release
+        run: cargo fmt --all -- --check
 
-  launcher:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
-      fail-fast: true
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux launcher dependencies
-        if: runner.os == 'Linux'
+      - name: Install Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -90,35 +38,61 @@ jobs:
             libsoup-3.0-dev \
             libgtk-3-dev
 
-      - name: Cache launcher cargo registry
-        uses: actions/cache@v4
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  windows-launcher:
+    needs: quick
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-launcher-cargo-registry-${{ hashFiles('launcher/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-launcher-cargo-registry-
+          components: rustfmt, clippy
 
-      - name: Cache launcher cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-launcher-cargo-git-${{ hashFiles('launcher/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-launcher-cargo-git-
+      - name: Build launcher flow on Windows
+        shell: pwsh
+        run: ./build-launcher.ps1 -Checks
 
-      - name: Cache launcher target directory
-        uses: actions/cache@v4
-        with:
-          path: launcher/target
-          key: ${{ runner.os }}-launcher-target-${{ hashFiles('launcher/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-launcher-target-
+  linux-launcher:
+    needs: quick
+    runs-on: ubuntu-latest
 
-      - name: Check launcher formatting
-        run: cargo fmt --manifest-path launcher/Cargo.toml --all -- --check
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Run launcher clippy
-        run: cargo clippy --manifest-path launcher/Cargo.toml --all-targets --all-features -- -D warnings
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build launcher
-        run: cargo build --manifest-path launcher/Cargo.toml --release
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libwayland-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev
+
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
+      - name: Build core
+        run: cargo build --release --features discord
+
+      - name: Build updater
+        run: CARGO_TARGET_DIR="$GITHUB_WORKSPACE/updater/target" cargo build --manifest-path updater/Cargo.toml --release
+
+      - name: Build launcher with embedded core and updater
+        run: CARGO_TARGET_DIR="$GITHUB_WORKSPACE/launcher/target" OSAGENT_CORE_SOURCE="$GITHUB_WORKSPACE/target/release/osagent" OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater" cargo build --manifest-path launcher/Cargo.toml --release

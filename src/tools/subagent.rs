@@ -113,7 +113,8 @@ impl Tool for SubagentTool {
             subagent_session_id
         );
 
-        let (status, result) = manager.wait_for_subagent(&subagent_session_id, 300).await?;
+        let (status, result, _tool_count) =
+            manager.wait_for_subagent(&subagent_session_id, 300).await?;
 
         info!(
             "SubagentTool: subagent {} finished with status={}",

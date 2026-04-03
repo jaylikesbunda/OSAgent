@@ -55,6 +55,12 @@ button { cursor: pointer; }
   border-bottom: 1px solid var(--border);
   padding: 0 4px;
   flex-shrink: 0;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.titlebar button, .titlebar input, .titlebar select {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .titlebar-brand { display: flex; align-items: center; gap: 6px; }

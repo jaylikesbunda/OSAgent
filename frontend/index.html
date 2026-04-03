@@ -127,6 +127,16 @@
                             <div class="empty-state-text">Click "New chat" to begin</div>
                         </div>
                     </div>
+                    <div id="todo-dock" class="todo-dock hidden" onclick="OSA.toggleTodoDock()">
+                        <div class="dock-header">
+                            <div class="dock-copy">
+                                <div class="dock-counter"></div>
+                                <div class="dock-active-task"></div>
+                            </div>
+                            <div class="dock-chevron">&#9662;</div>
+                        </div>
+                        <div class="dock-list" style="display: none;"></div>
+                    </div>
                     <div class="input-area">
                          <div class="input-bar-wrap">
                              <div class="input-left-controls">
@@ -171,18 +181,9 @@
                                         <input type="text" id="workspace-inline-name" placeholder="My App Workspace" />
                                     </div>
                                     <div class="workspace-field full">
-                                        <label for="workspace-inline-path">Folder</label>
-                                        <div class="path-field">
-                                            <input type="text" id="workspace-inline-path" placeholder="Choose a folder" />
-                                            <button class="control-btn" type="button" onclick="browseWorkspacePath()">Browse</button>
+                                        <label>Paths <span style="font-weight: normal; opacity: 0.7;">(click + to add)</span></label>
+                                        <div id="workspace-paths-container" class="workspace-paths-container">
                                         </div>
-                                    </div>
-                                    <div class="workspace-field">
-                                        <label for="workspace-inline-permission">Permission</label>
-                                        <select id="workspace-inline-permission">
-                                            <option value="read_write">Read + write</option>
-                                            <option value="read_only">Read only</option>
-                                        </select>
                                     </div>
                                     <div class="workspace-field">
                                         <label for="workspace-inline-description">Description</label>
@@ -337,6 +338,7 @@
                         <option value="skills">Skills</option>
                         <option value="security">Security</option>
                         <option value="experimental">Experimental</option>
+                        <option value="updates">Updates</option>
                     </optgroup>
                 </select>
             </div>
@@ -379,6 +381,9 @@
                         </button>
                         <button class="settings-sidebar-item" data-tab="experimental" onclick="switchSettingsTab('experimental')">
                             Experimental
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="updates" onclick="switchSettingsTab('updates')">
+                            Updates
                         </button>
                     </div>
                 </div>
@@ -482,7 +487,7 @@
                 <div class="settings-pane" id="pane-agent">
                     <div class="settings-pane-header">
                         <h2>Agent</h2>
-                        <p class="settings-pane-desc">Adjust generation parameters</p>
+                        <p class="settings-pane-desc">Adjust generation parameters and system prompt sections</p>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Generation</div>
@@ -514,6 +519,39 @@
                             </label>
                         </div>
                     </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">System Prompt</div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-use-custom-identity">Use Custom Identity</label>
+                                <span class="toggle-desc">Replace the default "You are OSA..." identity with custom text</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-use-custom-identity" onchange="OSA.onCustomIdentityToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="settings-field" id="custom-identity-field" style="display:none;">
+                            <label for="setting-custom-identity">Custom Identity Text</label>
+                            <textarea id="setting-custom-identity" rows="3" placeholder="Enter custom identity description (e.g., 'You are a helpful coding assistant...')"></textarea>
+                            <span class="settings-field-hint">This replaces the entire Identity section in the system prompt. Leave blank to use default.</span>
+                        </div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-use-custom-priorities">Use Custom Priorities</label>
+                                <span class="toggle-desc">Replace the default priorities list with custom bullet points</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-use-custom-priorities" onchange="OSA.onCustomPrioritiesToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="settings-field" id="custom-priorities-field" style="display:none;">
+                            <label for="setting-custom-priorities">Custom Priorities</label>
+                            <textarea id="setting-custom-priorities" rows="5" placeholder="- Priority one&#10;- Priority two&#10;- Priority three"></textarea>
+                            <span class="settings-field-hint">Enter each priority on a new line. These will appear under the "# Priorities" section. Leave blank to use default.</span>
+                        </div>
+                    </div>
                 </div>
                 <div class="settings-pane" id="pane-discord">
                     <div class="settings-pane-header">
@@ -530,9 +568,23 @@
                             </select>
                         </div>
                         <div class="settings-field">
+                            <label for="setting-discord-token">Bot Token</label>
+                            <input id="setting-discord-token" type="password" placeholder="Discord bot token">
+                            <span class="settings-field-hint">Saved in the OSAgent config file. Save settings before starting the bot.</span>
+                        </div>
+                        <div class="settings-field">
                             <label for="setting-discord-allowed-users">Allowed User IDs</label>
                             <textarea id="setting-discord-allowed-users" rows="4" placeholder="One Discord user ID per line or comma-separated"></textarea>
                             <span class="settings-field-hint">Leave blank to allow all users</span>
+                        </div>
+                        <div class="settings-field">
+                            <label>Bot Runtime</label>
+                            <div id="discord-bot-status" class="discord-bot-status">Checking status...</div>
+                            <div class="discord-bot-actions">
+                                <button type="button" class="btn-primary" id="btn-discord-start" onclick="OSA.startDiscordBot()">Start Bot</button>
+                                <button type="button" class="btn-danger" id="btn-discord-stop" onclick="OSA.stopDiscordBot()">Stop Bot</button>
+                            </div>
+                            <span id="discord-bot-message" class="settings-field-hint"></span>
                         </div>
                     </div>
                 </div>
@@ -767,6 +819,67 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-updates">
+                    <div class="settings-pane-header">
+                        <h2>Updates</h2>
+                        <p class="settings-pane-desc">Keep OSAgent up to date</p>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <div class="settings-group-title">Version</div>
+                        <div class="update-info-row">
+                            <span class="update-label">Current:</span>
+                            <span class="update-value" id="update-current-version">-</span>
+                        </div>
+                        <div class="update-info-row">
+                            <span class="update-label">Channel:</span>
+                            <select id="update-channel-select" class="update-channel-select">
+                                <option value="stable">Stable</option>
+                                <option value="beta">Beta (includes prereleases)</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <div class="settings-group-title">Status</div>
+                        <div class="update-status-display" id="update-status-display">
+                            <span class="update-status-text">Click "Check for Updates" to see if a new version is available.</span>
+                        </div>
+                        <div class="update-version-row hidden" id="update-version-row">
+                            <span class="update-label">Latest:</span>
+                            <span class="update-value" id="update-latest-version">-</span>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <div class="settings-group-title">Actions</div>
+                        <div class="update-actions">
+                            <button class="btn-action" id="btn-check-update" onclick="OSA.checkForUpdates()">
+                                Check for Updates
+                            </button>
+                            <button class="btn-primary hidden" id="btn-download-update" onclick="OSA.downloadUpdate()">
+                                Download Update
+                            </button>
+                            <button class="btn-primary hidden" id="btn-install-update" onclick="OSA.installUpdate()">
+                                Install & Restart
+                            </button>
+                            <a class="btn-ghost hidden" id="btn-view-release" target="_blank">
+                                View Release
+                            </a>
+                        </div>
+                        <div class="update-progress hidden" id="update-progress-container">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="update-progress-fill"></div>
+                            </div>
+                            <span class="progress-text" id="update-progress-text">0%</span>
+                        </div>
+                    </div>
+                    
+                    <div class="update-release-notes hidden" id="update-release-notes">
+                        <div class="settings-group-title">Release Notes</div>
+                        <div class="release-notes-content" id="release-notes-content"></div>
                     </div>
                 </div>
                 <div id="settings-error" class="settings-error hidden"></div>

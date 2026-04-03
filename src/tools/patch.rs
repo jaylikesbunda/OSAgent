@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::{OSAgentError, Result};
+use crate::tools::file_cache::FileReadCache;
 use crate::tools::guard::ensure_relative_path_not_backups;
 use crate::tools::registry::{Tool, ToolExample};
 use async_trait::async_trait;
@@ -7,6 +8,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn workspace_is_read_only(config: &Config) -> bool {
     if let Some(workspace) = config.get_workspace_by_path(&config.agent.workspace) {
@@ -47,15 +49,17 @@ enum PatchOperation {
 pub struct ApplyPatchTool {
     workspace: PathBuf,
     backup_dir: PathBuf,
+    cache: Arc<FileReadCache>,
 }
 
 impl ApplyPatchTool {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
         if workspace_is_read_only(&config) {
             let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
             return Self {
                 workspace,
                 backup_dir: PathBuf::new(),
+                cache,
             };
         }
 
@@ -73,6 +77,7 @@ impl ApplyPatchTool {
         Self {
             workspace: canonical_workspace,
             backup_dir,
+            cache,
         }
     }
 
@@ -466,6 +471,9 @@ impl Tool for ApplyPatchTool {
                     fs::write(&file_path, content).map_err(|e| {
                         OSAgentError::ToolExecution(format!("Failed to write file: {}", e))
                     })?;
+                    if let Ok(canonical) = file_path.canonicalize() {
+                        self.cache.invalidate(&canonical);
+                    }
                     results.push(format!("Added {}", path));
                 }
                 PatchOperation::Delete { path } => {
@@ -477,10 +485,14 @@ impl Tool for ApplyPatchTool {
                         )));
                     }
 
+                    let canonical = file_path.canonicalize().ok();
                     let _ = self.create_backup(&file_path)?;
                     fs::remove_file(&file_path).map_err(|e| {
                         OSAgentError::ToolExecution(format!("Failed to delete file: {}", e))
                     })?;
+                    if let Some(canonical) = canonical {
+                        self.cache.invalidate(&canonical);
+                    }
                     results.push(format!("Deleted {}", path));
                 }
                 PatchOperation::Update {
@@ -521,6 +533,12 @@ impl Tool for ApplyPatchTool {
                                 e
                             ))
                         })?;
+                        if let Ok(canonical) = source_path.canonicalize() {
+                            self.cache.invalidate(&canonical);
+                        }
+                        if let Ok(canonical) = target_path.canonicalize() {
+                            self.cache.invalidate(&canonical);
+                        }
                         results.push(format!(
                             "Updated {} and moved to {}",
                             path,
@@ -530,6 +548,9 @@ impl Tool for ApplyPatchTool {
                         fs::write(&source_path, updated).map_err(|e| {
                             OSAgentError::ToolExecution(format!("Failed to write file: {}", e))
                         })?;
+                        if let Ok(canonical) = source_path.canonicalize() {
+                            self.cache.invalidate(&canonical);
+                        }
                         results.push(format!("Updated {}", path));
                     }
                 }

@@ -279,6 +279,14 @@
     border-color: rgba(74, 222, 128, 0.24);
 }
 
+.workspace-perm-subtext {
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 10px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
 .context-menu {
     position: absolute;
     bottom: calc(100% + 10px);
@@ -387,6 +395,10 @@
     gap: 3px;
 }
 
+.persona-menu .menu-row-main {
+    padding: 6px 10px;
+}
+
 .menu-row-title {
     font-size: 13px;
     font-weight: 600;
@@ -424,6 +436,80 @@
 
 .workspace-editor-grid .full {
     grid-column: 1 / -1;
+}
+
+.workspace-paths-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.workspace-path-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 132px 42px;
+    gap: 8px;
+    align-items: start;
+}
+
+.workspace-path-row input {
+    min-width: 0;
+}
+
+.workspace-path-row .workspace-path-input {
+    width: auto;
+    max-width: 100%;
+}
+
+.workspace-path-perm {
+    width: 132px;
+}
+
+.workspace-path-remove {
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--error);
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.workspace-path-remove:hover {
+    background: var(--error);
+    color: var(--bg-primary);
+}
+
+.workspace-path-add {
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-top: 4px;
+}
+
+.workspace-path-add:hover {
+    border-color: var(--text-primary);
+    color: var(--text-primary);
+}
+
+@media (max-width: 640px) {
+    .workspace-editor-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .workspace-path-row {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .workspace-path-perm,
+    .workspace-path-remove {
+        width: 100%;
+    }
 }
 
 .workspace-field {

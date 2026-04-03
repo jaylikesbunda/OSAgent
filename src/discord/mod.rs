@@ -1,6 +1,6 @@
 use crate::agent::events::AgentEvent;
 use crate::agent::runtime::AgentRuntime;
-use crate::config::{Config, DiscordConfig};
+use crate::config::DiscordConfig;
 use dashmap::DashMap;
 use serenity::{
     async_trait,
@@ -20,6 +20,9 @@ use serenity::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::oneshot;
+use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
 
 const DEFAULT_WORKSPACE_CHOICE_LIMIT: usize = 25;
@@ -28,9 +31,26 @@ static SESSION_TO_CHANNEL: std::sync::OnceLock<
     tokio::sync::RwLock<std::collections::HashMap<String, u64>>,
 > = std::sync::OnceLock::new();
 
+struct DiscordBotState {
+    running: bool,
+    stop_tx: Option<oneshot::Sender<()>>,
+}
+
+static DISCORD_BOT_STATE: std::sync::OnceLock<tokio::sync::Mutex<DiscordBotState>> =
+    std::sync::OnceLock::new();
+
 fn get_session_to_channel() -> &'static tokio::sync::RwLock<std::collections::HashMap<String, u64>>
 {
     SESSION_TO_CHANNEL.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+fn get_discord_bot_state() -> &'static tokio::sync::Mutex<DiscordBotState> {
+    DISCORD_BOT_STATE.get_or_init(|| {
+        tokio::sync::Mutex::new(DiscordBotState {
+            running: false,
+            stop_tx: None,
+        })
+    })
 }
 
 const EMBED_COLOR_PRIMARY: Colour = Colour::from_rgb(88, 101, 242);
@@ -180,12 +200,7 @@ impl Handler {
         Self::send_ephemeral_embed_command(ctx, command, embed).await;
     }
 
-    pub fn new(
-        agent: Arc<AgentRuntime>,
-        _discord_config: DiscordConfig,
-        _unused_config: Config,
-        config_path: PathBuf,
-    ) -> Self {
+    pub fn new(agent: Arc<AgentRuntime>, config_path: PathBuf) -> Self {
         Self {
             agent,
             config_path,
@@ -2127,26 +2142,107 @@ impl EventHandler for Handler {
     }
 }
 
-pub async fn start_discord_bot(
+async fn run_discord_bot(
     discord_config: DiscordConfig,
-    full_config: Config,
     config_path: PathBuf,
     agent: Arc<AgentRuntime>,
-) {
+    mut stop_rx: oneshot::Receiver<()>,
+) -> Result<(), String> {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
-    let handler = Handler::new(agent, discord_config.clone(), full_config, config_path);
+    let handler = Handler::new(agent, config_path);
 
     let mut client = Client::builder(&discord_config.token, intents)
         .event_handler(handler)
         .await
-        .expect("Error creating Discord client");
+        .map_err(|e| format!("Error creating Discord client: {e}"))?;
+
+    let shard_manager = client.shard_manager.clone();
 
     info!("Discord bot starting...");
 
-    if let Err(why) = client.start().await {
-        error!("Discord bot error: {:?}", why);
+    let mut client_task = tokio::spawn(async move { client.start().await });
+
+    tokio::select! {
+        result = &mut client_task => {
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(why)) => Err(format!("Discord bot error: {why:?}")),
+                Err(err) => Err(format!("Discord bot task failed: {err}")),
+            }
+        }
+        _ = &mut stop_rx => {
+            info!("Discord bot stop requested");
+            shard_manager.shutdown_all().await;
+
+            match client_task.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(why)) => Err(format!("Discord bot error: {why:?}")),
+                Err(err) => Err(format!("Discord bot task failed: {err}")),
+            }
+        }
     }
+}
+
+pub async fn is_discord_bot_running() -> bool {
+    get_discord_bot_state().lock().await.running
+}
+
+pub async fn spawn_discord_bot(
+    discord_config: DiscordConfig,
+    config_path: PathBuf,
+    agent: Arc<AgentRuntime>,
+) -> Result<(), String> {
+    if discord_config.token.trim().is_empty() {
+        return Err("Discord bot token is not configured".to_string());
+    }
+
+    {
+        let mut state = get_discord_bot_state().lock().await;
+        if state.running {
+            return Err("Discord bot is already running".to_string());
+        }
+
+        let (stop_tx, stop_rx) = oneshot::channel();
+        state.running = true;
+        state.stop_tx = Some(stop_tx);
+
+        tokio::spawn(async move {
+            if let Err(err) = run_discord_bot(discord_config, config_path, agent, stop_rx).await {
+                error!("{err}");
+            }
+
+            let mut state = get_discord_bot_state().lock().await;
+            state.running = false;
+            state.stop_tx = None;
+        });
+    }
+
+    Ok(())
+}
+
+pub async fn stop_discord_bot() -> bool {
+    let stop_tx = {
+        let mut state = get_discord_bot_state().lock().await;
+        state.stop_tx.take()
+    };
+
+    let Some(stop_tx) = stop_tx else {
+        return false;
+    };
+
+    let _ = stop_tx.send(());
+    let _ = timeout(Duration::from_secs(5), async {
+        loop {
+            if !is_discord_bot_running().await {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    true
 }

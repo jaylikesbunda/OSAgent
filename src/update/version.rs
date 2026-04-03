@@ -27,6 +27,24 @@ pub fn is_newer(new_version: &str, current_version: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true if `candidate` is a prerelease (rc/alpha/beta) whose base version
+/// matches or exceeds `current`. Used to surface RCs on the beta channel even when
+/// the base version hasn't been released yet (e.g. 0.1.0-rc1 available while on 0.1.0).
+pub fn is_prerelease_of(candidate: &str, current: &str) -> bool {
+    let Some(candidate_v) = parse_version(candidate) else {
+        return false;
+    };
+    if candidate_v.pre.is_empty() {
+        return false;
+    }
+    let base_candidate = Version::new(candidate_v.major, candidate_v.minor, candidate_v.patch);
+    let Some(current_v) = parse_version(current) else {
+        return false;
+    };
+    let base_current = Version::new(current_v.major, current_v.minor, current_v.patch);
+    base_candidate >= base_current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -170,18 +170,15 @@ async fn main() -> anyhow::Result<()> {
             info!("Config: {}", config_path);
 
             for workspace in config.list_workspaces() {
-                let workspace_path = shellexpand::tilde(&workspace.path).to_string();
+                let workspace_path = shellexpand::tilde(&workspace.resolved_path()).to_string();
                 std::fs::create_dir_all(&workspace_path).map_err(crate::error::OSAgentError::Io)?;
             }
             let active_workspace = config.get_active_workspace();
             info!(
                 "Active workspace: {} ({})",
-                active_workspace.id, active_workspace.path
+                active_workspace.id,
+                active_workspace.resolved_path()
             );
-
-            // Check if any bot is enabled
-            let discord_enabled = cfg!(feature = "discord")
-                && config.discord.as_ref().map(|d| d.enabled).unwrap_or(false);
 
             let config_path_buf = std::path::PathBuf::from(&config_path);
 
@@ -203,64 +200,41 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 let mut config = config::Config::load(&config_path)?;
                 config.ensure_workspace_defaults();
+                let discord_enabled = cfg!(feature = "discord")
+                    && config.discord.as_ref().map(|d| d.enabled).unwrap_or(false);
 
                 let agent = std::sync::Arc::new(agent::AgentRuntime::new(config.clone())?);
                 let shutdown_rx = agent.subscribe_shutdown();
 
                 if discord_enabled {
-                    #[allow(unused_mut)]
-                    let mut handles: Vec<tokio::task::JoinHandle<()>> = vec![];
-
                     #[cfg(feature = "discord")]
                     if let Some(discord_config) = &config.discord {
                         if discord_config.enabled {
                             info!("Discord bot enabled");
-                            let discord_config = discord_config.clone();
-                            let full_config = config.clone();
-                            let config_path_clone = config_path_buf.clone();
-                            let agent = agent.clone();
-                            handles.push(tokio::spawn(async move {
-                                discord::start_discord_bot(
-                                    discord_config,
-                                    full_config,
-                                    config_path_clone,
-                                    agent,
-                                )
-                                .await;
-                            }));
+                            if let Err(err) = discord::spawn_discord_bot(
+                                discord_config.clone(),
+                                config_path_buf.clone(),
+                                agent.clone(),
+                            )
+                            .await
+                            {
+                                error!("Failed to start Discord bot: {}", err);
+                            }
                         }
                     }
 
-                    // Web server
-                    let web_handle = tokio::spawn({
-                        let agent = agent.clone();
-                        let config_path_clone = config_path_buf.clone();
-                        async move {
-                            web::server::run_with_agent(
-                                config,
-                                agent,
-                                config_path_clone,
-                                Some(shutdown_rx),
-                            )
-                            .await
-                        }
-                    });
+                    web::server::run_with_agent(
+                        config,
+                        agent,
+                        config_path_buf.clone(),
+                        Some(shutdown_rx),
+                    )
+                    .await?;
+                    info!("Web server stopped");
 
-                    // Wait for any task to complete
-                    tokio::select! {
-                        result = web_handle => {
-                            if let Err(e) = result {
-                                error!("Web server error: {}", e);
-                            }
-                            info!("Web server stopped");
-                        }
-                        _ = async {
-                            for handle in handles {
-                                let _ = handle.await;
-                            }
-                        } => {
-                            info!("Discord bot stopped");
-                        }
+                    #[cfg(feature = "discord")]
+                    if discord::stop_discord_bot().await {
+                        info!("Discord bot stopped");
                     }
                 } else {
                     // Just web server
@@ -357,8 +331,7 @@ async fn main() -> anyhow::Result<()> {
                 .parse::<update::UpdateChannel>()
                 .unwrap_or(update::UpdateChannel::Stable);
 
-            let checker =
-                update::UpdateChecker::with_repo(env!("CARGO_PKG_VERSION"), &cfg.update.repo);
+            let checker = update::UpdateChecker::new(env!("CARGO_PKG_VERSION"));
 
             info!("Checking for updates (channel: {})...", channel);
             let result = checker.check(channel).await;

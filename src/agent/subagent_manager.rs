@@ -2,7 +2,7 @@ use crate::agent::events::{AgentEvent, EventBus};
 use crate::agent::prompt::{self, PromptMode};
 use crate::agent::provider::{OpenAICompatibleProvider, Provider};
 use crate::agent::session::SessionManager;
-use crate::config::Config;
+use crate::config::{Config, WorkspaceConfig};
 use crate::error::Result;
 use crate::storage::{
     CompactionStats, Message, MessageTokens, Session, SessionContextState, SqliteStorage,
@@ -66,6 +66,8 @@ pub struct SubagentManager {
     session_manager: Arc<SessionManager>,
     active_subagents: Arc<DashMap<String, SubagentHandle>>,
     config: Arc<tokio::sync::RwLock<Config>>,
+    shared_provider: Option<Arc<dyn Provider>>,
+    workspace_root: PathBuf,
 }
 
 struct SubagentHandle {
@@ -82,6 +84,7 @@ impl SubagentManager {
         event_bus: Arc<EventBus>,
         session_manager: Arc<SessionManager>,
         config: Arc<tokio::sync::RwLock<Config>>,
+        workspace_root: PathBuf,
     ) -> Self {
         Self {
             storage,
@@ -89,7 +92,13 @@ impl SubagentManager {
             session_manager,
             active_subagents: Arc::new(DashMap::new()),
             config,
+            shared_provider: None,
+            workspace_root,
         }
+    }
+
+    pub fn set_shared_provider(&mut self, provider: Arc<dyn Provider>) {
+        self.shared_provider = Some(provider);
     }
 
     pub fn get_allowed_tools_for_agent_type(agent_type: &str) -> Vec<String> {
@@ -139,9 +148,25 @@ impl SubagentManager {
         .map(|s| s.to_string())
         .collect();
 
+        let verify_tools: HashSet<String> = [
+            "read_file",
+            "list_files",
+            "grep",
+            "glob",
+            "bash",
+            "web_fetch",
+            "web_search",
+            "reflect",
+            "lsp",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
         let allowed = match agent_type {
             "general" => general_tools,
             "explore" => explore_tools,
+            "verify" => verify_tools,
             _ => general_tools,
         };
 
@@ -162,6 +187,16 @@ impl SubagentManager {
             .ok_or_else(|| {
                 crate::error::OSAgentError::ToolExecution("Parent session not found".to_string())
             })?;
+
+        let parent_workspace = {
+            let cfg = self.config.read().await.clone();
+            parent_session
+                .metadata
+                .get("workspace_id")
+                .and_then(|value| value.as_str())
+                .and_then(|workspace_id| cfg.get_workspace(workspace_id))
+                .unwrap_or_else(|| cfg.get_active_workspace())
+        };
 
         let mut subagent_session = self.storage.create_subagent_session(
             parent_session_id.clone(),
@@ -212,6 +247,9 @@ impl SubagentManager {
         let task_id = task.id.clone();
         let parent_session_id_for_async = parent_session_id.clone();
         let active_subagents = self.active_subagents.clone();
+        let shared_provider = self.shared_provider.clone();
+        let workspace_root = self.workspace_root.clone();
+        let parent_workspace_for_async = parent_workspace.clone();
 
         let handle = tokio::spawn(async move {
             struct CleanupGuard {
@@ -240,6 +278,9 @@ impl SubagentManager {
                 event_bus.clone(),
                 session_manager.clone(),
                 config.clone(),
+                shared_provider.clone(),
+                parent_workspace_for_async,
+                workspace_root,
                 &mut cancel_rx,
             )
             .await;
@@ -320,13 +361,46 @@ impl SubagentManager {
         event_bus: Arc<EventBus>,
         _session_manager: Arc<SessionManager>,
         config: Arc<tokio::sync::RwLock<Config>>,
+        shared_provider: Option<Arc<dyn Provider>>,
+        parent_workspace: WorkspaceConfig,
+        workspace_root: PathBuf,
         cancel_rx: &mut mpsc::Receiver<()>,
     ) -> Result<(String, String, i32)> {
-        let cfg = config.read().await.clone();
+        let mut cfg = config.read().await.clone();
         drop(config);
 
-        let provider = Self::create_provider(&cfg, storage.clone()).await?;
-        let tool_registry = Arc::new(ToolRegistry::new(cfg.clone(), storage.clone())?);
+        if !parent_workspace.resolved_path().trim().is_empty() {
+            let parent_workspace_id = parent_workspace.id.clone();
+            cfg.agent.active_workspace = Some(parent_workspace_id.clone());
+            cfg.agent.workspace = parent_workspace.resolved_path();
+            if let Some(existing) = cfg
+                .agent
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == parent_workspace_id)
+            {
+                *existing = parent_workspace.clone();
+            } else {
+                cfg.agent.workspaces.push(parent_workspace.clone());
+            }
+            cfg.ensure_workspace_defaults();
+        } else if cfg.agent.workspace.trim().is_empty() {
+            cfg.agent.workspace = workspace_root.to_string_lossy().to_string();
+            cfg.ensure_workspace_defaults();
+        }
+
+        let provider = if let Some(shared) = shared_provider {
+            shared
+        } else {
+            Self::create_provider(&cfg, storage.clone()).await?
+        };
+        let tool_registry = Arc::new(ToolRegistry::with_deps(
+            cfg.clone(),
+            storage.clone(),
+            Some(event_bus.clone()),
+            None,
+            None,
+        )?);
         let available_tool_names: HashSet<String> = tool_registry
             .get_tool_definitions()
             .into_iter()
@@ -336,7 +410,9 @@ impl SubagentManager {
             .into_iter()
             .filter(|tool| available_tool_names.contains(tool))
             .collect();
-        let system_prompt = prompt::build_system_prompt(&allowed_tools, PromptMode::Minimal);
+        // Subagents use default identity and priorities (no custom sections)
+        let system_prompt =
+            prompt::build_system_prompt(&allowed_tools, PromptMode::Minimal, None, None);
 
         if let Ok(Some(mut session)) = storage.get_session(&session_id) {
             session.messages.push(Message::system(system_prompt));
@@ -344,7 +420,7 @@ impl SubagentManager {
             let _ = storage.update_session(&session);
         }
 
-        let max_iterations = usize::MAX;
+        let max_iterations = 50;
         let mut tool_count = 0;
 
         for iteration in 0..max_iterations {
@@ -385,6 +461,10 @@ impl SubagentManager {
                     }
                 }
                 Err(e) => {
+                    if e.to_string().contains("Subagent cancelled") {
+                        let result_text = Self::extract_result(&storage, &session_id).await?;
+                        return Ok(("cancelled".to_string(), result_text, tool_count));
+                    }
                     error!("Subagent iteration error: {:?}", e);
                     return Err(e);
                 }
@@ -463,7 +543,7 @@ impl SubagentManager {
         let start = Instant::now();
         let response = tokio::select! {
             _ = cancel_rx.recv() => {
-                return Ok((false, 0));
+                return Err(crate::error::OSAgentError::ToolExecution("Subagent cancelled".to_string()));
             }
             result = provider.complete(&api_messages, &tools) => {
                 result.map_err(|e| crate::error::OSAgentError::Provider(e.to_string()))?
@@ -613,39 +693,67 @@ impl SubagentManager {
 
         let _ = storage.update_session(&session);
 
-        let completed = !has_tool_calls || tool_count == 0;
+        let completed = !has_tool_calls;
         Ok((completed, tool_count))
     }
 
     async fn extract_result(storage: &Arc<SqliteStorage>, session_id: &str) -> Result<String> {
         if let Ok(Some(session)) = storage.get_session(session_id) {
-            let assistant_messages: Vec<_> = session
-                .messages
-                .iter()
-                .filter(|m| m.role == "assistant")
-                .collect();
+            let final_message = session.messages.iter().rev().find(|message| {
+                message.role == "assistant"
+                    && !message.content.trim().is_empty()
+                    && !Self::is_synthetic_message(message)
+                    && message
+                        .tool_calls
+                        .as_ref()
+                        .map(|calls| calls.is_empty())
+                        .unwrap_or(true)
+                    && !Self::looks_like_internal_tool_dump(&message.content)
+            });
 
-            if let Some(last) = assistant_messages.last() {
-                return Ok(last.content.clone());
+            if let Some(message) = final_message {
+                return Ok(message.content.clone());
+            }
+
+            let fallback_message = session.messages.iter().rev().find(|message| {
+                message.role == "assistant"
+                    && !message.content.trim().is_empty()
+                    && !Self::is_synthetic_message(message)
+                    && !Self::looks_like_internal_tool_dump(&message.content)
+            });
+
+            if let Some(message) = fallback_message {
+                return Ok(message.content.clone());
             }
         }
         Ok("No result available".to_string())
     }
 
+    fn is_synthetic_message(message: &Message) -> bool {
+        message
+            .metadata
+            .get("synthetic")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn looks_like_internal_tool_dump(content: &str) -> bool {
+        let trimmed = content.trim();
+        let lower = trimmed.to_lowercase();
+
+        trimmed.starts_with("OLCALL>")
+            || lower.starts_with("tool_calls")
+            || (trimmed.starts_with('[')
+                && lower.contains("\"name\"")
+                && lower.contains("\"arguments\""))
+            || (trimmed.starts_with('{')
+                && lower.contains("\"name\"")
+                && lower.contains("\"arguments\""))
+    }
+
     pub async fn cancel_subagent(&self, session_id: &str) -> Result<bool> {
-        if let Some((_, handle)) = self.active_subagents.remove(session_id) {
-            let _ = handle.cancel_tx.send(()).await;
-            handle.handle.abort();
-
-            if let Ok(Some(mut session)) = self.storage.get_session(session_id) {
-                session.task_status = "cancelled".to_string();
-                let _ = self.storage.update_session(&session);
-            }
-
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        self.stop_subagent(session_id, "cancelled", "Subagent cancelled".to_string())
+            .await
     }
 
     pub async fn cancel_all_for_parent(&self, parent_session_id: &str) {
@@ -688,18 +796,19 @@ impl SubagentManager {
         &self,
         session_id: &str,
         timeout_secs: u64,
-    ) -> Result<(String, String)> {
+    ) -> Result<(String, String, i32)> {
         let start = Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
         loop {
-            if start.elapsed() > timeout {
-                return Ok((
-                    "timeout".to_string(),
-                    format!("Subagent timed out after {}s", timeout_secs),
-                ));
-            }
             if !self.active_subagents.contains_key(session_id) {
                 break;
+            }
+            if start.elapsed() > timeout {
+                let timeout_message = format!("Subagent timed out after {}s", timeout_secs);
+                let _ = self
+                    .stop_subagent(session_id, "timeout", timeout_message.clone())
+                    .await;
+                return Ok(("timeout".to_string(), timeout_message, 0));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -708,9 +817,44 @@ impl SubagentManager {
             let result = task
                 .result
                 .unwrap_or_else(|| "No result available".to_string());
-            Ok((task.status, result))
+            Ok((task.status, result, task.tool_count))
         } else {
-            Ok(("unknown".to_string(), "Subagent task not found".to_string()))
+            Ok((
+                "unknown".to_string(),
+                "Subagent task not found".to_string(),
+                0,
+            ))
+        }
+    }
+
+    async fn stop_subagent(&self, session_id: &str, status: &str, result: String) -> Result<bool> {
+        if let Some((_, handle)) = self.active_subagents.remove(session_id) {
+            let SubagentHandle {
+                task_id,
+                handle,
+                cancel_tx,
+                ..
+            } = handle;
+
+            let _ = cancel_tx.send(()).await;
+            handle.abort();
+            let _ = handle.await;
+
+            if let Ok(Some(mut task)) = self.storage.get_subagent_task(&task_id) {
+                task.status = status.to_string();
+                task.result = Some(result.clone());
+                task.completed_at = Some(Utc::now());
+                let _ = self.storage.update_subagent_task(&task);
+            }
+
+            if let Ok(Some(mut session)) = self.storage.get_session(session_id) {
+                session.task_status = status.to_string();
+                let _ = self.storage.update_session(&session);
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 

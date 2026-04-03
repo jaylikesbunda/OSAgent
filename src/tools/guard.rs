@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::error::{OSAgentError, Result};
 use std::path::Path;
 
@@ -32,4 +33,27 @@ pub fn command_touches_backups(command: &str) -> bool {
     command
         .to_ascii_lowercase()
         .contains(&BACKUP_DIR_NAME.to_ascii_lowercase())
+}
+
+pub fn check_external_path_access(config: &Config, tool_name: &str, path: &str) -> Result<()> {
+    if config.is_path_in_workspace(path) {
+        return Ok(());
+    }
+
+    if let Some(action) = config.evaluate_permission_rule(tool_name, path) {
+        match action {
+            crate::permission::PermissionAction::Allow => Ok(()),
+            crate::permission::PermissionAction::Deny => Err(OSAgentError::ToolExecution(format!(
+                "Access to external path '{}' is denied by permission rule",
+                path
+            ))),
+            crate::permission::PermissionAction::Ask => Err(OSAgentError::ExternalPathAccess {
+                path: path.to_string(),
+            }),
+        }
+    } else {
+        Err(OSAgentError::ExternalPathAccess {
+            path: path.to_string(),
+        })
+    }
 }

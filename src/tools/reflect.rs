@@ -12,6 +12,12 @@ impl ReflectTool {
     }
 }
 
+impl Default for ReflectTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Tool for ReflectTool {
     fn name(&self) -> &str {

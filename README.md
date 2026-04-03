@@ -9,7 +9,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square" alt="Rust"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
 </p>
 
 ---
@@ -40,18 +40,17 @@
 
 ### Download
 
-Grab the latest release for your platform:
+Download the latest launcher from GitLab Releases for your platform:
 
 ```
 # Windows
 osagent-launcher.exe
 
-# macOS
-osagent-launcher
-
 # Linux
 ./osagent-launcher
 ```
+
+Windows and Linux releases are published on GitLab. Auto-updates are served from Cloudflare R2 via `https://releases.osagent.dev/releases/latest.json`.
 
 ### Setup Wizard
 
@@ -125,13 +124,22 @@ See `examples/skills/` for examples.
 
 ## Building from Source
 
-```bash
-git clone https://github.com/jaylikesbunda/OSAgent.git
-cd osagent
-cargo build --release
+On Windows, use the launcher-first build flow:
+
+```powershell
+git clone https://gitlab.com/<your-namespace>/OSAgent.git
+cd OSAgent
+.\build-launcher.ps1 -Checks
 ```
 
-The binary will be at `target/release/osagent`.
+That builds the core, updater, and launcher in the same order used by the release pipeline.
+
+Release artifacts are the launcher binaries:
+
+- Windows: `launcher/target/release/osagent-launcher.exe`
+- Linux: `launcher/target/release/osagent-launcher`
+
+See `RELEASING.md` for the GitLab + Cloudflare R2 release flow.
 
 ## License
 

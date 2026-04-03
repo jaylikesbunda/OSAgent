@@ -68,7 +68,7 @@ pub async fn run_with_agent(
     shutdown_rx: Option<watch::Receiver<bool>>,
 ) -> crate::error::Result<()> {
     for workspace in config.list_workspaces() {
-        std::fs::create_dir_all(shellexpand::tilde(&workspace.path).to_string())
+        std::fs::create_dir_all(shellexpand::tilde(&workspace.resolved_path()).to_string())
             .map_err(crate::error::OSAgentError::Io)?;
     }
 

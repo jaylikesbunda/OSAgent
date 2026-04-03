@@ -1,4 +1,5 @@
 use crate::agent::checkpoint::CheckpointManager;
+use crate::agent::coordinator::Coordinator;
 use crate::agent::events::{AgentEvent, EventBus, EventTokenUsage, ToolStatus};
 use crate::agent::instruction::{format_system_reminder, workspace_instruction_blocks};
 use crate::agent::memory::{MemoryEntry, MemoryStatus, MemoryStore};
@@ -9,7 +10,7 @@ use crate::agent::provider::{OpenAICompatibleProvider, Provider, StreamEvent};
 use crate::agent::provider_presets;
 use crate::agent::session::SessionManager;
 use crate::agent::subagent_manager::SubagentManager;
-use crate::config::{AgentConfig, Config, WorkspaceConfig};
+use crate::config::{AgentConfig, Config, WorkspaceConfig, WorkspacePath};
 use crate::error::{OSAgentError, Result};
 use crate::external::{ExternalDirectoryManager, PermissionAction, PermissionPrompt};
 use crate::indexer::CodeIndexer;
@@ -20,6 +21,7 @@ use crate::storage::{
     ToolCall,
 };
 use crate::tools::bash::BashTool;
+use crate::tools::file_cache::FileReadCache;
 use crate::tools::guard::ensure_relative_path_not_backups;
 use crate::tools::output::path_touches_tool_outputs;
 use crate::tools::registry::ToolRegistry;
@@ -70,6 +72,7 @@ pub struct AgentRuntime {
     external_manager: Arc<ExternalDirectoryManager>,
     plugin_manager: Arc<PluginManager>,
     subagent_manager: Arc<SubagentManager>,
+    coordinator: Arc<Coordinator>,
     indexer: Option<Arc<CodeIndexer>>,
     system_prompt: String,
     event_bus: EventBus,
@@ -206,11 +209,6 @@ impl AgentRuntime {
             .clear_all_tasks()
             .map_err(|e| warn!("Failed to clear tasks on startup: {}", e))
             .ok();
-        storage
-            .clear_all_todo_items()
-            .map_err(|e| warn!("Failed to clear todo items on startup: {}", e))
-            .ok();
-
         let mut provider_instances: Vec<(String, Arc<dyn Provider>)> = Vec::new();
 
         for provider_cfg in &config.providers {
@@ -312,12 +310,15 @@ impl AgentRuntime {
             None
         };
 
-        let subagent_manager = Arc::new(SubagentManager::new(
+        let mut subagent_manager = SubagentManager::new(
             storage.clone(),
             Arc::new(event_bus.clone()),
             session_manager.clone(),
             Arc::new(tokio::sync::RwLock::new(config.clone())),
-        ));
+            PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string()),
+        );
+        subagent_manager.set_shared_provider(provider.clone());
+        let subagent_manager = Arc::new(subagent_manager);
 
         let indexer: Option<Arc<CodeIndexer>> = if config.search.enabled {
             let workspace_path =
@@ -344,7 +345,7 @@ impl AgentRuntime {
             None
         };
 
-        let tool_registry = Arc::new(ToolRegistry::with_indexer(
+        let mut tool_registry_instance = ToolRegistry::with_indexer(
             config.clone(),
             storage.clone(),
             Some(Arc::new(event_bus.clone())),
@@ -352,8 +353,31 @@ impl AgentRuntime {
             Some(subagent_manager.clone()),
             indexer.clone(),
             Some(memory_store.clone()),
-        )?);
-        let system_prompt = prompt::build_system_prompt(&config.tools.allowed, PromptMode::Full);
+            Arc::new(FileReadCache::with_default_capacity()),
+        )?;
+
+        let workspace_root = PathBuf::from(
+            shellexpand::tilde(&config.get_active_workspace().resolved_path()).to_string(),
+        );
+        let coordinator = Arc::new(Coordinator::new(
+            storage.clone(),
+            Arc::new(event_bus.clone()),
+            subagent_manager.clone(),
+            Arc::new(tokio::sync::RwLock::new(config.clone())),
+            workspace_root,
+        ));
+
+        tool_registry_instance.register_coordinator(coordinator.clone());
+        let tool_registry = Arc::new(tool_registry_instance);
+
+        let custom_identity = config.agent.custom_identity.as_deref();
+        let custom_priorities = config.agent.custom_priorities.as_deref();
+        let system_prompt = prompt::build_system_prompt(
+            &config.tools.allowed,
+            PromptMode::Full,
+            custom_identity,
+            custom_priorities,
+        );
 
         Ok(Self {
             config: Arc::new(tokio::sync::RwLock::new(config)),
@@ -369,6 +393,7 @@ impl AgentRuntime {
             external_manager,
             plugin_manager,
             subagent_manager,
+            coordinator,
             indexer,
             system_prompt,
             event_bus,
@@ -680,13 +705,17 @@ impl AgentRuntime {
         let active_workspace = Self::resolve_workspace_for_session(&session, &runtime_config)
             .unwrap_or_else(|| runtime_config.get_active_workspace());
 
+        let workspace_path = active_workspace.resolved_path();
+
         info!(
             "Resolved workspace for session: {} (path: {})",
-            active_workspace.id, active_workspace.path
+            active_workspace.id, workspace_path
         );
 
         let mut iteration = 0;
-        let max_iterations = 25;
+        let agent_settings = self.agent_settings.read().await;
+        let max_iterations = agent_settings.max_iterations;
+        drop(agent_settings);
         let mut pending_tool_followup = false;
         let mut max_iterations_reached = false;
         let mut response_complete_emitted = false;
@@ -766,11 +795,11 @@ impl AgentRuntime {
             }
 
             if !is_roleplay {
-                let workspace_path = std::path::PathBuf::from(
-                    shellexpand::tilde(&active_workspace.path).to_string(),
+                let ws_path = std::path::PathBuf::from(
+                    shellexpand::tilde(&active_workspace.resolved_path()).to_string(),
                 );
                 if let Some(reminder) =
-                    format_system_reminder(&workspace_instruction_blocks(&workspace_path))
+                    format_system_reminder(&workspace_instruction_blocks(&ws_path))
                 {
                     api_messages.push(Message::system(reminder));
                 }
@@ -1091,7 +1120,12 @@ impl AgentRuntime {
                                 self.emit_thinking_chunks(session_id, thinking);
                             }
                         }
-                        if !had_content {
+                        let fallback_has_tool_calls = fallback
+                            .tool_calls
+                            .as_ref()
+                            .map(|calls| !calls.is_empty())
+                            .unwrap_or(false);
+                        if !had_content && !fallback_has_tool_calls {
                             if let Some(content) = fallback.content.as_deref() {
                                 self.event_bus.emit(AgentEvent::ResponseStart {
                                     session_id: session_id.to_string(),
@@ -1135,9 +1169,21 @@ impl AgentRuntime {
                 });
             }
 
+            let has_tool_calls = response
+                .tool_calls
+                .as_ref()
+                .map(|calls| !calls.is_empty())
+                .unwrap_or(false);
+
             if used_streaming {
                 if let Some(last_message) = session.messages.last_mut() {
                     last_message.tool_calls = response.tool_calls.clone();
+                    if has_tool_calls {
+                        last_message.metadata = serde_json::json!({
+                            "synthetic": true,
+                            "kind": "tool_prelude",
+                        });
+                    }
                     if let Some(ref usage) = response.usage {
                         last_message.tokens = Some(MessageTokens {
                             input: usage.input,
@@ -1155,6 +1201,12 @@ impl AgentRuntime {
                     response.content.clone().unwrap_or_default(),
                     response.tool_calls.clone(),
                 );
+                if has_tool_calls {
+                    assistant_message.metadata = serde_json::json!({
+                        "synthetic": true,
+                        "kind": "tool_prelude",
+                    });
+                }
                 assistant_message.thinking = response.thinking.clone();
                 if let Some(ref usage) = response.usage {
                     assistant_message.tokens = Some(MessageTokens {
@@ -1173,13 +1225,15 @@ impl AgentRuntime {
                     self.emit_thinking_chunks(session_id, thinking);
                 }
 
-                self.event_bus.emit(AgentEvent::ResponseStart {
-                    session_id: session_id.to_string(),
-                    timestamp: SystemTime::now(),
-                });
+                if !has_tool_calls {
+                    self.event_bus.emit(AgentEvent::ResponseStart {
+                        session_id: session_id.to_string(),
+                        timestamp: SystemTime::now(),
+                    });
 
-                if let Some(content) = response.content.as_ref() {
-                    self.emit_response_chunks(session_id, content);
+                    if let Some(content) = response.content.as_ref() {
+                        self.emit_response_chunks(session_id, content);
+                    }
                 }
             }
 
@@ -1500,14 +1554,19 @@ impl AgentRuntime {
                             .await
                         } else {
                             let mut tool_args = tool_call.arguments.clone();
-                            if tool_call.name == "question" || tool_call.name == "subagent" {
+                            if tool_call.name == "question"
+                                || tool_call.name == "subagent"
+                                || tool_call.name == "coordinator"
+                                || tool_call.name == "todowrite"
+                                || tool_call.name == "todoread"
+                            {
                                 tool_args["session_id"] = serde_json::json!(session_id);
                             }
                             self.tool_registry
                                 .execute_in_workspace(
                                     &tool_call.name,
                                     tool_args,
-                                    Some(active_workspace.path.clone()),
+                                    Some(workspace_path.clone()),
                                 )
                                 .await
                         };
@@ -1668,66 +1727,13 @@ impl AgentRuntime {
                     timestamp: SystemTime::now(),
                 });
                 self.session_manager.update_session(&session).await?;
-                let content = response
-                    .content
-                    .as_ref()
-                    .map(|c| c.to_lowercase())
-                    .unwrap_or_default();
-                let looks_like_completion = content.contains("task complete")
-                    || content.contains("summary:")
-                    || content.contains("in summary")
-                    || content.contains("to summarize")
-                    || content.contains("that's all")
-                    || content.contains("i've completed")
-                    || content.contains("i have completed")
-                    || content.contains("here's the summary")
-                    || content.contains("in conclusion")
-                    || content.contains("no changes")
-                    || content.contains("nothing to change")
-                    || content.contains("the answer is")
-                    || content.contains("the issue is")
-                    || content.contains("the problem is")
-                    || content.contains("the fix is")
-                    || content.contains("here's what")
-                    || content.contains("done.")
-                    || content.contains("is done")
-                    || content.contains("has been updated")
-                    || content.contains("has been added")
-                    || content.contains("has been fixed")
-                    || content.contains("has been removed")
-                    || content.contains("all set")
-                    || content.contains("good to go")
-                    || content.contains("is located")
-                    || content.contains("can be found")
-                    || content.contains("is defined")
-                    || content.contains("is implemented")
-                    || content.contains("is handled")
-                    || content.contains("lives in")
-                    || content.contains("is in")
-                    || content.starts_with("y")
-                    || content.starts_with("n")
-                    || content.starts_with("yes")
-                    || content.starts_with("no")
-                    || content.starts_with("sure")
-                    || content.starts_with("the file")
-                    || content.starts_with("the function")
-                    || content.starts_with("the code")
-                    || content.starts_with("the struct")
-                    || content.starts_with("the module")
-                    || content.starts_with("the class")
-                    || content.starts_with("the method")
-                    || content.starts_with("the trait")
-                    || content.starts_with("the enum")
-                    || content.starts_with("the type")
-                    || content.starts_with("the test")
-                    || content.starts_with("the config")
-                    || content.starts_with("the error")
-                    || content.starts_with("the variable")
-                    || content.starts_with("the constant");
+                let finish = response.finish_reason.to_lowercase();
+                let looks_like_completion =
+                    finish == "stop" || finish == "end_turn" || finish == "completed";
                 if !looks_like_completion {
                     pending_tool_followup = true;
                 } else {
-                    info!("process_message: Response appears to be a completion summary, not forcing continuation");
+                    info!("process_message: Model stopped naturally (finish_reason={}), not forcing continuation", finish);
                 }
             } else {
                 info!("process_message: No tool calls, response complete");
@@ -1798,9 +1804,17 @@ impl AgentRuntime {
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == "assistant" && !m.content.is_empty());
+            .find(|m| Self::is_visible_assistant_message(m));
+
+        let fallback_assistant_message = session.messages.iter().rev().find(|m| {
+            m.role == "assistant"
+                && !Self::is_synthetic_message(m)
+                && !m.content.trim().is_empty()
+                && !Self::looks_like_internal_tool_dump(&m.content)
+        });
 
         let mut result = last_assistant_message
+            .or(fallback_assistant_message)
             .map(|m| m.content.clone())
             .unwrap_or_else(|| {
                 // Check if any tools were executed
@@ -2258,6 +2272,32 @@ impl AgentRuntime {
         message.role == "user" && !Self::is_synthetic_message(message)
     }
 
+    fn looks_like_internal_tool_dump(content: &str) -> bool {
+        let trimmed = content.trim();
+        let lower = trimmed.to_lowercase();
+
+        trimmed.starts_with("OLCALL>")
+            || lower.starts_with("tool_calls")
+            || (trimmed.starts_with('[')
+                && lower.contains("\"name\"")
+                && lower.contains("\"arguments\""))
+            || (trimmed.starts_with('{')
+                && lower.contains("\"name\"")
+                && lower.contains("\"arguments\""))
+    }
+
+    fn is_visible_assistant_message(message: &Message) -> bool {
+        message.role == "assistant"
+            && !Self::is_synthetic_message(message)
+            && !message.content.trim().is_empty()
+            && message
+                .tool_calls
+                .as_ref()
+                .map(|calls| calls.is_empty())
+                .unwrap_or(true)
+            && !Self::looks_like_internal_tool_dump(&message.content)
+    }
+
     fn replay_start_index(messages: &[Message]) -> usize {
         for (index, message) in messages.iter().enumerate().rev() {
             if Self::is_real_user_message(message) {
@@ -2275,7 +2315,7 @@ impl AgentRuntime {
     }
 
     fn compactable_message_content(message: &Message) -> Option<String> {
-        if message.role == "system" {
+        if message.role == "system" || Self::is_synthetic_message(message) {
             return None;
         }
 
@@ -2383,8 +2423,9 @@ impl AgentRuntime {
             });
         }
 
-        let workspace_path =
-            std::path::PathBuf::from(shellexpand::tilde(&active_workspace.path).to_string());
+        let workspace_path = std::path::PathBuf::from(
+            shellexpand::tilde(&active_workspace.resolved_path()).to_string(),
+        );
         let mut compact_messages = vec![Message::system(COMPACTION_PROMPT.to_string())];
         if let Some(reminder) =
             format_system_reminder(&workspace_instruction_blocks(&workspace_path))
@@ -2469,7 +2510,7 @@ impl AgentRuntime {
     }
 
     fn workspace_root(workspace: &WorkspaceConfig) -> std::path::PathBuf {
-        std::path::PathBuf::from(shellexpand::tilde(&workspace.path).to_string())
+        std::path::PathBuf::from(shellexpand::tilde(&workspace.resolved_path()).to_string())
     }
 
     fn snapshot_allowed_path(path: &str) -> bool {
@@ -2651,8 +2692,8 @@ impl AgentRuntime {
             }
         }
 
+        let workspace_path = active_workspace.resolved_path();
         let session_id = session.id.clone();
-        let workspace_path = active_workspace.path.clone();
         let event_bus = self.event_bus.clone();
 
         let batch_internal_ids: Vec<String> = (0..tool_calls.len())
@@ -2770,7 +2811,7 @@ impl AgentRuntime {
         message_index: i32,
     ) -> Result<Vec<(String, bool, u64, String, Option<String>)>> {
         let session_id = session_id.to_string();
-        let workspace_path = active_workspace.path.clone();
+        let workspace_path = active_workspace.resolved_path();
         let registry = self.tool_registry.clone();
         let event_bus = self.event_bus.clone();
 
@@ -3706,6 +3747,13 @@ impl AgentRuntime {
         self.storage.list_file_snapshot_summaries(session_id)
     }
 
+    pub async fn list_todo_items(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::tools::todo::TodoItem>> {
+        self.storage.list_todo_items(session_id)
+    }
+
     pub async fn revert_file_snapshot(
         &self,
         session_id: &str,
@@ -3804,8 +3852,9 @@ impl AgentRuntime {
             })?;
 
         let workspace_id_owned = workspace.id.clone();
-        let workspace_path_owned = workspace.path.clone();
+        let workspace_path_owned = workspace.resolved_path();
         workspace.last_used = Some(chrono::Utc::now().to_rfc3339());
+        workspace.path = workspace_path_owned.clone();
         let workspace_out = workspace.clone();
 
         cfg.agent.active_workspace = Some(workspace_id_owned);
@@ -3883,6 +3932,32 @@ impl AgentRuntime {
     pub async fn remove_workspace(&self, workspace_id: &str) -> Result<()> {
         let mut cfg = self.config.write().await;
         cfg.remove_workspace(workspace_id)
+    }
+
+    pub async fn add_workspace_path(&self, workspace_id: &str, path: WorkspacePath) -> Result<()> {
+        let mut cfg = self.config.write().await;
+        cfg.add_workspace_path(workspace_id, path)
+    }
+
+    pub async fn update_workspace_path(
+        &self,
+        workspace_id: &str,
+        path_index: usize,
+        path: WorkspacePath,
+    ) -> Result<()> {
+        let mut cfg = self.config.write().await;
+        cfg.update_workspace_path(workspace_id, path_index, path)
+    }
+
+    pub async fn remove_workspace_path(&self, workspace_id: &str, path_index: usize) -> Result<()> {
+        let mut cfg = self.config.write().await;
+        cfg.remove_workspace_path(workspace_id, path_index)
+    }
+
+    pub async fn get_workspace(&self, workspace_id: &str) -> Result<WorkspaceConfig> {
+        let cfg = self.config.read().await;
+        cfg.get_workspace(workspace_id)
+            .ok_or_else(|| OSAgentError::Config(format!("Workspace '{}' not found", workspace_id)))
     }
 
     pub async fn get_session_workspace(&self, session_id: &str) -> Result<WorkspaceConfig> {
@@ -4016,7 +4091,8 @@ impl AgentRuntime {
         let cfg = self.config.read().await;
         let workspace = cfg.get_active_workspace();
         drop(cfg);
-        self.external_manager.evaluate(path, &workspace.path)
+        self.external_manager
+            .evaluate(path, &workspace.resolved_path())
     }
 
     pub async fn create_permission_prompt(
@@ -4053,6 +4129,21 @@ impl AgentRuntime {
 
     pub async fn has_granted_external_permission(&self, path: &str) -> bool {
         self.external_manager.has_granted_permission(path).await
+    }
+
+    pub async fn get_permission_rules(&self) -> Vec<crate::permission::PermissionRule> {
+        let cfg = self.config.read().await;
+        cfg.get_permission_rules()
+    }
+
+    pub async fn add_permission_rule(&self, rule: crate::permission::PermissionRule) -> Result<()> {
+        let mut cfg = self.config.write().await;
+        cfg.add_permission_rule(rule)
+    }
+
+    pub async fn remove_permission_rule(&self, rule_id: &str) -> Result<()> {
+        let mut cfg = self.config.write().await;
+        cfg.remove_permission_rule(rule_id)
     }
 
     pub async fn get_plugins(&self) -> Vec<crate::plugin::LoadedPlugin> {

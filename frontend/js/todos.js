@@ -61,12 +61,22 @@ OSA.fetchAndRenderTodos = async function() {
     if (!currentSession?.id) {
         OSA.setSessionTodos([]);
         OSA.renderSessionTodos();
+        OSA.updateTodoDock();
         return;
     }
     try {
+        const res = await fetch(`/api/sessions/${currentSession.id}/todos`, {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        OSA.setSessionTodos(Array.isArray(data) ? data : []);
         OSA.renderSessionTodos();
+        OSA.updateTodoDock();
     } catch (error) {
         console.error('Failed to fetch todos:', error);
+        OSA.setSessionTodos([]);
+        OSA.updateTodoDock();
     }
 };
 

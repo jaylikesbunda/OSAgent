@@ -46,6 +46,15 @@ impl SqliteStorage {
         Ok(storage)
     }
 
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = rusqlite::Connection::open_in_memory().map_err(OSAgentError::Storage)?;
+        let storage = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        storage.run_migrations()?;
+        Ok(storage)
+    }
+
     fn with_conn<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> Result<T>) -> Result<T> {
         let guard = self
             .conn

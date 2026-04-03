@@ -4,10 +4,45 @@ OSA.updateWorkspaceChip = function(workspaceId, workspacePath) {
     const label = document.getElementById('workspace-trigger-label');
     const ws = OSA.getWorkspaceState();
     const workspace = ws.workspaces.find(w => w.id === (workspaceId || 'default'));
+    const effectivePath = workspacePath || OSA.primaryWorkspacePath(workspace);
     if (label) {
         label.textContent = workspace?.name || workspaceId || 'default';
-        label.title = workspacePath || workspace?.name || workspaceId || 'default';
+        label.title = effectivePath || workspace?.name || workspaceId || 'default';
     }
+};
+
+OSA.workspacePaths = function(workspace) {
+    const explicitPaths = Array.isArray(workspace?.paths)
+        ? workspace.paths.filter(wp => wp?.path && wp.path.trim())
+        : [];
+
+    if (explicitPaths.length) {
+        return explicitPaths;
+    }
+
+    if (workspace?.path && workspace.path.trim()) {
+        return [{
+            path: workspace.path.trim(),
+            permission: workspace.permission || 'read_write'
+        }];
+    }
+
+    return [];
+};
+
+OSA.primaryWorkspacePath = function(workspace) {
+    return OSA.workspacePaths(workspace)[0]?.path || '';
+};
+
+OSA.workspacePathSummary = function(workspace) {
+    const paths = OSA.workspacePaths(workspace);
+    if (!paths.length) {
+        return workspace?.id || 'No path configured';
+    }
+
+    return paths.length > 1
+        ? `${paths[0].path} (+${paths.length - 1} more)`
+        : paths[0].path;
 };
 
 OSA.toggleWorkspaceMenu = function() {
@@ -70,15 +105,18 @@ OSA.renderWorkspaceMenu = function() {
     }
     list.innerHTML = ws.workspaces.map(w => {
         const isActive = OSA.selectedWorkspaceId() === w.id;
+        const paths = OSA.workspacePaths(w);
+        const primaryPath = paths[0]?.path || w.id;
+        const pathCount = paths.length;
         return `
             <div class="menu-row ${isActive ? 'active' : ''}">
                 <button class="menu-row-main" type="button" onclick="OSA.selectWorkspaceFromMenu('${OSA.escapeHtml(w.id)}')">
-                    <span class="permission-pill ${w.permission === 'read_only' ? 'read-only' : 'read-write'}">${w.permission === 'read_only' ? 'RO' : 'RW'}</span>
                     <span class="menu-row-copy">
                         <span class="menu-row-title">${OSA.escapeHtml(w.name || w.id)}</span>
-                        <span class="menu-row-meta">${OSA.escapeHtml(w.path || w.id)}</span>
+                        <span class="menu-row-meta" title="${paths.map(p => p.path).join('\n')}">${OSA.escapeHtml(primaryPath)}${pathCount > 1 ? ` (+${pathCount - 1} more)` : ''}</span>
                     </span>
                 </button>
+                <span class="workspace-perm-subtext">${paths[0]?.permission === 'read_only' ? 'ro' : 'rw'}</span>
                 <button class="menu-icon-btn" type="button" onclick="event.stopPropagation(); OSA.openWorkspaceEditorForEdit('${OSA.escapeHtml(w.id)}')">Edit</button>
             </div>
         `;
@@ -103,11 +141,10 @@ OSA.openWorkspaceEditorForEdit = function(workspaceId) {
     if (!workspace) return;
     document.getElementById('workspace-inline-id').value = workspace.id || '';
     document.getElementById('workspace-inline-name').value = workspace.name || '';
-    document.getElementById('workspace-inline-path').value = workspace.path || '';
     document.getElementById('workspace-inline-description').value = workspace.description || '';
-    document.getElementById('workspace-inline-permission').value = workspace.permission || 'read_write';
     document.getElementById('workspace-inline-id').readOnly = true;
     OSA.setEditingWorkspaceId(workspaceId);
+    OSA.renderWorkspacePathsEditor(OSA.workspacePaths(workspace));
     document.getElementById('workspace-inline-editor').classList.remove('hidden');
     OSA.setWorkspaceInlineStatus(`Editing ${workspace.name || workspace.id}`);
 };
@@ -115,11 +152,10 @@ OSA.openWorkspaceEditorForEdit = function(workspaceId) {
 OSA.openWorkspaceEditorForCreate = function() {
     document.getElementById('workspace-inline-id').value = '';
     document.getElementById('workspace-inline-name').value = '';
-    document.getElementById('workspace-inline-path').value = '';
     document.getElementById('workspace-inline-description').value = '';
-    document.getElementById('workspace-inline-permission').value = 'read_write';
     document.getElementById('workspace-inline-id').readOnly = false;
     OSA.setEditingWorkspaceId(null);
+    OSA.renderWorkspacePathsEditor([{ path: '', permission: 'read_write' }]);
     document.getElementById('workspace-inline-editor').classList.remove('hidden');
     OSA.setWorkspaceInlineStatus('Adding a new workspace.');
 };
@@ -127,6 +163,39 @@ OSA.openWorkspaceEditorForCreate = function() {
 OSA.closeWorkspaceEditor = function() {
     document.getElementById('workspace-inline-editor').classList.add('hidden');
     OSA.setWorkspaceInlineStatus('');
+};
+
+OSA.renderWorkspacePathsEditor = function(paths) {
+    const container = document.getElementById('workspace-paths-container');
+    if (!container) return;
+    
+    if (!paths || paths.length === 0) {
+        paths = [{ path: '', permission: 'read_write' }];
+    }
+    
+    container.innerHTML = paths.map((wp, idx) => `
+        <div class="workspace-path-row" data-index="${idx}">
+            <input type="text" class="workspace-path-input" value="${OSA.escapeHtml(wp.path || '')}" placeholder="Choose a folder or enter path" />
+            <select class="workspace-path-perm">
+                <option value="read_write" ${wp.permission === 'read_write' ? 'selected' : ''}>Read + write</option>
+                <option value="read_only" ${wp.permission === 'read_only' ? 'selected' : ''}>Read only</option>
+            </select>
+            <button class="workspace-path-remove" type="button" onclick="OSA.removeWorkspacePathRow(${idx})">-</button>
+        </div>
+    `).join('') + `<button class="workspace-path-add" type="button" onclick="OSA.browseWorkspacePath()">+ Add path</button>`;
+    
+    container.dataset.paths = JSON.stringify(paths);
+};
+
+OSA.removeWorkspacePathRow = function(index) {
+    const container = document.getElementById('workspace-paths-container');
+    let paths = JSON.parse(container.dataset.paths || '[]');
+    if (paths.length <= 1) {
+        OSA.setWorkspaceInlineStatus('A workspace must have at least one path', true);
+        return;
+    }
+    paths.splice(index, 1);
+    OSA.renderWorkspacePathsEditor(paths);
 };
 
 OSA.browseWorkspacePath = async function() {
@@ -137,7 +206,10 @@ OSA.browseWorkspacePath = async function() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        document.getElementById('workspace-inline-path').value = data.path || '';
+        
+        const container = document.getElementById('workspace-paths-container');
+        let paths = JSON.parse(container.dataset.paths || '[]');
+        
         const parts = data.path.replace(/\\/g, '/').split('/').filter(Boolean);
         const nameInput = document.getElementById('workspace-inline-name');
         const idInput = document.getElementById('workspace-inline-id');
@@ -146,6 +218,14 @@ OSA.browseWorkspacePath = async function() {
             const slug = (parts[parts.length - 1] || 'workspace').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
             idInput.value = slug || 'workspace';
         }
+        
+        if (paths.some(existing => existing.path === data.path)) {
+            OSA.setWorkspaceInlineStatus('That path is already in this workspace.');
+            return;
+        }
+
+        paths.push({ path: data.path, permission: 'read_write' });
+        OSA.renderWorkspacePathsEditor(paths);
         OSA.setWorkspaceInlineStatus('Folder selected.');
     } catch (error) {
         if (error.message !== 'Folder selection was cancelled') {
@@ -154,49 +234,85 @@ OSA.browseWorkspacePath = async function() {
     }
 };
 
+OSA.getWorkspacePathsFromEditor = function() {
+    const container = document.getElementById('workspace-paths-container');
+    const rows = container.querySelectorAll('.workspace-path-row');
+    const paths = [];
+    rows.forEach(row => {
+        const pathInput = row.querySelector('.workspace-path-input');
+        const permSelect = row.querySelector('.workspace-path-perm');
+        if (pathInput && pathInput.value.trim()) {
+            paths.push({
+                path: pathInput.value.trim(),
+                permission: permSelect ? permSelect.value : 'read_write'
+            });
+        }
+    });
+    return paths;
+};
+
 OSA.onWorkspaceSelectionChange = function() {
     const id = OSA.selectedWorkspaceId();
     const ws = OSA.getWorkspaceState();
     const workspace = ws.workspaces.find(w => w.id === id);
-    OSA.updateWorkspaceChip(id, workspace?.path || '');
+    OSA.updateWorkspaceChip(id, OSA.primaryWorkspacePath(workspace));
     OSA.renderWorkspaceMenu();
 };
 
 OSA.applySessionWorkspace = async function() {
     const currentSession = OSA.getCurrentSession();
-    if (!currentSession?.id) {
+    if (!currentSession || !currentSession.id) {
         alert('Select a session first.');
         return;
     }
     const workspaceId = OSA.selectedWorkspaceId();
     try {
-        const res = await fetch(`/api/sessions/${currentSession.id}/workspace`, {
+        const url = '/api/sessions/' + encodeURIComponent(currentSession.id) + '/workspace';
+        const res = await fetch(url, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
+            headers: { 'Authorization': 'Bearer ' + OSA.getToken(), 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspace_id: workspaceId })
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
         const ws = OSA.getWorkspaceState();
         ws.activeWorkspace = data.id;
         OSA.setWorkspaceState(ws);
-        OSA.updateWorkspaceChip(data.id, data.path);
+        OSA.updateWorkspaceChip(data.id, OSA.primaryWorkspacePath(data));
         OSA.renderWorkspaceMenu();
-        OSA.setWorkspaceInlineStatus(`Using ${data.name || data.id} for this chat.`);
+        var nameOrId = data.name || data.id;
+        OSA.setWorkspaceInlineStatus('Using ' + nameOrId + ' for this chat.');
     } catch (error) {
-        OSA.setWorkspaceInlineStatus(`Failed to set session workspace: ${error.message}`, true);
+        OSA.setWorkspaceInlineStatus('Failed to set session workspace: ' + error.message, true);
     }
 };
 
 OSA.saveWorkspaceInline = async function() {
     const id = document.getElementById('workspace-inline-id').value.trim();
     const name = document.getElementById('workspace-inline-name').value.trim();
-    const path = document.getElementById('workspace-inline-path').value.trim();
     const description = document.getElementById('workspace-inline-description').value.trim();
-    const permission = document.getElementById('workspace-inline-permission').value || 'read_write';
+    const paths = OSA.getWorkspacePathsFromEditor();
     
-    if (!id || !name || !path) {
-        OSA.setWorkspaceInlineStatus('Workspace id, name, and folder are required.', true);
+    if (!id || !name) {
+        OSA.setWorkspaceInlineStatus('Workspace id and name are required.', true);
+        return null;
+    }
+
+    const dedupedPaths = [];
+    const seen = new Set();
+    paths.forEach(wp => {
+        const normalized = wp.path.trim();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        dedupedPaths.push({
+            path: normalized,
+            permission: wp.permission || 'read_write'
+        });
+    });
+
+    
+    if (dedupedPaths.length === 0 || !dedupedPaths[0].path) {
+        OSA.setWorkspaceInlineStatus('At least one workspace path is required.', true);
         return null;
     }
     
@@ -208,7 +324,7 @@ OSA.saveWorkspaceInline = async function() {
         const res = await fetch(url, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, name, path, description: description || null, permission })
+            body: JSON.stringify({ id, name, paths: dedupedPaths, description: description || null })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -245,7 +361,7 @@ OSA.renderWorkspaceSelect = function() {
         activeSelect.value = ws.activeWorkspace || 'default';
     }
     const active = ws.workspaces.find(w => w.id === ws.activeWorkspace);
-    OSA.updateWorkspaceChip(ws.activeWorkspace, active?.path || '');
+    OSA.updateWorkspaceChip(ws.activeWorkspace, OSA.primaryWorkspacePath(active));
 };
 
 OSA.renderWorkspaceList = function() {
@@ -258,12 +374,13 @@ OSA.renderWorkspaceList = function() {
     }
     list.innerHTML = ws.workspaces.map(w => {
         const isActive = w.id === ws.activeWorkspace;
+        const paths = OSA.workspacePaths(w);
         return `
             <div class="workspace-item">
                 <div>
                     <div class="decision-key">${OSA.escapeHtml(w.name || w.id)} ${isActive ? '(active)' : ''}</div>
-                    <div class="decision-value">${OSA.escapeHtml(w.path)}</div>
-                    <div class="workspace-meta">id: ${OSA.escapeHtml(w.id)} · ${w.permission === 'read_only' ? 'Read only' : 'Read + write'}</div>
+                    <div class="decision-value" title="${OSA.escapeHtml(paths.map(p => p.path).join('\n'))}">${OSA.escapeHtml(OSA.workspacePathSummary(w))}</div>
+                    <div class="workspace-meta">id: ${OSA.escapeHtml(w.id)} · ${paths[0]?.permission === 'read_only' ? 'Read only' : 'Read + write'}${paths.length > 1 ? ` · ${paths.length} paths` : ''}</div>
                 </div>
                 <div class="workspace-actions">
                     <button type="button" class="btn-secondary" onclick="OSA.editWorkspaceInForm('${OSA.escapeHtml(w.id)}')">Edit</button>
@@ -296,7 +413,7 @@ OSA.loadSessionWorkspace = async function() {
     if (!currentSession?.id) {
         const ws = OSA.getWorkspaceState();
         const active = ws.workspaces.find(w => w.id === ws.activeWorkspace);
-        OSA.updateWorkspaceChip(ws.activeWorkspace, active?.path || '');
+        OSA.updateWorkspaceChip(ws.activeWorkspace, OSA.primaryWorkspacePath(active));
         OSA.renderWorkspaceMenu();
         return;
     }
@@ -307,7 +424,7 @@ OSA.loadSessionWorkspace = async function() {
         const ws = OSA.getWorkspaceState();
         ws.activeWorkspace = data.id;
         OSA.setWorkspaceState(ws);
-        OSA.updateWorkspaceChip(data.id, data.path);
+        OSA.updateWorkspaceChip(data.id, OSA.primaryWorkspacePath(data));
         OSA.renderWorkspaceMenu();
     } catch (error) {
         console.error('Failed to load session workspace:', error);
@@ -320,7 +437,7 @@ OSA.editWorkspaceInForm = function(workspaceId) {
     if (!w) return;
     document.getElementById('workspace-id').value = w.id || '';
     document.getElementById('workspace-name').value = w.name || '';
-    document.getElementById('workspace-path').value = w.path || '';
+    document.getElementById('workspace-path').value = OSA.primaryWorkspacePath(w);
     document.getElementById('workspace-description').value = w.description || '';
 };
 

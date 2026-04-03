@@ -1453,22 +1453,24 @@
       });
     }
 
-    els.btnBuild.addEventListener('click', async () => {
-      addLog('info', 'Starting build (' + state.buildProfile + ')...');
-      els.btnBuild.disabled = true;
-      if (els.buildProgressSection) els.buildProgressSection.classList.remove('hidden');
-      if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Preparing...';
-      if (els.buildProgressFill) els.buildProgressFill.style.width = '0%';
-      if (els.buildProgressStats) els.buildProgressStats.textContent = '';
+    if (els.btnBuild) {
+      els.btnBuild.addEventListener('click', async () => {
+        addLog('info', 'Starting build (' + state.buildProfile + ')...');
+        els.btnBuild.disabled = true;
+        if (els.buildProgressSection) els.buildProgressSection.classList.remove('hidden');
+        if (els.buildProgressLabel) els.buildProgressLabel.textContent = 'Preparing...';
+        if (els.buildProgressFill) els.buildProgressFill.style.width = '0%';
+        if (els.buildProgressStats) els.buildProgressStats.textContent = '';
 
-      try {
-        await invoke('build_osagent', { profile: state.buildProfile });
-      } catch (error) {
-        addLog('error', 'Build failed: ' + error);
-        els.btnBuild.disabled = false;
-        if (els.buildProgressSection) els.buildProgressSection.classList.add('hidden');
-      }
-    });
+        try {
+          await invoke('build_osagent', { profile: state.buildProfile });
+        } catch (error) {
+          addLog('error', 'Build failed: ' + error);
+          els.btnBuild.disabled = false;
+          if (els.buildProgressSection) els.buildProgressSection.classList.add('hidden');
+        }
+      });
+    }
 
     els.btnFinishOpenUi.addEventListener('click', async () => {
       try {
@@ -1511,12 +1513,16 @@
   }
 
   function bindTitlebarDrag() {
-    if (!els.titlebar || !tauriWindow) return;
-    const appWindow = tauriWindow.appWindow ?? tauriWindow.getCurrentWindow?.();
-    if (!appWindow) return;
+    if (!els.titlebar) return;
+    const appWindow = tauriWindow?.appWindow ?? tauriWindow?.getCurrentWindow?.() ?? tauri.window?.getCurrentWindow?.();
+    if (!appWindow) {
+      console.warn('Tauri window API not available for dragging');
+      return;
+    }
     els.titlebar.addEventListener('mousedown', (event) => {
       if (event.target.closest('.titlebar-controls')) return;
-      appWindow.startDragging();
+      if (event.target.closest('button')) return;
+      appWindow.startDragging().catch(() => {});
     });
   }
 

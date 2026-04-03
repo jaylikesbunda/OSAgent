@@ -1,3 +1,4 @@
+use crate::agent::coordinator::Coordinator;
 use crate::agent::events::EventBus;
 use crate::agent::memory::MemoryStore;
 use crate::agent::provider::ToolDefinition;
@@ -6,9 +7,10 @@ use crate::config::Config;
 use crate::error::{OSAgentError, Result};
 use crate::indexer::CodeIndexer;
 use crate::skills::SkillLoader;
+use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, code, codesearch, files, lsp, memory, patch, persona, plan, process, question,
-    search, skill, subagent, task, todo, web,
+    bash, batch, code, codesearch, coordinator, files, lsp, memory, patch, persona, plan, process,
+    question, search, skill, subagent, task, todo, web,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -55,6 +57,8 @@ pub struct ToolRegistry {
     subagent_manager: Option<Arc<SubagentManager>>,
     indexer: Option<Arc<CodeIndexer>>,
     memory_store: Option<Arc<MemoryStore>>,
+    file_cache: Arc<FileReadCache>,
+    coordinator: Option<Arc<Coordinator>>,
 }
 
 impl ToolRegistry {
@@ -91,7 +95,8 @@ impl ToolRegistry {
     }
 
     pub fn new(config: Config, storage: Arc<crate::storage::SqliteStorage>) -> Result<Self> {
-        Self::with_deps(config, storage, None, None, None)
+        let cache = Arc::new(FileReadCache::with_default_capacity());
+        Self::with_deps_and_cache(config, storage, None, None, None, cache)
     }
 
     pub fn with_event_bus(
@@ -99,7 +104,8 @@ impl ToolRegistry {
         storage: Arc<crate::storage::SqliteStorage>,
         event_bus: Option<Arc<EventBus>>,
     ) -> Result<Self> {
-        Self::with_deps(config, storage, event_bus, None, None)
+        let cache = Arc::new(FileReadCache::with_default_capacity());
+        Self::with_deps_and_cache(config, storage, event_bus, None, None, cache)
     }
 
     pub fn with_event_bus_and_skills(
@@ -108,7 +114,17 @@ impl ToolRegistry {
         event_bus: Option<Arc<EventBus>>,
         skill_loader: Option<Arc<SkillLoader>>,
     ) -> Result<Self> {
-        Self::with_indexer(config, storage, event_bus, skill_loader, None, None, None)
+        let cache = Arc::new(FileReadCache::with_default_capacity());
+        Self::with_indexer(
+            config,
+            storage,
+            event_bus,
+            skill_loader,
+            None,
+            None,
+            None,
+            cache,
+        )
     }
 
     pub fn with_deps(
@@ -118,6 +134,7 @@ impl ToolRegistry {
         skill_loader: Option<Arc<SkillLoader>>,
         subagent_manager: Option<Arc<SubagentManager>>,
     ) -> Result<Self> {
+        let cache = Arc::new(FileReadCache::with_default_capacity());
         Self::with_indexer(
             config,
             storage,
@@ -126,6 +143,27 @@ impl ToolRegistry {
             subagent_manager,
             None,
             None,
+            cache,
+        )
+    }
+
+    pub fn with_deps_and_cache(
+        config: Config,
+        storage: Arc<crate::storage::SqliteStorage>,
+        event_bus: Option<Arc<EventBus>>,
+        skill_loader: Option<Arc<SkillLoader>>,
+        subagent_manager: Option<Arc<SubagentManager>>,
+        file_cache: Arc<FileReadCache>,
+    ) -> Result<Self> {
+        Self::with_indexer(
+            config,
+            storage,
+            event_bus,
+            skill_loader,
+            subagent_manager,
+            None,
+            None,
+            file_cache,
         )
     }
 
@@ -137,6 +175,7 @@ impl ToolRegistry {
         subagent_manager: Option<Arc<SubagentManager>>,
         indexer: Option<Arc<CodeIndexer>>,
         memory_store: Option<Arc<MemoryStore>>,
+        file_cache: Arc<FileReadCache>,
     ) -> Result<Self> {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
@@ -149,19 +188,25 @@ impl ToolRegistry {
 
         tools.insert(
             "read_file".to_string(),
-            Arc::new(files::ReadFileTool::new(config.clone())),
+            Arc::new(files::ReadFileTool::new(config.clone(), file_cache.clone())),
         );
         tools.insert(
             "write_file".to_string(),
-            Arc::new(files::WriteFileTool::new(config.clone())),
+            Arc::new(files::WriteFileTool::new(
+                config.clone(),
+                file_cache.clone(),
+            )),
         );
         tools.insert(
             "edit_file".to_string(),
-            Arc::new(files::EditFileTool::new(config.clone())),
+            Arc::new(files::EditFileTool::new(config.clone(), file_cache.clone())),
         );
         tools.insert(
             "apply_patch".to_string(),
-            Arc::new(patch::ApplyPatchTool::new(config.clone())),
+            Arc::new(patch::ApplyPatchTool::new(
+                config.clone(),
+                file_cache.clone(),
+            )),
         );
         tools.insert(
             "list_files".to_string(),
@@ -169,7 +214,10 @@ impl ToolRegistry {
         );
         tools.insert(
             "delete_file".to_string(),
-            Arc::new(files::DeleteFileTool::new(config.clone())),
+            Arc::new(files::DeleteFileTool::new(
+                config.clone(),
+                file_cache.clone(),
+            )),
         );
 
         tools.insert(
@@ -287,6 +335,8 @@ impl ToolRegistry {
             subagent_manager,
             indexer,
             memory_store,
+            file_cache,
+            coordinator: None,
         })
     }
 
@@ -294,16 +344,32 @@ impl ToolRegistry {
         tool_name: &str,
         config: Config,
         storage: Arc<crate::storage::SqliteStorage>,
+        file_cache: &Arc<FileReadCache>,
     ) -> Option<Arc<dyn Tool>> {
         match tool_name {
             "bash" => Some(Arc::new(bash::BashTool::new(config))),
             "batch" => Some(Arc::new(batch::BatchTool::new())),
-            "read_file" => Some(Arc::new(files::ReadFileTool::new(config))),
-            "write_file" => Some(Arc::new(files::WriteFileTool::new(config))),
-            "edit_file" => Some(Arc::new(files::EditFileTool::new(config))),
-            "apply_patch" => Some(Arc::new(patch::ApplyPatchTool::new(config))),
+            "read_file" => Some(Arc::new(files::ReadFileTool::new(
+                config,
+                file_cache.clone(),
+            ))),
+            "write_file" => Some(Arc::new(files::WriteFileTool::new(
+                config,
+                file_cache.clone(),
+            ))),
+            "edit_file" => Some(Arc::new(files::EditFileTool::new(
+                config,
+                file_cache.clone(),
+            ))),
+            "apply_patch" => Some(Arc::new(patch::ApplyPatchTool::new(
+                config,
+                file_cache.clone(),
+            ))),
             "list_files" => Some(Arc::new(files::ListFilesTool::new(config))),
-            "delete_file" => Some(Arc::new(files::DeleteFileTool::new(config))),
+            "delete_file" => Some(Arc::new(files::DeleteFileTool::new(
+                config,
+                file_cache.clone(),
+            ))),
             "code_python" => Some(Arc::new(code::CodeInterpreterTool::python(config))),
             "code_node" => Some(Arc::new(code::CodeInterpreterTool::node(config))),
             "code_bash" => Some(Arc::new(code::CodeInterpreterTool::bash(config))),
@@ -329,7 +395,17 @@ impl ToolRegistry {
     pub fn is_parallel_safe(&self, tool_name: &str) -> bool {
         matches!(
             tool_name,
-            "read_file" | "list_files" | "grep" | "glob" | "web_fetch" | "web_search" | "reflect"
+            "read_file"
+                | "list_files"
+                | "grep"
+                | "glob"
+                | "web_fetch"
+                | "web_search"
+                | "reflect"
+                | "codesearch"
+                | "todoread"
+                | "process"
+                | "lsp"
         )
     }
 
@@ -373,8 +449,17 @@ impl ToolRegistry {
 
         if let Some(path) = workspace_path {
             let mut config = self.base_config.clone();
-            config.agent.workspace = path;
-            if let Some(tool) = Self::build_tool(tool_name, config, self.storage.clone()) {
+            if let Some(workspace) = config.get_workspace_by_path(&path) {
+                config.agent.active_workspace = Some(workspace.id.clone());
+                config.agent.workspace = workspace.resolved_path();
+            } else {
+                config.agent.active_workspace = Some("default".to_string());
+                config.agent.workspace = path;
+            }
+            config.ensure_workspace_defaults();
+            if let Some(tool) =
+                Self::build_tool(tool_name, config, self.storage.clone(), &self.file_cache)
+            {
                 return tool.execute(args).await;
             }
             if let Some(tool) = self.tools.get(tool_name) {
@@ -387,5 +472,26 @@ impl ToolRegistry {
         }
 
         self.execute(tool_name, args).await
+    }
+
+    pub fn file_cache(&self) -> &Arc<FileReadCache> {
+        &self.file_cache
+    }
+
+    pub fn invalidate_file_cache_all(&self) {
+        self.file_cache.invalidate_all();
+    }
+
+    pub fn register_coordinator(&mut self, coordinator: Arc<Coordinator>) {
+        if self.allowed.contains(&"coordinator".to_string()) || self.allowed.is_empty() {
+            self.tools.insert(
+                "coordinator".to_string(),
+                Arc::new(coordinator::CoordinatorTool::new(
+                    self.storage.clone(),
+                    coordinator.clone(),
+                )),
+            );
+            self.coordinator = Some(coordinator);
+        }
     }
 }

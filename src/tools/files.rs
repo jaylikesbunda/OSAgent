@@ -1,6 +1,8 @@
 use crate::agent::instruction::{format_system_reminder, nearby_instruction_blocks};
 use crate::config::Config;
 use crate::error::{OSAgentError, Result};
+use crate::tools::file_cache::FileReadCache;
+use crate::tools::fuzzy_edit::{apply_replacement, fuzzy_find};
 use crate::tools::guard::{ensure_relative_path_not_backups, path_touches_backups};
 use crate::tools::output::path_touches_tool_outputs;
 use crate::tools::registry::Tool;
@@ -9,36 +11,69 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn workspace_is_read_only(config: &Config) -> bool {
     if let Some(workspace) = config.get_workspace_by_path(&config.agent.workspace) {
+        if let Some((_, wp)) = config.get_workspace_for_path(&config.agent.workspace) {
+            return !wp.permission.allows_writes();
+        }
         return !workspace.permission.allows_writes();
     }
 
     false
 }
 
+fn path_is_in_workspace(path: &str, config: &Config) -> bool {
+    config.is_path_in_workspace(path)
+}
+
+fn get_workspace_path_for(path: &str, config: &Config) -> Option<std::path::PathBuf> {
+    config
+        .get_workspace_for_path(path)
+        .map(|(ws, wp)| std::path::PathBuf::from(&wp.path))
+}
+
+fn ensure_workspace(workspaces: &[PathBuf]) -> Result<()> {
+    if workspaces.is_empty() {
+        return Err(OSAgentError::ToolExecution(
+            "No workspace configured. Set a workspace path in settings.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct ReadFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
+    config: Config,
+    cache: Arc<FileReadCache>,
 }
 
 impl ReadFileTool {
-    pub fn new(config: Config) -> Self {
-        let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
-
-        if !workspace.exists() {
-            let _ = fs::create_dir_all(&workspace);
-        }
-
-        let canonical_workspace = workspace.canonicalize().unwrap_or(workspace);
+    pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
+        let active_workspace = config.get_active_workspace();
+        let workspaces: Vec<PathBuf> = active_workspace
+            .paths
+            .iter()
+            .map(|wp| {
+                let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+                if !path.exists() {
+                    let _ = fs::create_dir_all(&path);
+                }
+                path.canonicalize().unwrap_or(path)
+            })
+            .collect();
 
         Self {
-            workspace: canonical_workspace,
+            workspaces,
+            config,
+            cache,
         }
     }
 
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         ensure_relative_path_not_backups(path)?;
+        ensure_workspace(&self.workspaces)?;
 
         if path.contains("..") {
             return Err(OSAgentError::ToolExecution(
@@ -46,7 +81,8 @@ impl ReadFileTool {
             ));
         }
 
-        let full_path = self.workspace.join(path);
+        let full_path = self.workspaces[0].join(path);
+        let full_path_str = full_path.to_string_lossy().to_string();
 
         if !full_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(
@@ -61,7 +97,9 @@ impl ReadFileTool {
             ));
         }
 
-        if full_path.starts_with(&self.workspace) {
+        if self.workspaces.iter().any(|ws| full_path.starts_with(ws))
+            || path_is_in_workspace(&full_path_str, &self.config)
+        {
             Ok(full_path)
         } else {
             Err(OSAgentError::ToolExecution(
@@ -140,6 +178,18 @@ impl Tool for ReadFileTool {
 
         let file_path = self.validate_path(path)?;
 
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.clone());
+
+        let wants_range = start_line != 1 || end_line_arg.is_some();
+
+        if !wants_range {
+            if let Some(entry) = self.cache.check_hit(&canonical) {
+                return Ok(FileReadCache::format_stub(&entry, &file_path));
+            }
+        }
+
         let content = fs::read_to_string(&file_path)
             .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
 
@@ -151,6 +201,10 @@ impl Tool for ReadFileTool {
         let total_lines = lines.len();
         if total_lines == 0 {
             return Ok("(empty file)".to_string());
+        }
+
+        if !wants_range {
+            self.cache.update(&canonical, &content);
         }
 
         let start_line = start_line.max(1);
@@ -184,7 +238,7 @@ impl Tool for ReadFileTool {
         }
 
         if let Some(reminder) =
-            format_system_reminder(&nearby_instruction_blocks(&self.workspace, &file_path))
+            format_system_reminder(&nearby_instruction_blocks(&self.workspaces[0], &file_path))
         {
             output.push_str("\n\n");
             output.push_str(&reminder);
@@ -195,36 +249,57 @@ impl Tool for ReadFileTool {
 }
 
 pub struct WriteFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     backup_dir: PathBuf,
+    config: Config,
+    cache: Arc<FileReadCache>,
 }
 
 impl WriteFileTool {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
         if workspace_is_read_only(&config) {
-            let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+            let workspaces: Vec<PathBuf> = config
+                .get_active_workspace()
+                .paths
+                .iter()
+                .map(|wp| {
+                    let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+                    path.canonicalize().unwrap_or(path)
+                })
+                .collect();
             return Self {
-                workspace,
+                workspaces,
                 backup_dir: PathBuf::new(),
+                config,
+                cache,
             };
         }
 
-        let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+        let active_workspace = config.get_active_workspace();
+        let mut workspaces: Vec<PathBuf> = Vec::new();
+        let mut backup_dir = PathBuf::new();
 
-        if !workspace.exists() {
-            let _ = fs::create_dir_all(&workspace);
-        }
+        for (i, wp) in active_workspace.paths.iter().enumerate() {
+            let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+            let canonical = path.canonicalize().unwrap_or(path.clone());
 
-        let canonical_workspace = workspace.canonicalize().unwrap_or(workspace);
-        let backup_dir = canonical_workspace.join(".osagent_backups");
-
-        if !backup_dir.exists() {
-            let _ = fs::create_dir_all(&backup_dir);
+            if i == 0 {
+                if !path.exists() {
+                    let _ = fs::create_dir_all(&path);
+                }
+                backup_dir = canonical.join(".osagent_backups");
+                if !backup_dir.exists() {
+                    let _ = fs::create_dir_all(&backup_dir);
+                }
+            }
+            workspaces.push(canonical);
         }
 
         Self {
-            workspace: canonical_workspace,
+            workspaces,
             backup_dir,
+            config,
+            cache,
         }
     }
 
@@ -250,6 +325,7 @@ impl WriteFileTool {
 
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         ensure_relative_path_not_backups(path)?;
+        ensure_workspace(&self.workspaces)?;
 
         if path.contains("..") {
             return Err(OSAgentError::ToolExecution(
@@ -257,7 +333,7 @@ impl WriteFileTool {
             ));
         }
 
-        let full_path = self.workspace.join(path);
+        let full_path = self.workspaces[0].join(path);
 
         if let Some(parent) = full_path.parent() {
             if !parent.exists() {
@@ -267,7 +343,9 @@ impl WriteFileTool {
             }
         }
 
-        if full_path.starts_with(&self.workspace) {
+        if self.workspaces.iter().any(|ws| full_path.starts_with(ws))
+            || path_is_in_workspace(&full_path.to_string_lossy(), &self.config)
+        {
             Ok(full_path)
         } else {
             Err(OSAgentError::ToolExecution(
@@ -334,6 +412,10 @@ impl Tool for WriteFileTool {
         fs::write(&file_path, content)
             .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
 
+        if let Ok(canonical) = file_path.canonicalize() {
+            self.cache.invalidate(&canonical);
+        }
+
         let backup_msg = if let Some(backup_path) = backup {
             format!(" (backup created at {:?})", backup_path)
         } else {
@@ -345,41 +427,63 @@ impl Tool for WriteFileTool {
 }
 
 pub struct EditFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     backup_dir: PathBuf,
+    config: Config,
+    cache: Arc<FileReadCache>,
 }
 
 impl EditFileTool {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
         if workspace_is_read_only(&config) {
-            let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+            let workspaces: Vec<PathBuf> = config
+                .get_active_workspace()
+                .paths
+                .iter()
+                .map(|wp| {
+                    let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+                    path.canonicalize().unwrap_or(path)
+                })
+                .collect();
             return Self {
-                workspace,
+                workspaces,
                 backup_dir: PathBuf::new(),
+                config,
+                cache,
             };
         }
 
-        let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+        let active_workspace = config.get_active_workspace();
+        let mut workspaces: Vec<PathBuf> = Vec::new();
+        let mut backup_dir = PathBuf::new();
 
-        if !workspace.exists() {
-            let _ = fs::create_dir_all(&workspace);
-        }
+        for (i, wp) in active_workspace.paths.iter().enumerate() {
+            let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+            let canonical = path.canonicalize().unwrap_or(path.clone());
 
-        let canonical_workspace = workspace.canonicalize().unwrap_or(workspace);
-        let backup_dir = canonical_workspace.join(".osagent_backups");
-
-        if !backup_dir.exists() {
-            let _ = fs::create_dir_all(&backup_dir);
+            if i == 0 {
+                if !path.exists() {
+                    let _ = fs::create_dir_all(&path);
+                }
+                backup_dir = canonical.join(".osagent_backups");
+                if !backup_dir.exists() {
+                    let _ = fs::create_dir_all(&backup_dir);
+                }
+            }
+            workspaces.push(canonical);
         }
 
         Self {
-            workspace: canonical_workspace,
+            workspaces,
             backup_dir,
+            config,
+            cache,
         }
     }
 
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         ensure_relative_path_not_backups(path)?;
+        ensure_workspace(&self.workspaces)?;
 
         if path.contains("..") {
             return Err(OSAgentError::ToolExecution(
@@ -387,7 +491,7 @@ impl EditFileTool {
             ));
         }
 
-        let full_path = self.workspace.join(path);
+        let full_path = self.workspaces[0].join(path);
 
         if !full_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(
@@ -396,7 +500,9 @@ impl EditFileTool {
             )));
         }
 
-        if full_path.starts_with(&self.workspace) {
+        if self.workspaces.iter().any(|ws| full_path.starts_with(ws))
+            || path_is_in_workspace(&full_path.to_string_lossy(), &self.config)
+        {
             Ok(full_path)
         } else {
             Err(OSAgentError::ToolExecution(
@@ -429,15 +535,15 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing text (creates automatic backup)"
+        "Edit a file by replacing text with fuzzy matching (creates automatic backup)"
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for small exact text replacements when the target text is already known and unambiguous"
+        "Use for small text replacements; supports exact matching and fuzzy fallbacks (line-trimmed, whitespace-normalized, indentation-flexible, block-anchor, context-aware) for robust edits"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for multi-hunk edits, large rewrites, or ambiguous matches; use apply_patch or write_file instead"
+        "Do not use for multi-hunk edits, large rewrites, or when apply_patch is more appropriate"
     }
 
     fn parameters(&self) -> Value {
@@ -494,65 +600,121 @@ impl Tool for EditFileTool {
 
         let file_path = self.validate_path(path)?;
 
+        if let Ok(canonical) = file_path.canonicalize() {
+            if let Some(entry) = self.cache.check(&canonical) {
+                if let Ok(meta) = fs::metadata(&canonical) {
+                    let current_mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if current_mtime != entry.mtime_secs {
+                        return Err(OSAgentError::ToolExecution(
+                            "File has been modified since last read. Re-read the file first with read_file, then retry the edit.".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
         let _backup_path = self.create_backup(&file_path)?;
 
         let content = fs::read_to_string(&file_path)
             .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
 
-        let match_count = content.match_indices(old_text).count();
-        if match_count == 0 {
-            return Err(OSAgentError::ToolExecution(
-                "Text not found in file".to_string(),
+        if replace_all {
+            let match_count = content.match_indices(old_text).count();
+            if match_count == 0 {
+                return Err(OSAgentError::ToolExecution(
+                    "Text not found in file (exact match for replace_all)".to_string(),
+                ));
+            }
+            let new_content = content.replace(old_text, new_text);
+            fs::write(&file_path, new_content)
+                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
+            if let Ok(canonical) = file_path.canonicalize() {
+                self.cache.invalidate(&canonical);
+            }
+            return Ok(format!(
+                "Successfully edited {} ({} replacement{})",
+                path,
+                match_count,
+                if match_count == 1 { "" } else { "s" }
             ));
         }
 
-        if !replace_all && match_count > 1 {
+        let exact_count = content.match_indices(old_text).count();
+        if exact_count == 1 {
+            let new_content = content.replacen(old_text, new_text, 1);
+            fs::write(&file_path, new_content)
+                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
+            if let Ok(canonical) = file_path.canonicalize() {
+                self.cache.invalidate(&canonical);
+            }
+            return Ok(format!(
+                "Successfully edited {} (1 replacement, exact match)",
+                path
+            ));
+        }
+
+        if exact_count > 1 {
             return Err(OSAgentError::ToolExecution(format!(
                 "Text matched {} times; refine 'old_text', set replace_all=true, or use apply_patch",
-                match_count
+                exact_count
             )));
         }
 
-        let new_content = if replace_all {
-            content.replace(old_text, new_text)
-        } else {
-            content.replacen(old_text, new_text, 1)
-        };
+        let match_result = fuzzy_find(&content, old_text).ok_or_else(|| {
+            OSAgentError::ToolExecution(
+                "Text not found in file (tried exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, trimmed-boundary, block-anchor, and context-aware matching)".to_string(),
+            )
+        })?;
+
+        let new_content = apply_replacement(&content, &match_result, old_text, new_text);
 
         fs::write(&file_path, new_content)
             .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
 
-        let replacements = if replace_all { match_count } else { 1 };
+        if let Ok(canonical) = file_path.canonicalize() {
+            self.cache.invalidate(&canonical);
+        }
+
         Ok(format!(
-            "Successfully edited {} ({} replacement{})",
+            "Successfully edited {} (1 replacement via {} matching, confidence: {:.0}%)",
             path,
-            replacements,
-            if replacements == 1 { "" } else { "s" }
+            match_result.strategy,
+            match_result.confidence * 100.0
         ))
     }
 }
 
 pub struct ListFilesTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
+    config: Config,
 }
 
 impl ListFilesTool {
     pub fn new(config: Config) -> Self {
-        let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+        let active_workspace = config.get_active_workspace();
+        let workspaces: Vec<PathBuf> = active_workspace
+            .paths
+            .iter()
+            .map(|wp| {
+                let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+                if !path.exists() {
+                    let _ = fs::create_dir_all(&path);
+                }
+                path.canonicalize().unwrap_or(path)
+            })
+            .collect();
 
-        if !workspace.exists() {
-            let _ = fs::create_dir_all(&workspace);
-        }
-
-        let canonical_workspace = workspace.canonicalize().unwrap_or(workspace);
-
-        Self {
-            workspace: canonical_workspace,
-        }
+        Self { workspaces, config }
     }
 
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         ensure_relative_path_not_backups(path)?;
+        ensure_workspace(&self.workspaces)?;
 
         if path.contains("..") {
             return Err(OSAgentError::ToolExecution(
@@ -561,12 +723,14 @@ impl ListFilesTool {
         }
 
         let full_path = if path.is_empty() || path == "." {
-            self.workspace.clone()
+            self.workspaces[0].clone()
         } else {
-            self.workspace.join(path)
+            self.workspaces[0].join(path)
         };
 
-        if full_path.starts_with(&self.workspace) {
+        if self.workspaces.iter().any(|ws| full_path.starts_with(ws))
+            || path_is_in_workspace(&full_path.to_string_lossy(), &self.config)
+        {
             Ok(full_path)
         } else {
             Err(OSAgentError::ToolExecution(
@@ -665,7 +829,7 @@ impl Tool for ListFilesTool {
             Ok(())
         }
 
-        list_dir(&dir_path, &self.workspace, &mut results, recursive)?;
+        list_dir(&dir_path, &self.workspaces[0], &mut results, recursive)?;
 
         if results.is_empty() {
             Ok("Empty directory".to_string())
@@ -676,41 +840,63 @@ impl Tool for ListFilesTool {
 }
 
 pub struct DeleteFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     backup_dir: PathBuf,
+    config: Config,
+    cache: Arc<FileReadCache>,
 }
 
 impl DeleteFileTool {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
         if workspace_is_read_only(&config) {
-            let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+            let workspaces: Vec<PathBuf> = config
+                .get_active_workspace()
+                .paths
+                .iter()
+                .map(|wp| {
+                    let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+                    path.canonicalize().unwrap_or(path)
+                })
+                .collect();
             return Self {
-                workspace,
+                workspaces,
                 backup_dir: PathBuf::new(),
+                config,
+                cache,
             };
         }
 
-        let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+        let active_workspace = config.get_active_workspace();
+        let mut workspaces: Vec<PathBuf> = Vec::new();
+        let mut backup_dir = PathBuf::new();
 
-        if !workspace.exists() {
-            let _ = fs::create_dir_all(&workspace);
-        }
+        for (i, wp) in active_workspace.paths.iter().enumerate() {
+            let path = PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+            let canonical = path.canonicalize().unwrap_or(path.clone());
 
-        let canonical_workspace = workspace.canonicalize().unwrap_or(workspace);
-        let backup_dir = canonical_workspace.join(".osagent_backups");
-
-        if !backup_dir.exists() {
-            let _ = fs::create_dir_all(&backup_dir);
+            if i == 0 {
+                if !path.exists() {
+                    let _ = fs::create_dir_all(&path);
+                }
+                backup_dir = canonical.join(".osagent_backups");
+                if !backup_dir.exists() {
+                    let _ = fs::create_dir_all(&backup_dir);
+                }
+            }
+            workspaces.push(canonical);
         }
 
         Self {
-            workspace: canonical_workspace,
+            workspaces,
             backup_dir,
+            config,
+            cache,
         }
     }
 
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         ensure_relative_path_not_backups(path)?;
+        ensure_workspace(&self.workspaces)?;
 
         if path.contains("..") {
             return Err(OSAgentError::ToolExecution(
@@ -718,7 +904,7 @@ impl DeleteFileTool {
             ));
         }
 
-        let full_path = self.workspace.join(path);
+        let full_path = self.workspaces[0].join(path);
 
         if !full_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(
@@ -727,7 +913,9 @@ impl DeleteFileTool {
             )));
         }
 
-        if full_path.starts_with(&self.workspace) {
+        if self.workspaces.iter().any(|ws| full_path.starts_with(ws))
+            || path_is_in_workspace(&full_path.to_string_lossy(), &self.config)
+        {
             Ok(full_path)
         } else {
             Err(OSAgentError::ToolExecution(
@@ -797,10 +985,16 @@ impl Tool for DeleteFileTool {
 
         let file_path = self.validate_path(path)?;
 
+        let canonical = file_path.canonicalize().ok();
+
         let backup_path = self.create_backup(&file_path)?;
 
         fs::remove_file(&file_path)
             .map_err(|e| OSAgentError::ToolExecution(format!("Failed to delete file: {}", e)))?;
+
+        if let Some(canonical) = canonical {
+            self.cache.invalidate(&canonical);
+        }
 
         Ok(format!(
             "Successfully deleted {} (backup at {:?})",

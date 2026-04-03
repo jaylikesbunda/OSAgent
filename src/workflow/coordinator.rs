@@ -12,7 +12,7 @@ use crate::workflow::types::*;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -422,26 +422,13 @@ impl SafeWorkflowCoordinator {
             )
             .await?;
 
-        let start = Instant::now();
-        let timeout_duration = Duration::from_secs(self.config.default_timeout_seconds);
+        let timeout_secs = self.config.default_timeout_seconds;
 
-        loop {
-            if start.elapsed() > timeout_duration {
-                context.send_message(job_id, None, MessageType::Timeout, serde_json::json!({}));
-                return Err(OSAgentError::Workflow(
-                    "Agent execution timed out".to_string(),
-                ));
-            }
-
-            if !self
-                .subagent_manager
-                .is_subagent_running(&subagent_session_id)
-            {
-                break;
-            }
-
-            sleep(Duration::from_millis(100)).await;
-        }
+        let (_, result, _) = self
+            .subagent_manager
+            .wait_for_subagent(&subagent_session_id, timeout_secs)
+            .await
+            .unwrap_or(("completed".into(), "No result available".into(), 0));
 
         context.send_message(
             job_id,
@@ -450,12 +437,12 @@ impl SafeWorkflowCoordinator {
             serde_json::json!({
                 "agent_id": config.agent_id,
                 "session_id": subagent_session_id,
-                "result": format!("Agent {} completed (result pending)", config.agent_id)
+                "result": result,
             }),
         );
 
         let output = serde_json::json!({
-            "result": format!("Agent {} executed successfully", config.agent_id),
+            "result": result,
             "agent_id": config.agent_id,
             "session_id": subagent_session_id,
             "job_id": job_id,

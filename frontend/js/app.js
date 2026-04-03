@@ -478,6 +478,7 @@ OSA.selectSession = async function(sessionId) {
         }
         
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        await OSA.fetchAndRenderTodos();
         OSA.loadSessions();
         OSA.loadSessionWorkspace();
         OSA.loadSessionPersona();

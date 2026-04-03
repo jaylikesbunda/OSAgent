@@ -85,6 +85,59 @@ impl TodoWriteTool {
     pub fn new(storage: Arc<SqliteStorage>) -> Self {
         Self { storage }
     }
+
+    fn parse_items(&self, todos_input: &[Value], session_id: &str) -> Result<Vec<TodoItem>> {
+        let mut items = Vec::with_capacity(todos_input.len());
+        let mut in_progress_count = 0;
+
+        for (position, todo_input) in todos_input.iter().enumerate() {
+            let content = todo_input["content"].as_str().ok_or_else(|| {
+                OSAgentError::ToolExecution("Missing 'content' field".to_string())
+            })?;
+
+            let status_str = todo_input["status"].as_str().unwrap_or("pending");
+            let status = TodoStatus::from_str(status_str).ok_or_else(|| {
+                OSAgentError::ToolExecution(format!("Invalid status: {}", status_str))
+            })?;
+            if status == TodoStatus::InProgress {
+                in_progress_count += 1;
+            }
+
+            let priority_str = todo_input["priority"].as_str().unwrap_or("medium");
+            let priority = TodoPriority::from_str(priority_str).ok_or_else(|| {
+                OSAgentError::ToolExecution(format!("Invalid priority: {}", priority_str))
+            })?;
+
+            items.push(TodoItem {
+                id: todo_input["id"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                session_id: session_id.to_string(),
+                content: content.to_string(),
+                status,
+                priority,
+                position: position as i32,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            });
+        }
+
+        if in_progress_count > 1 {
+            return Err(OSAgentError::ToolExecution(
+                "Todo list can only contain one item with status 'in_progress'".to_string(),
+            ));
+        }
+
+        Ok(items)
+    }
+
+    fn all_items_terminal(items: &[TodoItem]) -> bool {
+        !items.is_empty()
+            && items.iter().all(|item| {
+                item.status == TodoStatus::Completed || item.status == TodoStatus::Cancelled
+            })
+    }
 }
 
 #[async_trait]
@@ -168,33 +221,22 @@ impl Tool for TodoWriteTool {
 
         let session_id = args["session_id"].as_str().unwrap_or("default").to_string();
 
-        for (position, todo_input) in todos_input.iter().enumerate() {
-            let content = todo_input["content"].as_str().ok_or_else(|| {
-                OSAgentError::ToolExecution("Missing 'content' field".to_string())
-            })?;
+        let items = self.parse_items(todos_input, &session_id)?;
 
-            let status_str = todo_input["status"].as_str().unwrap_or("pending");
-            let status = TodoStatus::from_str(status_str).ok_or_else(|| {
-                OSAgentError::ToolExecution(format!("Invalid status: {}", status_str))
-            })?;
+        if Self::all_items_terminal(&items) {
+            self.storage.clear_todo_items(&session_id)?;
+            return Ok("Todo list completed.".to_string());
+        }
 
-            let priority_str = todo_input["priority"].as_str().unwrap_or("medium");
-            let priority = TodoPriority::from_str(priority_str).ok_or_else(|| {
-                OSAgentError::ToolExecution(format!("Invalid priority: {}", priority_str))
-            })?;
-
-            let id = todo_input["id"]
-                .as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| Uuid::new_v4().to_string());
-
+        self.storage.clear_todo_items(&session_id)?;
+        for item in &items {
             self.storage.upsert_todo_item(
-                &id,
-                &session_id,
-                content,
-                status,
-                priority,
-                position as i32,
+                &item.id,
+                &item.session_id,
+                &item.content,
+                item.status.clone(),
+                item.priority.clone(),
+                item.position,
             )?;
         }
 

@@ -1,6 +1,6 @@
 [package]
 name = "osagent"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 authors = ["OSA Contributors"]
 license = "MIT"
@@ -84,6 +84,13 @@ bytes = "1.5"
 # ZIP handling
 zip = "0.6"
 
+# TAR/GZ handling
+tar = "0.4"
+flate2 = "1.0"
+
+# Directory paths
+dirs-next = "2.0"
+
 # Version comparison
 semver = "1.0"
 
@@ -107,6 +114,10 @@ memory-stats = "1.0"
 [[bin]]
 name = "osagent"
 path = "src/main.rs"
+
+[[bin]]
+name = "osagent-optimize"
+path = "src/bin/optimize.rs"
 
 [features]
 default = []

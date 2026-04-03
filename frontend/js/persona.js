@@ -45,7 +45,6 @@ OSA.renderPersonaMenu = function() {
                 <button class="menu-row-main" type="button" onclick="OSA.selectPersonaFromMenu('${OSA.escapeHtml(p.id)}')">
                     <span class="menu-row-copy">
                         <span class="menu-row-title">${OSA.escapeHtml(p.name || p.id)}</span>
-                        <span class="menu-row-meta">${OSA.escapeHtml(p.summary || p.id)}</span>
                     </span>
                 </button>
             </div>

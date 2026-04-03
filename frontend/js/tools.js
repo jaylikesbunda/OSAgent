@@ -10,13 +10,12 @@ OSA.buildContextRingHtml = function(contextState, subagentId) {
     const colorClass = pct >= 90 ? 'danger' : pct >= 70 ? 'warning' : '';
     return `
         <div class="subagent-context-ring ${colorClass}" id="subagent-context-ring-${subagentId}" title="Context: ${pct}%">
-            <svg viewBox="0 0 36 36" width="22" height="22">
+            <svg viewBox="0 0 36 36">
                 <circle class="context-ring-bg" cx="18" cy="18" r="15.5" stroke-width="2.5"/>
                 <circle class="context-ring-progress" cx="18" cy="18" r="15.5" stroke-width="2.5"
-                    stroke-dasharray="97.4" stroke-dashoffset="${offset}"
-                    style="stroke: var(--${colorClass || 'accent'})"/>
+                    stroke-dasharray="97.4" stroke-dashoffset="${offset}"/>
             </svg>
-            <span class="subagent-context-pct">${pct}%</span>
+            <span class="subagent-context-pct">${pct}</span>
         </div>
     `;
 };
@@ -151,6 +150,9 @@ OSA.handleAgentEvent = function(event) {
 
         case 'context_update':
             OSA.updateContextStatus(event);
+            if (event.subagent_session_id) {
+                OSA.updateSubagentContextRing(event.subagent_session_id, event);
+            }
             break;
 
         case 'retry':
@@ -185,7 +187,11 @@ OSA.handleAgentEvent = function(event) {
         case 'subagent_completed':
             OSA.handleSubagentCompleted(event);
             break;
-    }
+        case 'subagent_completed':
+            OSA.handleSubagentCompleted(event);
+            break;
+
+        default:    }
 };
 
 OSA._contextStates = {};
@@ -435,12 +441,11 @@ OSA.createToolCard = function(event, insertBefore = null) {
         return;
     }
 
-    const isRow = OSA.isRowTool(toolName);
     const label = OSA.toolLabel(toolName);
     const icon = OSA.toolIcon(toolName);
     const subtitle = OSA.summarizeToolArgs(toolName, args);
     const domId = `tool-${callId || (Date.now())}`;
-    const isPanel = !isRow;
+    const isPanel = true;
     const startTime = Date.now();
 
     const container = document.createElement('div');
@@ -454,38 +459,22 @@ OSA.createToolCard = function(event, insertBefore = null) {
 
     let html = '';
 
-    if (isRow) {
-        html += `
-            <div class="tool-card tool-row" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
-                <div class="tool-trigger tool-trigger-row">
-                    <span class="tool-icon">${icon}</span>
-                    <span class="tool-title ${titleClass}">${OSA.escapeHtml(label)}</span>
-                    ${subtitle ? `<span class="tool-subtitle">${OSA.escapeHtml(subtitle)}</span>` : ''}
-                    <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
+    html += `
+        <div class="tool-card tool-inline" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
+            <div class="tool-trigger tool-trigger-inline" onclick="OSA.toggleToolCard('${domId}')">
+                <span class="tool-icon">${icon}</span>
+                <span class="tool-title ${titleClass}" id="title-${domId}">${OSA.escapeHtml(label)}</span>
+                ${subtitle ? `<span class="tool-subtitle" id="subtitle-${domId}">${OSA.escapeHtml(subtitle)}</span>` : ''}
+                <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
+                <span class="tool-chevron" id="chevron-${domId}" style="${chevronOpacity}">&#x25B6;</span>
+            </div>
+            <div class="tool-body" id="body-${domId}">
+                <div class="tool-body-inner">
+                    <div class="tool-args">${OSA.escapeHtml(JSON.stringify(args, null, 2))}</div>
+                    <div class="tool-output" id="output-${domId}" style="display:none"></div>
                 </div>
-            </div>`;
-    } else {
-        html += `
-            <div class="tool-card tool-panel" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
-                <div class="tool-trigger tool-trigger-panel" onclick="OSA.toggleToolCard('${domId}')">
-                    <div class="tool-trigger-info">
-                        <span class="tool-icon">${icon}</span>
-                        <span class="tool-title ${titleClass}" id="title-${domId}">${OSA.escapeHtml(label)}</span>
-                        ${subtitle ? `<span class="tool-subtitle" id="subtitle-${domId}">${OSA.escapeHtml(subtitle)}</span>` : ''}
-                    </div>
-                    <div class="tool-trigger-actions">
-                        <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
-                        <span class="tool-chevron" id="chevron-${domId}" style="${chevronOpacity}">&#x25B6;</span>
-                    </div>
-                </div>
-                <div class="tool-body" id="body-${domId}">
-                    <div class="tool-body-inner">
-                        <div class="tool-args">${OSA.escapeHtml(JSON.stringify(args, null, 2))}</div>
-                        <div class="tool-output" id="output-${domId}" style="display:none"></div>
-                    </div>
-                </div>
-            </div>`;
-    }
+            </div>
+        </div>`;
 
     container.innerHTML = html;
 
@@ -545,12 +534,11 @@ OSA.restoreToolCard = function(event, insertBefore = null, parent = null) {
     const output = event.output || '';
     const isCompleted = event.completed === true;
 
-    const isRow = OSA.isRowTool(toolName);
     const label = OSA.toolLabel(toolName);
     const icon = OSA.toolIcon(toolName);
     const subtitle = OSA.summarizeToolArgs(toolName, args);
     const domId = `tool-${callId}`;
-    const isPanel = !isRow;
+    const isPanel = true;
 
     const container = document.createElement('div');
     container.id = domId;
@@ -563,45 +551,30 @@ OSA.restoreToolCard = function(event, insertBefore = null, parent = null) {
 
     let html = '';
 
-    if (isRow) {
-        const subtitleHtml = (() => {
-            if (!subtitle) return '';
-            if (toolName === 'subagent') {
-                return `<a class="subagent-link subagent-row-link" id="subagent-link-${domId}">${OSA.escapeHtml(subtitle)}</a>`;
-            }
-            return `<span class="tool-subtitle">${OSA.escapeHtml(subtitle)}</span>`;
-        })();
-        html += `
-            <div class="tool-card tool-row" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
-                <div class="tool-trigger tool-trigger-row">
-                    <span class="tool-icon">${icon}</span>
-                    <span class="tool-title">${OSA.escapeHtml(label)}</span>
-                    ${subtitleHtml}
-                    <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
+    const subtitleHtml = (() => {
+        if (!subtitle) return '';
+        if (toolName === 'subagent') {
+            return `<a class="subagent-link subagent-row-link" id="subagent-link-${domId}">${OSA.escapeHtml(subtitle)}</a>`;
+        }
+        return `<span class="tool-subtitle" id="subtitle-${domId}">${OSA.escapeHtml(subtitle)}</span>`;
+    })();
+
+    html += `
+        <div class="tool-card tool-inline" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
+            <div class="tool-trigger tool-trigger-inline" onclick="OSA.toggleToolCard('${domId}')">
+                <span class="tool-icon">${icon}</span>
+                <span class="tool-title" id="title-${domId}">${OSA.escapeHtml(label)}</span>
+                ${subtitleHtml}
+                <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
+                <span class="tool-chevron" id="chevron-${domId}">&#x25B6;</span>
+            </div>
+            <div class="tool-body" id="body-${domId}">
+                <div class="tool-body-inner">
+                    <div class="tool-args" id="args-${domId}">${OSA.escapeHtml(JSON.stringify(args, null, 2))}</div>
+                    <div class="tool-output" id="output-${domId}" style="display:none"></div>
                 </div>
-            </div>`;
-    } else {
-        html += `
-            <div class="tool-card tool-panel" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
-                <div class="tool-trigger tool-trigger-panel" onclick="OSA.toggleToolCard('${domId}')">
-                    <div class="tool-trigger-info">
-                        <span class="tool-icon">${icon}</span>
-                        <span class="tool-title" id="title-${domId}">${OSA.escapeHtml(label)}</span>
-                        ${subtitle ? `<span class="tool-subtitle" id="subtitle-${domId}">${OSA.escapeHtml(subtitle)}</span>` : ''}
-                    </div>
-                    <div class="tool-trigger-actions">
-                        <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
-                        <span class="tool-chevron" id="chevron-${domId}">&#x25B6;</span>
-                    </div>
-                </div>
-                <div class="tool-body" id="body-${domId}">
-                    <div class="tool-body-inner">
-                        <div class="tool-args" id="args-${domId}">${OSA.escapeHtml(JSON.stringify(args, null, 2))}</div>
-                        <div class="tool-output" id="output-${domId}" style="display:none"></div>
-                    </div>
-                </div>
-            </div>`;
-    }
+            </div>
+        </div>`;
 
     container.innerHTML = html;
 
@@ -680,67 +653,29 @@ OSA.restoreContextToolGroup = function(tools, insertBefore = null) {
 
     const group = document.createElement('div');
     group.id = 'context-tool-group';
-    group.className = 'tool-container';
-    group.innerHTML = `
-        <div class="tool-card tool-panel context-group">
-            <div class="tool-trigger tool-trigger-panel" onclick="OSA.toggleContextGroup()">
-                <div class="tool-trigger-info">
-                    <span class="tool-icon">S</span>
-                    <span class="tool-title" id="ctx-group-title">Gathering context</span>
-                    <span class="tool-subtitle" id="ctx-group-summary"></span>
-                </div>
-                <div class="tool-trigger-actions">
-                    <span class="tool-status-badge done" id="ctx-group-status">done</span>
-                    <span class="tool-chevron" id="ctx-group-chevron">&#x25B6;</span>
-                </div>
-            </div>
-            <div class="tool-body" id="ctx-group-body">
-                <div class="tool-body-inner">
-                    <div class="context-tool-list" id="context-tool-list"></div>
-                </div>
-            </div>
-        </div>
-    `;
-
-    const list = group.querySelector('#context-tool-list');
+    group.className = 'tool-container context-inline-group';
 
     tools.forEach(t => {
         const label = OSA.toolLabel(t.tool_name);
         const detail = OSA.summarizeToolArgs(t.tool_name, t.arguments || {});
         const isSuccess = t.success === true;
         const statusText = isSuccess ? 'done' : 'failed';
-        const statusClass = isSuccess ? 'done' : 'failed';
 
         const item = document.createElement('div');
-        item.className = 'context-tool-row';
+        item.className = 'context-inline-item';
         item.id = `ctx-${t.tool_call_id}`;
         item.innerHTML = `
-            <span class="context-tool-action">${OSA.escapeHtml(label)}</span>
-            <span class="context-tool-detail">${OSA.escapeHtml(detail)}</span>
-            <span class="context-tool-status ${statusClass}">${statusText}</span>
+            <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
+            <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
+            <span class="context-inline-status">${statusText}</span>
         `;
-        list.appendChild(item);
+        group.appendChild(item);
     });
-
-    OSA._contextGroupState = { expanded: false, allDone: true };
 
     if (insertBefore) {
         messagesDiv.insertBefore(group, insertBefore);
     } else {
         messagesDiv.appendChild(group);
-    }
-
-    OSA.updateContextGroupCounts();
-
-    const statusEl = document.getElementById('ctx-group-status');
-    if (statusEl) {
-        statusEl.textContent = 'done';
-        statusEl.className = 'tool-status-badge done';
-    }
-    const titleEl = document.getElementById('ctx-group-title');
-    if (titleEl) {
-        titleEl.textContent = 'Context gathered';
-        titleEl.classList.remove('tool-title-pending');
     }
 
     return group;
@@ -767,23 +702,20 @@ OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = fal
     const toolName = event.tool_name;
     const args = event.arguments || {};
     const callId = event.tool_call_id;
-    const list = document.getElementById('context-tool-list');
-    if (!list) return;
-
     const label = OSA.toolLabel(toolName);
     const detail = OSA.summarizeToolArgs(toolName, args);
     const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
-    const statusClass = isCompleted ? (isSuccess ? 'done' : 'failed') : 'pending';
 
     const item = document.createElement('div');
-    item.className = 'context-tool-row';
+    item.className = 'context-inline-item';
     item.id = `ctx-${callId}`;
     item.innerHTML = `
-        <span class="context-tool-action">${OSA.escapeHtml(label)}</span>
-        <span class="context-tool-detail">${OSA.escapeHtml(detail)}</span>
-        <span class="context-tool-status ${statusClass}">${statusText}</span>
+        <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
+        <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
+        <span class="context-inline-status">${statusText}</span>
     `;
-    list.appendChild(item);
+    group.appendChild(item);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
     if (!isCompleted) {
         OSA.getActiveTools().set(callId, {
@@ -793,8 +725,6 @@ OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = fal
             completed: false,
         });
     }
-
-    OSA.updateContextGroupCounts();
 };
 
 OSA.ensureContextToolGroup = function() {
@@ -809,27 +739,7 @@ OSA.ensureContextToolGroup = function() {
 
     const group = document.createElement('div');
     group.id = 'context-tool-group';
-    group.className = 'tool-container';
-    group.innerHTML = `
-        <div class="tool-card tool-panel context-group">
-            <div class="tool-trigger tool-trigger-panel" onclick="OSA.toggleContextGroup()">
-                <div class="tool-trigger-info">
-                    <span class="tool-icon">S</span>
-                    <span class="tool-title tool-title-pending" id="ctx-group-title">Gathering context...</span>
-                    <span class="tool-subtitle" id="ctx-group-summary"></span>
-                </div>
-                <div class="tool-trigger-actions">
-                    <span class="tool-status-badge pending" id="ctx-group-status">running</span>
-                    <span class="tool-chevron" id="ctx-group-chevron" style="opacity:0">&#x25B6;</span>
-                </div>
-            </div>
-            <div class="tool-body" id="ctx-group-body">
-                <div class="tool-body-inner">
-                    <div class="context-tool-list" id="context-tool-list"></div>
-                </div>
-            </div>
-        </div>
-    `;
+    group.className = 'tool-container context-inline-group';
     messagesDiv.appendChild(group);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
@@ -837,85 +747,9 @@ OSA.ensureContextToolGroup = function() {
     return group;
 };
 
-OSA.updateContextGroupCounts = function() {
-    const items = document.querySelectorAll('#context-tool-list .context-tool-row');
-    let readCount = 0, searchCount = 0, listCount = 0, pending = 0;
+OSA.updateContextGroupCounts = function() {};
 
-    items.forEach(item => {
-        const action = item.querySelector('.context-tool-action')?.textContent || '';
-        const status = item.querySelector('.context-tool-status')?.textContent || '';
-        if (status === 'running') pending++;
-        if (action === 'Read') readCount++;
-        else if (action === 'Search' || action === 'Find') searchCount++;
-        else if (action === 'List') listCount++;
-    });
-
-    const parts = [];
-    if (readCount) parts.push(readCount === 1 ? '1 file' : `${readCount} files`);
-    if (searchCount) parts.push(searchCount === 1 ? '1 search' : `${searchCount} searches`);
-    if (listCount) parts.push(listCount === 1 ? '1 listing' : `${listCount} listings`);
-
-    const summary = document.getElementById('ctx-group-summary');
-    if (summary) summary.textContent = parts.join(', ');
-
-    const title = document.getElementById('ctx-group-title');
-    const statusBadge = document.getElementById('ctx-group-status');
-    const chevron = document.getElementById('ctx-group-chevron');
-    const body = document.getElementById('ctx-group-body');
-
-    if (pending === 0 && items.length > 0) {
-        if (title) {
-            title.textContent = 'Gathered context';
-            title.classList.remove('tool-title-pending');
-        }
-        if (statusBadge) {
-            statusBadge.textContent = 'done';
-            statusBadge.classList.remove('pending');
-            statusBadge.classList.add('done');
-        }
-        if (chevron) chevron.style.opacity = '';
-
-        if (OSA._contextGroupState) {
-            OSA._contextGroupState.allDone = true;
-            if (!OSA._contextGroupState.expanded && body) {
-                body.classList.remove('visible');
-            }
-        }
-    } else {
-        if (title) {
-            title.textContent = 'Gathering context\u2026';
-            title.classList.add('tool-title-pending');
-        }
-        if (statusBadge) {
-            statusBadge.textContent = 'running';
-            statusBadge.classList.add('pending');
-            statusBadge.classList.remove('done');
-        }
-        if (chevron) chevron.style.opacity = '0';
-        if (body) body.classList.add('visible');
-    }
-};
-
-OSA.toggleContextGroup = function() {
-    if (!OSA._contextGroupState || !OSA._contextGroupState.allDone) return;
-
-    const body = document.getElementById('ctx-group-body');
-    const chevron = document.getElementById('ctx-group-chevron');
-    if (!body) return;
-
-    OSA._contextGroupState.expanded = !OSA._contextGroupState.expanded;
-
-    if (OSA._contextGroupState.expanded) {
-        body.classList.add('visible');
-        if (chevron) {
-            chevron.classList.add('open');
-            chevron.style.opacity = '';
-        }
-    } else {
-        body.classList.remove('visible');
-        if (chevron) chevron.classList.remove('open');
-    }
-};
+OSA.toggleContextGroup = function() {};
 
 OSA.toggleToolCard = function(domId) {
     const activeTools = OSA.getActiveTools();
@@ -977,7 +811,6 @@ OSA.completeToolCard = function(event) {
                 else state.classList.add('failed');
             }
         }
-        OSA.updateContextGroupCounts();
         activeTools.delete(event.tool_call_id);
         return;
     }
@@ -1200,16 +1033,120 @@ OSA.handleEventCancelled = function(event) {
 
 OSA._activeSubagents = new Map();
 
+OSA.syncSubagentCardState = function(task) {
+    if (!task || !task.session_id) return;
+
+    const subagentId = task.session_id;
+    const status = task.status || 'running';
+    const isRunning = !!task.is_running;
+    const toolCount = task.tool_count || 0;
+    const result = task.result || '';
+
+    const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
+    if (statusBadge) {
+        const badgeStatus = isRunning ? 'running' : status;
+        statusBadge.textContent = badgeStatus;
+        statusBadge.className = `subagent-status-badge ${badgeStatus}`;
+    }
+
+    const countEl = document.getElementById(`subagent-count-${subagentId}`);
+    if (countEl) {
+        countEl.textContent = `${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
+    }
+
+    const promptEl = document.getElementById(`subagent-prompt-${subagentId}`);
+    if (promptEl && task.prompt) {
+        promptEl.textContent = task.prompt;
+    }
+
+    const resultEl = document.getElementById(`subagent-result-${subagentId}`);
+    if (resultEl) {
+        if (result) {
+            resultEl.style.display = 'block';
+            resultEl.innerHTML = `<div class="subagent-result-label">Result:</div><div class="subagent-result-text">${OSA.escapeHtml(result.slice(0, 500))}${result.length > 500 ? '\u2026' : ''}</div>`;
+        } else if (!isRunning) {
+            resultEl.style.display = 'none';
+            resultEl.innerHTML = '';
+        }
+    }
+
+    const cancelBtnId = `subagent-cancel-${subagentId}`;
+    let cancelBtn = document.getElementById(cancelBtnId);
+    if (isRunning) {
+        if (!cancelBtn) {
+            const actions = document.querySelector(`#subagent-${subagentId} .subagent-actions`);
+            if (actions) {
+                cancelBtn = document.createElement('button');
+                cancelBtn.id = cancelBtnId;
+                cancelBtn.className = 'subagent-btn subagent-btn-cancel';
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.onclick = () => OSA.cancelSubagent(subagentId);
+                actions.appendChild(cancelBtn);
+            }
+        }
+    } else if (cancelBtn) {
+        cancelBtn.remove();
+    }
+
+    OSA.updateSubagentContextRing(subagentId, task.context_state);
+
+    if (isRunning) {
+        OSA._activeSubagents.set(subagentId, {
+            id: subagentId,
+            description: task.description || 'Subagent task',
+            agentType: task.agent_type || 'general',
+            toolCount,
+            status: 'running',
+            result
+        });
+    } else {
+        OSA._activeSubagents.delete(subagentId);
+    }
+};
+
+OSA.updateSubagentContextRing = function(subagentId, contextState) {
+    if (!contextState) return;
+    const ring = document.getElementById(`subagent-context-ring-${subagentId}`);
+    if (!ring) return;
+    const used = contextState.estimated_tokens || 0;
+    const window = contextState.context_window || 1;
+    const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
+    const circumference = 97.4;
+    const offset = circumference - (pct / 100) * circumference;
+    const progress = ring.querySelector('.context-ring-progress');
+    const pctEl = ring.querySelector('.subagent-context-pct');
+    if (progress) {
+        progress.style.strokeDashoffset = offset;
+        progress.style.stroke = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '';
+    }
+    if (pctEl) pctEl.textContent = pct;
+    ring.classList.remove('warning', 'danger');
+    if (pct >= 90) ring.classList.add('danger');
+    else if (pct >= 70) ring.classList.add('warning');
+    ring.title = `Context: ${pct}%`;
+};
+
 OSA.restoreSubagentCards = function(subagentTasks) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv || !subagentTasks || subagentTasks.length === 0) return;
 
+    const sorted = [...subagentTasks].sort((a, b) => {
+        const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return ta - tb;
+    });
+
     const allMessages = Array.from(messagesDiv.querySelectorAll('.message'));
 
-    subagentTasks.forEach(task => {
+    const groupedByAnchor = new Map();
+
+    sorted.forEach(task => {
         const subagentId = task.session_id;
         const existingCard = document.getElementById(`subagent-${subagentId}`);
-        if (existingCard) return;
+        if (existingCard) {
+            OSA.syncSubagentCardState(task);
+            return;
+        }
 
         const description = task.description || 'Subagent task';
         const agentType = task.agent_type || 'general';
@@ -1250,32 +1187,20 @@ OSA.restoreSubagentCards = function(subagentTasks) {
             </div>
         `;
 
+        let anchorIdx = null;
         if (allMessages.length > 0 && task.created_at) {
             const subTs = new Date(task.created_at).getTime();
-            let anchor = null;
             for (let i = allMessages.length - 1; i >= 0; i--) {
                 const msgTs = parseInt(allMessages[i].dataset.ts, 10) || 0;
                 if (msgTs <= subTs) {
-                    anchor = allMessages[i];
+                    anchorIdx = i;
                     break;
                 }
             }
-            let insertBefore = null;
-            if (anchor) {
-                let sibling = anchor.nextElementSibling;
-                while (sibling && !sibling.classList.contains('message')) {
-                    sibling = sibling.nextElementSibling;
-                }
-                insertBefore = sibling;
-            }
-            if (insertBefore) {
-                messagesDiv.insertBefore(container, insertBefore);
-            } else {
-                messagesDiv.appendChild(container);
-            }
-        } else {
-            messagesDiv.appendChild(container);
         }
+        const key = anchorIdx !== null ? anchorIdx : -1;
+        if (!groupedByAnchor.has(key)) groupedByAnchor.set(key, []);
+        groupedByAnchor.get(key).push(container);
 
         if (isRunning) {
             OSA._activeSubagents.set(subagentId, {
@@ -1287,6 +1212,31 @@ OSA.restoreSubagentCards = function(subagentTasks) {
             });
         }
     });
+
+    const sortedKeys = Array.from(groupedByAnchor.keys()).sort((a, b) => a - b);
+    for (const key of sortedKeys) {
+        const cards = groupedByAnchor.get(key);
+        if (key === -1) {
+            for (const card of cards) {
+                messagesDiv.appendChild(card);
+            }
+        } else {
+            const anchor = allMessages[key];
+            let insertBefore = null;
+            let sibling = anchor.nextElementSibling;
+            while (sibling && !sibling.classList.contains('message')) {
+                sibling = sibling.nextElementSibling;
+            }
+            insertBefore = sibling;
+            for (const card of cards) {
+                if (insertBefore) {
+                    messagesDiv.insertBefore(card, insertBefore);
+                } else {
+                    messagesDiv.appendChild(card);
+                }
+            }
+        }
+    }
 };
 
 OSA.handleSubagentCreated = function(event) {
@@ -1400,6 +1350,9 @@ OSA.handleSubagentCompleted = function(event) {
         data.status = status;
         data.result = result;
     }
+
+    OSA._activeSubagents.delete(subagentId);
+    OSA.loadSessions();
 };
 
 OSA.handleSubagentComplete = function(event) {
@@ -1497,6 +1450,44 @@ OSA.cancelSubagent = async function(subagentId) {
     } catch (err) {
         console.error('Failed to cancel subagent:', err);
     }
+};
+
+OSA.handleCoordinatorPhase = function(event) {
+    const phase = event.phase || 'unknown';
+    const workers = event.workers_spawned || 0;
+    const messagesDiv = document.getElementById('messages');
+    if (!messagesDiv) return;
+
+    const phaseLabels = {
+        research: 'Researching',
+        synthesis: 'Synthesizing plan',
+        implementation: 'Implementing',
+        verification: 'Verifying',
+        complete: 'Complete'
+    };
+    const label = phaseLabels[phase] || phase;
+
+    let container = document.getElementById('coordinator-status');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'coordinator-status';
+        container.className = 'coordinator-card';
+        const lastMsg = messagesDiv.querySelector('.message:last-child');
+        if (lastMsg) {
+            lastMsg.appendChild(container);
+        } else {
+            messagesDiv.appendChild(container);
+        }
+    }
+
+    if (phase === 'complete') {
+        container.className = 'coordinator-card coordinator-complete';
+        container.innerHTML = `<div class="coordinator-header"><span class="coordinator-icon">&#x2713;</span> <span class="coordinator-title">Coordinator finished</span></div>`;
+        return;
+    }
+
+    container.className = 'coordinator-card coordinator-active';
+    container.innerHTML = `<div class="coordinator-header"><span class="coordinator-icon coordinator-spinner">&#x26A1;</span> <span class="coordinator-title">Coordinator: ${label}</span> <span class="coordinator-workers">${workers} worker${workers !== 1 ? 's' : ''}</span></div>`;
 };
 
 window.toggleToolCard = OSA.toggleToolCard;
