@@ -806,7 +806,7 @@ impl Coordinator {
             return true;
         }
 
-        let is_single_known_file = has_path_sep
+        has_path_sep
             && (lower.ends_with(".html")
                 || lower.ends_with(".css")
                 || lower.ends_with(".js")
@@ -817,9 +817,7 @@ impl Coordinator {
                 || lower.ends_with(".md")
                 || lower.ends_with(".py")
                 || lower.ends_with(".sh")
-                || lower.ends_with(".sql"));
-
-        is_single_known_file
+                || lower.ends_with(".sql"))
     }
 
     fn build_synthesis(request: &str, findings: &[(String, String)]) -> String {
