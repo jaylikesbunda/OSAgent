@@ -177,6 +177,7 @@ release:gitlab:
       {
         "name": "OSAgent ${TAG}",
         "tag_name": "${TAG}",
+        "ref": "${CI_COMMIT_SHA}",
         "description": "Launcher release for Windows and Linux. Auto-updates are served from Cloudflare R2 via ${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json.",
         "assets": {
           "links": [
