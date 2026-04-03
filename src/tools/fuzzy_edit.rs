@@ -274,15 +274,15 @@ impl MatchStrategy for EscapeNormalizedMatcher {
 pub fn fuzzy_find(content: &str, old_text: &str) -> Option<MatchResult> {
     let strategies: Vec<Box<dyn MatchStrategy>> = vec![
         Box::new(ExactMatcher),
-        Box::new(LineTrimmedMatcher),
-        Box::new(WhitespaceNormalizedMatcher),
         Box::new(IndentationFlexibleMatcher),
-        Box::new(EscapeNormalizedMatcher),
+        Box::new(LineTrimmedMatcher),
+        Box::new(ContextAwareMatcher),
         Box::new(TrimmedBoundaryMatcher),
+        Box::new(WhitespaceNormalizedMatcher),
         Box::new(BlockAnchorMatcher {
             min_similarity: 0.75,
         }),
-        Box::new(ContextAwareMatcher),
+        Box::new(EscapeNormalizedMatcher),
     ];
 
     for strategy in &strategies {
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn line_trimmed_match() {
         let content = "hello world\n  foo bar  \nbaz";
-        let old = "foo bar";
+        let old = "foo bar\nbaz";
         let result = fuzzy_find(content, old).unwrap();
         assert_eq!(result.strategy, "line_trimmed");
     }
@@ -477,8 +477,8 @@ mod tests {
 
     #[test]
     fn indentation_flexible_match() {
-        let content = "fn main() {\n    println!(\"hello\");\n}";
-        let old = "fn main() {\nprintln!(\"hello\");\n}";
+        let content = "    fn main() {\n        println!(\"hello\");\n    }";
+        let old = "fn main() {\n    println!(\"hello\");\n}";
         let result = fuzzy_find(content, old).unwrap();
         assert_eq!(result.strategy, "indentation_flexible");
     }
@@ -492,8 +492,8 @@ mod tests {
 
     #[test]
     fn block_anchor_match() {
-        let content = "line 1\nline two with typo\nline 3";
-        let old = "line 1\nline 2 with typo\nline 3";
+        let content = "line 1\nline 2\nline 3\nline four";
+        let old = "line 1\nline 2\nline 3\nline 4";
         let result = fuzzy_find(content, old).unwrap();
         assert_eq!(result.strategy, "block_anchor");
         assert!(result.confidence >= 0.75);
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn trimmed_boundary_match() {
         let content = "  hello world  ";
-        let old = "hello world";
+        let old = "\nhello world\n";
         let result = fuzzy_find(content, old).unwrap();
         assert_eq!(result.strategy, "trimmed_boundary");
     }
