@@ -44,8 +44,8 @@ variables:
 
 .install_windows_cross_deps: &install_windows_cross_deps |
   apt-get update
-  apt-get install -y mingw-w64 clang
-  cargo install cross --locked
+  apt-get install -y mingw-w64
+  rustup target add x86_64-pc-windows-gnu
 
 .install_aws_cli: &install_aws_cli |
   python3 -m pip install --user awscli
@@ -117,9 +117,9 @@ build:windows:
     - *setup_rust
     - *install_linux_deps
     - *install_windows_cross_deps
-    - cross build --release --target x86_64-pc-windows-gnu --features discord
-    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/updater/target" cross build --release --target x86_64-pc-windows-gnu --manifest-path updater/Cargo.toml
-    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/launcher/target" OSAGENT_CORE_SOURCE="$CI_PROJECT_DIR/target/x86_64-pc-windows-gnu/release/osagent.exe" OSAGENT_UPDATER_SOURCE="$CI_PROJECT_DIR/updater/target/x86_64-pc-windows-gnu/release/osagent-updater.exe" cross build --release --target x86_64-pc-windows-gnu --manifest-path launcher/Cargo.toml
+    - cargo build --release --target x86_64-pc-windows-gnu --features discord
+    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/updater/target" cargo build --release --target x86_64-pc-windows-gnu --manifest-path updater/Cargo.toml
+    - CARGO_TARGET_DIR="$CI_PROJECT_DIR/launcher/target" OSAGENT_CORE_SOURCE="$CI_PROJECT_DIR/target/x86_64-pc-windows-gnu/release/osagent.exe" OSAGENT_UPDATER_SOURCE="$CI_PROJECT_DIR/updater/target/x86_64-pc-windows-gnu/release/osagent-updater.exe" cargo build --release --target x86_64-pc-windows-gnu --manifest-path launcher/Cargo.toml
     - mkdir -p dist/windows-x86_64
     - cp launcher/target/x86_64-pc-windows-gnu/release/osagent-launcher.exe dist/windows-x86_64/osagent-launcher.exe
     - zip -j osagent-windows-x86_64.zip dist/windows-x86_64/osagent-launcher.exe
