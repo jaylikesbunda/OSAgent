@@ -5,7 +5,9 @@ mod version;
 
 pub use channel::UpdateChannel;
 pub use checker::{UpdateCheckResult, UpdateChecker};
-pub use installer::{get_pending_update, PendingUpdate, UpdateInstaller, UpdateStatus};
+pub use installer::{
+    get_pending_update, PendingUpdate, PendingUpdateKind, UpdateInstaller, UpdateStatus,
+};
 
 pub fn build_version() -> &'static str {
     option_env!("OSAGENT_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))

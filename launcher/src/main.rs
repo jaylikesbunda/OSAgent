@@ -3624,9 +3624,23 @@ fn read_output_to_file<R: std::io::Read>(reader: R, app_handle: AppHandle, log_p
 // --- Pending Update Application ---
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LauncherPendingUpdateKind {
+    BinarySwap,
+    Installer,
+}
+
+fn default_launcher_pending_update_kind() -> LauncherPendingUpdateKind {
+    LauncherPendingUpdateKind::BinarySwap
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 struct LauncherPendingUpdate {
     tag: String,
-    launcher_path: std::path::PathBuf,
+    #[serde(alias = "launcher_path")]
+    staged_path: std::path::PathBuf,
+    #[serde(default = "default_launcher_pending_update_kind")]
+    kind: LauncherPendingUpdateKind,
     #[allow(dead_code)]
     created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -3756,6 +3770,54 @@ fn spawn_updater_and_exit(launcher_path: &std::path::Path, new_launcher_path: &s
     }
 }
 
+#[cfg(windows)]
+fn spawn_installer_and_exit(
+    launcher_path: &std::path::Path,
+    installer_path: &std::path::Path,
+) -> bool {
+    let current_exe = launcher_path.to_string_lossy().to_string();
+    let installer_exe = installer_path.to_string_lossy().to_string();
+    let cleanup_dir = installer_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if let Some(updater_path) = get_embedded_updater_path() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+
+        let result = Command::new(&updater_path)
+            .args([
+                "--pid",
+                &std::process::id().to_string(),
+                "--installer",
+                &installer_exe,
+                "--launch",
+                &current_exe,
+                "--cleanup",
+                &cleanup_dir,
+            ])
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn();
+
+        match result {
+            Ok(_) => {
+                info!("Installer updater spawned successfully, exiting launcher for update");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                info!("Installer updater spawn failed: {}", e);
+                false
+            }
+        }
+    } else {
+        info!("Embedded updater not available for installer update");
+        false
+    }
+}
+
 fn apply_pending_update_if_any() -> bool {
     let pending_path = match get_pending_update_path() {
         Some(p) => p,
@@ -3783,8 +3845,8 @@ fn apply_pending_update_if_any() -> bool {
         }
     };
 
-    if !pending.launcher_path.exists() {
-        info!("Staged binary does not exist: {}", pending.launcher_path.display());
+    if !pending.staged_path.exists() {
+        info!("Staged update does not exist: {}", pending.staged_path.display());
         let _ = std::fs::remove_file(&pending_path);
         return false;
     }
@@ -3799,7 +3861,17 @@ fn apply_pending_update_if_any() -> bool {
 
     info!("Startup: pending update {} found, applying", pending.tag);
     let _ = std::fs::remove_file(&pending_path);
-    spawn_updater_and_exit(&launcher_path, &pending.launcher_path)
+    match pending.kind {
+        LauncherPendingUpdateKind::BinarySwap => {
+            spawn_updater_and_exit(&launcher_path, &pending.staged_path)
+        }
+        #[cfg(windows)]
+        LauncherPendingUpdateKind::Installer => {
+            spawn_installer_and_exit(&launcher_path, &pending.staged_path)
+        }
+        #[cfg(not(windows))]
+        LauncherPendingUpdateKind::Installer => false,
+    }
 }
 
 // --- Process Monitor ---
@@ -3890,10 +3962,10 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
         }
     };
 
-    add_log(&state, "info", format!("Pending update: tag={}, binary={}", pending.tag, pending.launcher_path.display()));
+    add_log(&state, "info", format!("Pending update: tag={}, path={}", pending.tag, pending.staged_path.display()));
 
-    if !pending.launcher_path.exists() {
-        add_log(&state, "error", format!("Staged binary missing: {}", pending.launcher_path.display()));
+    if !pending.staged_path.exists() {
+        add_log(&state, "error", format!("Staged update missing: {}", pending.staged_path.display()));
         let _ = std::fs::remove_file(&pending_path);
         return false;
     }
@@ -3910,7 +3982,17 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
     let _ = std::fs::remove_file(&pending_path);
 
     terminate_osagent_processes(&state);
-    spawn_updater_and_exit(&launcher_path, &pending.launcher_path)
+    match pending.kind {
+        LauncherPendingUpdateKind::BinarySwap => {
+            spawn_updater_and_exit(&launcher_path, &pending.staged_path)
+        }
+        #[cfg(windows)]
+        LauncherPendingUpdateKind::Installer => {
+            spawn_installer_and_exit(&launcher_path, &pending.staged_path)
+        }
+        #[cfg(not(windows))]
+        LauncherPendingUpdateKind::Installer => false,
+    }
 }
 
 // --- Main Entry ---

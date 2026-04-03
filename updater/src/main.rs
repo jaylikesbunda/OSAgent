@@ -342,6 +342,31 @@ fn launch_new(launch_path: &str) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn run_installer_and_wait(installer_path: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+
+    log_msg(&format!("Running installer: {}", installer_path));
+    let mut cmd = Command::new(installer_path);
+    cmd.arg("/S");
+    cmd.creation_flags(platform::CREATE_NO_WINDOW);
+
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            log_msg("Installer completed successfully");
+            true
+        }
+        Ok(status) => {
+            log_msg(&format!("Installer failed with status: {}", status));
+            false
+        }
+        Err(e) => {
+            log_msg(&format!("Failed to run installer: {}", e));
+            false
+        }
+    }
+}
+
 fn cleanup_dir(dir: &str) {
     let path = PathBuf::from(dir);
     if !path.exists() {
@@ -355,22 +380,29 @@ fn cleanup_dir(dir: &str) {
 }
 
 fn print_usage() {
-    eprintln!("Usage: osagent-updater --pid <PID> --old <old_exe> --new <new_exe> --launch <exe_to_launch> [--cleanup <dir>]");
+    eprintln!("Usage: osagent-updater --pid <PID> (--old <old_exe> --new <new_exe> | --installer <installer_exe>) --launch <exe_to_launch> [--cleanup <dir>]");
     eprintln!();
-    eprintln!("Replaces old_exe with new_exe after PID exits, then launches exe_to_launch.");
+    eprintln!("Runs a binary swap or installer after PID exits, then launches exe_to_launch.");
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 9 || args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+    if args.len() < 7 || args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
         print_usage();
-        process::exit(if args.len() < 9 { 1 } else { 0 });
+        process::exit(
+            if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+                0
+            } else {
+                1
+            },
+        );
     }
 
     let mut pid = None;
     let mut old_path = None;
     let mut new_path = None;
+    let mut installer_path = None;
     let mut launch_path = None;
     let mut cleanup = None;
 
@@ -393,6 +425,10 @@ fn main() {
                 launch_path = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--installer" if i + 1 < args.len() => {
+                installer_path = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--cleanup" if i + 1 < args.len() => {
                 cleanup = Some(args[i + 1].clone());
                 i += 2;
@@ -410,20 +446,6 @@ fn main() {
             process::exit(1);
         }
     };
-    let old_path = match old_path {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: --old is required");
-            process::exit(1);
-        }
-    };
-    let new_path = match new_path {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: --new is required");
-            process::exit(1);
-        }
-    };
     let launch_path = match launch_path {
         Some(p) => p,
         None => {
@@ -434,43 +456,95 @@ fn main() {
 
     log_msg(&format!("=== osagent-updater starting ==="));
     log_msg(&format!("  PID to wait for: {}", pid));
-    log_msg(&format!("  Old binary:      {}", old_path));
-    log_msg(&format!("  New binary:      {}", new_path));
+    if let Some(ref old) = old_path {
+        log_msg(&format!("  Old binary:      {}", old));
+    }
+    if let Some(ref new) = new_path {
+        log_msg(&format!("  New binary:      {}", new));
+    }
+    if let Some(ref installer) = installer_path {
+        log_msg(&format!("  Installer:       {}", installer));
+    }
     log_msg(&format!("  Launch after:    {}", launch_path));
     if let Some(ref dir) = cleanup {
         log_msg(&format!("  Cleanup dir:     {}", dir));
     }
 
-    if !PathBuf::from(&new_path).exists() {
-        let err = format!("New binary does not exist: {}", new_path);
-        log_msg(&err);
-        write_failure(&err, &old_path, &new_path);
+    let swap_mode = old_path.is_some() && new_path.is_some();
+    let installer_mode = installer_path.is_some();
+    if !swap_mode && !installer_mode {
+        eprintln!("Error: either --old/--new or --installer is required");
         process::exit(1);
+    }
+    if swap_mode && installer_mode {
+        eprintln!("Error: --installer cannot be combined with --old/--new");
+        process::exit(1);
+    }
+
+    if swap_mode {
+        let old = old_path.as_ref().unwrap();
+        let new = new_path.as_ref().unwrap();
+        if !PathBuf::from(new).exists() {
+            let err = format!("New binary does not exist: {}", new);
+            log_msg(&err);
+            write_failure(&err, old, new);
+            process::exit(1);
+        }
+    }
+
+    if let Some(installer) = installer_path.as_ref() {
+        if !PathBuf::from(installer).exists() {
+            let err = format!("Installer does not exist: {}", installer);
+            log_msg(&err);
+            write_failure(&err, installer, installer);
+            process::exit(1);
+        }
     }
 
     if !wait_for_pid(pid) {
         let err = format!("Process {} did not exit within timeout", pid);
         log_msg(&err);
-        write_failure(&err, &old_path, &new_path);
+        let failure_ref = installer_path.as_ref().or(new_path.as_ref()).unwrap();
+        let old_ref = old_path.as_ref().unwrap_or(failure_ref);
+        write_failure(&err, old_ref, failure_ref);
         process::exit(1);
     }
 
-    if !copy_with_retries(&new_path, &old_path) {
-        let err = format!(
-            "Failed to copy {} -> {} after {} attempts",
-            new_path, old_path, MAX_COPY_ATTEMPTS
-        );
-        log_msg(&err);
-        write_failure(&err, &old_path, &new_path);
-        process::exit(1);
-    }
+    if let Some(installer) = installer_path.as_ref() {
+        #[cfg(windows)]
+        if !run_installer_and_wait(installer) {
+            let err = format!("Failed to run installer {}", installer);
+            log_msg(&err);
+            write_failure(&err, installer, installer);
+            process::exit(1);
+        }
+        #[cfg(not(windows))]
+        {
+            let err = "Installer mode is only supported on Windows".to_string();
+            log_msg(&err);
+            write_failure(&err, installer, installer);
+            process::exit(1);
+        }
+    } else {
+        let old_path = old_path.as_ref().unwrap();
+        let new_path = new_path.as_ref().unwrap();
+        if !copy_with_retries(new_path, old_path) {
+            let err = format!(
+                "Failed to copy {} -> {} after {} attempts",
+                new_path, old_path, MAX_COPY_ATTEMPTS
+            );
+            log_msg(&err);
+            write_failure(&err, old_path, new_path);
+            process::exit(1);
+        }
 
-    #[cfg(windows)]
-    if !copy_windows_runtime_files(&new_path, &old_path) {
-        let err = format!("Failed to copy Windows runtime files from {}", new_path);
-        log_msg(&err);
-        write_failure(&err, &old_path, &new_path);
-        process::exit(1);
+        #[cfg(windows)]
+        if !copy_windows_runtime_files(new_path, old_path) {
+            let err = format!("Failed to copy Windows runtime files from {}", new_path);
+            log_msg(&err);
+            write_failure(&err, old_path, new_path);
+            process::exit(1);
+        }
     }
 
     if let Some(ref dir) = cleanup {
@@ -480,7 +554,9 @@ fn main() {
     if !launch_new(&launch_path) {
         let err = format!("Failed to launch new binary: {}", launch_path);
         log_msg(&err);
-        write_failure(&err, &old_path, &new_path);
+        let failure_ref = installer_path.as_ref().or(new_path.as_ref()).unwrap();
+        let old_ref = old_path.as_ref().unwrap_or(failure_ref);
+        write_failure(&err, old_ref, failure_ref);
         process::exit(1);
     }
 

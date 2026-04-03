@@ -2,7 +2,9 @@
 param(
     [switch]$Checks,
 
-    [switch]$NoDiscord
+    [switch]$NoDiscord,
+
+    [switch]$Installer
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +39,7 @@ if (-not $NoDiscord) {
 Write-Host "OSAgent launcher build" -ForegroundColor Green
 Write-Host "Checks  : $Checks"
 Write-Host "Discord : $(-not $NoDiscord)"
+Write-Host "Installer: $Installer"
 
 if ($Checks) {
     Invoke-CargoStep -Label "Check core formatting" -Args @("fmt", "--", "--check")
@@ -48,14 +51,38 @@ if ($Checks) {
 
 Invoke-CargoStep -Label "Build core" -Args (@("build", "--release") + $CoreFeatureArgs)
 Invoke-CargoStep -Label "Build updater" -Args @("build", "--manifest-path", "updater/Cargo.toml", "--release")
+
+$env:OSAGENT_CORE_SOURCE = Join-Path $ScriptRoot "target/release/osagent.exe"
+$env:OSAGENT_UPDATER_SOURCE = Join-Path $ScriptRoot "updater/target/release/osagent-updater.exe"
 Invoke-CargoStep -Label "Build launcher (embeds core + updater)" -Args @("build", "--manifest-path", "launcher/Cargo.toml", "--release")
+
+if ($Installer) {
+    Write-Host ""
+    Write-Host "==> Build launcher installer (NSIS + WebView2 bootstrapper)" -ForegroundColor Cyan
+    Write-Host "cargo tauri build --bundles nsis" -ForegroundColor DarkGray
+
+    Push-Location (Join-Path $ScriptRoot "launcher")
+    try {
+        & cargo tauri build --bundles nsis
+        if ($LASTEXITCODE -ne 0) {
+            throw "Step failed: Build launcher installer"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
 
 $CoreBinary = Join-Path $ScriptRoot "target/release/osagent.exe"
 $UpdaterBinary = Join-Path $ScriptRoot "updater/target/release/osagent-updater.exe"
 $LauncherBinary = Join-Path $ScriptRoot "launcher/target/release/osagent-launcher.exe"
+$InstallerBinary = Join-Path $ScriptRoot "launcher/target/release/bundle/nsis"
 
 Write-Host ""
 Write-Host "Build complete" -ForegroundColor Green
 Write-Host "Core    : $CoreBinary"
 Write-Host "Updater : $UpdaterBinary"
 Write-Host "Launcher: $LauncherBinary"
+if ($Installer) {
+    Write-Host "Installer dir: $InstallerBinary"
+}

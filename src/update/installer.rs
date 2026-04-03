@@ -33,10 +33,24 @@ pub enum UpdateStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingUpdateKind {
+    BinarySwap,
+    Installer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingUpdate {
     pub tag: String,
-    pub launcher_path: PathBuf,
+    #[serde(alias = "launcher_path")]
+    pub staged_path: PathBuf,
+    #[serde(default = "default_pending_update_kind")]
+    pub kind: PendingUpdateKind,
     pub created_at: DateTime<Utc>,
+}
+
+fn default_pending_update_kind() -> PendingUpdateKind {
+    PendingUpdateKind::BinarySwap
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +67,8 @@ struct CdnManifest {
 struct CdnAssetEntry {
     archive: String,
     url: String,
+    #[serde(default)]
+    installer: Option<String>,
 }
 
 pub struct UpdateInstaller {
@@ -87,6 +103,9 @@ fn copy_windows_runtime_files(src_launcher: &Path, staged_dir: &Path) -> Result<
             continue;
         };
         let dest = staged_dir.join(name);
+        if path == dest {
+            continue;
+        }
         std::fs::copy(&path, &dest)
             .map_err(|e| format!("Failed to copy runtime file to staging: {}", e))?;
     }
@@ -146,6 +165,11 @@ impl UpdateInstaller {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    fn platform_installer_name(&self) -> String {
+        "osagent-windows-x86_64-setup.exe".to_string()
+    }
+
     fn launcher_binary_name(&self) -> &'static str {
         #[cfg(target_os = "windows")]
         return "osagent-launcher.exe";
@@ -178,6 +202,15 @@ impl UpdateInstaller {
         let archive_name = self.platform_archive_name();
 
         let download_url = if let Some(asset) = manifest.assets.get(platform_key) {
+            #[cfg(target_os = "windows")]
+            if let Some(installer) = asset.installer.as_ref() {
+                return Ok(Some((
+                    manifest.tag.clone(),
+                    self.platform_installer_name(),
+                    installer.clone(),
+                )));
+            }
+
             if !asset.url.is_empty() {
                 asset.url.clone()
             } else {
@@ -188,6 +221,22 @@ impl UpdateInstaller {
         };
 
         Ok(Some((manifest.tag.clone(), archive_name, download_url)))
+    }
+
+    fn pending_update_kind_for_path(&self, path: &Path) -> PendingUpdateKind {
+        #[cfg(target_os = "windows")]
+        {
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("exe"))
+                .unwrap_or(false)
+            {
+                return PendingUpdateKind::Installer;
+            }
+        }
+
+        PendingUpdateKind::BinarySwap
     }
 
     pub fn update_dir(&self) -> Result<PathBuf, String> {
@@ -375,6 +424,29 @@ impl UpdateInstaller {
     }
 
     pub async fn prepare_update(&self, archive_path: &Path, tag: &str) -> Result<PathBuf, String> {
+        #[cfg(target_os = "windows")]
+        if archive_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
+        {
+            let update_dir = self.update_dir()?;
+            let staged_dir = update_dir.join(tag);
+            std::fs::create_dir_all(&staged_dir)
+                .map_err(|e| format!("Failed to create installer staging directory: {}", e))?;
+            let staged_installer = staged_dir.join(
+                archive_path
+                    .file_name()
+                    .ok_or("Installer filename missing")?,
+            );
+            if archive_path != staged_installer {
+                std::fs::copy(archive_path, &staged_installer)
+                    .map_err(|e| format!("Failed to stage installer: {}", e))?;
+            }
+            return Ok(staged_installer);
+        }
+
         let extract_dir = self.extract_update(archive_path, tag).await?;
 
         let launcher_path = self.find_launcher_in_dir(&extract_dir)?;
@@ -410,7 +482,7 @@ impl UpdateInstaller {
         Ok(staged_launcher)
     }
 
-    pub fn mark_update_pending(&self, tag: &str, launcher_path: &Path) -> Result<(), String> {
+    pub fn mark_update_pending(&self, tag: &str, staged_path: &Path) -> Result<(), String> {
         let pending_file = self.pending_update_file()?;
 
         if let Some(parent) = pending_file.parent() {
@@ -420,7 +492,8 @@ impl UpdateInstaller {
 
         let pending = PendingUpdate {
             tag: tag.to_string(),
-            launcher_path: launcher_path.to_path_buf(),
+            staged_path: staged_path.to_path_buf(),
+            kind: self.pending_update_kind_for_path(staged_path),
             created_at: Utc::now(),
         };
 

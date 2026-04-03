@@ -4348,7 +4348,7 @@ async fn download_update(
             )
         })?;
 
-    let staged_launcher = installer
+    let staged_update = installer
         .prepare_update(&archive_path, &tag)
         .await
         .map_err(|e| {
@@ -4363,7 +4363,7 @@ async fn download_update(
     let _ = std::fs::remove_file(&archive_path).ok();
 
     installer
-        .mark_update_pending(&tag, &staged_launcher)
+        .mark_update_pending(&tag, &staged_update)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4403,7 +4403,7 @@ async fn install_update(
     })?;
 
     installer
-        .mark_update_pending(&pending.tag, &pending.launcher_path)
+        .mark_update_pending(&pending.tag, &pending.staged_path)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

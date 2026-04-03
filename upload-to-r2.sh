@@ -13,6 +13,8 @@ LINUX_ARCHIVE="osagent-linux-x86_64.tar.gz"
 LINUX_CHECKSUM="${LINUX_ARCHIVE}.sha256"
 WINDOWS_ARCHIVE="osagent-windows-x86_64.zip"
 WINDOWS_CHECKSUM="${WINDOWS_ARCHIVE}.sha256"
+WINDOWS_INSTALLER="osagent-windows-x86_64-setup.exe"
+WINDOWS_INSTALLER_CHECKSUM="${WINDOWS_INSTALLER}.sha256"
 
 require_file() {
     local path="$1"
@@ -41,6 +43,8 @@ require_file "${ARTIFACT_DIR}/${LINUX_ARCHIVE}"
 require_file "${ARTIFACT_DIR}/${LINUX_CHECKSUM}"
 require_file "${ARTIFACT_DIR}/${WINDOWS_ARCHIVE}"
 require_file "${ARTIFACT_DIR}/${WINDOWS_CHECKSUM}"
+require_file "${ARTIFACT_DIR}/${WINDOWS_INSTALLER}"
+require_file "${ARTIFACT_DIR}/${WINDOWS_INSTALLER_CHECKSUM}"
 
 R2_PATH="${PREFIX}/${TAG}"
 VERSION="${TAG#v}"
@@ -58,6 +62,7 @@ echo ""
 
 LINUX_SHA=$(awk '{print $1}' "${ARTIFACT_DIR}/${LINUX_CHECKSUM}")
 WIN_SHA=$(awk '{print $1}' "${ARTIFACT_DIR}/${WINDOWS_CHECKSUM}")
+WIN_INSTALLER_SHA=$(awk '{print $1}' "${ARTIFACT_DIR}/${WINDOWS_INSTALLER_CHECKSUM}")
 
 cat > "${ARTIFACT_DIR}/release-manifest.json" <<EOF
 {
@@ -72,12 +77,14 @@ cat > "${ARTIFACT_DIR}/release-manifest.json" <<EOF
     },
     "windows-x86_64": {
       "archive": "${WINDOWS_ARCHIVE}",
-      "url": "${CDN_BASE_URL}/${R2_PATH}/${WINDOWS_ARCHIVE}"
+      "url": "${CDN_BASE_URL}/${R2_PATH}/${WINDOWS_ARCHIVE}",
+      "installer": "${CDN_BASE_URL}/${R2_PATH}/${WINDOWS_INSTALLER}"
     }
   },
   "sha256": {
     "linux-x86_64": "${LINUX_SHA}",
-    "windows-x86_64": "${WIN_SHA}"
+    "windows-x86_64": "${WIN_SHA}",
+    "windows-x86_64-installer": "${WIN_INSTALLER_SHA}"
   }
 }
 EOF
