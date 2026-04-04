@@ -4360,15 +4360,17 @@ async fn download_update(
             )
         })?;
 
-    let _ = std::fs::remove_file(&archive_path).ok();
+    if archive_path != staged_update {
+        let _ = std::fs::remove_file(&archive_path).ok();
+    }
 
     installer
-        .mark_update_pending(&tag, &staged_update)
+        .mark_prepared_update(&tag, &staged_update)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: format!("Failed to mark update as pending: {}", e),
+                    error: format!("Failed to mark update as prepared: {}", e),
                 }),
             )
         })?;
@@ -4393,7 +4395,7 @@ async fn install_update(
 ) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
     let installer = crate::update::UpdateInstaller::new();
 
-    let pending = crate::update::get_pending_update().ok_or_else(|| {
+    let pending = crate::update::get_prepared_update().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -4403,13 +4405,15 @@ async fn install_update(
     })?;
 
     installer
-        .mark_update_pending(&pending.tag, &pending.staged_path)
+        .mark_update_pending(&pending.tag, &pending.staged_path, true)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse { error: e }),
             )
         })?;
+
+    let _ = installer.clear_prepared_update();
 
     agent.signal_shutdown();
 
@@ -4435,6 +4439,20 @@ async fn update_status() -> Json<UpdateStatusResponse> {
             total_bytes: None,
             tag: Some(pending.tag.clone()),
             version: Some(pending.tag.trim_start_matches('v').to_string()),
+            message: Some("Update ready to install".to_string()),
+        });
+    }
+
+    let prepared = crate::update::get_prepared_update();
+
+    if let Some(prepared) = prepared {
+        return Json(UpdateStatusResponse {
+            status: "ready".to_string(),
+            progress: Some(100.0),
+            bytes_downloaded: None,
+            total_bytes: None,
+            tag: Some(prepared.tag.clone()),
+            version: Some(prepared.tag.trim_start_matches('v').to_string()),
             message: Some("Update ready to install".to_string()),
         });
     }

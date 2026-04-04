@@ -6,7 +6,8 @@ mod version;
 pub use channel::UpdateChannel;
 pub use checker::{UpdateCheckResult, UpdateChecker};
 pub use installer::{
-    get_pending_update, PendingUpdate, PendingUpdateKind, UpdateInstaller, UpdateStatus,
+    get_pending_update, get_prepared_update, PendingUpdate, PendingUpdateKind, UpdateInstaller,
+    UpdateStatus,
 };
 
 pub fn build_version() -> &'static str {

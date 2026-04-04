@@ -46,11 +46,17 @@ pub struct PendingUpdate {
     pub staged_path: PathBuf,
     #[serde(default = "default_pending_update_kind")]
     pub kind: PendingUpdateKind,
+    #[serde(default = "default_pending_update_armed")]
+    pub armed: bool,
     pub created_at: DateTime<Utc>,
 }
 
 fn default_pending_update_kind() -> PendingUpdateKind {
     PendingUpdateKind::BinarySwap
+}
+
+fn default_pending_update_armed() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +253,11 @@ impl UpdateInstaller {
     pub fn pending_update_file(&self) -> Result<PathBuf, String> {
         let base = dirs_next::home_dir().ok_or("Could not find home directory")?;
         Ok(base.join(".osagent").join("pending_update.json"))
+    }
+
+    pub fn prepared_update_file(&self) -> Result<PathBuf, String> {
+        let base = dirs_next::home_dir().ok_or("Could not find home directory")?;
+        Ok(base.join(".osagent").join("prepared_update.json"))
     }
 
     pub async fn download_release<F>(
@@ -482,7 +493,12 @@ impl UpdateInstaller {
         Ok(staged_launcher)
     }
 
-    pub fn mark_update_pending(&self, tag: &str, staged_path: &Path) -> Result<(), String> {
+    pub fn mark_update_pending(
+        &self,
+        tag: &str,
+        staged_path: &Path,
+        armed: bool,
+    ) -> Result<(), String> {
         let pending_file = self.pending_update_file()?;
 
         if let Some(parent) = pending_file.parent() {
@@ -494,6 +510,7 @@ impl UpdateInstaller {
             tag: tag.to_string(),
             staged_path: staged_path.to_path_buf(),
             kind: self.pending_update_kind_for_path(staged_path),
+            armed,
             created_at: Utc::now(),
         };
 
@@ -506,11 +523,45 @@ impl UpdateInstaller {
         Ok(())
     }
 
+    pub fn mark_prepared_update(&self, tag: &str, staged_path: &Path) -> Result<(), String> {
+        let prepared_file = self.prepared_update_file()?;
+
+        if let Some(parent) = prepared_file.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create prepared update directory: {}", e))?;
+        }
+
+        let prepared = PendingUpdate {
+            tag: tag.to_string(),
+            staged_path: staged_path.to_path_buf(),
+            kind: self.pending_update_kind_for_path(staged_path),
+            armed: false,
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string_pretty(&prepared)
+            .map_err(|e| format!("Failed to serialize prepared update: {}", e))?;
+
+        std::fs::write(&prepared_file, json)
+            .map_err(|e| format!("Failed to write prepared update file: {}", e))?;
+
+        Ok(())
+    }
+
     pub fn clear_pending_update(&self) -> Result<(), String> {
         let pending_file = self.pending_update_file()?;
         if pending_file.exists() {
             std::fs::remove_file(&pending_file)
                 .map_err(|e| format!("Failed to remove pending update file: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_prepared_update(&self) -> Result<(), String> {
+        let prepared_file = self.prepared_update_file()?;
+        if prepared_file.exists() {
+            std::fs::remove_file(&prepared_file)
+                .map_err(|e| format!("Failed to remove prepared update file: {}", e))?;
         }
         Ok(())
     }
@@ -539,5 +590,15 @@ pub fn get_pending_update() -> Option<PendingUpdate> {
         return None;
     }
     let json = std::fs::read_to_string(&pending_file).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+pub fn get_prepared_update() -> Option<PendingUpdate> {
+    let base = dirs_next::home_dir()?;
+    let prepared_file = base.join(".osagent").join("prepared_update.json");
+    if !prepared_file.exists() {
+        return None;
+    }
+    let json = std::fs::read_to_string(&prepared_file).ok()?;
     serde_json::from_str(&json).ok()
 }

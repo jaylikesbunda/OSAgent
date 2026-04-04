@@ -35,6 +35,59 @@ static CORE_EXTRACTED_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 static UPDATER_BINARY: &[u8] = include_bytes!("updater.bin");
 static UPDATER_EXTRACTED_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
+fn sync_embedded_binary(target_path: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let needs_write = match fs::read(target_path) {
+        Ok(existing) => existing != bytes,
+        Err(_) => true,
+    };
+
+    if !needs_write {
+        return Some(target_path.to_path_buf());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = Command::new("attrib")
+            .args(["-R", "-H", target_path.to_string_lossy().as_ref()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok();
+    }
+
+    fs::write(target_path, bytes).ok()?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = Command::new("attrib")
+            .args(["+R", target_path.to_string_lossy().as_ref()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok();
+        let _ = Command::new("attrib")
+            .args(["+H", target_path.to_string_lossy().as_ref()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok();
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(mut perms) = fs::metadata(target_path).map(|m| m.permissions()) {
+            let mut mode = perms.mode();
+            mode |= 0o111;
+            perms.set_mode(mode);
+            let _ = fs::set_permissions(target_path, perms);
+        }
+    }
+
+    Some(target_path.to_path_buf())
+}
+
 fn get_embedded_core_path() -> Option<PathBuf> {
     if CORE_BINARY.is_empty() || CORE_BINARY == b"placeholder" {
         return None;
@@ -50,37 +103,7 @@ fn get_embedded_core_path() -> Option<PathBuf> {
         };
         let core_path = exe_dir.join(core_name);
 
-        if core_path.exists() {
-            return Some(core_path);
-        }
-
-        fs::write(&core_path, CORE_BINARY).ok()?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let _ = Command::new("attrib")
-                .args(["+R", core_path.to_string_lossy().as_ref()])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .ok();
-            let _ = Command::new("attrib")
-                .args(["+H", core_path.to_string_lossy().as_ref()])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .ok();
-        }
-
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(mut perms) = fs::metadata(&core_path).map(|m| m.permissions()) {
-                let mut mode = perms.mode();
-                mode |= 0o111;
-                perms.set_mode(mode);
-                let _ = fs::set_permissions(&core_path, perms);
-            }
-        }
+        let core_path = sync_embedded_binary(&core_path, CORE_BINARY)?;
 
         info!("Extracted bundled osagent core to {}", core_path.display());
         Some(core_path)
@@ -104,37 +127,7 @@ fn get_embedded_updater_path() -> Option<PathBuf> {
         };
         let updater_path = exe_dir.join(updater_name);
 
-        if updater_path.exists() {
-            return Some(updater_path);
-        }
-
-        fs::write(&updater_path, UPDATER_BINARY).ok()?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let _ = Command::new("attrib")
-                .args(["+R", updater_path.to_string_lossy().as_ref()])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .ok();
-            let _ = Command::new("attrib")
-                .args(["+H", updater_path.to_string_lossy().as_ref()])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .ok();
-        }
-
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(mut perms) = fs::metadata(&updater_path).map(|m| m.permissions()) {
-                let mut mode = perms.mode();
-                mode |= 0o111;
-                perms.set_mode(mode);
-                let _ = fs::set_permissions(&updater_path, perms);
-            }
-        }
+        let updater_path = sync_embedded_binary(&updater_path, UPDATER_BINARY)?;
 
         info!("Extracted bundled updater to {}", updater_path.display());
         Some(updater_path)
@@ -841,6 +834,12 @@ fn tauri_target_triple() -> &'static str {
 }
 
 fn get_osagent_path_for_profile(profile: &str) -> PathBuf {
+    if profile == "release" {
+        if let Some(embedded) = get_embedded_core_path() {
+            return embedded;
+        }
+    }
+
     let exe_path = std::env::current_exe()
         .ok()
         .unwrap_or_else(|| PathBuf::from("."));
@@ -3641,8 +3640,14 @@ struct LauncherPendingUpdate {
     staged_path: std::path::PathBuf,
     #[serde(default = "default_launcher_pending_update_kind")]
     kind: LauncherPendingUpdateKind,
+    #[serde(default = "default_launcher_pending_update_armed")]
+    armed: bool,
     #[allow(dead_code)]
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn default_launcher_pending_update_armed() -> bool {
+    true
 }
 
 fn get_pending_update_path() -> Option<std::path::PathBuf> {
@@ -3845,6 +3850,10 @@ fn apply_pending_update_if_any() -> bool {
         }
     };
 
+    if !pending.armed {
+        return false;
+    }
+
     if !pending.staged_path.exists() {
         info!("Staged update does not exist: {}", pending.staged_path.display());
         let _ = std::fs::remove_file(&pending_path);
@@ -3961,6 +3970,10 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
             return false;
         }
     };
+
+    if !pending.armed {
+        return false;
+    }
 
     add_log(&state, "info", format!("Pending update: tag={}, path={}", pending.tag, pending.staged_path.display()));
 

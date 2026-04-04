@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "identifier": "com.osagent.launcher",
   "build": {
-    "beforeBuildCommand": "cargo build --release",
     "beforeDevCommand": "cargo build",
     "frontendDist": "src"
   },
