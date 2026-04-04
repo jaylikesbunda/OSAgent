@@ -148,7 +148,7 @@ build:windows:
 build:windows-installer:
   stage: build
   tags:
-    - windows
+    - windows-shell
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: manual
