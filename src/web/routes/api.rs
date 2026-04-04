@@ -3914,7 +3914,10 @@ fn ollama_context_cache() -> &'static dashmap::DashMap<String, (usize, Instant)>
 }
 
 fn extract_ollama_context_window(payload: &serde_json::Value) -> Option<usize> {
-    if let Some(model_info) = payload.get("model_info").and_then(|value| value.as_object()) {
+    if let Some(model_info) = payload
+        .get("model_info")
+        .and_then(|value| value.as_object())
+    {
         for (key, value) in model_info {
             if (key.ends_with(".context_length") || key.ends_with(".context_window"))
                 && value.as_u64().unwrap_or(0) > 0
@@ -3964,7 +3967,10 @@ async fn fetch_ollama_context_window(
     }
 
     let mut request = client
-        .post(format!("{}/api/show", normalized_base.trim_end_matches('/')))
+        .post(format!(
+            "{}/api/show",
+            normalized_base.trim_end_matches('/')
+        ))
         .json(&serde_json::json!({ "name": model_id }));
     if let Some(key) = api_key {
         if !key.trim().is_empty() {
@@ -4023,7 +4029,11 @@ async fn resolve_ollama_base_url(
     }
 
     let config = agent.get_config().await;
-    if let Some(provider) = config.providers.iter().find(|p| p.provider_type == "ollama") {
+    if let Some(provider) = config
+        .providers
+        .iter()
+        .find(|p| p.provider_type == "ollama")
+    {
         if !provider.base_url.trim().is_empty() {
             return provider.base_url.clone();
         }
@@ -4107,13 +4117,9 @@ async fn fetch_live_ollama_models(
         .collect();
 
     for model in &mut models {
-        if let Some(context_window) = fetch_ollama_context_window(
-            &client,
-            &normalized_base,
-            api_key.as_deref(),
-            &model.id,
-        )
-        .await
+        if let Some(context_window) =
+            fetch_ollama_context_window(&client, &normalized_base, api_key.as_deref(), &model.id)
+                .await
         {
             model.context_window = context_window;
         }
@@ -4131,7 +4137,9 @@ async fn apply_live_ollama_models_to_catalog(
     if let Some(provider) = catalog.providers.iter_mut().find(|p| p.id == "ollama") {
         provider.models = live_models.clone();
     }
-    catalog.all_models.retain(|model| model.provider_id != "ollama");
+    catalog
+        .all_models
+        .retain(|model| model.provider_id != "ollama");
     catalog.all_models.extend(live_models);
 }
 
