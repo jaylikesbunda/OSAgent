@@ -45,10 +45,9 @@ variables:
 
 .install_windows_cross_deps: &install_windows_cross_deps |
   apt-get update
-  apt-get install -y nsis lld llvm clang
+  apt-get install -y lld llvm clang
   rustup target add x86_64-pc-windows-msvc
   cargo install cargo-xwin --locked
-  cargo install tauri-cli --locked
 
 .install_aws_cli: &install_aws_cli |
   apt-get update
@@ -132,20 +131,44 @@ build:windows:
       perl -0pi -e 's/"version":\s*"[^"]+"/"version": "'"$OSAGENT_APP_VERSION"'"/' launcher/tauri.conf.json
     - cargo xwin build --release --target x86_64-pc-windows-msvc --features discord
     - CARGO_TARGET_DIR="$CI_PROJECT_DIR/updater/target" cargo xwin build --release --target x86_64-pc-windows-msvc --manifest-path updater/Cargo.toml
-    - cd launcher && CARGO_TARGET_DIR="$CI_PROJECT_DIR/launcher/target" OSAGENT_CORE_SOURCE="$CI_PROJECT_DIR/target/x86_64-pc-windows-msvc/release/osagent.exe" OSAGENT_UPDATER_SOURCE="$CI_PROJECT_DIR/updater/target/x86_64-pc-windows-msvc/release/osagent-updater.exe" cargo tauri build --bundles nsis --runner cargo-xwin --target x86_64-pc-windows-msvc
     - mkdir -p dist/windows-x86_64
     - cp launcher/target/x86_64-pc-windows-msvc/release/osagent-launcher.exe dist/windows-x86_64/osagent-launcher.exe
     - *install_webview2_loader
     - cp launcher/target/x86_64-pc-windows-msvc/release/*.dll dist/windows-x86_64/ 2>/dev/null || true
     - zip -j osagent-windows-x86_64.zip dist/windows-x86_64/*
     - sha256sum osagent-windows-x86_64.zip > osagent-windows-x86_64.zip.sha256
-    - cp launcher/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe osagent-windows-x86_64-setup.exe
-    - sha256sum osagent-windows-x86_64-setup.exe > osagent-windows-x86_64-setup.exe.sha256
   artifacts:
     name: windows-x86_64
     paths:
       - osagent-windows-x86_64.zip
       - osagent-windows-x86_64.zip.sha256
+
+build:windows-installer:
+  stage: build
+  tags:
+    - windows
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  script:
+    - '$RELEASE_TAG = if ($env:CI_COMMIT_TAG) { $env:CI_COMMIT_TAG } else { "$[[ inputs.release-tag ]]" }'
+    - '$env:OSAGENT_APP_VERSION = $RELEASE_TAG.TrimStart("v")'
+    - '$configPath = Join-Path $env:CI_PROJECT_DIR "launcher/tauri.conf.json"'
+    - '$config = Get-Content $configPath -Raw'
+    - '$config = [regex]::Replace($config, ''"version"\s*:\s*"[^"]+"'', ''"version": "'' + $env:OSAGENT_APP_VERSION + ''"'')'
+    - 'Set-Content -Path $configPath -Value $config -NoNewline'
+    - 'cargo build --release --features discord'
+    - 'cargo build --manifest-path updater/Cargo.toml --release'
+    - 'Push-Location launcher'
+    - '$env:OSAGENT_CORE_SOURCE = Join-Path $env:CI_PROJECT_DIR "target/release/osagent.exe"'
+    - '$env:OSAGENT_UPDATER_SOURCE = Join-Path $env:CI_PROJECT_DIR "updater/target/release/osagent-updater.exe"'
+    - 'cargo tauri build --bundles nsis'
+    - 'Pop-Location'
+    - 'Copy-Item "launcher/target/release/bundle/nsis/*.exe" "osagent-windows-x86_64-setup.exe"'
+    - 'Get-FileHash osagent-windows-x86_64-setup.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  osagent-windows-x86_64-setup.exe" } | Set-Content osagent-windows-x86_64-setup.exe.sha256'
+  artifacts:
+    name: windows-installer
+    paths:
       - osagent-windows-x86_64-setup.exe
       - osagent-windows-x86_64-setup.exe.sha256
 
@@ -157,6 +180,7 @@ publish:r2:
   dependencies:
     - build:linux
     - build:windows
+    - build:windows-installer
   script:
     - *install_linux_deps
     - *install_aws_cli
