@@ -154,7 +154,9 @@ OSA.onCustomPrioritiesToggleChange = function() {
 
 OSA.openSettings = async function() {
     document.getElementById('settings-modal').classList.remove('hidden');
-    await OSA.loadSettings();
+    requestAnimationFrame(function() {
+        OSA.loadSettings();
+    });
 };
 
 OSA.closeSettings = function() {
@@ -477,7 +479,13 @@ OSA.switchSettingsTab = async function(tabId) {
     const sel = document.getElementById('settings-tab-select');
     if (sel) sel.value = tabId;
     if (tabId === 'models' || tabId === 'provider') {
-        OSA.renderSettingsProviders();
+        const catalogList = document.getElementById('model-catalog-list');
+        if (catalogList) {
+            catalogList.innerHTML = '<div class="model-empty">Loading...</div>';
+        }
+        requestAnimationFrame(function() {
+            OSA.renderSettingsProviders();
+        });
     } else if (tabId === 'voice') {
         const browser = document.getElementById('voice-models-browser');
         if (browser) {

@@ -1984,7 +1984,7 @@ pub struct VoiceStatusResponse {
     pub language: Option<String>,
 }
 
-async fn voice_status(Extension(_config): Extension<Config>) -> Json<serde_json::Value> {
+async fn voice_status() -> Json<serde_json::Value> {
     let status = crate::voice::get_status();
     Json(serde_json::json!({
         "whisper_installed": status.whisper_installed,

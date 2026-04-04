@@ -1343,6 +1343,100 @@ impl OpenAICompatibleProvider {
         None
     }
 
+    fn extract_ollama_context_window(payload: &serde_json::Value) -> Option<usize> {
+        if let Some(model_info) = payload.get("model_info").and_then(|value| value.as_object()) {
+            for (key, value) in model_info {
+                if (key.ends_with(".context_length") || key.ends_with(".context_window"))
+                    && value.as_u64().unwrap_or(0) > 0
+                {
+                    return value.as_u64().map(|raw| raw as usize);
+                }
+            }
+
+            for key in ["context_length", "context_window", "num_ctx"] {
+                if let Some(raw) = model_info.get(key).and_then(|value| value.as_u64()) {
+                    if raw > 0 {
+                        return Some(raw as usize);
+                    }
+                }
+            }
+        }
+
+        if let Some(parameters) = payload.get("parameters").and_then(|value| value.as_str()) {
+            for line in parameters.lines() {
+                let normalized = line.trim().replace('\t', " ");
+                let mut parts = normalized.split_whitespace();
+                let key = parts.next().unwrap_or_default().to_ascii_lowercase();
+                if key == "num_ctx" || key == "context_length" {
+                    if let Some(raw) = parts.next().and_then(|value| value.parse::<usize>().ok()) {
+                        if raw > 0 {
+                            return Some(raw);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn normalize_ollama_base_url(base_url: &str) -> String {
+        let mut normalized = base_url.trim().trim_end_matches('/').to_string();
+        if normalized.is_empty() {
+            return "http://localhost:11434".to_string();
+        }
+
+        let lower = normalized.to_ascii_lowercase();
+        if lower.ends_with("/v1/models") {
+            normalized.truncate(normalized.len().saturating_sub(10));
+        } else if lower.ends_with("/api/tags") {
+            normalized.truncate(normalized.len().saturating_sub(9));
+        } else if lower.ends_with("/v1") {
+            normalized.truncate(normalized.len().saturating_sub(3));
+        } else if lower.ends_with("/api") {
+            normalized.truncate(normalized.len().saturating_sub(4));
+        }
+
+        normalized = normalized.trim_end_matches('/').to_string();
+        if normalized.is_empty() {
+            "http://localhost:11434".to_string()
+        } else {
+            normalized
+        }
+    }
+
+    async fn fetch_ollama_context_window(&self) -> Option<usize> {
+        let config = self.resolved_config();
+        if config.provider_type != "ollama" {
+            return None;
+        }
+
+        let model = self.current_model().await;
+        if model.trim().is_empty() {
+            return None;
+        }
+
+        let base_url = Self::normalize_ollama_base_url(&config.base_url);
+        let mut req = self
+            .client
+            .post(format!("{}/api/show", base_url.trim_end_matches('/')))
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({ "name": model }))
+            .timeout(Duration::from_secs(15));
+
+        if !config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", config.api_key));
+        }
+
+        let response = req.send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+
+        let payload: serde_json::Value = response.json().await.ok()?;
+        Self::extract_ollama_context_window(&payload)
+    }
+
     async fn complete_with_retry(
         &self,
         messages: &[Message],
@@ -1866,7 +1960,11 @@ impl Provider for OpenAICompatibleProvider {
             *attempted = true;
         }
 
-        let fetched = self.fetch_openrouter_context_window().await;
+        let fetched = if self.config.provider_type == "ollama" {
+            self.fetch_ollama_context_window().await
+        } else {
+            self.fetch_openrouter_context_window().await
+        };
         if let Some(value) = fetched {
             let mut cached = self.context_window.write().await;
             *cached = Some(value);

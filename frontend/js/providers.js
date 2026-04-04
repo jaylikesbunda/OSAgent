@@ -137,7 +137,15 @@ OSA.toggleModelDropdown = function() {
                 OSA.modelSearchQuery = '';
                 searchInput.focus();
             }
-            OSA.renderModelDropdown();
+            const list = dropdown.querySelector('.model-dropdown-list');
+            if (list) {
+                list.innerHTML = '<div class="model-empty">Loading models...</div>';
+            }
+            requestAnimationFrame(function() {
+                if (OSA.modelDropdownOpen) {
+                    OSA.renderModelDropdown();
+                }
+            });
         }
     }
 };

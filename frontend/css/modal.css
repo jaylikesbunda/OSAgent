@@ -89,7 +89,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    box-shadow: var(--shadow-xl), 0 0 60px var(--accent-dim);
+    box-shadow: 0 24px 56px rgba(0, 0, 0, 0.34), 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent);
     animation: modalContentIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 

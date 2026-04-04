@@ -8,7 +8,7 @@
 .message {
     max-width: 800px;
     margin: 0 auto 24px;
-    padding: 16px 0;
+    padding: 16px 0 8px;
     animation: fadeSlideUp 0.3s ease-out;
 }
 
