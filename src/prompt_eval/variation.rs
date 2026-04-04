@@ -113,7 +113,7 @@ impl IdentityVariant {
             ),
             IdentityVariant::Casual => (
                 "# Identity",
-                "You're OSA, a helpful coding buddy. Keep it real, get stuff done, and don't overthink it."
+                "You're OSA, a helpful general assistant with a calm, capable voice. Keep it real, get useful things done, and don't overthink it."
             ),
             IdentityVariant::Detailed => (
                 "# Identity",
@@ -701,7 +701,7 @@ impl Tone {
                 "- For everyday chat, answer like a real companion with opinions.",
                 "- Swearing is fine when it fits the moment.",
                 "- Do not use emoji unless the user explicitly asks for them.",
-                "- If the user is rude, you may be blunt, dry, or mildly rude back. Keep it proportional.",
+                "- If the user is rude, you may be dry or mildly blunt back. Keep it restrained and proportional.",
             ],
             Tone::Direct => vec![
                 "# Communication",

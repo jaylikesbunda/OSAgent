@@ -1,5 +1,6 @@
 pub mod bash;
 pub mod batch;
+pub mod calendar;
 pub mod code;
 pub mod codesearch;
 pub mod coordinator;
@@ -21,8 +22,10 @@ pub mod registry;
 pub mod search;
 pub mod skill;
 pub mod subagent;
+pub mod system_status;
 pub mod task;
 pub mod todo;
 pub mod truncation;
 pub mod web;
+pub mod weather;
 pub mod web_search;

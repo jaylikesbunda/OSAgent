@@ -9,8 +9,8 @@ use crate::indexer::CodeIndexer;
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, code, codesearch, coordinator, files, lsp, memory, patch, persona, plan, process,
-    question, search, skill, subagent, task, todo, web,
+    bash, batch, calendar, code, codesearch, coordinator, files, lsp, memory, patch, persona,
+    plan, process, question, search, skill, subagent, system_status, task, todo, web, weather,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -310,6 +310,18 @@ impl ToolRegistry {
             "process".to_string(),
             Arc::new(process::ProcessTool::new(config.clone())),
         );
+        tools.insert(
+            "calendar".to_string(),
+            Arc::new(calendar::CalendarTool::new(config.clone())),
+        );
+        tools.insert(
+            "weather".to_string(),
+            Arc::new(weather::WeatherTool::new(config.clone())),
+        );
+        tools.insert(
+            "system_status".to_string(),
+            Arc::new(system_status::SystemStatusTool::new(config.clone())),
+        );
 
         if let Some(ref idx) = indexer {
             tools.insert(
@@ -382,6 +394,9 @@ impl ToolRegistry {
             "web_fetch" => Some(Arc::new(web::WebFetchTool::new(config))),
             "web_search" => Some(Arc::new(web::WebSearchTool::new(config))),
             "process" => Some(Arc::new(process::ProcessTool::new(config))),
+            "calendar" => Some(Arc::new(calendar::CalendarTool::new(config.clone()))),
+            "weather" => Some(Arc::new(weather::WeatherTool::new(config.clone()))),
+            "system_status" => Some(Arc::new(system_status::SystemStatusTool::new(config))),
             "lsp" => Some(Arc::new(lsp::LspTool::new(config))),
             "plan_exit" => Some(Arc::new(plan::PlanExitTool::new())),
             _ => None,
@@ -405,6 +420,8 @@ impl ToolRegistry {
                 | "codesearch"
                 | "todoread"
                 | "process"
+                | "weather"
+                | "system_status"
                 | "lsp"
         )
     }

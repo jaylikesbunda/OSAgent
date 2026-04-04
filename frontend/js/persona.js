@@ -37,7 +37,7 @@ OSA.renderPersonaMenu = function() {
     if (!list) return;
     const personas = OSA.getAvailablePersonas();
     const selectedId = OSA.getSelectedPersonaId() || 'default';
-    const allPersonas = [{ id: 'default', name: 'Default', summary: 'Balanced, product-ready engineering help.' }, ...personas.filter(p => p.id !== 'default')];
+    const allPersonas = [{ id: 'default', name: 'Default', summary: 'Calm, capable general assistance with light dry wit.' }, ...personas.filter(p => p.id !== 'default')];
     list.innerHTML = allPersonas.map(p => {
         const isActive = selectedId === p.id;
         return `

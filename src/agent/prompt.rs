@@ -224,7 +224,7 @@ fn build_identity_section(mode: PromptMode, custom_identity: Option<&str>) -> Ve
     match mode {
         PromptMode::Full => vec![
             "# Identity".to_string(),
-            "You are OSA, a technical workspace agent optimized for software engineering. Provide precise, actionable assistance for code analysis, debugging, and file operations.".to_string(),
+            "You are OSA, a workspace-aware general assistant with a calm, capable voice and a touch of dry wit. Help with software work, research, organization, system tasks, and practical day-to-day requests with precise, actionable assistance.".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Verify => vec![
             "# Identity".to_string(),
@@ -323,6 +323,18 @@ fn tool_line(name: &str) -> Option<(&'static str, &'static str)> {
         "process" => Some((
             "- process: inspect or kill running processes",
             "process(action=\"list\")",
+        )),
+        "calendar" => Some((
+            "- calendar: create, list, update, or delete events in OSA's local calendar",
+            "calendar(action=\"create\", title=\"Dentist\", start=\"2026-04-07 09:00\")",
+        )),
+        "weather" => Some((
+            "- weather: fetch current conditions and a short forecast for a place",
+            "weather(location=\"Boston\", days=2)",
+        )),
+        "system_status" => Some((
+            "- system_status: inspect the current machine's OS, uptime, CPU, memory, and disk usage",
+            "system_status()",
         )),
         "code_python" => Some((
             "- code_python: short computations or transformations when easier than shell",

@@ -222,6 +222,50 @@ impl Default for SkillInstaller {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::loader::SkillLoader;
+    use tempfile::TempDir;
+
+    fn example_bundle_bytes(name: &str) -> Vec<u8> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("skills")
+            .join(format!("{}.oskill", name));
+        std::fs::read(path).expect("example bundle should exist")
+    }
+
+    #[test]
+    fn installs_and_loads_example_skill_bundle() {
+        let temp = TempDir::new().expect("temp dir");
+        std::env::set_var("OSAGENT_DATA_DIR", temp.path());
+
+        let installer = SkillInstaller::new();
+        let bundle = example_bundle_bytes("github");
+        let result = installer
+            .install_from_bundle(&bundle)
+            .expect("install should succeed");
+
+        assert_eq!(result.name, "github");
+        assert!(installer.store.skill_exists("github"));
+
+        let skill_info = installer
+            .store
+            .get_skill_info("github")
+            .expect("skill info should load");
+        assert_eq!(skill_info.name, "github");
+        assert_eq!(skill_info.emoji.as_deref(), Some("🐙"));
+        assert!(skill_info.has_config);
+
+        let mut loader = SkillLoader::new(temp.path().join("skills"));
+        let loaded = loader.load_all().expect("loader should succeed");
+        assert!(loaded.iter().any(|name| name == "github"));
+
+        std::env::remove_var("OSAGENT_DATA_DIR");
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct InstallResult {
     pub name: String,
