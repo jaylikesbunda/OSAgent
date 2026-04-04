@@ -629,6 +629,11 @@ struct ProviderValidationPayload {
 }
 
 #[derive(Deserialize)]
+struct DiscoverProviderModelsPayload {
+    provider_type: String,
+}
+
+#[derive(Deserialize)]
 struct SetupOAuthStartPayload {
     provider_type: String,
 }
@@ -739,6 +744,19 @@ struct SnapshotModel {
 }
 
 type SnapshotCatalog = BTreeMap<String, SnapshotProvider>;
+
+#[derive(Debug, Deserialize)]
+struct OllamaTagsResponse {
+    #[serde(default)]
+    models: Vec<OllamaTagModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTagModel {
+    model: String,
+    #[serde(default)]
+    name: String,
+}
 
 // --- Helper Functions ---
 
@@ -1384,6 +1402,92 @@ fn resolve_provider_api_key(
         .unwrap_or_default()
 }
 
+fn resolve_provider_base_url(state: &AppState, provider_type: &str, fallback_base_url: &str) -> String {
+    load_existing_config(&state.config_path)
+        .and_then(|config| provider_for_type(&config, provider_type))
+        .map(|provider| provider.base_url.trim().to_string())
+        .filter(|base_url| !base_url.is_empty())
+        .unwrap_or_else(|| fallback_base_url.to_string())
+}
+
+fn normalize_ollama_base_url(base_url: &str) -> String {
+    let mut normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        return "http://localhost:11434".to_string();
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    if lower.ends_with("/v1/models") {
+        normalized.truncate(normalized.len().saturating_sub(10));
+    } else if lower.ends_with("/api/tags") {
+        normalized.truncate(normalized.len().saturating_sub(9));
+    } else if lower.ends_with("/v1") {
+        normalized.truncate(normalized.len().saturating_sub(3));
+    } else if lower.ends_with("/api") {
+        normalized.truncate(normalized.len().saturating_sub(4));
+    }
+
+    normalized = normalized.trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        "http://localhost:11434".to_string()
+    } else {
+        normalized
+    }
+}
+
+async fn discover_ollama_models(base_url: &str, api_key: &str) -> Result<Vec<SetupProviderModel>, String> {
+    let native_base = normalize_ollama_base_url(base_url);
+    let tags_url = format!("{}/api/tags", native_base.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|e| format!("Could not create HTTP client: {}", e))?;
+
+    let mut request = client.get(&tags_url);
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key.trim());
+    }
+
+    let response = request.send().await.map_err(|e| {
+        format!(
+            "Could not reach Ollama. Make sure the Ollama app or service is running on this machine. {}",
+            e
+        )
+    })?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Ollama returned HTTP {} while listing models.",
+            response.status()
+        ));
+    }
+
+    let payload: OllamaTagsResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Could not parse Ollama model list: {}", e))?;
+
+    let mut models: Vec<SetupProviderModel> = payload
+        .models
+        .into_iter()
+        .filter_map(|model| {
+            let id = model.model.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let name = if model.name.trim().is_empty() {
+                id.clone()
+            } else {
+                model.name
+            };
+            Some(SetupProviderModel { id, name })
+        })
+        .collect();
+
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(models)
+}
+
 fn ensure_table(value: &mut toml::Value) -> &mut toml::map::Map<String, toml::Value> {
     if !value.is_table() {
         *value = toml::Value::Table(toml::map::Map::new());
@@ -1848,29 +1952,26 @@ async fn validate_provider_connection(
         return Err("Enter an API key before testing this provider".to_string());
     }
 
+    let base_url = resolve_provider_base_url(state, &provider_type, &preset.base_url);
+
+    if provider_type == "ollama" {
+        discover_ollama_models(&base_url, &api_key).await?;
+        return Ok(ProviderValidationResult {
+            ok: true,
+            message: "Ollama responded and looks ready.".to_string(),
+        });
+    }
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(12))
         .build()
         .map_err(|e| format!("Could not create HTTP client: {}", e))?;
 
-    let request = if provider_type == "ollama" {
-        let request = client.get("http://localhost:11434/api/tags");
-        if api_key.trim().is_empty() {
-            request
-        } else {
-            request.bearer_auth(api_key)
-        }
-    } else {
-        client
-            .get(format!("{}/models", preset.base_url.trim_end_matches('/')))
-            .bearer_auth(api_key)
-    };
+    let request = client
+        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .bearer_auth(api_key);
 
     let response = request.send().await.map_err(|e| match provider_type.as_str() {
-        "ollama" => format!(
-            "Could not reach Ollama. Make sure the Ollama app or service is running on this machine. {}",
-            e
-        ),
         _ => format!("Could not reach {}: {}", preset.name, e),
     })?;
 
@@ -1879,7 +1980,6 @@ async fn validate_provider_connection(
         let message = match provider_type.as_str() {
             "openrouter" => "OpenRouter connection looks good.".to_string(),
             "openai" => "OpenAI connection looks good.".to_string(),
-            "ollama" => "Ollama responded and looks ready.".to_string(),
             _ => format!("{} connection looks good.", preset.name),
         };
         return Ok(ProviderValidationResult { ok: true, message });
@@ -1891,7 +1991,6 @@ async fn validate_provider_connection(
             match provider_type.as_str() {
                 "openrouter" => "OpenRouter",
                 "openai" => "OpenAI",
-                "ollama" => "Ollama",
                 _ => &preset.name,
             }
         ),
@@ -1900,7 +1999,6 @@ async fn validate_provider_connection(
             match provider_type.as_str() {
                 "openrouter" => "OpenRouter",
                 "openai" => "OpenAI",
-                "ollama" => "Ollama",
                 _ => &preset.name,
             },
             status
@@ -2186,6 +2284,7 @@ fn get_setup_provider_catalog() -> Vec<SetupProviderInfo> {
     setup_catalog_presets()
         .into_iter()
         .map(|preset| {
+            let is_ollama = preset.id == "ollama";
             let oauth = match preset.oauth_flow_type {
                 Some(ref flow_type) => {
                     let env_var_name = format!(
@@ -2221,15 +2320,43 @@ fn get_setup_provider_catalog() -> Vec<SetupProviderInfo> {
                 key_help: preset.key_help,
                 api_key_required: preset.api_key_required,
                 default_model: preset.default_model,
-                models: preset
-                    .models
-                    .into_iter()
-                    .map(|(id, name)| SetupProviderModel { id, name })
-                    .collect(),
+                models: if is_ollama {
+                    Vec::new()
+                } else {
+                    preset
+                        .models
+                        .into_iter()
+                        .map(|(id, name)| SetupProviderModel { id, name })
+                        .collect()
+                },
                 oauth,
             }
         })
         .collect()
+}
+
+#[tauri::command]
+async fn discover_setup_provider_models(
+    state: State<'_, AppState>,
+    payload: DiscoverProviderModelsPayload,
+) -> Result<Vec<SetupProviderModel>, String> {
+    let provider_type = payload.provider_type.trim().to_lowercase();
+    let preset =
+        provider_preset(&provider_type).ok_or_else(|| "Unsupported provider selected".to_string())?;
+
+    if provider_type != "ollama" {
+        return Ok(
+            preset
+                .models
+                .into_iter()
+                .map(|(id, name)| SetupProviderModel { id, name })
+                .collect(),
+        );
+    }
+
+    let api_key = resolve_provider_api_key(&state, &provider_type, "");
+    let base_url = resolve_provider_base_url(&state, &provider_type, &preset.base_url);
+    discover_ollama_models(&base_url, &api_key).await
 }
 
 #[derive(Deserialize)]
@@ -4054,6 +4181,7 @@ fn main() {
             get_binary_status,
             get_setup_state,
             get_setup_provider_catalog,
+            discover_setup_provider_models,
             start_setup_oauth,
             start_device_code_oauth,
             poll_device_code_oauth,

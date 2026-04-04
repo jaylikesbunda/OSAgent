@@ -1,20 +1,52 @@
 use crate::agent::runtime::AgentRuntime;
 use crate::config::Config;
 use crate::web::routes::create_router;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tower_http::cors::CorsLayer;
-use tracing::info;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::{info, warn};
 
 #[derive(RustEmbed)]
 #[folder = "frontend/"]
 struct FrontendAssets;
 
 static INDEX_HTML: &str = "index.html";
+
+fn build_cors_layer(config: &Config) -> CorsLayer {
+    let allowed_origins: Vec<HeaderValue> = config
+        .server
+        .cors_allowed_origins
+        .iter()
+        .filter_map(|origin| match HeaderValue::from_str(origin) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warn!("Ignoring invalid CORS origin '{}': {}", origin, error);
+                None
+            }
+        })
+        .collect();
+
+    let layer = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]);
+
+    if allowed_origins.is_empty() {
+        layer
+    } else {
+        layer.allow_origin(AllowOrigin::list(allowed_origins))
+    }
+}
 
 async fn serve_static_handler(uri: Uri) -> impl IntoResponse {
     let path = uri.path();
@@ -76,7 +108,7 @@ pub async fn run_with_agent(
 
     let app = api_routes
         .fallback(serve_static_handler)
-        .layer(CorsLayer::permissive());
+        .layer(build_cors_layer(&config));
 
     let bind_addr = format!("{}:{}", config.server.bind, config.server.port);
     info!("OSA web server listening on http://{}", bind_addr);

@@ -832,7 +832,11 @@ OSA.connectEventSource = function(sessionId) {
 
     OSA.showConnectionStatus('connecting', 'Connecting...');
     
-    const es = new EventSource(`/api/sessions/${sessionId}/events`);
+    const token = OSA.getToken ? OSA.getToken() : '';
+    const sseUrl = token
+        ? `/api/sessions/${sessionId}/events?token=${encodeURIComponent(token)}`
+        : `/api/sessions/${sessionId}/events`;
+    const es = new EventSource(sseUrl);
     
     es.onopen = () => {
         OSA.showConnectionStatus('connected', 'Connected');

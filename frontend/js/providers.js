@@ -11,6 +11,8 @@ OSA.validationDebounce = null;
 OSA.expandedModels = {};
 OSA.modalModelDropdownOpen = false;
 OSA.modalModelSearchQuery = '';
+OSA.modalProviderModels = [];
+OSA.ollamaModelDebounce = null;
 
 // ── Favourite Models ─────────────────────────────────────────
 
@@ -354,6 +356,61 @@ OSA.handleModalDropdownKeydown = function(event) {
     if (event.key === 'Escape') { OSA.closeModalModelDropdown(); event.stopPropagation(); }
 };
 
+OSA.formatContextWindow = function(contextWindow) {
+    if (!contextWindow || contextWindow <= 0) return '?';
+    if (contextWindow >= 1000000) return (contextWindow / 1000000).toFixed(0) + 'M';
+    return (contextWindow / 1000).toFixed(0) + 'K';
+};
+
+OSA.discoverProviderModels = async function(providerId, baseUrl) {
+    const params = new URLSearchParams();
+    params.set('provider_id', providerId || '');
+    if (baseUrl) params.set('base_url', baseUrl);
+    return OSA.getJson('/api/providers/models?' + params.toString());
+};
+
+OSA.refreshModalProviderModels = async function(provider, connectedEntry) {
+    if (!provider) return;
+
+    const list = document.getElementById('modal-model-list');
+    const baseUrlInput = document.getElementById('provider-base-url');
+    const selectedModelId = document.getElementById('provider-model').value;
+
+    if (provider.id !== 'ollama') {
+        OSA.modalProviderModels = provider.models || [];
+        OSA.populateModalModelDropdown(OSA.modalProviderModels, provider.id);
+        return;
+    }
+
+    if (list) list.innerHTML = '<div class="model-empty">Loading installed Ollama models...</div>';
+
+    const baseUrl = (baseUrlInput && baseUrlInput.value.trim())
+        || (connectedEntry && connectedEntry.base_url)
+        || provider.base_url
+        || '';
+
+    try {
+        const models = await OSA.discoverProviderModels(provider.id, baseUrl);
+        OSA.modalProviderModels = Array.isArray(models) ? models : [];
+    } catch (error) {
+        OSA.modalProviderModels = [];
+    }
+
+    OSA.populateModalModelDropdown(OSA.modalProviderModels, provider.id);
+
+    if (selectedModelId) {
+        const selected = OSA.modalProviderModels.find(function(model) { return model.id === selectedModelId; });
+        if (selected) {
+            OSA.selectModalModel(selected.id, selected.name, provider.id);
+            return;
+        }
+    }
+
+    if (provider.id === 'ollama' && OSA.modalProviderModels.length === 0 && list) {
+        list.innerHTML = '<div class="model-empty">No Ollama models available (is Ollama running?)</div>';
+    }
+};
+
 OSA.renderModalModelDropdown = async function() {
     const list = document.getElementById('modal-model-list');
     if (!list) return;
@@ -361,6 +418,23 @@ OSA.renderModalModelDropdown = async function() {
     const query = OSA.modalModelSearchQuery.trim();
     const provider = OSA.providerCatalog.providers.find(p => p.id === OSA.currentProviderId);
     if (!provider) { list.innerHTML = '<div class="model-empty">No provider selected</div>'; return; }
+    const modalModels = (OSA.modalProviderModels && OSA.modalProviderModels.length)
+        ? OSA.modalProviderModels
+        : (provider.models || []);
+
+    if (provider.id === 'ollama') {
+        const filtered = query
+            ? modalModels.filter(function(model) {
+                return (model.name || '').toLowerCase().includes(query.toLowerCase())
+                    || (model.id || '').toLowerCase().includes(query.toLowerCase());
+            })
+            : modalModels;
+        OSA.populateModalModelDropdown(filtered, provider.id);
+        if (filtered.length === 0) {
+            list.innerHTML = '<div class="model-empty">No Ollama models available (is Ollama running?)</div>';
+        }
+        return;
+    }
 
     if (query.length >= 2) {
         try {
@@ -374,7 +448,7 @@ OSA.renderModalModelDropdown = async function() {
                         '<span class="model-option-id">' + OSA.escapeHtml(m.id) + '</span>' +
                     '</div>' +
                     '<div class="model-option-meta">' +
-                        '<span>' + (m.context_window >= 1000000 ? (m.context_window / 1000000).toFixed(0) + 'M' : (m.context_window / 1000).toFixed(0) + 'K') + ' ctx</span>' +
+                        '<span>' + OSA.formatContextWindow(m.context_window) + ' ctx</span>' +
                         (m.supports_tools ? '<span title="Tool calling">T</span>' : '') +
                         (m.supports_vision ? '<span title="Vision">V</span>' : '') +
                     '</div>' +
@@ -385,7 +459,7 @@ OSA.renderModalModelDropdown = async function() {
         } catch (e) { list.innerHTML = '<div class="model-empty">Search failed</div>'; return; }
     }
 
-    OSA.populateModalModelDropdown(provider.models, provider.id);
+    OSA.populateModalModelDropdown(modalModels, provider.id);
 };
 
 OSA.populateModalModelDropdown = function(models, providerId) {
@@ -393,7 +467,7 @@ OSA.populateModalModelDropdown = function(models, providerId) {
     if (!list) return;
 
     const categories = {};
-    const catOrder = ['recommended', 'popular', 'fast', 'reasoning', 'open', 'code'];
+    const catOrder = ['installed', 'recommended', 'popular', 'fast', 'reasoning', 'open', 'code'];
     for (const m of models) {
         const cat = m.category || 'other';
         if (!categories[cat]) categories[cat] = [];
@@ -411,7 +485,7 @@ OSA.populateModalModelDropdown = function(models, providerId) {
                     '<span class="model-option-id">' + OSA.escapeHtml(m.id) + '</span>' +
                 '</div>' +
                 '<div class="model-option-meta">' +
-                    '<span>' + (m.context_window >= 1000000 ? (m.context_window / 1000000).toFixed(0) + 'M' : (m.context_window / 1000).toFixed(0) + 'K') + ' ctx</span>' +
+                    '<span>' + OSA.formatContextWindow(m.context_window) + ' ctx</span>' +
                     (m.supports_tools ? '<span title="Tool calling">T</span>' : '') +
                     (m.supports_vision ? '<span title="Vision">V</span>' : '') +
                 '</div>' +
@@ -735,7 +809,7 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     }
 
     // Pre-fill base URL
-    document.getElementById('provider-base-url').value = provider.base_url || '';
+    document.getElementById('provider-base-url').value = (connectedEntry && connectedEntry.base_url) || provider.base_url || '';
 
     // API key link
     const apiKeyLink = document.getElementById('api-key-link');
@@ -757,10 +831,10 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     OSA.closeModalModelDropdown();
 
     // Populate modal model dropdown
-    OSA.populateModalModelDropdown(provider.models, provider.id);
+    await OSA.refreshModalProviderModels(provider, connectedEntry);
     const initialModelId = OSA.pendingProviderModel || (connectedEntry && connectedEntry.model) || '';
     if (initialModelId) {
-        const selected = provider.models.find(function(model) { return model.id === initialModelId; });
+        const selected = OSA.modalProviderModels.find(function(model) { return model.id === initialModelId; });
         if (selected) {
             OSA.selectModalModel(selected.id, selected.name, provider.id);
         } else {
@@ -769,8 +843,17 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
         }
     }
 
-    // Set up auto-validation
+    // Set up auto-validation and dynamic Ollama discovery
     document.getElementById('provider-api-key').oninput = function() { OSA.scheduleValidation(); };
+    document.getElementById('provider-base-url').oninput = function() {
+        OSA.scheduleValidation();
+        if (provider.id === 'ollama') {
+            if (OSA.ollamaModelDebounce) clearTimeout(OSA.ollamaModelDebounce);
+            OSA.ollamaModelDebounce = setTimeout(function() {
+                OSA.refreshModalProviderModels(provider, connectedEntry);
+            }, 350);
+        }
+    };
 
     modal.classList.remove('hidden');
 };
@@ -1124,7 +1207,7 @@ OSA.addProvider = async function() {
         }
     }
 
-    if (!apiKey) { alert('Please enter an API key'); return; }
+    if (!apiKey && OSA.currentProviderId !== 'ollama') { alert('Please enter an API key'); return; }
 
     addBtn.disabled = true;
     addBtn.textContent = 'Adding...';
@@ -1162,14 +1245,28 @@ OSA.closeAddProviderModal = function() {
     OSA.currentProviderOAuthSupported = false;
     OSA.currentProviderApiKeyUrl = null;
     OSA.pendingProviderModel = null;
-    document.getElementById('provider-api-key').value = '';
-    document.getElementById('provider-base-url').value = '';
-    document.getElementById('provider-model').value = '';
-    document.getElementById('modal-model-select-text').textContent = 'Use provider default (choose later)';
-    document.getElementById('provider-default').checked = false;
-    document.getElementById('validation-badge').style.display = 'none';
-    document.getElementById('oauth-client-id').value = '';
-    document.getElementById('oauth-card-error').classList.add('hidden');
+    OSA.modalProviderModels = [];
+    if (OSA.ollamaModelDebounce) {
+        clearTimeout(OSA.ollamaModelDebounce);
+        OSA.ollamaModelDebounce = null;
+    }
+    const apiKeyInput = document.getElementById('provider-api-key');
+    const baseUrlInput = document.getElementById('provider-base-url');
+    const modelInput = document.getElementById('provider-model');
+    const modelSelectText = document.getElementById('modal-model-select-text');
+    const defaultProviderCheckbox = document.getElementById('provider-default');
+    const validationBadge = document.getElementById('validation-badge');
+    const oauthClientIdInput = document.getElementById('oauth-client-id');
+    const oauthCardError = document.getElementById('oauth-card-error');
+
+    if (apiKeyInput) apiKeyInput.value = '';
+    if (baseUrlInput) baseUrlInput.value = '';
+    if (modelInput) modelInput.value = '';
+    if (modelSelectText) modelSelectText.textContent = 'Use provider default (choose later)';
+    if (defaultProviderCheckbox) defaultProviderCheckbox.checked = false;
+    if (validationBadge) validationBadge.style.display = 'none';
+    if (oauthClientIdInput) oauthClientIdInput.value = '';
+    if (oauthCardError) oauthCardError.classList.add('hidden');
     OSA.closeModalModelDropdown();
 };
 

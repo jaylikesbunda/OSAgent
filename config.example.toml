@@ -3,8 +3,17 @@
 [server]
 bind = "127.0.0.1"
 port = 8765
+password_enabled = true
 # Password is bcrypt hashed - use 'osagent setup' to generate
 password = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/7.J6LlZq"
+# JWT signing secret for API bearer tokens.
+# OSA auto-generates and persists this if it is missing.
+# Changing it signs out all current sessions and requires a server restart.
+jwt_secret = "replace-with-a-long-random-secret"
+# Leave empty to disable cross-origin API access.
+# Same-origin requests from the built-in Web UI still work without CORS entries.
+# Changes require a server restart.
+cors_allowed_origins = []
 
 # --- Provider Configuration ---
 # OSA supports multiple providers simultaneously.

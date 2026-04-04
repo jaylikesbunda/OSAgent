@@ -788,6 +788,11 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="settings-field" style="margin-top: 16px;">
+                            <label for="setting-cors-allowed-origins">Allowed CORS Origins</label>
+                            <textarea id="setting-cors-allowed-origins" rows="3" placeholder="https://example.com&#10;http://localhost:3000" oninput="OSA.onNetworkSettingsChange()"></textarea>
+                            <div class="settings-help">Leave empty to keep the API same-origin only. Enter one origin per line or comma-separated. Restart required after changes.</div>
+                        </div>
                         <div id="network-restart-notice" class="settings-notice hidden">
                             Network settings require server restart to take effect.
                         </div>

@@ -213,11 +213,15 @@ OSA.loadSettings = async function() {
         
         const bind = config.server?.bind || '127.0.0.1';
         const port = config.server?.port || 8765;
+        const corsAllowedOrigins = Array.isArray(config.server?.cors_allowed_origins)
+            ? config.server.cors_allowed_origins
+            : [];
         const isLan = bind === '0.0.0.0';
         const isCustom = bind !== '127.0.0.1' && bind !== '0.0.0.0';
         
         document.getElementById('setting-lan-enabled').checked = isLan;
         document.getElementById('setting-port').value = port;
+        document.getElementById('setting-cors-allowed-origins').value = corsAllowedOrigins.join('\n');
         
         if (isCustom) {
             document.getElementById('setting-bind').value = bind;
@@ -273,6 +277,10 @@ OSA.saveSettings = async function() {
     }
 
     const lanEnabled = document.getElementById('setting-lan-enabled').checked;
+    const corsAllowedOrigins = (document.getElementById('setting-cors-allowed-origins').value || '')
+        .split(/[\n,]/)
+        .map(v => v.trim())
+        .filter(Boolean);
     let bindAddr = '127.0.0.1';
     if (lanEnabled) bindAddr = '0.0.0.0';
     else if (document.getElementById('custom-network-fields').classList.contains('hidden') === false) {
@@ -283,7 +291,8 @@ OSA.saveSettings = async function() {
         ...newConfig.server,
         bind: bindAddr,
         port: parseInt(document.getElementById('setting-port').value) || 8765,
-        password_enabled: document.getElementById('setting-password-enabled').checked
+        password_enabled: document.getElementById('setting-password-enabled').checked,
+        cors_allowed_origins: corsAllowedOrigins
     };
     newConfig.provider = {
         ...newConfig.provider,
@@ -559,6 +568,10 @@ OSA.onPortChange = function() {
     if (lanEnabled || !customHidden) {
         document.getElementById('network-restart-notice').classList.remove('hidden');
     }
+};
+
+OSA.onNetworkSettingsChange = function() {
+    document.getElementById('network-restart-notice').classList.remove('hidden');
 };
 
 OSA.updateLanAddressDisplay = function() {

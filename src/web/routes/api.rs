@@ -10,7 +10,7 @@ use crate::oauth::{generate_oauth_state, generate_pkce_pair, PkcePair};
 use crate::plugin::LoadedPlugin;
 use crate::skills::SkillService;
 use crate::storage::{FileSnapshotSummary, QueuedMessage, Session, StoredSessionEvent};
-use crate::web::auth;
+use crate::web::{auth, middleware::AuthLayer};
 use crate::workflow::api::WorkflowState;
 use crate::workflow::artifact_store::ArtifactStore;
 use crate::workflow::db::WorkflowDb;
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -181,7 +182,7 @@ pub struct SessionPersonaResponse {
 }
 
 pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: PathBuf) -> Router {
-    let secret = uuid::Uuid::new_v4().to_string();
+    let secret = config.server.jwt_secret.clone();
 
     let db_path = PathBuf::from(std::env::var("OSAGENT_DATA_DIR").unwrap_or_else(|_| {
         std::env::var("OSAGENT_WORKSPACE").unwrap_or_else(|_| ".".to_string())
@@ -222,11 +223,13 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
     let skill_service = Arc::new(SkillService::new());
     let skills_router = crate::skills::create_skills_router(skill_service);
 
-    Router::new()
+    let public_routes = Router::new()
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/status", get(auth_status));
+
+    let protected_routes = Router::new()
         .merge(workflow_router)
         .merge(skills_router)
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/status", get(auth_status))
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
@@ -364,8 +367,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/update/check", get(check_update))
         .route("/api/update/download", post(download_update))
         .route("/api/update/install", post(install_update))
-        .route("/api/update/status", get(update_status))
-        .layer(Extension(config))
+        .route("/api/update/status", get(update_status));
+
+    public_routes
+        .merge(protected_routes.layer(AuthLayer::new(secret.clone())))
         .layer(Extension(agent))
         .layer(Extension(Arc::new(secret)))
         .layer(Extension(config_path))
@@ -500,10 +505,12 @@ async fn set_model(
 }
 
 async fn login(
-    Extension(config): Extension<Config>,
+    Extension(agent): Extension<Arc<AgentRuntime>>,
     Extension(secret): Extension<Arc<String>>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let config = agent.get_config().await;
+
     if !config.server.password_enabled || config.server.password.is_empty() {
         let token = auth::generate_token("user", &secret).map_err(|e| {
             (
@@ -544,7 +551,9 @@ async fn login(
     Ok(Json(LoginResponse { token }))
 }
 
-async fn auth_status(Extension(config): Extension<Config>) -> Json<AuthStatusResponse> {
+async fn auth_status(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<AuthStatusResponse> {
+    let config = agent.get_config().await;
+
     Json(AuthStatusResponse {
         required: config.server.password_enabled && !config.server.password.is_empty(),
     })
@@ -620,7 +629,10 @@ async fn restart_server(
 }
 
 async fn get_config(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<Config> {
-    Json(agent.get_config().await)
+    let mut config = agent.get_config().await;
+    config.server.password.clear();
+    config.server.jwt_secret.clear();
+    Json(config)
 }
 
 async fn get_discord_bot_status(
@@ -741,6 +753,16 @@ async fn update_config(
     Extension(config_path): Extension<PathBuf>,
     Json(mut new_config): Json<Config>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let current_config = agent.get_config().await;
+
+    if new_config.server.password.trim().is_empty() {
+        new_config.server.password = current_config.server.password.clone();
+    }
+
+    if new_config.server.jwt_secret.trim().is_empty() {
+        new_config.server.jwt_secret = current_config.server.jwt_secret.clone();
+    }
+
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
         discord.allowed_users.dedup();
@@ -2714,6 +2736,7 @@ pub struct ValidateProviderRequest {
 async fn validate_provider(
     Json(payload): Json<ValidateProviderRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let is_ollama = payload.provider_id == "ollama";
     let base_url = if let Some(url) = payload.base_url {
         url
     } else {
@@ -2722,7 +2745,7 @@ async fn validate_provider(
             .unwrap_or_default()
     };
 
-    if payload.api_key.is_empty() {
+    if payload.api_key.is_empty() && !is_ollama {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -2743,12 +2766,20 @@ async fn validate_provider(
             )
         })?;
 
-    let test_url = format!("{}/models", base_url.trim_end_matches('/'));
-    let res = client
-        .get(&test_url)
-        .header("Authorization", format!("Bearer {}", payload.api_key))
-        .send()
-        .await;
+    let test_url = if is_ollama {
+        format!(
+            "{}/api/version",
+            normalize_ollama_base_url(&base_url).trim_end_matches('/')
+        )
+    } else {
+        format!("{}/models", base_url.trim_end_matches('/'))
+    };
+
+    let mut request = client.get(&test_url);
+    if !payload.api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", payload.api_key));
+    }
+    let res = request.send().await;
 
     match res {
         Ok(response) => {
@@ -3853,12 +3884,280 @@ async fn switch_provider_model(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+struct ModelSearchQuery {
+    q: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderModelsQuery {
+    provider_id: Option<String>,
+    base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTagsResponse {
+    #[serde(default)]
+    models: Vec<OllamaTagModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTagModel {
+    model: String,
+    #[serde(default)]
+    name: String,
+}
+
+fn ollama_context_cache() -> &'static dashmap::DashMap<String, (usize, Instant)> {
+    static STORE: OnceLock<dashmap::DashMap<String, (usize, Instant)>> = OnceLock::new();
+    STORE.get_or_init(dashmap::DashMap::new)
+}
+
+fn extract_ollama_context_window(payload: &serde_json::Value) -> Option<usize> {
+    if let Some(model_info) = payload.get("model_info").and_then(|value| value.as_object()) {
+        for (key, value) in model_info {
+            if (key.ends_with(".context_length") || key.ends_with(".context_window"))
+                && value.as_u64().unwrap_or(0) > 0
+            {
+                return value.as_u64().map(|raw| raw as usize);
+            }
+        }
+
+        for key in ["context_length", "context_window", "num_ctx"] {
+            if let Some(raw) = model_info.get(key).and_then(|value| value.as_u64()) {
+                if raw > 0 {
+                    return Some(raw as usize);
+                }
+            }
+        }
+    }
+
+    if let Some(parameters) = payload.get("parameters").and_then(|value| value.as_str()) {
+        for line in parameters.lines() {
+            let normalized = line.trim().replace('\t', " ");
+            let mut parts = normalized.split_whitespace();
+            let key = parts.next().unwrap_or_default().to_ascii_lowercase();
+            if key == "num_ctx" || key == "context_length" {
+                if let Some(raw) = parts.next().and_then(|value| value.parse::<usize>().ok()) {
+                    if raw > 0 {
+                        return Some(raw);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+async fn fetch_ollama_context_window(
+    client: &reqwest::Client,
+    normalized_base: &str,
+    api_key: Option<&str>,
+    model_id: &str,
+) -> Option<usize> {
+    let cache_key = format!("{}|{}", normalized_base, model_id);
+    if let Some(cached) = ollama_context_cache().get(&cache_key) {
+        if cached.value().1.elapsed() < Duration::from_secs(600) {
+            return Some(cached.value().0);
+        }
+    }
+
+    let mut request = client
+        .post(format!("{}/api/show", normalized_base.trim_end_matches('/')))
+        .json(&serde_json::json!({ "name": model_id }));
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", key.trim()));
+        }
+    }
+
+    let response = match request.send().await {
+        Ok(response) if response.status().is_success() => response,
+        _ => return None,
+    };
+
+    let payload: serde_json::Value = match response.json().await {
+        Ok(payload) => payload,
+        Err(_) => return None,
+    };
+
+    let context = extract_ollama_context_window(&payload)?;
+    ollama_context_cache().insert(cache_key, (context, Instant::now()));
+    Some(context)
+}
+
+fn normalize_ollama_base_url(base_url: &str) -> String {
+    let mut normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        return "http://localhost:11434".to_string();
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    if lower.ends_with("/v1/models") {
+        normalized.truncate(normalized.len().saturating_sub(10));
+    } else if lower.ends_with("/api/tags") {
+        normalized.truncate(normalized.len().saturating_sub(9));
+    } else if lower.ends_with("/v1") {
+        normalized.truncate(normalized.len().saturating_sub(3));
+    } else if lower.ends_with("/api") {
+        normalized.truncate(normalized.len().saturating_sub(4));
+    }
+
+    normalized = normalized.trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        "http://localhost:11434".to_string()
+    } else {
+        normalized
+    }
+}
+
+async fn resolve_ollama_base_url(
+    agent: &Arc<AgentRuntime>,
+    base_url_override: Option<String>,
+) -> String {
+    if let Some(url) = base_url_override {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+
+    let config = agent.get_config().await;
+    if let Some(provider) = config.providers.iter().find(|p| p.provider_type == "ollama") {
+        if !provider.base_url.trim().is_empty() {
+            return provider.base_url.clone();
+        }
+    }
+
+    crate::agent::provider_presets::get_preset("ollama")
+        .map(|preset| preset.base_url)
+        .unwrap_or_else(|| "http://localhost:11434/v1".to_string())
+}
+
+async fn resolve_ollama_api_key(agent: &Arc<AgentRuntime>) -> Option<String> {
+    let config = agent.get_config().await;
+    config
+        .providers
+        .iter()
+        .find(|provider| provider.provider_type == "ollama")
+        .map(|provider| provider.api_key.clone())
+        .filter(|api_key| !api_key.trim().is_empty())
+}
+
+async fn fetch_live_ollama_models(
+    agent: &Arc<AgentRuntime>,
+    base_url_override: Option<String>,
+) -> Vec<crate::agent::model_catalog::ModelInfo> {
+    let base_url = resolve_ollama_base_url(agent, base_url_override).await;
+    let normalized_base = normalize_ollama_base_url(&base_url);
+    let tags_url = format!("{}/api/tags", normalized_base.trim_end_matches('/'));
+    let api_key = resolve_ollama_api_key(agent).await;
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut tags_request = client.get(tags_url);
+    if let Some(key) = api_key.as_deref() {
+        tags_request = tags_request.header("Authorization", format!("Bearer {}", key.trim()));
+    }
+
+    let response = match tags_request.send().await {
+        Ok(response) if response.status().is_success() => response,
+        _ => return Vec::new(),
+    };
+
+    let payload: OllamaTagsResponse = match response.json().await {
+        Ok(payload) => payload,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut models: Vec<crate::agent::model_catalog::ModelInfo> = payload
+        .models
+        .into_iter()
+        .filter_map(|model| {
+            let id = model.model.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let name = if model.name.trim().is_empty() {
+                id.clone()
+            } else {
+                model.name
+            };
+
+            Some(crate::agent::model_catalog::ModelInfo {
+                id,
+                name,
+                provider_id: "ollama".to_string(),
+                provider_name: "Ollama (Local)".to_string(),
+                context_window: 0,
+                input_limit: None,
+                output_limit: 0,
+                supports_tools: false,
+                supports_vision: false,
+                category: "installed".to_string(),
+                available: true,
+            })
+        })
+        .collect();
+
+    for model in &mut models {
+        if let Some(context_window) = fetch_ollama_context_window(
+            &client,
+            &normalized_base,
+            api_key.as_deref(),
+            &model.id,
+        )
+        .await
+        {
+            model.context_window = context_window;
+        }
+    }
+
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    models
+}
+
+async fn apply_live_ollama_models_to_catalog(
+    agent: &Arc<AgentRuntime>,
+    catalog: &mut crate::agent::model_catalog::CatalogState,
+) {
+    let live_models = fetch_live_ollama_models(agent, None).await;
+    if let Some(provider) = catalog.providers.iter_mut().find(|p| p.id == "ollama") {
+        provider.models = live_models.clone();
+    }
+    catalog.all_models.retain(|model| model.provider_id != "ollama");
+    catalog.all_models.extend(live_models);
+}
+
 async fn search_models(
     Extension(agent): Extension<Arc<AgentRuntime>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<ModelSearchQuery>,
 ) -> Json<serde_json::Value> {
-    let query = params.get("q").cloned().unwrap_or_default();
-    let models = agent.search_catalog_models(query).await;
+    let query = params.q.unwrap_or_default().trim().to_lowercase();
+    if query.is_empty() {
+        return Json(serde_json::json!([]));
+    }
+
+    let mut catalog = agent.get_catalog_state().await;
+    apply_live_ollama_models_to_catalog(&agent, &mut catalog).await;
+
+    let models: Vec<crate::agent::model_catalog::ModelInfo> = catalog
+        .all_models
+        .into_iter()
+        .filter(|model| {
+            model.id.to_lowercase().contains(&query)
+                || model.name.to_lowercase().contains(&query)
+                || model.provider_id.to_lowercase().contains(&query)
+                || model.provider_name.to_lowercase().contains(&query)
+        })
+        .collect();
+
     Json(serde_json::to_value(models).unwrap_or(serde_json::json!([])))
 }
 
@@ -3882,19 +4181,26 @@ async fn answer_question(
 async fn catalog_handler(
     Extension(agent): Extension<Arc<AgentRuntime>>,
 ) -> Json<serde_json::Value> {
-    let catalog = agent.get_catalog_state().await;
+    let mut catalog = agent.get_catalog_state().await;
+    apply_live_ollama_models_to_catalog(&agent, &mut catalog).await;
     Json(serde_json::to_value(&catalog).unwrap_or(serde_json::json!({})))
 }
 
 async fn models_handler(
     Extension(agent): Extension<Arc<AgentRuntime>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<ProviderModelsQuery>,
 ) -> Json<serde_json::Value> {
-    let provider_id = params.get("provider_id").cloned().unwrap_or_default();
+    let provider_id = params.provider_id.unwrap_or_default();
+    let base_url = params.base_url;
     let models = if !provider_id.is_empty() {
-        agent.get_provider_models(provider_id).await
+        if provider_id == "ollama" {
+            fetch_live_ollama_models(&agent, base_url).await
+        } else {
+            agent.get_provider_models(provider_id).await
+        }
     } else {
-        let catalog = agent.get_catalog_state().await;
+        let mut catalog = agent.get_catalog_state().await;
+        apply_live_ollama_models_to_catalog(&agent, &mut catalog).await;
         catalog.all_models
     };
     Json(serde_json::to_value(&models).unwrap_or(serde_json::json!([])))
@@ -4261,9 +4567,11 @@ struct CheckUpdateQuery {
 }
 
 async fn check_update(
-    Extension(config): Extension<Config>,
+    Extension(agent): Extension<Arc<AgentRuntime>>,
     Query(params): Query<CheckUpdateQuery>,
 ) -> Result<Json<crate::update::UpdateCheckResult>, (StatusCode, Json<ErrorResponse>)> {
+    let config = agent.get_config().await;
+
     let channel = params
         .channel
         .as_deref()
@@ -4296,7 +4604,6 @@ struct UpdateStatusResponse {
 }
 
 async fn download_update(
-    Extension(config): Extension<Config>,
     Json(payload): Json<DownloadUpdateRequest>,
 ) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
     let channel = payload
@@ -4389,7 +4696,6 @@ async fn download_update(
 }
 
 async fn install_update(
-    Extension(config): Extension<Config>,
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Json(payload): Json<DownloadUpdateRequest>,
 ) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -4466,4 +4772,79 @@ async fn update_status() -> Json<UpdateStatusResponse> {
         version: None,
         message: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{auth_status, login, LoginRequest};
+    use crate::agent::runtime::AgentRuntime;
+    use crate::config::{Config, WorkspacePath, WorkspacePermission};
+    use crate::web::auth;
+    use axum::{extract::Extension, http::StatusCode, response::IntoResponse, Json};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn test_config(temp_root: &std::path::Path) -> Config {
+        let workspace = temp_root.join("workspace");
+        let database = temp_root.join("osagent.db");
+
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let mut config = Config::default_config();
+        config.server.password = auth::hash_password("test-password").unwrap();
+        config.server.password_enabled = true;
+        config.server.jwt_secret = "test-jwt-secret".to_string();
+        config.search.enabled = false;
+        config.storage.database = database.to_string_lossy().to_string();
+        config.agent.workspace = workspace.to_string_lossy().to_string();
+        config.agent.active_workspace = Some("default".to_string());
+
+        if let Some(default_workspace) = config.agent.workspaces.get_mut(0) {
+            default_workspace.path = workspace.to_string_lossy().to_string();
+            default_workspace.paths = vec![WorkspacePath {
+                path: workspace.to_string_lossy().to_string(),
+                permission: WorkspacePermission::ReadWrite,
+                description: Some("Test workspace".to_string()),
+            }];
+        }
+
+        config
+    }
+
+    #[tokio::test]
+    async fn login_uses_runtime_config_after_password_toggle() {
+        let temp_dir = tempdir().unwrap();
+        let mut config = test_config(temp_dir.path());
+        let secret = Arc::new(config.server.jwt_secret.clone());
+        let agent = Arc::new(AgentRuntime::new(config.clone()).unwrap());
+
+        config.server.password_enabled = false;
+        agent.replace_config(config).await;
+
+        let response = login(
+            Extension(agent),
+            Extension(secret),
+            Json(LoginRequest {
+                password: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_status_uses_runtime_config() {
+        let temp_dir = tempdir().unwrap();
+        let mut config = test_config(temp_dir.path());
+        let agent = Arc::new(AgentRuntime::new(config.clone()).unwrap());
+
+        config.server.password_enabled = false;
+        agent.replace_config(config).await;
+
+        let Json(status) = auth_status(Extension(agent)).await;
+        assert!(!status.required);
+    }
 }

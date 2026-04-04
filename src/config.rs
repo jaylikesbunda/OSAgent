@@ -39,6 +39,9 @@ pub struct ServerConfig {
     pub port: u16,
     pub password: String,
     pub password_enabled: bool,
+    pub jwt_secret: String,
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +284,8 @@ impl Default for ServerConfig {
             port: 8765,
             password: "".to_string(),
             password_enabled: false,
+            jwt_secret: String::new(),
+            cors_allowed_origins: vec![],
         }
     }
 }
@@ -610,6 +615,7 @@ impl Config {
             update: UpdateConfig::default(),
             experimental: ExperimentalConfig::default(),
         };
+        cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();
         cfg
     }
@@ -627,8 +633,12 @@ impl Config {
         let raw = fs::read_to_string(path_ref).map_err(OSAgentError::Io)?;
         let mut cfg: Config = toml::from_str(&raw)
             .map_err(|e| OSAgentError::Config(format!("Failed to parse config TOML: {}", e)))?;
+        let mutated = cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();
         cfg.migrate_tool_defaults();
+        if mutated {
+            cfg.save(path_ref)?;
+        }
         Ok(cfg)
     }
 
@@ -639,12 +649,41 @@ impl Config {
         }
 
         let mut cloned = self.clone();
+        cloned.ensure_server_security_defaults();
         cloned.ensure_workspace_defaults();
         cloned.migrate_legacy_provider();
         let data = toml::to_string_pretty(&cloned)
             .map_err(|e| OSAgentError::Config(format!("Failed to serialize config: {}", e)))?;
         fs::write(path_ref, data).map_err(OSAgentError::Io)?;
         Ok(())
+    }
+
+    pub fn ensure_server_security_defaults(&mut self) -> bool {
+        let mut mutated = false;
+
+        if self.server.jwt_secret.trim().is_empty() {
+            self.server.jwt_secret = generate_jwt_secret();
+            mutated = true;
+        }
+
+        let mut cleaned_origins = Vec::new();
+        for origin in &self.server.cors_allowed_origins {
+            let trimmed = origin.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if cleaned_origins.iter().any(|existing| existing == trimmed) {
+                continue;
+            }
+            cleaned_origins.push(trimmed.to_string());
+        }
+
+        if cleaned_origins != self.server.cors_allowed_origins {
+            self.server.cors_allowed_origins = cleaned_origins;
+            mutated = true;
+        }
+
+        mutated
     }
 
     pub fn migrate_legacy_provider(&mut self) {
@@ -1290,4 +1329,45 @@ fn default_workspace_path() -> String {
 
 fn default_memory_file() -> String {
     "~/.osagent/memories.json".to_string()
+}
+
+fn generate_jwt_secret() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn load_generates_and_persists_jwt_secret() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+
+        fs::write(
+            &config_path,
+            r#"
+[server]
+bind = "127.0.0.1"
+port = 8765
+password = ""
+password_enabled = false
+"#,
+        )
+        .unwrap();
+
+        let first = Config::load(config_path.to_str().unwrap()).unwrap();
+        assert!(!first.server.jwt_secret.is_empty());
+
+        let second = Config::load(config_path.to_str().unwrap()).unwrap();
+        assert_eq!(first.server.jwt_secret, second.server.jwt_secret);
+    }
 }

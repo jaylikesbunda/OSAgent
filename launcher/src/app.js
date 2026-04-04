@@ -364,6 +364,11 @@
     }
     renderModelSelect();
     updateProviderFields();
+
+    const selectedProvider = currentProvider();
+    if (selectedProvider && selectedProvider.id === 'ollama' && (!selectedProvider.models || !selectedProvider.models.length)) {
+      refreshCurrentProviderModels();
+    }
   }
 
   function renderModelSelect() {
@@ -385,6 +390,15 @@
     placeholder.value = '';
     placeholder.textContent = 'Use provider default (choose later)';
     els.providerModel.appendChild(placeholder);
+
+    if (!modelsToShow.length && provider.id === 'ollama') {
+      const offline = document.createElement('option');
+      offline.value = '';
+      offline.textContent = 'No Ollama models found (is Ollama running?)';
+      offline.disabled = true;
+      els.providerModel.appendChild(offline);
+    }
+
     modelsToShow.forEach((model) => {
       const option = document.createElement('option');
       option.value = model.id;
@@ -395,6 +409,25 @@
     const validCurrent = modelsToShow.some((m) => m.id === state.wizard.model);
     state.wizard.model = validCurrent ? state.wizard.model : '';
     els.providerModel.value = state.wizard.model;
+  }
+
+  async function refreshCurrentProviderModels() {
+    const provider = currentProvider();
+    if (!provider || provider.id !== 'ollama') {
+      renderModelSelect();
+      return;
+    }
+
+    try {
+      const models = await invoke('discover_setup_provider_models', {
+        payload: { provider_type: provider.id }
+      });
+      provider.models = Array.isArray(models) ? models : [];
+    } catch (_error) {
+      provider.models = [];
+    }
+
+    renderModelSelect();
   }
 
   function updateProviderFields() {
@@ -520,6 +553,7 @@
     }
     setSetupNotice(notice);
     hydrateWizardFields();
+    refreshCurrentProviderModels();
 
     if (setup.needs_setup) {
       state.wizard.step = 0;
@@ -550,6 +584,7 @@
       setSetupNotice('Reconfigure provider, model, workspace, and security settings.');
       setSetupError('');
       hydrateWizardFields();
+      refreshCurrentProviderModels();
     }
     showView('setup');
   }
@@ -624,9 +659,9 @@
       if (!state.wizard.provider_type && state.providerOrder.length) {
         state.wizard.provider_type = state.providerOrder[0];
       }
-      const provider = currentProvider();
       state.wizard.model = '';
       renderProviderSelect();
+      await refreshCurrentProviderModels();
     } catch (error) {
       setSetupError('Failed to load provider catalog: ' + error);
     }
@@ -1196,12 +1231,12 @@
       updateReview();
     });
 
-    els.providerSelect.addEventListener('change', (event) => {
+    els.providerSelect.addEventListener('change', async (event) => {
       state.wizard.provider_type = event.target.value;
       state.modelFilter = '';
       state.wizard.model = '';
       if (els.modelSearch) els.modelSearch.value = '';
-      renderModelSelect();
+      await refreshCurrentProviderModels();
       updateProviderFields();
       resetProviderValidation();
       updateReview();
