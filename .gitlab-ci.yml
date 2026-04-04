@@ -6,6 +6,8 @@ spec:
       regex: ^v\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$
       default: "v0.1.0"
 ---
+image: rust:bookworm
+
 stages:
   - quick
   - test
