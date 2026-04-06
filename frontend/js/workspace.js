@@ -417,10 +417,13 @@ OSA.loadSessionWorkspace = async function() {
         OSA.renderWorkspaceMenu();
         return;
     }
+    const sessionId = currentSession.id;
     try {
-        const res = await fetch(`/api/sessions/${currentSession.id}/workspace`, { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
+        const res = await fetch(`/api/sessions/${sessionId}/workspace`, { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const activeSession = OSA.getCurrentSession();
+        if (!activeSession || activeSession.id !== sessionId) return;
         const ws = OSA.getWorkspaceState();
         ws.activeWorkspace = data.id;
         OSA.setWorkspaceState(ws);

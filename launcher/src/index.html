@@ -373,9 +373,21 @@
           <section class="panel log-panel">
             <div class="log-header">
               <h2>Output</h2>
-              <button class="btn ghost tiny" id="btn-clear-log" type="button">Clear</button>
+              <div class="log-header-actions">
+                <button class="btn ghost tiny" id="btn-toggle-logs" type="button">Show logs</button>
+              </div>
             </div>
-            <div class="log-container" id="log-container"></div>
+            <div class="log-body hidden" id="log-body">
+              <div class="log-tools">
+                <button class="btn ghost tiny" id="btn-load-live-logs" type="button">Live</button>
+                <button class="btn ghost tiny" id="btn-load-recent-logs" type="button">Recent</button>
+                <button class="btn ghost tiny" id="btn-load-more-logs" type="button">Load more</button>
+                <button class="btn ghost tiny" id="btn-refresh-logs" type="button">Refresh</button>
+                <button class="btn ghost tiny" id="btn-clear-log" type="button">Clear view</button>
+              </div>
+              <div class="log-meta" id="log-meta">Live output is hidden to keep the dashboard responsive.</div>
+              <div class="log-container" id="log-container"></div>
+            </div>
           </section>
         </div>
       </section>

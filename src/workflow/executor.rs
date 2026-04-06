@@ -3,7 +3,7 @@ use crate::error::{OSAgentError, Result};
 use crate::workflow::artifact_store::ArtifactStore;
 use crate::workflow::db::WorkflowDb;
 use crate::workflow::events::WorkflowEvent;
-use crate::workflow::graph::{topological_sort, GraphValidator};
+use crate::workflow::graph::{parse_litegraph_json, topological_sort, GraphValidator};
 use crate::workflow::types::*;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -52,7 +52,7 @@ impl WorkflowExecutor {
     ) -> Result<WorkflowResult> {
         let run_id = Uuid::new_v4().to_string();
 
-        let graph: WorkflowGraph = match serde_json::from_str(graph_json) {
+        let graph: WorkflowGraph = match parse_litegraph_json(graph_json) {
             Ok(g) => g,
             Err(e) => {
                 return Ok(WorkflowResult {
@@ -157,10 +157,37 @@ impl WorkflowExecutor {
                 node.node_type.as_str(),
             ));
 
-            let input = node_output_map
-                .get(node_id)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
+            let incoming_edges: Vec<&WorkflowEdge> = graph
+                .edges
+                .iter()
+                .filter(|edge| edge.target_node_id == node.id)
+                .collect();
+
+            let input = if incoming_edges.is_empty() {
+                serde_json::Value::Null
+            } else if incoming_edges.len() == 1 {
+                node_output_map
+                    .get(&incoming_edges[0].source_node_id)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                let mut by_node = serde_json::Map::new();
+                let mut inputs = Vec::new();
+
+                for edge in incoming_edges {
+                    let value = node_output_map
+                        .get(&edge.source_node_id)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    by_node.insert(edge.source_node_id.clone(), value.clone());
+                    inputs.push(value);
+                }
+
+                serde_json::json!({
+                    "inputs": inputs,
+                    "by_node": by_node,
+                })
+            };
 
             let output = match self
                 .execute_node(

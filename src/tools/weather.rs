@@ -22,7 +22,10 @@ impl WeatherTool {
 
     fn build_url(location: Option<&str>) -> String {
         match location.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(location) => format!("https://wttr.in/{}?format=j1", urlencoding::encode(location)),
+            Some(location) => format!(
+                "https://wttr.in/{}?format=j1",
+                urlencoding::encode(location)
+            ),
             None => "https://wttr.in/?format=j1".to_string(),
         }
     }
@@ -101,7 +104,9 @@ impl WeatherTool {
 
         let (temp, feels_like, wind) = if units == "imperial" {
             (
-                current.and_then(|entry| entry["temp_F"].as_str()).map(ToString::to_string),
+                current
+                    .and_then(|entry| entry["temp_F"].as_str())
+                    .map(ToString::to_string),
                 current
                     .and_then(|entry| entry["FeelsLikeF"].as_str())
                     .map(ToString::to_string),
@@ -111,7 +116,9 @@ impl WeatherTool {
             )
         } else {
             (
-                current.and_then(|entry| entry["temp_C"].as_str()).map(ToString::to_string),
+                current
+                    .and_then(|entry| entry["temp_C"].as_str())
+                    .map(ToString::to_string),
                 current
                     .and_then(|entry| entry["FeelsLikeC"].as_str())
                     .map(ToString::to_string),
@@ -126,10 +133,23 @@ impl WeatherTool {
 
         let mut lines = vec![
             format!("Weather for {}", resolved_location),
-            format!("Current: {}{}, {}", temp.unwrap_or_else(|| "?".to_string()), temp_unit, condition),
-            format!("Feels like: {}{}", feels_like.unwrap_or_else(|| "?".to_string()), temp_unit),
+            format!(
+                "Current: {}{}, {}",
+                temp.unwrap_or_else(|| "?".to_string()),
+                temp_unit,
+                condition
+            ),
+            format!(
+                "Feels like: {}{}",
+                feels_like.unwrap_or_else(|| "?".to_string()),
+                temp_unit
+            ),
             format!("Humidity: {}%", humidity),
-            format!("Wind: {} {}", wind.unwrap_or_else(|| "?".to_string()), wind_unit),
+            format!(
+                "Wind: {} {}",
+                wind.unwrap_or_else(|| "?".to_string()),
+                wind_unit
+            ),
         ];
 
         let forecast = Self::forecast_lines(value, units, days.clamp(1, 3));
@@ -226,7 +246,10 @@ mod tests {
 
     #[test]
     fn builds_location_url() {
-        assert_eq!(WeatherTool::build_url(Some("New York")), "https://wttr.in/New%20York?format=j1");
+        assert_eq!(
+            WeatherTool::build_url(Some("New York")),
+            "https://wttr.in/New%20York?format=j1"
+        );
     }
 
     #[test]

@@ -357,6 +357,7 @@ OSA.saveSettings = async function() {
             throw new Error(data.error || `HTTP ${res.status}`);
         }
         OSA.setCachedConfig(newConfig);
+        OSA.updateWorkflowButtonVisibility(!!newConfig.experimental?.workflows_enabled);
         await OSA.refreshThinkingOptions(undefined, undefined, newConfig.agent.thinking_level);
         OSA.setVoiceConfig(newConfig.voice);
         OSA.updateVoiceButtons();
@@ -582,16 +583,22 @@ OSA.onNetworkSettingsChange = function() {
     document.getElementById('network-restart-notice').classList.remove('hidden');
 };
 
-OSA.updateLanAddressDisplay = function() {
+OSA.updateLanAddressDisplay = async function() {
     const lanSection = document.getElementById('lan-address-section');
     const lanAddressDisplay = document.getElementById('lan-address-display');
     const lanEnabled = document.getElementById('setting-lan-enabled').checked;
     
     if (lanEnabled) {
-        const port = document.getElementById('setting-port')?.value || 8765;
-        const lanAddress = `http://${window.location.hostname}:${port}`;
-        if (lanAddressDisplay) {
-            lanAddressDisplay.textContent = lanAddress;
+        try {
+            const netInfo = await OSA.getJson('/api/network');
+            if (lanAddressDisplay && netInfo.lan_url) {
+                lanAddressDisplay.textContent = netInfo.lan_url;
+            }
+        } catch (e) {
+            const port = document.getElementById('setting-port')?.value || 8765;
+            if (lanAddressDisplay) {
+                lanAddressDisplay.textContent = `http://<your-lan-ip>:${port}`;
+            }
         }
         if (lanSection) {
             lanSection.classList.remove('hidden');
@@ -758,8 +765,46 @@ OSA.updateWorkflowButtonVisibility = function(enabled) {
     }
 };
 
+OSA.refreshWorkflowAvailability = async function() {
+    try {
+        let config = OSA.getCachedConfig();
+        if (!config) {
+            const res = await fetch('/api/config', {
+                headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
+            config = await res.json();
+            OSA.setCachedConfig(config);
+        }
+
+        OSA.updateWorkflowButtonVisibility(!!config?.experimental?.workflows_enabled);
+    } catch (error) {
+        console.error('Failed to refresh workflow availability:', error);
+        OSA.updateWorkflowButtonVisibility(false);
+    }
+};
+
 OSA.getTheme = function() {
     return localStorage.getItem('osagent-theme') || 'dark';
+};
+
+OSA.getChatAlignment = function() {
+    return localStorage.getItem('osagent-chat-alignment') || 'split';
+};
+
+OSA.setChatAlignment = function(alignment) {
+    const normalized = alignment === 'left' ? 'left' : 'split';
+    localStorage.setItem('osagent-chat-alignment', normalized);
+    OSA.applyChatAlignment(normalized);
+    const select = document.getElementById('setting-chat-alignment');
+    if (select) select.value = normalized;
+};
+
+OSA.applyChatAlignment = function(alignment) {
+    document.documentElement.setAttribute('data-chat-alignment', alignment === 'left' ? 'left' : 'split');
 };
 
 OSA.setTheme = function(theme) {
@@ -816,6 +861,11 @@ OSA.initTheme = function() {
     OSA.applyTheme(theme);
     const radio = document.querySelector(`input[name="theme"][value="${theme}"]`);
     if (radio) radio.checked = true;
+
+    const chatAlignment = OSA.getChatAlignment();
+    OSA.applyChatAlignment(chatAlignment);
+    const chatAlignmentSelect = document.getElementById('setting-chat-alignment');
+    if (chatAlignmentSelect) chatAlignmentSelect.value = chatAlignment;
 
     const accent = OSA.getAccent();
     OSA.applyAccent(accent);

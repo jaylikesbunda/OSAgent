@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(skill_info.emoji.as_deref(), Some("🐙"));
         assert!(skill_info.has_config);
 
-        let mut loader = SkillLoader::new(temp.path().join("skills"));
+        let loader = SkillLoader::new(temp.path().join("skills"));
         let loaded = loader.load_all().expect("loader should succeed");
         assert!(loaded.iter().any(|name| name == "github"));
 

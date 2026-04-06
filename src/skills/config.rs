@@ -12,9 +12,15 @@ pub struct SkillConfigSchema {
     #[serde(default)]
     pub emoji: Option<String>,
     #[serde(default)]
+    pub icon_url: Option<String>,
+    #[serde(default)]
     pub requires: SkillRequirements,
     #[serde(default)]
     pub config: Vec<ConfigField>,
+    #[serde(default)]
+    pub actions: Vec<SkillActionSchema>,
+    #[serde(default)]
+    pub token_refresh: Option<SkillTokenRefreshSchema>,
 }
 
 /// Parse the YAML frontmatter block from a SKILL.md file.
@@ -48,6 +54,116 @@ pub struct ConfigField {
     pub required: bool,
     #[serde(default)]
     pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillActionSchema {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub parameters: Vec<SkillActionParameter>,
+    #[serde(flatten)]
+    pub runner: SkillActionRunner,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillActionParameter {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub parameter_type: SkillActionParameterType,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillActionParameterType {
+    String,
+    Number,
+    Boolean,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SkillActionRunner {
+    Http {
+        method: String,
+        url: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
+        query: HashMap<String, String>,
+        #[serde(default)]
+        body: Option<serde_json::Value>,
+        #[serde(default)]
+        body_form: Option<HashMap<String, String>>,
+        #[serde(default)]
+        response_transform: Option<String>,
+    },
+    Script {
+        script: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillTokenRefreshSchema {
+    pub token_url: String,
+    #[serde(default = "default_grant_type")]
+    pub grant_type: String,
+    pub refresh_token_field: String,
+    pub access_token_field: String,
+    #[serde(default)]
+    pub client_id_field: String,
+    #[serde(default)]
+    pub client_secret_field: String,
+    #[serde(default)]
+    pub body: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub response_access_token_path: String,
+    #[serde(default)]
+    pub response_refresh_token_path: String,
+    #[serde(default)]
+    pub token_expiry_seconds: Option<u64>,
+    #[serde(default)]
+    pub authorize_url: Option<String>,
+    #[serde(default)]
+    pub scopes: Option<String>,
+    #[serde(default = "default_callback_port")]
+    pub callback_port: u16,
+    #[serde(default = "default_redirect_path")]
+    pub redirect_path: String,
+}
+
+fn default_grant_type() -> String {
+    "refresh_token".to_string()
+}
+
+fn default_callback_port() -> u16 {
+    8888
+}
+
+fn default_redirect_path() -> String {
+    "/callback".to_string()
+}
+
+impl SkillTokenRefreshSchema {
+    pub fn redirect_uri(&self) -> String {
+        format!(
+            "http://127.0.0.1:{}{}",
+            self.callback_port, self.redirect_path
+        )
+    }
+
+    pub fn supports_native_oauth(&self) -> bool {
+        self.authorize_url.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

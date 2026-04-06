@@ -1,14 +1,20 @@
 use crate::error::{OSAgentError, Result};
+use crate::skills::config::{
+    parse_frontmatter, ConfigField, SkillActionSchema, SkillTokenRefreshSchema,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::RwLock;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMetadata {
     #[serde(default)]
     pub emoji: Option<String>,
+    #[serde(default)]
+    pub icon_url: Option<String>,
     #[serde(default)]
     pub requires: Option<SkillRequirements>,
 }
@@ -27,6 +33,9 @@ pub struct Skill {
     pub description: String,
     pub content: String,
     pub base_dir: PathBuf,
+    pub config_fields: Vec<ConfigField>,
+    pub actions: Vec<SkillActionSchema>,
+    pub token_refresh: Option<SkillTokenRefreshSchema>,
     pub scripts: HashMap<String, PathBuf>,
     pub references: HashMap<String, PathBuf>,
     pub metadata: Option<SkillMetadata>,
@@ -52,41 +61,50 @@ impl Skill {
 
 pub struct SkillLoader {
     skills_dir: PathBuf,
-    workspace_skills_dir: Option<PathBuf>,
-    skills: HashMap<String, Skill>,
+    additional_skills_dirs: Vec<PathBuf>,
+    skills: RwLock<HashMap<String, Skill>>,
 }
 
 impl SkillLoader {
     pub fn new(skills_dir: PathBuf) -> Self {
         Self {
             skills_dir,
-            workspace_skills_dir: None,
-            skills: HashMap::new(),
+            additional_skills_dirs: Vec::new(),
+            skills: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn with_workspace_skills(mut self, workspace_dir: PathBuf) -> Self {
-        self.workspace_skills_dir = Some(workspace_dir.join(".osagent").join("skills"));
+        self.additional_skills_dirs
+            .push(workspace_dir.join(".osagent").join("skills"));
         self
     }
 
-    pub fn load_all(&mut self) -> Result<Vec<String>> {
-        self.skills.clear();
-
-        let skills_dir = self.skills_dir.clone();
-        self.load_from_dir(&skills_dir)?;
-
-        if let Some(ref workspace_dir) = self.workspace_skills_dir {
-            if workspace_dir.exists() {
-                let workspace_dir_clone = workspace_dir.clone();
-                self.load_from_dir(&workspace_dir_clone)?;
-            }
-        }
-
-        Ok(self.skills.keys().cloned().collect())
+    pub fn with_additional_skills_dir(mut self, dir: PathBuf) -> Self {
+        self.additional_skills_dirs.push(dir);
+        self
     }
 
-    fn load_from_dir(&mut self, dir: &PathBuf) -> Result<()> {
+    pub fn load_all(&self) -> Result<Vec<String>> {
+        let mut loaded_skills = HashMap::new();
+
+        for dir in &self.additional_skills_dirs {
+            self.load_from_dir(dir, &mut loaded_skills)?;
+        }
+
+        self.load_from_dir(&self.skills_dir, &mut loaded_skills)?;
+
+        let mut skills = self.skills.write().unwrap();
+        *skills = loaded_skills;
+
+        Ok(skills.keys().cloned().collect())
+    }
+
+    fn load_from_dir(
+        &self,
+        dir: &PathBuf,
+        loaded_skills: &mut HashMap<String, Skill>,
+    ) -> Result<()> {
         if !dir.exists() {
             return Ok(());
         }
@@ -111,7 +129,7 @@ impl SkillLoader {
                 match self.load_skill(&skill_dir) {
                     Ok(Some(skill)) => {
                         info!("Loaded skill: {}", skill.name);
-                        self.skills.insert(skill.name.clone(), skill);
+                        loaded_skills.insert(skill.name.clone(), skill);
                     }
                     Ok(None) => {
                         warn!("No SKILL.md found in {:?}", skill_dir);
@@ -139,7 +157,8 @@ impl SkillLoader {
             )))
         })?;
 
-        let (name, description, metadata, body) = parse_skill_md(&content);
+        let (name, description, metadata, config_fields, actions, token_refresh, body) =
+            parse_skill_md(&content);
 
         let mut scripts = HashMap::new();
         let mut references = HashMap::new();
@@ -190,78 +209,77 @@ impl SkillLoader {
             description,
             content: body,
             base_dir: skill_dir.clone(),
+            config_fields,
+            actions,
+            token_refresh,
             scripts,
             references,
             metadata,
         }))
     }
 
-    pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.get(name)
+    pub fn get(&self, name: &str) -> Option<Skill> {
+        self.skills.read().unwrap().get(name).cloned()
     }
 
-    pub fn list(&self) -> Vec<&Skill> {
-        self.skills.values().collect()
+    pub fn list(&self) -> Vec<Skill> {
+        self.skills.read().unwrap().values().cloned().collect()
     }
 
-    pub fn names(&self) -> Vec<&String> {
-        self.skills.keys().collect()
+    pub fn names(&self) -> Vec<String> {
+        self.skills.read().unwrap().keys().cloned().collect()
     }
 }
 
-fn parse_skill_md(content: &str) -> (String, String, Option<SkillMetadata>, String) {
+fn parse_skill_md(
+    content: &str,
+) -> (
+    String,
+    String,
+    Option<SkillMetadata>,
+    Vec<ConfigField>,
+    Vec<SkillActionSchema>,
+    Option<SkillTokenRefreshSchema>,
+    String,
+) {
     let mut name = String::new();
     let mut description = String::new();
     let mut metadata: Option<SkillMetadata> = None;
+    let mut config_fields = Vec::new();
+    let mut actions = Vec::new();
+    let mut token_refresh = None;
     let mut body_start = 0;
 
-    if content.starts_with("---") {
+    if let Some(schema) = parse_frontmatter(content) {
+        name = schema.name;
+        description = if schema.description.is_empty() {
+            "No description".to_string()
+        } else {
+            schema
+                .description
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        };
+        let requires = if schema.requires.bins.is_empty() && schema.requires.files.is_empty() {
+            None
+        } else {
+            Some(SkillRequirements {
+                bins: schema.requires.bins,
+                files: schema.requires.files,
+            })
+        };
+        metadata = Some(SkillMetadata {
+            emoji: schema.emoji,
+            icon_url: schema.icon_url,
+            requires,
+        });
+        config_fields = schema.config;
+        actions = schema.actions;
+        token_refresh = schema.token_refresh;
+
         if let Some(end) = content[3..].find("---\n") {
-            let frontmatter = &content[3..end + 3];
             body_start = end + 6;
-
-            let lines = frontmatter.lines();
-            let mut name_line: Option<String> = None;
-            let mut desc_line: Option<String> = None;
-            let mut emoji: Option<String> = None;
-            let mut requires_bins: Vec<String> = Vec::new();
-
-            for line in lines {
-                let line = line.trim();
-                if line.starts_with("name:") {
-                    name_line = Some(line[5..].trim().to_string());
-                } else if line.starts_with("description:") {
-                    desc_line = Some(line[12..].trim().to_string());
-                } else if line.starts_with("emoji:") {
-                    emoji = Some(line[6..].trim().to_string());
-                } else if line.starts_with("bins:") {
-                    // Simple array parsing
-                    if let Some(rest) = line[5..].strip_prefix('[') {
-                        if let Some(inner) = rest.strip_suffix(']') {
-                            for item in inner.split(',') {
-                                let item = item.trim().trim_matches('"').trim_matches('\'');
-                                if !item.is_empty() {
-                                    requires_bins.push(item.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            name = name_line.unwrap_or_default();
-            description = desc_line.unwrap_or_else(|| "No description".to_string());
-
-            let requires = if requires_bins.is_empty() {
-                None
-            } else {
-                Some(SkillRequirements {
-                    bins: requires_bins,
-                    files: Vec::new(),
-                })
-            };
-
-            metadata = Some(SkillMetadata { emoji, requires });
         }
     }
 
@@ -292,33 +310,119 @@ fn parse_skill_md(content: &str) -> (String, String, Option<SkillMetadata>, Stri
     // Body is the full content for the skill
     let body = content.to_string();
 
-    (name, description, metadata, body)
+    (
+        name,
+        description,
+        metadata,
+        config_fields,
+        actions,
+        token_refresh,
+        body,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_skill_md_with_native_oauth() {
+        let content = r#"---
+name: spotify
+description: "Control Spotify"
+emoji: "🎵"
+config:
+  - name: SPOTIFY_CLIENT_ID
+    type: api_key
+    description: "Client ID"
+    required: true
+token_refresh:
+  token_url: "https://accounts.spotify.com/api/token"
+  grant_type: "refresh_token"
+  refresh_token_field: "SPOTIFY_REFRESH_TOKEN"
+  access_token_field: "SPOTIFY_ACCESS_TOKEN"
+  client_id_field: "SPOTIFY_CLIENT_ID"
+  client_secret_field: "SPOTIFY_CLIENT_SECRET"
+  authorize_url: "https://accounts.spotify.com/authorize"
+  scopes: "user-modify-playback-state user-read-playback-state"
+  callback_port: 8888
+  redirect_path: "/callback"
+actions:
+  - name: status
+    description: Get status
+    type: http
+    method: GET
+    url: "https://api.spotify.com/v1/me/player"
+    headers:
+      Authorization: "Bearer {{ config.SPOTIFY_ACCESS_TOKEN }}"
+---
+# Spotify
+"#;
+        let schema = crate::skills::config::parse_frontmatter(content).expect("should parse");
+        let tr = schema.token_refresh.expect("should have token_refresh");
+        assert_eq!(
+            tr.authorize_url.as_deref(),
+            Some("https://accounts.spotify.com/authorize")
+        );
+        assert_eq!(tr.callback_port, 8888);
+        assert!(tr.supports_native_oauth());
+        assert!(!schema.actions.iter().any(|a| a.name == "authorize"));
+    }
 
     #[test]
     fn test_parse_skill_md() {
         let content = r#"---
 name: github
 description: GitHub operations
-metadata:
-  osa:
-    emoji: "📦"
-    requires:
-      bins: ["gh"]
+emoji: "📦"
+requires:
+  bins: ["gh"]
+actions:
+  - name: status
+    description: Show GitHub status
+    type: script
+    script: scripts/status.ps1
 ---
 
 # GitHub Skill
 
 Use `gh` CLI for GitHub operations.
 "#;
-        let (name, desc, meta, body) = parse_skill_md(content);
+        let (name, desc, meta, config_fields, actions, _token_refresh, body) =
+            parse_skill_md(content);
         assert_eq!(name, "github");
         assert_eq!(desc, "GitHub operations");
         assert!(meta.is_some());
+        assert!(config_fields.is_empty());
+        assert_eq!(actions.len(), 1);
         assert!(body.contains("GitHub Skill"));
+    }
+
+    #[test]
+    fn loads_from_additional_directory_before_primary_directory() {
+        let temp = TempDir::new().expect("temp dir");
+        let primary_dir = temp.path().join("primary");
+        let fallback_dir = temp.path().join("fallback");
+
+        std::fs::create_dir_all(primary_dir.join("spotify")).expect("create primary skill dir");
+        std::fs::create_dir_all(fallback_dir.join("spotify")).expect("create fallback skill dir");
+
+        std::fs::write(
+            primary_dir.join("spotify").join("SKILL.md"),
+            "---\nname: spotify\ndescription: Primary skill\n---\n",
+        )
+        .expect("write primary skill");
+        std::fs::write(
+            fallback_dir.join("spotify").join("SKILL.md"),
+            "---\nname: spotify\ndescription: Fallback skill\n---\n",
+        )
+        .expect("write fallback skill");
+
+        let loader = SkillLoader::new(primary_dir).with_additional_skills_dir(fallback_dir);
+        loader.load_all().expect("load skills");
+
+        let skill = loader.get("spotify").expect("skill should exist");
+        assert_eq!(skill.description, "Primary skill");
     }
 }

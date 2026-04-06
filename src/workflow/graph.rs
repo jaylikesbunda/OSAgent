@@ -202,6 +202,35 @@ pub fn topological_sort(graph: &WorkflowGraph) -> Result<Vec<String>> {
 }
 
 pub fn parse_litegraph_json(json_str: &str) -> Result<WorkflowGraph> {
+    fn value_to_string(value: &serde_json::Value) -> Option<String> {
+        if let Some(string) = value.as_str() {
+            return Some(string.to_string());
+        }
+        if let Some(number) = value.as_i64() {
+            return Some(number.to_string());
+        }
+        if let Some(number) = value.as_u64() {
+            return Some(number.to_string());
+        }
+        None
+    }
+
+    fn resolve_node_id(
+        value: &serde_json::Value,
+        litegraph_id_map: &HashMap<String, String>,
+        index_map: &HashMap<usize, String>,
+    ) -> Option<String> {
+        if let Some(raw) = value_to_string(value) {
+            if let Some(node_id) = litegraph_id_map.get(&raw) {
+                return Some(node_id.clone());
+            }
+        }
+
+        value
+            .as_u64()
+            .and_then(|index| index_map.get(&(index as usize)).cloned())
+    }
+
     let data: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| OSAgentError::Workflow(format!("Invalid JSON: {}", e)))?;
 
@@ -216,14 +245,14 @@ pub fn parse_litegraph_json(json_str: &str) -> Result<WorkflowGraph> {
         .ok_or_else(|| OSAgentError::Workflow("Missing or invalid 'links' field".to_string()))?;
 
     let mut nodes = Vec::new();
-    let mut node_id_map: HashMap<usize, String> = HashMap::new();
+    let mut litegraph_id_map: HashMap<String, String> = HashMap::new();
+    let mut index_map: HashMap<usize, String> = HashMap::new();
 
     for (idx, node_val) in nodes_array.iter().enumerate() {
-        let id = node_val
+        let litegraph_id = node_val
             .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("node_{}", idx));
+            .and_then(value_to_string)
+            .unwrap_or_else(|| idx.to_string());
 
         let type_str = node_val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -239,15 +268,29 @@ pub fn parse_litegraph_json(json_str: &str) -> Result<WorkflowGraph> {
             Position { x: 0.0, y: 0.0 }
         };
 
-        let config = node_val
+        let mut config = node_val
             .get("properties")
             .cloned()
             .unwrap_or(serde_json::json!({}));
 
-        node_id_map.insert(idx, id.clone());
+        let workflow_id = config
+            .get("node_id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| litegraph_id.clone());
+
+        if let Some(properties) = config.as_object_mut() {
+            properties.insert(
+                "node_id".to_string(),
+                serde_json::Value::String(workflow_id.clone()),
+            );
+        }
+
+        litegraph_id_map.insert(litegraph_id, workflow_id.clone());
+        index_map.insert(idx, workflow_id.clone());
 
         nodes.push(WorkflowNode {
-            id,
+            id: workflow_id,
             node_type,
             position,
             config,
@@ -258,23 +301,54 @@ pub fn parse_litegraph_json(json_str: &str) -> Result<WorkflowGraph> {
 
     for (link_idx, link_val) in links_array.iter().enumerate() {
         if let Some(link_arr) = link_val.as_array() {
-            if link_arr.len() >= 4 {
-                let source_idx = link_arr.get(1).and_then(|v| v.as_u64()).map(|v| v as usize);
-                let target_idx = link_arr.get(3).and_then(|v| v.as_u64()).map(|v| v as usize);
+            let parsed = if link_arr.len() >= 5 {
+                let source_id = link_arr
+                    .get(1)
+                    .and_then(|value| resolve_node_id(value, &litegraph_id_map, &index_map));
+                let target_id = link_arr
+                    .get(3)
+                    .and_then(|value| resolve_node_id(value, &litegraph_id_map, &index_map));
+                let source_port = link_arr
+                    .get(2)
+                    .and_then(value_to_string)
+                    .unwrap_or_else(|| "0".to_string());
+                let target_port = link_arr
+                    .get(4)
+                    .and_then(value_to_string)
+                    .unwrap_or_else(|| "0".to_string());
 
-                if let (Some(src_idx), Some(tgt_idx)) = (source_idx, target_idx) {
-                    if let (Some(source_id), Some(target_id)) =
-                        (node_id_map.get(&src_idx), node_id_map.get(&tgt_idx))
-                    {
-                        edges.push(WorkflowEdge {
-                            id: format!("edge_{}", link_idx),
-                            source_node_id: source_id.clone(),
-                            source_port: "output".to_string(),
-                            target_node_id: target_id.clone(),
-                            target_port: "input".to_string(),
-                        });
-                    }
-                }
+                source_id
+                    .zip(target_id)
+                    .map(|(source_node_id, target_node_id)| WorkflowEdge {
+                        id: format!("edge_{}", link_idx),
+                        source_node_id,
+                        source_port,
+                        target_node_id,
+                        target_port,
+                    })
+            } else if link_arr.len() >= 3 {
+                let source_id = link_arr
+                    .get(1)
+                    .and_then(|value| resolve_node_id(value, &litegraph_id_map, &index_map));
+                let target_id = link_arr
+                    .get(2)
+                    .and_then(|value| resolve_node_id(value, &litegraph_id_map, &index_map));
+
+                source_id
+                    .zip(target_id)
+                    .map(|(source_node_id, target_node_id)| WorkflowEdge {
+                        id: format!("edge_{}", link_idx),
+                        source_node_id,
+                        source_port: "0".to_string(),
+                        target_node_id,
+                        target_port: "0".to_string(),
+                    })
+            } else {
+                None
+            };
+
+            if let Some(edge) = parsed {
+                edges.push(edge);
             }
         }
     }
@@ -308,10 +382,11 @@ fn parse_node_type(type_str: &str) -> NodeType {
 
 pub fn to_litegraph_json(graph: &WorkflowGraph) -> Result<String> {
     let mut nodes: Vec<serde_json::Value> = Vec::new();
-    let mut node_id_to_idx: HashMap<&str, usize> = HashMap::new();
+    let mut node_id_to_litegraph_id: HashMap<&str, usize> = HashMap::new();
 
     for (idx, node) in graph.nodes.iter().enumerate() {
-        node_id_to_idx.insert(node.id.as_str(), idx);
+        let litegraph_id = idx + 1;
+        node_id_to_litegraph_id.insert(node.id.as_str(), litegraph_id);
 
         let type_str = match node.node_type {
             NodeType::Trigger => "osa/trigger",
@@ -322,12 +397,20 @@ pub fn to_litegraph_json(graph: &WorkflowGraph) -> Result<String> {
             NodeType::Output => "osa/output",
         };
 
+        let mut properties = node.config.clone();
+        if let Some(object) = properties.as_object_mut() {
+            object.insert(
+                "node_id".to_string(),
+                serde_json::Value::String(node.id.clone()),
+            );
+        }
+
         nodes.push(serde_json::json!({
-            "id": node.id,
+            "id": litegraph_id,
             "type": type_str,
             "pos": [node.position.x, node.position.y],
             "size": [120, 60],
-            "properties": node.config,
+            "properties": properties,
             "flags": {}
         }));
     }
@@ -335,11 +418,20 @@ pub fn to_litegraph_json(graph: &WorkflowGraph) -> Result<String> {
     let mut links: Vec<serde_json::Value> = Vec::new();
 
     for (edge_idx, edge) in graph.edges.iter().enumerate() {
-        if let (Some(&source_idx), Some(&target_idx)) = (
-            node_id_to_idx.get(edge.source_node_id.as_str()),
-            node_id_to_idx.get(edge.target_node_id.as_str()),
+        if let (Some(&source_id), Some(&target_id)) = (
+            node_id_to_litegraph_id.get(edge.source_node_id.as_str()),
+            node_id_to_litegraph_id.get(edge.target_node_id.as_str()),
         ) {
-            links.push(serde_json::json!([edge_idx, source_idx, target_idx, null]));
+            let source_slot = edge.source_port.parse::<usize>().unwrap_or(0);
+            let target_slot = edge.target_port.parse::<usize>().unwrap_or(0);
+            links.push(serde_json::json!([
+                edge_idx + 1,
+                source_id,
+                source_slot,
+                target_id,
+                target_slot,
+                "flow"
+            ]));
         }
     }
 

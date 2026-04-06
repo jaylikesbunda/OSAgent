@@ -381,12 +381,16 @@ fn tool_line(name: &str) -> Option<(&'static str, &'static str)> {
             "question(questions=[{\"question\": \"Proceed?\", \"header\": \"Confirm\"}])",
         )),
         "skill" => Some((
-            "- skill: invoke a loaded skill for a specialized workflow",
+            "- skill: inspect a loaded skill's safe metadata and runtime actions",
             "skill(name=\"refactor\")",
         )),
         "skill_list" => Some((
-            "- skill_list: list available loaded skills",
+            "- skill_list: list available skills and their runtime actions",
             "skill_list()",
+        )),
+        "skill_action" => Some((
+            "- skill_action: execute a runtime action exposed by an installed skill without revealing its saved secrets",
+            "skill_action(skill=\"spotify\", action=\"pause\")",
         )),
         "lsp" => Some((
             "- lsp: query language server definitions, references, and diagnostics",

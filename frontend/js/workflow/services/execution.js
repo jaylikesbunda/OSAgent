@@ -5,6 +5,7 @@ class ExecutionManager {
     this.isRunning = false;
     this.currentRunId = null;
     this.eventSource = null;
+    this.pollTimer = null;
     this.nodeStates = new Map();
   }
 
@@ -32,75 +33,101 @@ class ExecutionManager {
         started_at: new Date().toISOString()
       });
 
-      this.subscribeToEvents(workflowId);
+      this.startPolling(workflowId);
     } catch (error) {
       console.error('Failed to start workflow:', error);
       this.isRunning = false;
       this.emit('executionError', { error: error.message });
+      throw error;
     }
   }
 
-  subscribeToEvents(workflowId) {
-    if (this.eventSource) {
-      this.eventSource.close();
+  startPolling(workflowId) {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
     }
 
-    this.eventSource = new EventSource(`/api/workflows/${workflowId}/runs/${this.currentRunId}/logs`);
+    const api = new WorkflowAPI();
+    api.setToken?.((window.OSA && typeof OSA.getToken === 'function' && OSA.getToken()) || '');
 
-    this.eventSource.onmessage = (event) => {
+    const poll = async () => {
       try {
-        const data = JSON.parse(event.data);
-        this.handleEvent(data);
-      } catch (e) {
-        console.warn('Failed to parse event:', e);
+        const [run, logs] = await Promise.all([
+          api.getRun(workflowId, this.currentRunId),
+          api.getRunLogs(workflowId, this.currentRunId)
+        ]);
+
+        this.applyLogs(logs || []);
+
+        if (!run) {
+          return;
+        }
+
+        if (run.status === 'completed') {
+          this.isRunning = false;
+          this.stopPolling();
+          this.state.updateRun(this.currentRunId, {
+            status: run.status,
+            completed_at: run.completed_at || new Date().toISOString(),
+            error_message: run.error_message || null
+          });
+          this.emit('executionCompleted', run);
+          return;
+        }
+
+        if (run.status === 'failed') {
+          this.isRunning = false;
+          this.stopPolling();
+          this.state.updateRun(this.currentRunId, {
+            status: 'failed',
+            completed_at: run.completed_at || new Date().toISOString(),
+            error_message: run.error_message || null
+          });
+          this.emit('executionFailed', { error: run.error_message || 'Workflow failed' });
+          return;
+        }
+
+        if (run.status === 'cancelled') {
+          this.isRunning = false;
+          this.stopPolling();
+          this.state.updateRun(this.currentRunId, {
+            status: 'cancelled',
+            completed_at: run.completed_at || new Date().toISOString()
+          });
+          this.emit('executionCancelled', {});
+        }
+      } catch (error) {
+        console.error('Workflow polling failed:', error);
+        this.isRunning = false;
+        this.stopPolling();
+        this.emit('executionError', { error: error.message || 'Connection lost' });
       }
     };
 
-    this.eventSource.onerror = () => {
-      this.isRunning = false;
-      this.emit('executionError', { error: 'Connection lost' });
-    };
+    poll();
+    this.pollTimer = setInterval(poll, 1000);
   }
 
-  handleEvent(event) {
-    if (!event.event_type) return;
+  applyLogs(logs) {
+    const seenNodeIds = new Set();
+    logs.forEach(log => {
+      seenNodeIds.add(log.node_id);
+      if (log.status === 'started') {
+        this.setNodeState(log.node_id, 'running');
+      } else if (log.status === 'completed') {
+        this.setNodeState(log.node_id, 'completed');
+      } else if (log.status === 'failed') {
+        this.setNodeState(log.node_id, 'failed');
+      }
+    });
 
-    switch (event.event_type.type) {
-      case 'node_started':
-        this.setNodeState(event.event_type.node_id, 'running');
-        break;
-      case 'node_completed':
-        this.setNodeState(event.event_type.node_id, 'completed');
-        break;
-      case 'node_failed':
-        this.setNodeState(event.event_type.node_id, 'failed', event.event_type.error);
-        break;
-      case 'workflow_run_completed':
-        this.isRunning = false;
-        this.state.updateRun(this.currentRunId, {
-          status: event.event_type.status,
-          completed_at: new Date().toISOString()
-        });
-        this.emit('executionCompleted', event.event_type);
-        break;
-      case 'workflow_run_failed':
-        this.isRunning = false;
-        this.state.updateRun(this.currentRunId, {
-          status: 'failed',
-          error_message: event.event_type.error,
-          completed_at: new Date().toISOString()
-        });
-        this.emit('executionFailed', event.event_type);
-        break;
-      case 'workflow_run_cancelled':
-        this.isRunning = false;
-        this.state.updateRun(this.currentRunId, {
-          status: 'cancelled',
-          completed_at: new Date().toISOString()
-        });
-        this.emit('executionCancelled', {});
-        break;
-    }
+    this.adapter.getNodes().forEach(node => {
+      if (!seenNodeIds.has(String(node.id)) && !this.nodeStates.has(node.id)) {
+        this.nodeStates.set(node.id, 'idle');
+      }
+    });
+
+    this.emit('nodeStatesChanged', this.nodeStates);
   }
 
   async stopExecution() {
@@ -112,9 +139,17 @@ class ExecutionManager {
       const api = new WorkflowAPI();
       await api.cancelRun(this.state.currentWorkflow?.id, this.currentRunId);
       this.isRunning = false;
+      this.stopPolling();
       this.emit('executionStopped', {});
     } catch (error) {
       console.error('Failed to stop execution:', error);
+    }
+  }
+
+  stopPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
     }
   }
 

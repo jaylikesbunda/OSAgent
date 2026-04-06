@@ -72,6 +72,17 @@
     border-radius: var(--radius-md);
 }
 
+.skill-icon-img {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
+    object-fit: contain;
+    background: var(--bg-tertiary);
+    padding: 4px;
+    border: 1px solid var(--border);
+}
+
 .skill-info {
     flex: 1;
     min-width: 0;

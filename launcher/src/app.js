@@ -26,6 +26,11 @@
     es: [{ id: 'es_ES-sharvard-medium', name: 'Sharvard', quality: 'medium' }]
   };
 
+  const LIVE_LOG_LIMIT = 250;
+  const LOG_RENDER_BATCH_MS = 70;
+  const LOG_PINNED_THRESHOLD_PX = 24;
+  const FILE_LOG_PAGE_SIZE = 250;
+
   const state = {
     isRunning: false,
     logs: [],
@@ -40,13 +45,17 @@
       signature: ''
     },
     logPollInterval: null,
-    logSyncCount: 0,
-    buildPollInterval: null,
-    buildPollLogCount: 0,
+    logLastKey: '',
+    logPanelExpanded: false,
+    hiddenLogCount: 0,
+    logRenderQueue: [],
+    logRenderTimer: null,
+    logViewMode: 'live',
+    fileLogOffset: 0,
+    fileLogLoaded: 0,
     buildProfile: 'release',
     runProfile: 'release',
     buildProgress: null,
-    buildUnlisten: null,
     wizard: {
       step: 0,
       provider_type: '',
@@ -131,7 +140,14 @@
     dashboardProvider: $('#dashboard-provider'),
     dashboardWorkspace: $('#dashboard-workspace'),
     dashboardSecurity: $('#dashboard-security'),
+    logBody: $('#log-body'),
+    logMeta: $('#log-meta'),
     logContainer: $('#log-container'),
+    btnToggleLogs: $('#btn-toggle-logs'),
+    btnLoadLiveLogs: $('#btn-load-live-logs'),
+    btnLoadRecentLogs: $('#btn-load-recent-logs'),
+    btnLoadMoreLogs: $('#btn-load-more-logs'),
+    btnRefreshLogs: $('#btn-refresh-logs'),
     btnStart: $('#btn-start'),
     btnStop: $('#btn-stop'),
     btnRestart: $('#btn-restart'),
@@ -677,18 +693,27 @@
   }
 
   function normalizeEntry(raw) {
+    const time =
+      raw.time ||
+      raw.timestamp ||
+      new Date().toLocaleTimeString('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+
+    const level = String(raw.level || 'info').toLowerCase();
+    const message = String(raw.message || '');
+
     return {
-      time:
-        raw.time ||
-        raw.timestamp ||
-        new Date().toLocaleTimeString('en-GB', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit'
-        }),
-      level: raw.level || 'info',
-      message: raw.message || ''
+      time,
+      level,
+      message
     };
+  }
+
+  function logEntryKey(entry) {
+    return `${entry.time}|${entry.level}|${entry.message}`;
   }
 
   function updateBuildProgressFromLog(message) {
@@ -733,8 +758,7 @@
     }
   }
 
-  function renderLogEntry(entry) {
-    updateBuildProgressFromLog(entry.message);
+  function createLogEntryElement(entry) {
     const div = document.createElement('div');
     div.className = 'log-entry';
     div.innerHTML =
@@ -749,8 +773,122 @@
       '<span class="log-msg">' +
       escapeHtml(entry.message) +
       '</span>';
-    els.logContainer.appendChild(div);
+    return div;
+  }
+
+  function isLogPinnedToBottom() {
+    if (!els.logContainer) return true;
+    const remaining = els.logContainer.scrollHeight - els.logContainer.scrollTop - els.logContainer.clientHeight;
+    return remaining <= LOG_PINNED_THRESHOLD_PX;
+  }
+
+  function trimRenderedLiveRows() {
+    if (!els.logContainer) return;
+    while (els.logContainer.childElementCount > LIVE_LOG_LIMIT) {
+      els.logContainer.removeChild(els.logContainer.firstElementChild);
+    }
+  }
+
+  function setLogMeta(text) {
+    if (els.logMeta) {
+      els.logMeta.textContent = text;
+    }
+  }
+
+  function updateLogModeButtons() {
+    if (els.btnLoadLiveLogs) {
+      els.btnLoadLiveLogs.classList.toggle('active', state.logViewMode === 'live');
+    }
+    if (els.btnLoadRecentLogs) {
+      els.btnLoadRecentLogs.classList.toggle('active', state.logViewMode === 'file');
+    }
+    if (els.btnLoadMoreLogs) {
+      els.btnLoadMoreLogs.disabled = state.logViewMode !== 'file';
+    }
+    if (els.btnRefreshLogs) {
+      els.btnRefreshLogs.disabled = state.logViewMode !== 'file';
+    }
+  }
+
+  function updateLogToggleButton() {
+    if (!els.btnToggleLogs) return;
+    if (state.logPanelExpanded) {
+      els.btnToggleLogs.textContent = 'Hide logs';
+      return;
+    }
+
+    if (state.hiddenLogCount > 0) {
+      const badge = state.hiddenLogCount > 999 ? '999+' : String(state.hiddenLogCount);
+      els.btnToggleLogs.textContent = `Show logs (${badge})`;
+    } else {
+      els.btnToggleLogs.textContent = 'Show logs';
+    }
+  }
+
+  function queueLiveLogRender(entries) {
+    if (!state.logPanelExpanded || state.logViewMode !== 'live' || !entries.length) return;
+    state.logRenderQueue.push(...entries);
+    if (state.logRenderTimer) return;
+    state.logRenderTimer = setTimeout(() => {
+      state.logRenderTimer = null;
+      if (!state.logPanelExpanded || state.logViewMode !== 'live' || !state.logRenderQueue.length) {
+        state.logRenderQueue = [];
+        return;
+      }
+
+      const shouldStick = isLogPinnedToBottom();
+      const batch = state.logRenderQueue.splice(0, state.logRenderQueue.length);
+      const frag = document.createDocumentFragment();
+      batch.forEach((entry) => {
+        frag.appendChild(createLogEntryElement(entry));
+      });
+      els.logContainer.appendChild(frag);
+      trimRenderedLiveRows();
+
+      if (shouldStick) {
+        els.logContainer.scrollTop = els.logContainer.scrollHeight;
+      }
+    }, LOG_RENDER_BATCH_MS);
+  }
+
+  function renderLiveLogSnapshot() {
+    if (!els.logContainer) return;
+    if (state.logRenderTimer) {
+      clearTimeout(state.logRenderTimer);
+      state.logRenderTimer = null;
+    }
+    state.logRenderQueue = [];
+
+    const frag = document.createDocumentFragment();
+    state.logs.forEach((entry) => {
+      frag.appendChild(createLogEntryElement(entry));
+    });
+
+    els.logContainer.innerHTML = '';
+    els.logContainer.appendChild(frag);
     els.logContainer.scrollTop = els.logContainer.scrollHeight;
+  }
+
+  function ingestLiveLogs(entries) {
+    if (!entries || !entries.length) return;
+    const normalized = entries.map(normalizeEntry);
+    normalized.forEach((entry) => {
+      updateBuildProgressFromLog(entry.message);
+      state.logs.push(entry);
+    });
+
+    if (state.logs.length > LIVE_LOG_LIMIT) {
+      state.logs.splice(0, state.logs.length - LIVE_LOG_LIMIT);
+    }
+
+    if (state.logPanelExpanded && state.logViewMode === 'live') {
+      queueLiveLogRender(normalized);
+      setLogMeta(`Live output (${state.logs.length} lines cached in launcher UI)`);
+    } else {
+      state.hiddenLogCount += normalized.length;
+    }
+
+    updateLogToggleButton();
   }
 
   function addLog(level, message) {
@@ -759,23 +897,25 @@
       minute: '2-digit',
       second: '2-digit'
     });
-    const entry = { time, level, message };
-    state.logs.push(entry);
-    if (state.logs.length > 300) state.logs.shift();
-    renderLogEntry(entry);
+    const entry = { time, level: String(level || 'info').toLowerCase(), message: String(message || '') };
+    ingestLiveLogs([entry]);
+    state.logLastKey = logEntryKey(entry);
   }
 
   async function loadLogs() {
     try {
-      state.logs = [];
-      els.logContainer.innerHTML = '';
       const existingLogs = await invoke('get_logs');
-      existingLogs.forEach((raw) => {
-        const entry = normalizeEntry(raw);
-        state.logs.push(entry);
-        renderLogEntry(entry);
-      });
-      state.logSyncCount = existingLogs.length;
+      const normalized = Array.isArray(existingLogs) ? existingLogs.map(normalizeEntry) : [];
+      state.logs = normalized.slice(-LIVE_LOG_LIMIT);
+      state.logLastKey = normalized.length ? logEntryKey(normalized[normalized.length - 1]) : '';
+      state.hiddenLogCount = 0;
+
+      if (state.logPanelExpanded && state.logViewMode === 'live') {
+        renderLiveLogSnapshot();
+      }
+
+      setLogMeta(`Live output (${state.logs.length} lines cached in launcher UI)`);
+      updateLogToggleButton();
     } catch (_error) {
       addLog('warn', 'No existing logs found yet');
     }
@@ -784,18 +924,22 @@
   async function syncLogsFromBackend() {
     try {
       const allLogs = await invoke('get_logs');
+      const normalized = Array.isArray(allLogs) ? allLogs.map(normalizeEntry) : [];
+      if (!normalized.length) return;
 
-      if (allLogs.length < state.logSyncCount) {
-        state.logSyncCount = 0;
+      let newEntries;
+      if (!state.logLastKey) {
+        newEntries = normalized.slice(-LIVE_LOG_LIMIT);
+      } else {
+        const idx = normalized.findIndex((entry) => logEntryKey(entry) === state.logLastKey);
+        newEntries = idx >= 0 ? normalized.slice(idx + 1) : normalized.slice(-Math.min(80, normalized.length));
       }
 
-      while (state.logSyncCount < allLogs.length) {
-        const entry = normalizeEntry(allLogs[state.logSyncCount]);
-        state.logs.push(entry);
-        if (state.logs.length > 300) state.logs.shift();
-        renderLogEntry(entry);
-        state.logSyncCount += 1;
+      if (newEntries.length) {
+        ingestLiveLogs(newEntries);
       }
+
+      state.logLastKey = logEntryKey(normalized[normalized.length - 1]);
     } catch (_error) {}
   }
 
@@ -803,7 +947,83 @@
     if (state.logPollInterval) return;
     state.logPollInterval = setInterval(() => {
       syncLogsFromBackend();
-    }, 1000);
+    }, 2000);
+  }
+
+  async function loadLogsFromFile(resetOffset) {
+    if (resetOffset) {
+      state.fileLogOffset = 0;
+      state.fileLogLoaded = 0;
+      els.logContainer.innerHTML = '';
+    }
+
+    let rows = [];
+    try {
+      rows = await invoke('get_log_file_tail', {
+        limit: FILE_LOG_PAGE_SIZE,
+        offsetFromEnd: state.fileLogOffset
+      });
+    } catch (_error) {
+      setLogMeta('Could not read launcher_output.log right now.');
+      return;
+    }
+
+    const entries = Array.isArray(rows) ? rows.map(normalizeEntry) : [];
+    if (!entries.length) {
+      if (state.fileLogLoaded === 0) {
+        setLogMeta('No file history available yet.');
+      }
+      return;
+    }
+
+    const wasPinned = isLogPinnedToBottom();
+    const previousHeight = els.logContainer.scrollHeight;
+    const previousTop = els.logContainer.scrollTop;
+    const frag = document.createDocumentFragment();
+
+    entries.forEach((entry) => {
+      frag.appendChild(createLogEntryElement(entry));
+    });
+
+    if (resetOffset) {
+      els.logContainer.appendChild(frag);
+      if (wasPinned) {
+        els.logContainer.scrollTop = els.logContainer.scrollHeight;
+      }
+    } else {
+      els.logContainer.insertBefore(frag, els.logContainer.firstChild);
+      const addedHeight = els.logContainer.scrollHeight - previousHeight;
+      els.logContainer.scrollTop = previousTop + addedHeight;
+    }
+
+    state.fileLogOffset += entries.length;
+    state.fileLogLoaded += entries.length;
+    setLogMeta(`File history loaded: ${state.fileLogLoaded} lines (launcher_output.log)`);
+  }
+
+  function setLogPanelExpanded(expanded) {
+    state.logPanelExpanded = expanded;
+    if (els.logBody) {
+      els.logBody.classList.toggle('hidden', !expanded);
+    }
+
+    if (expanded && state.logViewMode === 'live') {
+      state.hiddenLogCount = 0;
+      renderLiveLogSnapshot();
+      setLogMeta(`Live output (${state.logs.length} lines cached in launcher UI)`);
+    }
+
+    updateLogToggleButton();
+    updateLogModeButtons();
+  }
+
+  function showLiveLogs() {
+    state.logViewMode = 'live';
+    state.hiddenLogCount = 0;
+    renderLiveLogSnapshot();
+    setLogMeta(`Live output (${state.logs.length} lines cached in launcher UI)`);
+    updateLogToggleButton();
+    updateLogModeButtons();
   }
 
   async function openWebUi() {
@@ -842,45 +1062,6 @@
       addLog('info', 'OSA restarted (PID: ' + status.pid + ')');
     } catch (error) {
       addLog('error', 'Restart failed: ' + error);
-    }
-  }
-
-  function stopBuildPolling() {
-    if (state.buildPollInterval) {
-      clearInterval(state.buildPollInterval);
-      state.buildPollInterval = null;
-    }
-    if (state.buildUnlisten) {
-      state.buildUnlisten();
-      state.buildUnlisten = null;
-    }
-    els.btnBuild.disabled = false;
-  }
-
-  async function flushBuildLogs() {
-    const allLogs = await invoke('get_logs');
-    while (state.buildPollLogCount < allLogs.length) {
-      const entry = normalizeEntry(allLogs[state.buildPollLogCount]);
-      state.logs.push(entry);
-      if (state.logs.length > 300) state.logs.shift();
-      renderLogEntry(entry);
-      state.buildPollLogCount += 1;
-    }
-    if (state.logSyncCount < state.buildPollLogCount) {
-      state.logSyncCount = state.buildPollLogCount;
-    }
-  }
-
-  async function pollBuild() {
-    try {
-      await flushBuildLogs();
-      const building = await invoke('get_build_running');
-      if (!building) {
-        await flushBuildLogs();
-        stopBuildPolling();
-      }
-    } catch (_error) {
-      stopBuildPolling();
     }
   }
 
@@ -1523,15 +1704,76 @@
       els.btnInstallVoiceDash.addEventListener('click', () => downloadVoice('dash'));
     }
 
+    if (els.btnToggleLogs) {
+      els.btnToggleLogs.addEventListener('click', async () => {
+        const next = !state.logPanelExpanded;
+        setLogPanelExpanded(next);
+        if (next && state.logViewMode === 'file' && state.fileLogLoaded === 0) {
+          await loadLogsFromFile(true);
+        }
+      });
+    }
+
+    if (els.btnLoadLiveLogs) {
+      els.btnLoadLiveLogs.addEventListener('click', () => {
+        showLiveLogs();
+      });
+    }
+
+    if (els.btnLoadRecentLogs) {
+      els.btnLoadRecentLogs.addEventListener('click', async () => {
+        state.logViewMode = 'file';
+        updateLogModeButtons();
+        setLogMeta('Loading file history...');
+        await loadLogsFromFile(true);
+      });
+    }
+
+    if (els.btnLoadMoreLogs) {
+      els.btnLoadMoreLogs.addEventListener('click', async () => {
+        if (state.logViewMode !== 'file') return;
+        const before = state.fileLogLoaded;
+        setLogMeta('Loading older lines...');
+        await loadLogsFromFile(false);
+        if (state.fileLogLoaded === before) {
+          setLogMeta(`Reached start of launcher_output.log (${state.fileLogLoaded} lines loaded)`);
+        }
+      });
+    }
+
+    if (els.btnRefreshLogs) {
+      els.btnRefreshLogs.addEventListener('click', async () => {
+        if (state.logViewMode === 'file') {
+          setLogMeta('Refreshing file history...');
+          await loadLogsFromFile(true);
+        } else {
+          showLiveLogs();
+        }
+      });
+    }
+
     els.btnClearLog.addEventListener('click', async () => {
       state.logs = [];
+      state.hiddenLogCount = 0;
+      state.fileLogOffset = 0;
+      state.fileLogLoaded = 0;
+      state.logRenderQueue = [];
+      if (state.logRenderTimer) {
+        clearTimeout(state.logRenderTimer);
+        state.logRenderTimer = null;
+      }
       els.logContainer.innerHTML = '';
       try {
         const allLogs = await invoke('get_logs');
-        state.logSyncCount = allLogs.length;
+        const normalized = Array.isArray(allLogs) ? allLogs.map(normalizeEntry) : [];
+        state.logLastKey = normalized.length ? logEntryKey(normalized[normalized.length - 1]) : '';
       } catch (_error) {
-        state.logSyncCount = 0;
+        state.logLastKey = '';
       }
+      state.logViewMode = 'live';
+      setLogMeta('Launcher UI log cleared. launcher_output.log is unchanged.');
+      updateLogModeButtons();
+      updateLogToggleButton();
     });
 
     els.btnMinimize.addEventListener('click', async () => {
@@ -1571,10 +1813,8 @@
 
     listen('log-line', (event) => {
       const entry = normalizeEntry(event.payload);
-      state.logs.push(entry);
-      if (state.logs.length > 300) state.logs.shift();
-      state.logSyncCount += 1;
-      renderLogEntry(entry);
+      ingestLiveLogs([entry]);
+      state.logLastKey = logEntryKey(entry);
     });
 
     listen('setup-state-changed', (event) => {
@@ -1583,7 +1823,6 @@
 
     await listen('build-progress', (event) => {
       const p = event.payload;
-      console.log('build-progress event:', p);
       if (!p) return;
       state.buildProgress = p;
 
@@ -1616,6 +1855,9 @@
     bindWizardEvents();
     bindVoiceWizardEvents();
     bindDashboardEvents();
+    setLogPanelExpanded(false);
+    updateLogModeButtons();
+    updateLogToggleButton();
     await bindTauriEvents();
     await loadProviderCatalog();
     await getStatus();

@@ -44,6 +44,7 @@ OSA.parallelToolGroups = [];
 OSA.parallelToolWindow = 500;
 OSA.pendingFormattedElements = new Set();
 OSA.pendingFormattedFrame = null;
+OSA.sessionSelectionRequestId = 0;
 
 OSA.getToken = () => OSA.token;
 OSA.setToken = t => { OSA.token = t; localStorage.setItem('token', t); };
@@ -125,6 +126,8 @@ OSA.setEventReconnectTimer = t => OSA.eventReconnectTimer = t;
 OSA.getPendingFormattedElements = () => OSA.pendingFormattedElements;
 OSA.getPendingFormattedFrame = () => OSA.pendingFormattedFrame;
 OSA.setPendingFormattedFrame = f => OSA.pendingFormattedFrame = f;
+OSA.beginSessionSelection = () => ++OSA.sessionSelectionRequestId;
+OSA.isSessionSelectionCurrent = id => OSA.sessionSelectionRequestId === id;
 OSA.inspectorExpanded = false;
 OSA.getInspectorExpanded = () => OSA.inspectorExpanded;
 OSA.setInspectorExpanded = e => OSA.inspectorExpanded = e;
@@ -146,6 +149,12 @@ OSA.setSessionHierarchy = h => OSA.sessionHierarchy = h;
 OSA.sidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
 OSA.getSidebarCollapsed = () => OSA.sidebarCollapsed;
 OSA.setSidebarCollapsed = c => { OSA.sidebarCollapsed = c; localStorage.setItem('sidebarCollapsed', c); };
+OSA.sessionSourceFilter = localStorage.getItem('osagent-session-source-filter') || 'all';
+OSA.getSessionSourceFilter = () => OSA.sessionSourceFilter;
+OSA.setSessionSourceFilter = value => {
+    OSA.sessionSourceFilter = value || 'all';
+    localStorage.setItem('osagent-session-source-filter', OSA.sessionSourceFilter);
+};
 OSA.showThinkingBlocks = localStorage.getItem('osagent-show-thinking-blocks') !== 'false';
 OSA.getShowThinkingBlocks = () => OSA.showThinkingBlocks;
 OSA.setShowThinkingBlocks = value => {

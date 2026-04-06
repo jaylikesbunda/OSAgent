@@ -123,6 +123,7 @@ impl SubagentManager {
             "question",
             "skill",
             "skill_list",
+            "skill_action",
             "lsp",
             "persona",
             "process",
@@ -142,6 +143,7 @@ impl SubagentManager {
             "reflect",
             "skill",
             "skill_list",
+            "skill_action",
             "lsp",
         ]
         .iter()

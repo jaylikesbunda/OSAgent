@@ -1344,7 +1344,10 @@ impl OpenAICompatibleProvider {
     }
 
     fn extract_ollama_context_window(payload: &serde_json::Value) -> Option<usize> {
-        if let Some(model_info) = payload.get("model_info").and_then(|value| value.as_object()) {
+        if let Some(model_info) = payload
+            .get("model_info")
+            .and_then(|value| value.as_object())
+        {
             for (key, value) in model_info {
                 if (key.ends_with(".context_length") || key.ends_with(".context_window"))
                     && value.as_u64().unwrap_or(0) > 0

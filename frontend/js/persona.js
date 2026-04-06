@@ -88,12 +88,15 @@ OSA.loadSessionPersona = async function() {
         OSA.onPersonaSelectionChange();
         return;
     }
+    const sessionId = currentSession.id;
     try {
-        const res = await fetch(`/api/sessions/${currentSession.id}/persona`, {
+        const res = await fetch(`/api/sessions/${sessionId}/persona`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const activeSession = OSA.getCurrentSession();
+        if (!activeSession || activeSession.id !== sessionId) return;
         OSA.setActivePersona(data.active || null);
         OSA.setSelectedPersonaId(data.active?.id || 'default');
         OSA.updatePersonaTrigger(data.active || null);

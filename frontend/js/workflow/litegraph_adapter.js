@@ -192,7 +192,10 @@ class LitegraphAdapter {
 
   getNode(nodeId) {
     if (!this.graph) return null;
-    return this.graph.getNodeById(nodeId);
+    return this.graph.getNodeById(nodeId)
+      || this.graph.getNodeById(parseInt(nodeId, 10))
+      || this.graph.nodes.find(node => String(node.id) === String(nodeId))
+      || null;
   }
 
   onNodeSelect(callback) {
@@ -205,7 +208,7 @@ class LitegraphAdapter {
 
   setNodeProperty(nodeId, propertyName, value) {
     if (!this.graph) return;
-    const node = this.graph.getNodeById(nodeId);
+    const node = this.getNode(nodeId);
     if (node) {
       node.properties[propertyName] = value;
       if (typeof node.onPropertyChanged === 'function') {
@@ -217,7 +220,7 @@ class LitegraphAdapter {
 
   getNodeProperty(nodeId, propertyName) {
     if (!this.graph) return null;
-    const node = this.graph.getNodeById(nodeId);
+    const node = this.getNode(nodeId);
     if (node) {
       return node.properties[propertyName];
     }

@@ -53,11 +53,13 @@ fn get_discord_bot_state() -> &'static tokio::sync::Mutex<DiscordBotState> {
     })
 }
 
-const EMBED_COLOR_PRIMARY: Colour = Colour::from_rgb(88, 101, 242);
+const EMBED_COLOR_PRIMARY: Colour = Colour::from_rgb(124, 129, 141);
 const EMBED_COLOR_SUCCESS: Colour = Colour::from_rgb(87, 242, 135);
 const EMBED_COLOR_ERROR: Colour = Colour::from_rgb(237, 66, 69);
 const EMBED_COLOR_WARNING: Colour = Colour::from_rgb(254, 231, 92);
-const EMBED_COLOR_INFO: Colour = Colour::from_rgb(66, 184, 245);
+const EMBED_COLOR_INFO: Colour = Colour::from_rgb(150, 155, 167);
+const DISCORD_TYPING_PULSE_SECS: u64 = 8;
+const DISCORD_TASK_JOIN_TIMEOUT_MS: u64 = 150;
 
 pub struct Handler {
     agent: Arc<AgentRuntime>,
@@ -211,24 +213,72 @@ impl Handler {
         }
     }
 
-    async fn get_or_create_session(&self, user_id: u64) -> Result<String, String> {
-        let sessions = self.sessions.read().await;
-        if let Some(session_id) = sessions.get(&user_id) {
-            if self
-                .agent
-                .get_session(session_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                return Ok(session_id.clone());
+    fn session_is_archived(session: &crate::storage::Session) -> bool {
+        session
+            .metadata
+            .get("archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    async fn get_active_session_id_for_user(&self, user_id: u64) -> Option<String> {
+        {
+            let sessions = self.sessions.read().await;
+            if let Some(session_id) = sessions.get(&user_id) {
+                if let Ok(Some(session)) = self.agent.get_session(session_id).await {
+                    if !Self::session_is_archived(&session) {
+                        return Some(session.id);
+                    }
+                }
             }
         }
-        drop(sessions);
 
         let owner_key = format!("discord:{}", user_id);
-        match self.agent.get_or_create_session_for_user(&owner_key).await {
+        let resolved = self
+            .agent
+            .get_session_id_for_user(&owner_key)
+            .await
+            .ok()
+            .flatten();
+
+        if let Some(session_id) = resolved.as_ref() {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(user_id, session_id.clone());
+        }
+
+        resolved
+    }
+
+    async fn archive_current_session_for_user(
+        &self,
+        user_id: u64,
+    ) -> Result<Option<String>, String> {
+        let session_id = self.get_active_session_id_for_user(user_id).await;
+
+        if let Some(session_id) = session_id {
+            self.agent
+                .archive_session(&session_id)
+                .await
+                .map_err(|e| format!("Failed to archive session: {}", e))?;
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(&user_id);
+            Ok(Some(session_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_or_create_session(&self, user_id: u64) -> Result<String, String> {
+        if let Some(active_session_id) = self.get_active_session_id_for_user(user_id).await {
+            return Ok(active_session_id);
+        }
+
+        let owner_key = format!("discord:{}", user_id);
+        match self
+            .agent
+            .create_session_for_user(&owner_key, "discord")
+            .await
+        {
             Ok(session) => {
                 let mut sessions = self.sessions.write().await;
                 sessions.insert(user_id, session.id.clone());
@@ -255,7 +305,11 @@ impl Handler {
         drop(sessions);
 
         let owner_key = format!("discord-channel:{}", channel_id);
-        match self.agent.get_or_create_session_for_user(&owner_key).await {
+        match self
+            .agent
+            .create_session_for_user(&owner_key, "discord")
+            .await
+        {
             Ok(session) => {
                 let mut sessions = self.channel_sessions.write().await;
                 sessions.insert(channel_id, session.id.clone());
@@ -281,10 +335,11 @@ impl Handler {
         channel_id: ChannelId,
         done: Arc<tokio::sync::Notify>,
     ) {
+        let _ = channel_id.broadcast_typing(&http).await;
         loop {
             tokio::select! {
                 _ = done.notified() => break,
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(7)) => {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(DISCORD_TYPING_PULSE_SECS)) => {
                     let _ = channel_id.broadcast_typing(&http).await;
                 }
             }
@@ -302,54 +357,21 @@ impl Handler {
     ) {
         let _channel_guard = channel_lock.lock().await;
 
-        let thinking_embed = CreateEmbed::new()
-            .title("Thinking...")
-            .description("Queued and processing your request...")
-            .colour(EMBED_COLOR_INFO);
-
-        let thinking_msg = match msg
-            .channel_id
-            .send_message(&ctx.http, CreateMessage::new().embed(thinking_embed))
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                error!("Discord: Failed to send thinking indicator: {}", e);
-                return;
-            }
-        };
-
         let typing_done = Arc::new(tokio::sync::Notify::new());
-        let typing_task = tokio::spawn(Self::start_typing_loop(
+        let mut typing_task = tokio::spawn(Self::start_typing_loop(
             ctx.http.clone(),
             msg.channel_id,
             typing_done.clone(),
         ));
 
-        let delete_thinking = || async {
-            let _ = thinking_msg.delete(&ctx.http).await;
-        };
-
         let mut event_rx = agent.subscribe_to_events();
         let session_for_events = session_id.clone();
         let http_for_events = ctx.http.clone();
         let channel_for_events = msg.channel_id;
-        let mut thinking_for_events = thinking_msg.clone();
 
         let mut tool_event_task = tokio::spawn(async move {
-            let mut recent_updates: Vec<String> = Vec::new();
             loop {
                 match event_rx.recv().await {
-                    Ok(AgentEvent::ToolStart {
-                        session_id,
-                        tool_name,
-                        ..
-                    }) => {
-                        if session_id != session_for_events {
-                            continue;
-                        }
-                        recent_updates.push(format!("Started `{}`", tool_name));
-                    }
                     Ok(AgentEvent::ToolComplete {
                         session_id,
                         tool_name,
@@ -361,12 +383,6 @@ impl Handler {
                         if session_id != session_for_events {
                             continue;
                         }
-                        recent_updates.push(format!(
-                            "{} `{}` ({} ms)",
-                            if success { "Finished" } else { "Failed" },
-                            tool_name,
-                            duration_ms
-                        ));
                         if !success {
                             Self::send_tool_complete_embed(
                                 &http_for_events,
@@ -378,16 +394,6 @@ impl Handler {
                             )
                             .await;
                         }
-                    }
-                    Ok(AgentEvent::Reasoning {
-                        session_id,
-                        summary,
-                        ..
-                    }) => {
-                        if session_id != session_for_events {
-                            continue;
-                        }
-                        recent_updates.push(summary);
                     }
                     Ok(AgentEvent::ResponseComplete { session_id, .. }) => {
                         if session_id == session_for_events {
@@ -403,27 +409,6 @@ impl Handler {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
-
-                if recent_updates.len() > 4 {
-                    let drain = recent_updates.len() - 4;
-                    recent_updates.drain(0..drain);
-                }
-
-                let body = if recent_updates.is_empty() {
-                    "Processing your request...".to_string()
-                } else {
-                    recent_updates.join("\n")
-                };
-                let embed = CreateEmbed::new()
-                    .title("Working")
-                    .description(body)
-                    .colour(EMBED_COLOR_INFO);
-                let _ = thinking_for_events
-                    .edit(
-                        &http_for_events,
-                        serenity::builder::EditMessage::new().embed(embed),
-                    )
-                    .await;
             }
         });
 
@@ -438,8 +423,6 @@ impl Handler {
                 info!("Discord: process_message completed");
                 match result {
                     Ok(response) => {
-                        delete_thinking().await;
-
                         if response.trim().is_empty() {
                             let workspace_note = agent
                                 .get_session_workspace(&session_id)
@@ -460,7 +443,6 @@ impl Handler {
                     }
                     Err(e) => {
                         error!("Discord: Error processing message: {}", e);
-                        delete_thinking().await;
                         let embed = CreateEmbed::new()
                             .title("Error")
                             .description(format!("```\n{}\n```", e))
@@ -477,7 +459,6 @@ impl Handler {
                     "Discord: Timeout processing message for session {}",
                     session_id
                 );
-                delete_thinking().await;
                 let embed = CreateEmbed::new()
                     .title("Timeout")
                     .description("Request timed out after 60 minutes.")
@@ -490,10 +471,17 @@ impl Handler {
         }
 
         typing_done.notify_waiters();
-        let _ = tokio::time::timeout(tokio::time::Duration::from_millis(500), typing_task).await;
+        let _ = tokio::time::timeout(
+            tokio::time::Duration::from_millis(DISCORD_TASK_JOIN_TIMEOUT_MS),
+            &mut typing_task,
+        )
+        .await;
+        if !typing_task.is_finished() {
+            typing_task.abort();
+        }
 
         let _ = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
+            tokio::time::Duration::from_millis(DISCORD_TASK_JOIN_TIMEOUT_MS),
             &mut tool_event_task,
         )
         .await;
@@ -532,7 +520,29 @@ impl Handler {
         let commands = vec![
             CreateCommand::new("new").description("Create a new AI session"),
             CreateCommand::new("status").description("Show current session status"),
-            CreateCommand::new("reset").description("Reset current session"),
+            CreateCommand::new("session")
+                .description("Manage your session")
+                .add_option(
+                    serenity::builder::CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "action",
+                        "Action to perform",
+                    )
+                    .add_string_choice("new", "new")
+                    .add_string_choice("status", "status")
+                    .add_string_choice("archive", "archive")
+                    .required(true),
+                ),
+            CreateCommand::new("reset")
+                .description("Permanently delete current session (advanced)")
+                .add_option(
+                    serenity::builder::CreateCommandOption::new(
+                        CommandOptionType::Boolean,
+                        "confirm",
+                        "Must be true to permanently delete",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("permissions")
                 .description("Manage external directory permissions")
                 .add_option(
@@ -752,13 +762,12 @@ impl Handler {
             return;
         }
 
-        let owner_key = format!("discord:{}", user_id);
-        let mut sessions = self.sessions.write().await;
+        let archived_previous = matches!(
+            self.archive_current_session_for_user(user_id).await,
+            Ok(Some(_))
+        );
 
-        if let Some(old_id) = sessions.remove(&user_id) {
-            let _ = self.agent.delete_session(&old_id).await;
-        }
-        drop(sessions);
+        let owner_key = format!("discord:{}", user_id);
 
         match self.agent.get_or_create_session_for_user(&owner_key).await {
             Ok(session) => {
@@ -769,8 +778,13 @@ impl Handler {
                 let embed = CreateEmbed::new()
                     .title("New Session Created")
                     .description(format!(
-                        "A fresh session has been initialized.\n```\n{}\n```",
-                        id
+                        "A fresh session has been initialized{}\n```\n{}\n```",
+                        if archived_previous {
+                            " and your previous one was archived."
+                        } else {
+                            "."
+                        },
+                        id,
                     ))
                     .colour(EMBED_COLOR_SUCCESS)
                     .footer(CreateEmbedFooter::new("Ready to assist you!"));
@@ -796,14 +810,26 @@ impl Handler {
             return;
         }
 
-        let sessions = self.sessions.read().await;
-        let embed = match sessions.get(&user_id) {
-            Some(session_id) => match self.agent.get_session(session_id).await {
+        let active_session_id = self.get_active_session_id_for_user(user_id).await;
+        let embed = match active_session_id {
+            Some(session_id) => match self.agent.get_session(&session_id).await {
                 Ok(Some(session)) => CreateEmbed::new()
                     .title("Session Status")
                     .field("Session ID", format!("```\n{}\n```", session.id), false)
                     .field("Messages", format!("`{}`", session.messages.len()), true)
-                    .field("Status", "`Active`", true)
+                    .field(
+                        "Source",
+                        format!(
+                            "`{}`",
+                            session
+                                .metadata
+                                .get("source")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("discord")
+                        ),
+                        true,
+                    )
+                    .field("Status", format!("`{}`", session.task_status), true)
                     .colour(EMBED_COLOR_PRIMARY)
                     .footer(CreateEmbedFooter::new("Session is ready for interactions")),
                 _ => CreateEmbed::new()
@@ -822,7 +848,7 @@ impl Handler {
         Self::send_ephemeral_embed_command(ctx, command, embed).await;
     }
 
-    async fn handle_reset_command(&self, ctx: &Context, command: &CommandInteraction) {
+    async fn handle_archive_command(&self, ctx: &Context, command: &CommandInteraction) {
         let user_id = command.user.id.get();
 
         if !self.is_authorized(user_id).await {
@@ -830,14 +856,63 @@ impl Handler {
             return;
         }
 
-        let mut sessions = self.sessions.write().await;
-        let embed = match sessions.remove(&user_id) {
+        let embed = match self.archive_current_session_for_user(user_id).await {
+            Ok(Some(_)) => CreateEmbed::new()
+                .title("Session Archived")
+                .description("Your current session was archived. Your next message will start a new session.")
+                .colour(EMBED_COLOR_INFO),
+            Ok(None) => CreateEmbed::new()
+                .title("No Active Session")
+                .description("You don't have an active session to archive.")
+                .colour(EMBED_COLOR_INFO),
+            Err(error) => CreateEmbed::new()
+                .title("Archive Failed")
+                .description(format!("```
+{}
+```", error))
+                .colour(EMBED_COLOR_ERROR),
+        };
+
+        Self::send_ephemeral_embed_command(ctx, command, embed).await;
+    }
+
+    async fn handle_reset_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        confirm: bool,
+    ) {
+        let user_id = command.user.id.get();
+
+        if !self.is_authorized(user_id).await {
+            Self::send_unauthorized_response_command(ctx, command).await;
+            return;
+        }
+
+        if !confirm {
+            let embed = CreateEmbed::new()
+                .title("Confirmation Required")
+                .description(
+                    "`/reset` permanently deletes your current session. Use `/reset confirm:true`.",
+                )
+                .colour(EMBED_COLOR_WARNING);
+            Self::send_ephemeral_embed_command(ctx, command, embed).await;
+            return;
+        }
+
+        let session_id = self.get_active_session_id_for_user(user_id).await;
+        if session_id.is_some() {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(&user_id);
+        }
+
+        let embed = match session_id {
             Some(session_id) => {
                 let _ = self.agent.delete_session(&session_id).await;
                 CreateEmbed::new()
-                    .title("Session Reset")
-                    .description("Your session has been cleared.\nUse `/new` to start fresh.")
-                    .colour(EMBED_COLOR_WARNING)
+                    .title("Session Deleted")
+                    .description("Your session was permanently deleted. Use `/new` to start fresh.")
+                    .colour(EMBED_COLOR_ERROR)
             }
             None => CreateEmbed::new()
                 .title("Nothing to Reset")
@@ -846,6 +921,26 @@ impl Handler {
         };
 
         Self::send_ephemeral_embed_command(ctx, command, embed).await;
+    }
+
+    async fn handle_session_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        action: &str,
+    ) {
+        match action {
+            "new" => self.handle_new_command(ctx, command).await,
+            "status" => self.handle_status_command(ctx, command).await,
+            "archive" => self.handle_archive_command(ctx, command).await,
+            _ => {
+                let embed = CreateEmbed::new()
+                    .title("Unknown Action")
+                    .description("Use `new`, `status`, or `archive`.")
+                    .colour(EMBED_COLOR_WARNING);
+                Self::send_ephemeral_embed_command(ctx, command, embed).await;
+            }
+        }
     }
 
     async fn handle_model_command(&self, ctx: &Context, command: &CommandInteraction, model: &str) {
@@ -1217,9 +1312,18 @@ impl Handler {
             .title("OSA Discord Bot")
             .description("Your AI coding assistant powered by advanced language models.")
             .colour(EMBED_COLOR_PRIMARY)
-            .field("/new", "Create a new AI session", false)
+            .field("/new", "Create a new session and archive current", false)
             .field("/status", "Show current session status", false)
-            .field("/reset", "Reset current session", false)
+            .field(
+                "/session <new|status|archive>",
+                "Preferred session controls",
+                false,
+            )
+            .field(
+                "/reset confirm:true",
+                "Permanently delete current session (advanced)",
+                false,
+            )
             .field(
                 "/permissions <action> [path]",
                 "Manage external directory permissions",
@@ -1388,7 +1492,7 @@ impl Handler {
                                 EditInteractionResponse::new().content("Response:"),
                             )
                             .await;
-                        self.send_embeds(&ctx.http, channel_id, &response).await;
+                        Self::send_text_chunks(&ctx.http, channel_id, &response).await;
                     }
                 }
                 Err(e) => {
@@ -1420,7 +1524,7 @@ impl Handler {
         }
 
         let _ = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
+            tokio::time::Duration::from_millis(DISCORD_TASK_JOIN_TIMEOUT_MS),
             &mut tool_event_task,
         )
         .await;
@@ -1983,7 +2087,26 @@ impl EventHandler for Handler {
             match command_name {
                 "new" => self.handle_new_command(&ctx, command).await,
                 "status" => self.handle_status_command(&ctx, command).await,
-                "reset" => self.handle_reset_command(&ctx, command).await,
+                "session" => {
+                    let action = command
+                        .data
+                        .options
+                        .iter()
+                        .find(|o| o.name == "action")
+                        .and_then(|o| o.value.as_str())
+                        .unwrap_or("status");
+                    self.handle_session_command(&ctx, command, action).await;
+                }
+                "reset" => {
+                    let confirm = command
+                        .data
+                        .options
+                        .iter()
+                        .find(|o| o.name == "confirm")
+                        .and_then(|o| o.value.as_bool())
+                        .unwrap_or(false);
+                    self.handle_reset_command(&ctx, command, confirm).await;
+                }
                 "permissions" => {
                     let action = command
                         .data

@@ -140,6 +140,10 @@
         margin: 0 auto 16px;
     }
 
+    :root[data-chat-alignment="split"] .message.user {
+        max-width: 92%;
+    }
+
     .message-content {
         font-size: 14px;
         line-height: 1.5;

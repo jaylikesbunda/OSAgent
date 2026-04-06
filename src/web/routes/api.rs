@@ -233,6 +233,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/network", get(get_network_info))
         .route("/api/discord/status", get(get_discord_bot_status))
         .route("/api/discord/start", post(start_discord_bot))
         .route("/api/discord/stop", post(stop_discord_bot))
@@ -633,6 +634,25 @@ async fn get_config(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<Conf
     config.server.password.clear();
     config.server.jwt_secret.clear();
     Json(config)
+}
+
+#[derive(Debug, serde::Serialize)]
+struct NetworkInfoResponse {
+    lan_ip: String,
+    port: u16,
+    lan_url: String,
+}
+
+async fn get_network_info(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<NetworkInfoResponse>, crate::error::OSAgentError> {
+    let config = agent.get_config().await;
+    let port = config.server.port;
+    let lan_ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let lan_url = format!("http://{}:{}", lan_ip, port);
+    Ok(Json(NetworkInfoResponse { lan_ip, port, lan_url }))
 }
 
 async fn get_discord_bot_status(
@@ -1905,6 +1925,8 @@ async fn list_tools(
         "todoread",
         "question",
         "skill",
+        "skill_list",
+        "skill_action",
         "lsp",
         "subagent",
         "plan_exit",
@@ -1927,7 +1949,7 @@ async fn list_tools(
                     "task" | "subagent" => "management",
                     "persona" => "management",
                     "reflect" | "todowrite" | "todoread" => "meta",
-                    "question" | "skill" => "management",
+                    "question" | "skill" | "skill_list" | "skill_action" => "management",
                     "lsp" => "code",
                     "plan_exit" => "agent",
                     "process" => "shell",

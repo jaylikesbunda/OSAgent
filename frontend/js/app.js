@@ -1,9 +1,121 @@
 window.OSA = window.OSA || {};
 
+OSA.WORKFLOW_STYLESHEETS = [
+    '/static/css/workflow.css',
+    '/static/css/litegraph.min.css'
+];
+
+OSA.WORKFLOW_SCRIPTS = [
+    '/static/js/litegraph.min.js',
+    '/static/js/workflow/services/api.js',
+    '/static/js/workflow/services/execution.js',
+    '/static/js/workflow/store/state.js',
+    '/static/js/workflow/nodes/base.js',
+    '/static/js/workflow/litegraph_adapter.js',
+    '/static/js/workflow/views/editor.js',
+    '/static/js/workflow/main.js'
+];
+
+OSA.loadStylesheet = function(href) {
+    if (!href) return Promise.resolve();
+    const existing = document.querySelector(`link[rel="stylesheet"][href="${href}"]`);
+    if (existing) {
+        return existing.dataset.loaded === 'true'
+            ? Promise.resolve()
+            : new Promise((resolve, reject) => {
+                existing.addEventListener('load', resolve, { once: true });
+                existing.addEventListener('error', () => reject(new Error(`Failed to load ${href}`)), { once: true });
+            });
+    }
+
+    return new Promise((resolve, reject) => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = href;
+        link.addEventListener('load', function() {
+            link.dataset.loaded = 'true';
+            resolve();
+        }, { once: true });
+        link.addEventListener('error', function() {
+            reject(new Error(`Failed to load ${href}`));
+        }, { once: true });
+        document.head.appendChild(link);
+    });
+};
+
+OSA.loadScript = function(src) {
+    if (!src) return Promise.resolve();
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) {
+        return existing.dataset.loaded === 'true'
+            ? Promise.resolve()
+            : new Promise((resolve, reject) => {
+                existing.addEventListener('load', resolve, { once: true });
+                existing.addEventListener('error', () => reject(new Error(`Failed to load ${src}`)), { once: true });
+            });
+    }
+
+    return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = false;
+        script.addEventListener('load', function() {
+            script.dataset.loaded = 'true';
+            resolve();
+        }, { once: true });
+        script.addEventListener('error', function() {
+            reject(new Error(`Failed to load ${src}`));
+        }, { once: true });
+        document.body.appendChild(script);
+    });
+};
+
+OSA.ensureWorkflowAssetsLoaded = function() {
+    if (window.ensureWorkflowEditor) {
+        return Promise.resolve();
+    }
+    if (OSA.workflowAssetsPromise) {
+        return OSA.workflowAssetsPromise;
+    }
+
+    OSA.workflowAssetsPromise = (async function() {
+        await Promise.all(OSA.WORKFLOW_STYLESHEETS.map(OSA.loadStylesheet));
+        for (const src of OSA.WORKFLOW_SCRIPTS) {
+            await OSA.loadScript(src);
+        }
+    })().catch(function(error) {
+        OSA.workflowAssetsPromise = null;
+        throw error;
+    });
+
+    return OSA.workflowAssetsPromise;
+};
+
 OSA.getSessionDisplayName = function(session) {
     if (session.metadata?.name) return session.metadata.name;
     if (session.agent_type) return session.agent_type.charAt(0).toUpperCase() + session.agent_type.slice(1) + ' Agent';
     return 'Session';
+};
+
+OSA.getSessionSourceKey = function(session) {
+    const source = (session && session.metadata && typeof session.metadata.source === 'string')
+        ? session.metadata.source.trim().toLowerCase()
+        : '';
+    if (source === 'discord' || source === 'web') return source;
+    if (source === 'discord-shared' || source === 'shared') return 'discord-shared';
+
+    const owner = (session && session.metadata && typeof session.metadata.owner === 'string')
+        ? session.metadata.owner
+        : '';
+    if (owner.startsWith('discord-channel:')) return 'discord-shared';
+    if (owner.startsWith('discord:')) return 'discord';
+    return 'web';
+};
+
+OSA.getSessionSourceLabel = function(sourceKey) {
+    if (sourceKey === 'discord') return 'Discord';
+    if (sourceKey === 'discord-shared') return 'Shared';
+    return 'Web';
 };
 
 OSA.checkAuthAndInit = async function() {
@@ -109,6 +221,7 @@ OSA.showApp = function() {
     OSA.loadModel();
     OSA.loadProviderCatalog();
     OSA.initTheme();
+    OSA.refreshWorkflowAvailability?.();
 };
 
 OSA.loadModel = async function() {
@@ -170,6 +283,7 @@ OSA.loadSessions = async function() {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         });
         const sessions = await res.json();
+        const sessionIds = new Set(sessions.map(function(session) { return session.id; }));
         
         const currentSession = OSA.getCurrentSession();
 
@@ -179,7 +293,7 @@ OSA.loadSessions = async function() {
 
         sessions.forEach(s => {
             if (s.parent_id) {
-                const parentExists = sessions.some(p => p.id === s.parent_id);
+                const parentExists = sessionIds.has(s.parent_id);
                 if (parentExists) {
                     if (!childMap.has(s.parent_id)) {
                         childMap.set(s.parent_id, []);
@@ -198,18 +312,29 @@ OSA.loadSessions = async function() {
             const childClass = isChild ? ' session-child' : '';
             const isActive = currentSession && currentSession.id === s.id;
             const displayName = OSA.getSessionDisplayName(s);
+            const sourceKey = OSA.getSessionSourceKey(s);
+            const sourceLabel = OSA.getSessionSourceLabel(sourceKey);
             const isRunning = s.task_status === 'running' || hasRunningChildren;
             const iconHtml = isRunning
-                ? `<canvas class="session-icon-canvas" data-session-running="${s.id}"></canvas>`
+                ? `
+                    <span class="session-running-orbits" aria-hidden="true">
+                        <span class="session-running-track track-a"></span>
+                        <span class="session-running-track track-b"></span>
+                        <span class="session-running-track track-c"></span>
+                        <span class="session-running-core"></span>
+                    </span>`
                 : (isChild ? 'A' : '#');
             const iconStyle = isChild && !isRunning ? 'style="width:24px;height:24px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"' : '';
             const iconClass = isRunning ? ' session-icon-running' : '';
             return `
-            <div class="session-item${childClass} ${isActive ? 'active' : ''}" onclick="OSA.selectSession('${s.id}')" style="${indent}">
+            <div class="session-item${childClass} ${isActive ? 'active' : ''}" data-session-id="${OSA.escapeHtml(s.id)}" data-session-source="${OSA.escapeHtml(sourceKey)}" onclick="OSA.selectSession('${s.id}')" style="${indent}">
                 <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}</div>
                 <div class="session-info">
                     <div class="session-name">${OSA.escapeHtml(displayName)}</div>
-                    <div class="session-date">${new Date(s.created_at).toLocaleDateString()}</div>
+                    <div class="session-meta">
+                        <div class="session-date">${new Date(s.created_at).toLocaleDateString()}</div>
+                        <span class="session-source-badge source-${OSA.escapeHtml(sourceKey)}">${OSA.escapeHtml(sourceLabel)}</span>
+                    </div>
                 </div>
                 <div class="session-actions">
                     <button class="session-action-btn rename-btn" onclick="event.stopPropagation(); OSA.startRenameSession('${s.id}', this)" title="Rename">
@@ -257,16 +382,28 @@ OSA.loadSessions = async function() {
         list.innerHTML = `
             <div class="session-search">
                 <input type="text" id="session-search-input" placeholder="Search sessions..." oninput="OSA.filterSessions(this.value)" />
+                <select id="session-source-filter" onchange="OSA.setSessionSourceFilter(this.value); OSA.filterSessions(document.getElementById('session-search-input')?.value || '')">
+                    <option value="all">All sources</option>
+                    <option value="web">Web</option>
+                    <option value="discord">Discord</option>
+                    <option value="discord-shared">Shared</option>
+                </select>
             </div>
             ${sessionsHtml}
         `;
+
+        const sourceFilter = document.getElementById('session-source-filter');
+        if (sourceFilter) {
+            sourceFilter.value = OSA.getSessionSourceFilter ? OSA.getSessionSourceFilter() : 'all';
+        }
+
+        OSA.filterSessions(document.getElementById('session-search-input')?.value || '');
 
         const activeEl = list.querySelector('.session-item.active');
         if (activeEl) {
             activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
         }
 
-        OSA._initSessionIconCanvases();
     } catch (error) {
         console.error('Failed to load sessions:', error);
     }
@@ -355,8 +492,15 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
             if (streamingMessage) {
                 OSA.releaseStreamingAssistantMessage();
             }
+            if (OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
+                OSA.showThinkingIndicator();
+            } else {
+                OSA.hideThinkingIndicator();
+            }
             return;
         }
+
+        OSA.hideThinkingIndicator();
 
         if (!streamingMessage) {
             OSA.renderMessages(session.messages || []);
@@ -386,11 +530,33 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
 };
 
 OSA.selectSession = async function(sessionId) {
+    const requestId = OSA.beginSessionSelection ? OSA.beginSessionSelection() : 0;
+    OSA.markSessionListSelection(sessionId);
+
     try {
         const res = await fetch(`/api/sessions/${sessionId}`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         });
+        if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return;
         const session = await res.json();
+        if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return;
+
+        const isCurrentSelection = () => {
+            if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return false;
+            const activeSession = OSA.getCurrentSession();
+            return !!activeSession && activeSession.id === sessionId;
+        };
+
+        const pendingToolsRequest = fetch(`/api/sessions/${sessionId}/tools`, {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        }).catch(() => null);
+        const pendingSubagentsRequest = fetch(`/api/sessions/${sessionId}/subagents`, {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        }).catch(() => null);
+        const pendingQueueRequest = fetch(`/api/sessions/${sessionId}/queue`, {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        }).catch(() => null);
+
         OSA.setCurrentSession(session);
         OSA.restoreContextState(session.id, session.context_state || null);
         OSA.setSessionQueue([]);
@@ -401,6 +567,7 @@ OSA.selectSession = async function(sessionId) {
         OSA._contextGroupState = null;
         
         OSA.connectEventSource(sessionId);
+        OSA.hideThinkingIndicator();
         OSA.resetStreamingMessage();
         
         const sessionName = OSA.getSessionDisplayName(session);
@@ -410,22 +577,6 @@ OSA.selectSession = async function(sessionId) {
         
         const messagesDiv = document.getElementById('messages');
         messagesDiv.innerHTML = '';
-        
-        const [toolStartsRes, subagentsRes, queueRes] = await Promise.all([
-            fetch(`/api/sessions/${sessionId}/tools`, {
-                headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-            }).catch(() => null),
-            fetch(`/api/sessions/${sessionId}/subagents`, {
-                headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-            }).catch(() => null),
-            fetch(`/api/sessions/${sessionId}/queue`, {
-                headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-            }).catch(() => null)
-        ]);
-        const tools = (toolStartsRes && toolStartsRes.ok) ? await toolStartsRes.json() : [];
-        const subagentsData = (subagentsRes && subagentsRes.ok) ? await subagentsRes.json() : { subagents: [], has_running: false };
-        const queueItems = (queueRes && queueRes.ok) ? await queueRes.json() : [];
-        OSA.setSessionQueue(queueItems);
         
         if (session.messages.length === 0) {
             messagesDiv.innerHTML = `
@@ -438,11 +589,48 @@ OSA.selectSession = async function(sessionId) {
         } else {
             OSA.renderMessages(session.messages);
             if (session.task_status === 'running') {
-                OSA.adoptStreamingAssistantFromRenderedSession(session);
+                const adopted = OSA.adoptStreamingAssistantFromRenderedSession(session);
+                if (!adopted && OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
+                    OSA.showThinkingIndicator();
+                }
             }
-            if (tools && tools.length > 0) {
-                OSA.restoreToolsAtPositions(tools);
-            }
+        }
+
+        const sessionIsRunning = session.task_status === 'running';
+        if (sessionIsRunning) {
+            OSA.setProcessing(true);
+            OSA.setSendButtonStopMode(true);
+        } else {
+            OSA.setProcessing(false);
+            OSA.setStopping(false);
+            OSA.resetSendButton();
+        }
+
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        OSA.fetchAndRenderTodos();
+        OSA.loadSessions();
+        OSA.loadSessionWorkspace();
+        OSA.loadSessionPersona();
+        OSA.loadSessionBreadcrumb(sessionId);
+
+        const [toolStartsRes, subagentsRes, queueRes] = await Promise.all([
+            pendingToolsRequest,
+            pendingSubagentsRequest,
+            pendingQueueRequest
+        ]);
+        if (!isCurrentSelection()) return;
+
+        const tools = (toolStartsRes && toolStartsRes.ok) ? await toolStartsRes.json() : [];
+        if (!isCurrentSelection()) return;
+        const subagentsData = (subagentsRes && subagentsRes.ok) ? await subagentsRes.json() : { subagents: [], has_running: false };
+        if (!isCurrentSelection()) return;
+        const queueItems = (queueRes && queueRes.ok) ? await queueRes.json() : [];
+        if (!isCurrentSelection()) return;
+
+        OSA.setSessionQueue(queueItems);
+
+        if (tools.length > 0) {
+            OSA.restoreToolsAtPositions(tools);
         }
 
         if (subagentsData && subagentsData.subagents && subagentsData.subagents.length > 0) {
@@ -451,8 +639,7 @@ OSA.selectSession = async function(sessionId) {
 
         OSA.renderQueuedMessages(queueItems);
 
-        const sessionIsRunning = session.task_status === 'running';
-        const subagentsRunning = subagentsData && subagentsData.has_running;
+        const subagentsRunning = !!(subagentsData && subagentsData.has_running);
         const isDirectlyRunning = sessionIsRunning && !subagentsRunning;
 
         if (sessionIsRunning || subagentsRunning) {
@@ -464,28 +651,55 @@ OSA.selectSession = async function(sessionId) {
             OSA.resetSendButton();
         }
 
-        if (isDirectlyRunning) {
-            const msgs = session.messages || [];
-            const hasPendingTools = tools.some(t => !t.completed);
-            const lastUserMsgIdx = msgs.reduce((acc, m, i) => m.role === 'user' ? i : acc, -1);
-            const lastMsg = msgs[msgs.length - 1];
-            const waitingForResponse = lastUserMsgIdx >= 0 && (
-                !lastMsg || lastMsg.role === 'user' || lastMsg.role === 'tool'
-            );
-            if ((waitingForResponse || hasPendingTools) && !OSA.getStreamingAssistantMessage()) {
-                OSA.showThinkingIndicator();
-            }
+        if (isDirectlyRunning && OSA.shouldShowThinkingIndicatorForRunningSession(session, tools) && !OSA.getStreamingAssistantMessage()) {
+            OSA.showThinkingIndicator();
         }
-        
+
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        await OSA.fetchAndRenderTodos();
-        OSA.loadSessions();
-        OSA.loadSessionWorkspace();
-        OSA.loadSessionPersona();
-        OSA.loadSessionBreadcrumb(sessionId);
     } catch (error) {
         console.error('Failed to load session:', error);
     }
+};
+
+OSA.shouldShowThinkingIndicatorForRunningSession = function(session, tools = []) {
+    if (!session || session.task_status !== 'running') {
+        return false;
+    }
+
+    const msgs = Array.isArray(session.messages) ? session.messages : [];
+    const lastUserMsgIdx = msgs.reduce((acc, message, index) => message.role === 'user' ? index : acc, -1);
+    if (lastUserMsgIdx < 0) {
+        return Array.isArray(tools) && tools.some(tool => !tool.completed);
+    }
+
+    const lastMsg = msgs[msgs.length - 1];
+    const lastAssistantIsPlaceholder = !!(
+        lastMsg
+        && lastMsg.role === 'assistant'
+        && !OSA.isHiddenSyntheticMessage(lastMsg)
+        && !(lastMsg.content || '').trim()
+        && !(OSA.getShowThinkingBlocks() && (lastMsg.thinking || '').trim())
+    );
+
+    return !!(
+        !lastMsg
+        || lastMsg.role === 'user'
+        || lastMsg.role === 'tool'
+        || lastAssistantIsPlaceholder
+        || (Array.isArray(tools) && tools.some(tool => !tool.completed))
+    );
+};
+
+OSA.markSessionListSelection = function(sessionId) {
+    document.querySelectorAll('.session-item.active').forEach(item => {
+        item.classList.remove('active');
+    });
+
+    if (!sessionId) return;
+
+    document.querySelectorAll('.session-item').forEach(item => {
+        item.classList.toggle('active', item.dataset.sessionId === sessionId);
+    });
 };
 
 OSA.findToolInsertBefore = function(messagesDiv, messageIndex, fallbackTimestampMs = 0) {
@@ -842,14 +1056,10 @@ OSA.connectEventSource = function(sessionId) {
         OSA.showConnectionStatus('connected', 'Connected');
 
         const session = OSA.getCurrentSession();
-        if (session && session.task_status === 'running' && OSA.isAgentProcessing()) {
-            const indicator = document.getElementById('thinking-indicator');
-            if (!indicator) {
+        if (session && session.id === sessionId && session.task_status === 'running') {
+            if (!OSA.getStreamingAssistantMessage() && OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
                 OSA.showThinkingIndicator();
             }
-        }
-
-        if (session && session.id === sessionId && session.task_status === 'running') {
             OSA.syncRunningSessionSnapshot(sessionId);
         }
     };
@@ -1112,13 +1322,16 @@ OSA.filterSessions = function(query) {
     const items = document.querySelectorAll('.session-item');
     const childrenGroups = document.querySelectorAll('.session-children');
     const q = query.toLowerCase();
+    const sourceFilter = OSA.getSessionSourceFilter ? OSA.getSessionSourceFilter() : 'all';
     
     items.forEach(item => {
         const text = (item.textContent || '').toLowerCase();
-        item.style.display = (!q || text.includes(q)) ? '' : 'none';
+        const source = item.dataset.sessionSource || 'web';
+        const matchesSource = sourceFilter === 'all' || source === sourceFilter;
+        item.style.display = ((!q || text.includes(q)) && matchesSource) ? '' : 'none';
     });
 
-    if (q) {
+    if (q || sourceFilter !== 'all') {
         childrenGroups.forEach(group => {
             const visibleChildren = group.querySelectorAll('.session-item:not([style*="display: none"])');
             group.style.display = visibleChildren.length > 0 ? '' : 'none';
@@ -1136,6 +1349,8 @@ OSA.loadSessionBreadcrumb = async function(sessionId) {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         });
         const data = await res.json();
+        const currentSession = OSA.getCurrentSession();
+        if (!currentSession || currentSession.id !== sessionId) return;
         
         const breadcrumb = [];
         if (data.session) {
@@ -1146,6 +1361,8 @@ OSA.loadSessionBreadcrumb = async function(sessionId) {
                     headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
                 });
                 const parentData = await parentRes.json();
+                const activeSession = OSA.getCurrentSession();
+                if (!activeSession || activeSession.id !== sessionId) return;
                 if (parentData.session) {
                     breadcrumb.unshift({ id: parentData.session.id, title: 'Parent' });
                     current = parentData.session;
@@ -1166,6 +1383,8 @@ OSA.loadSessionBreadcrumb = async function(sessionId) {
         OSA.renderBreadcrumb();
     } catch (error) {
         console.error('Failed to load session breadcrumb:', error);
+        const currentSession = OSA.getCurrentSession();
+        if (!currentSession || currentSession.id !== sessionId) return;
         OSA.setSessionHierarchy({ parentId: null, children: [], breadcrumb: [{ id: sessionId, title: 'Current', current: true }] });
         OSA.renderBreadcrumb();
     }
@@ -1357,22 +1576,31 @@ window.saveSettings = function() { OSA.saveSettings(); };
 window.toggleTodoDock = OSA.toggleTodoDock;
 window.filterSessions = OSA.filterSessions;
 
-OSA.openWorkflowEditor = function() {
+OSA.openWorkflowEditor = async function() {
+    try {
+        await OSA.ensureWorkflowAssetsLoaded();
+    } catch (error) {
+        console.error('Failed to load workflow assets:', error);
+        alert(error.message || 'Failed to load workflow editor');
+        return;
+    }
+
     const appView = document.getElementById('app-view');
     const workflowEditor = document.getElementById('workflow-editor');
-    
+
     if (appView) {
         appView.classList.add('hidden');
         appView.style.display = 'none';
     }
-    
+
     if (workflowEditor) {
         workflowEditor.classList.remove('hidden');
         workflowEditor.style.display = 'flex';
     }
-    
-    if (window.workflowEditor) {
-        window.workflowEditor.init().catch(err => {
+
+    const editor = window.ensureWorkflowEditor ? window.ensureWorkflowEditor() : window.workflowEditor;
+    if (editor) {
+        editor.init().catch(err => {
             console.error('Failed to init workflow editor:', err);
         });
     }
@@ -1398,105 +1626,5 @@ OSA.closeWorkflowEditor = function() {
 };
 
 window.openWorkflowEditor = OSA.openWorkflowEditor;
-
-OSA._sidebarCanvasAnims = [];
-
-OSA._initSessionIconCanvases = function() {
-    OSA._sidebarCanvasAnims.forEach(fn => fn());
-    OSA._sidebarCanvasAnims = [];
-
-    const canvases = document.querySelectorAll('.session-icon-canvas');
-    canvases.forEach(canvas => {
-        const fn = OSA._initMiniCanvas(canvas);
-        if (fn) OSA._sidebarCanvasAnims.push(fn);
-    });
-};
-
-OSA._initMiniCanvas = function(canvas) {
-    const dpr = window.devicePixelRatio || 1;
-    const size = 32;
-    canvas.width = size * dpr;
-    canvas.height = size * dpr;
-    canvas.style.width = size + 'px';
-    canvas.style.height = size + 'px';
-
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-
-    let frame;
-    const center = size / 2;
-    const orbits = [
-        { rx: 11, ry: 5, tilt: -0.4, speed: 2.2, phase: 0, dotSize: 1.2, trailLen: 5 },
-        { rx: 11, ry: 5, tilt: 0.9, speed: 1.6, phase: 2.1, dotSize: 1.0, trailLen: 4 },
-        { rx: 11, ry: 5, tilt: -1.7, speed: 2.8, phase: 4.2, dotSize: 0.8, trailLen: 6 },
-    ];
-    const trailBuf = orbits.map(() => []);
-
-    function draw(t) {
-        ctx.clearRect(0, 0, size, size);
-        const time = t * 0.001;
-
-        const grad = ctx.createRadialGradient(center, center, 0, center, center, 5);
-        grad.addColorStop(0, 'rgba(255,255,255,0.25)');
-        grad.addColorStop(1, 'rgba(255,255,255,0)');
-        ctx.beginPath();
-        ctx.arc(center, center, 5, 0, Math.PI * 2);
-        ctx.fillStyle = grad;
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(center, center, 1.5, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255,255,255,0.6)';
-        ctx.fill();
-
-        orbits.forEach((orbit, idx) => {
-            const cosT = Math.cos(orbit.tilt);
-            const sinT = Math.sin(orbit.tilt);
-            const angle = time * orbit.speed + orbit.phase;
-
-            ctx.beginPath();
-            ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-            ctx.lineWidth = 0.5;
-            for (let a = 0; a <= Math.PI * 2; a += 0.08) {
-                const ex = center + Math.cos(a) * orbit.rx;
-                const ey = center + Math.sin(a) * orbit.ry;
-                const px = center + (ex - center) * cosT - (ey - center) * sinT;
-                const py = center + (ex - center) * sinT + (ey - center) * cosT;
-                if (a === 0) ctx.moveTo(px, py);
-                else ctx.lineTo(px, py);
-            }
-            ctx.closePath();
-            ctx.stroke();
-
-            const ex = center + Math.cos(angle) * orbit.rx;
-            const ey = center + Math.sin(angle) * orbit.ry;
-            const px = center + (ex - center) * cosT - (ey - center) * sinT;
-            const py = center + (ex - center) * sinT + (ey - center) * cosT;
-
-            trailBuf[idx].push({ x: px, y: py });
-            if (trailBuf[idx].length > orbit.trailLen) trailBuf[idx].shift();
-
-            for (let i = 0; i < trailBuf[idx].length; i++) {
-                const tp = trailBuf[idx][i];
-                const a = ((i + 1) / trailBuf[idx].length) * 0.2;
-                const s = orbit.dotSize * (0.3 + 0.7 * (i / trailBuf[idx].length));
-                ctx.beginPath();
-                ctx.arc(tp.x, tp.y, s, 0, Math.PI * 2);
-                ctx.fillStyle = `rgba(255,255,255,${a})`;
-                ctx.fill();
-            }
-
-            ctx.beginPath();
-            ctx.arc(px, py, orbit.dotSize, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255,255,255,0.7)';
-            ctx.fill();
-        });
-
-        frame = requestAnimationFrame(draw);
-    }
-
-    frame = requestAnimationFrame(draw);
-    return function cancel() { cancelAnimationFrame(frame); };
-};
 
 OSA.checkAuthAndInit();

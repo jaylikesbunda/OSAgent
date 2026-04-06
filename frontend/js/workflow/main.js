@@ -1,24 +1,24 @@
 (function() {
-  function initWorkflowModule() {
+  function createWorkflowEditor() {
     const container = document.getElementById('workflow-editor');
     if (!container) {
       console.warn('Workflow editor container not found');
-      return;
+      return null;
     }
 
     const api = new WorkflowAPI();
+    api.setToken((window.OSA && typeof OSA.getToken === 'function' && OSA.getToken()) || '');
     const editor = new WorkflowEditor(container, api);
-    
-    editor.init().catch(err => {
-      console.error('Failed to initialize workflow editor:', err);
-    });
-
     window.workflowEditor = editor;
+    return editor;
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initWorkflowModule);
-  } else {
-    initWorkflowModule();
-  }
+  window.ensureWorkflowEditor = function() {
+    if (window.workflowEditor) {
+      window.workflowEditor.api?.setToken?.((window.OSA && typeof OSA.getToken === 'function' && OSA.getToken()) || '');
+      return window.workflowEditor;
+    }
+
+    return createWorkflowEditor();
+  };
 })();

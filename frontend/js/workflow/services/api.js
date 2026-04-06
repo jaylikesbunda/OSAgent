@@ -1,7 +1,10 @@
 class WorkflowAPI {
   constructor(baseUrl = '/api') {
     this.baseUrl = baseUrl;
-    this.token = localStorage.getItem('osagent_token');
+    this.token = (window.OSA && typeof OSA.getToken === 'function' && OSA.getToken())
+      || localStorage.getItem('token')
+      || localStorage.getItem('osagent_token')
+      || '';
   }
 
   setToken(token) {
@@ -9,6 +12,10 @@ class WorkflowAPI {
   }
 
   async request(method, path, body = null) {
+    if (!this.token && window.OSA && typeof OSA.getToken === 'function') {
+      this.token = OSA.getToken() || '';
+    }
+
     const headers = {
       'Content-Type': 'application/json'
     };
@@ -24,19 +31,29 @@ class WorkflowAPI {
     }
 
     const response = await fetch(`${this.baseUrl}${path}`, options);
+    const raw = await response.text();
+    let payload = null;
+    if (raw) {
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        payload = null;
+      }
+    }
     
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-      throw new Error(error.error || `HTTP ${response.status}`);
+      throw new Error(payload?.error || payload?.message || raw || `HTTP ${response.status}`);
     }
 
-    const data = await response.json();
+    if (!payload) {
+      return null;
+    }
     
-    if (!data.success) {
-      throw new Error(data.error || 'API request failed');
+    if (payload.success === false) {
+      throw new Error(payload.error || 'API request failed');
     }
 
-    return data.data;
+    return Object.prototype.hasOwnProperty.call(payload, 'data') ? payload.data : payload;
   }
 
   async createWorkflow(name, description = null) {

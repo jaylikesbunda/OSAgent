@@ -559,56 +559,36 @@
 }
 
 .subagent-context-ring {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    display: inline-block;
     cursor: default;
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
 }
 
 .subagent-context-ring svg {
-    transform: rotate(-90deg);
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 22px;
-    height: 22px;
+    width: 100%;
+    height: 100%;
 }
 
 .subagent-context-ring .context-ring-bg {
-    fill: none;
-    stroke: var(--border);
-    stroke-width: 2.5;
+    stroke-width: 3;
 }
 
 .subagent-context-ring .context-ring-progress {
-    fill: none;
-    stroke: var(--accent);
-    stroke-width: 2.5;
-    stroke-linecap: round;
-    transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;
+    stroke-width: 3;
 }
 
 .subagent-context-ring.danger .context-ring-progress {
-    stroke: #ef4444;
+    stroke: var(--error);
 }
 
 .subagent-context-ring.warning .context-ring-progress {
-    stroke: #f59e0b;
+    stroke: var(--warning);
 }
 
-.subagent-context-pct {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    font-size: 7px;
+.subagent-context-ring .context-ring-text {
+    font-size: 5.5px;
     font-weight: 700;
-    color: var(--text-secondary);
-    line-height: 1;
-    pointer-events: none;
 }
 
 .subagent-body {

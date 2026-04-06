@@ -64,17 +64,22 @@ OSA.fetchAndRenderTodos = async function() {
         OSA.updateTodoDock();
         return;
     }
+    const sessionId = currentSession.id;
     try {
-        const res = await fetch(`/api/sessions/${currentSession.id}/todos`, {
+        const res = await fetch(`/api/sessions/${sessionId}/todos`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const activeSession = OSA.getCurrentSession();
+        if (!activeSession || activeSession.id !== sessionId) return;
         OSA.setSessionTodos(Array.isArray(data) ? data : []);
         OSA.renderSessionTodos();
         OSA.updateTodoDock();
     } catch (error) {
         console.error('Failed to fetch todos:', error);
+        const activeSession = OSA.getCurrentSession();
+        if (!activeSession || activeSession.id !== sessionId) return;
         OSA.setSessionTodos([]);
         OSA.updateTodoDock();
     }

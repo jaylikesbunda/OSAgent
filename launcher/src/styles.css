@@ -578,6 +578,36 @@ button { cursor: pointer; }
   color: var(--text-muted);
 }
 
+.log-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.log-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 8px;
+}
+
+.log-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.log-tools .btn.active {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.log-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .log-container {
   flex: 1;
   min-height: 0;

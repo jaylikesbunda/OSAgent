@@ -58,7 +58,8 @@ impl SystemStatusTool {
         let cpu_usage = if system.cpus().is_empty() {
             0.0
         } else {
-            system.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / system.cpus().len() as f32
+            system.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>()
+                / system.cpus().len() as f32
         };
         let cpu_model = system
             .cpus()
@@ -81,7 +82,12 @@ impl SystemStatusTool {
             format!("OS: {}", os),
             format!("Kernel: {}", kernel),
             format!("Uptime: {}", Self::format_duration(uptime)),
-            format!("CPU: {} ({} cores, {:.1}% avg usage)", cpu_model, system.cpus().len(), cpu_usage),
+            format!(
+                "CPU: {} ({} cores, {:.1}% avg usage)",
+                cpu_model,
+                system.cpus().len(),
+                cpu_usage
+            ),
             format!(
                 "Memory: {} / {}",
                 Self::format_bytes(used_memory),
@@ -156,7 +162,9 @@ impl Tool for SystemStatusTool {
     async fn execute(&self, _args: Value) -> Result<String> {
         let report = tokio::task::spawn_blocking(Self::collect)
             .await
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to collect system status: {}", e)))?;
+            .map_err(|e| {
+                OSAgentError::ToolExecution(format!("Failed to collect system status: {}", e))
+            })?;
         Ok(report)
     }
 }

@@ -15,6 +15,7 @@ pub struct SkillInfo {
     pub version: Option<String>,
     pub author: Option<String>,
     pub emoji: Option<String>,
+    pub icon_url: Option<String>,
     pub has_icon: bool,
     pub enabled: bool,
     pub has_config: bool,
@@ -109,14 +110,14 @@ impl SkillStore {
         let config = self.config_store.load_config(name).ok();
         let icon_path = self.skill_icon_path(name);
 
-        let (description, emoji, config_schema) = if skill_md_path.exists() {
+        let (description, emoji, icon_url, config_schema) = if skill_md_path.exists() {
             if let Ok(content) = fs::read_to_string(&skill_md_path) {
                 Self::parse_skill_info_from_md(&content)
             } else {
-                (String::new(), None, Vec::new())
+                (String::new(), None, None, Vec::new())
             }
         } else {
-            (String::new(), None, Vec::new())
+            (String::new(), None, None, Vec::new())
         };
 
         let enabled = config.as_ref().map(|c| c.enabled).unwrap_or(true);
@@ -133,6 +134,7 @@ impl SkillStore {
             version: None,
             author: None,
             emoji,
+            icon_url,
             has_icon: icon_path.is_some(),
             enabled,
             has_config,
@@ -140,7 +142,9 @@ impl SkillStore {
         })
     }
 
-    fn parse_skill_info_from_md(content: &str) -> (String, Option<String>, Vec<ConfigField>) {
+    fn parse_skill_info_from_md(
+        content: &str,
+    ) -> (String, Option<String>, Option<String>, Vec<ConfigField>) {
         if let Some(schema) = parse_frontmatter(content) {
             let description = if schema.description.is_empty() {
                 Self::extract_description_from_body(content)
@@ -152,12 +156,12 @@ impl SkillStore {
                     .trim_matches('\'')
                     .to_string()
             };
-            return (description, schema.emoji, schema.config);
+            return (description, schema.emoji, schema.icon_url, schema.config);
         }
 
         // Fallback for skills without frontmatter
         let description = Self::extract_description_from_body(content);
-        (description, None, Vec::new())
+        (description, None, None, Vec::new())
     }
 
     fn extract_description_from_body(content: &str) -> String {

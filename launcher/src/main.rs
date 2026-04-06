@@ -1402,7 +1402,11 @@ fn resolve_provider_api_key(
         .unwrap_or_default()
 }
 
-fn resolve_provider_base_url(state: &AppState, provider_type: &str, fallback_base_url: &str) -> String {
+fn resolve_provider_base_url(
+    state: &AppState,
+    provider_type: &str,
+    fallback_base_url: &str,
+) -> String {
     load_existing_config(&state.config_path)
         .and_then(|config| provider_for_type(&config, provider_type))
         .map(|provider| provider.base_url.trim().to_string())
@@ -1435,7 +1439,10 @@ fn normalize_ollama_base_url(base_url: &str) -> String {
     }
 }
 
-async fn discover_ollama_models(base_url: &str, api_key: &str) -> Result<Vec<SetupProviderModel>, String> {
+async fn discover_ollama_models(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<SetupProviderModel>, String> {
     let native_base = normalize_ollama_base_url(base_url);
     let tags_url = format!("{}/api/tags", native_base.trim_end_matches('/'));
     let client = reqwest::Client::builder()
@@ -1971,9 +1978,12 @@ async fn validate_provider_connection(
         .get(format!("{}/models", base_url.trim_end_matches('/')))
         .bearer_auth(api_key);
 
-    let response = request.send().await.map_err(|e| match provider_type.as_str() {
-        _ => format!("Could not reach {}: {}", preset.name, e),
-    })?;
+    let response = request
+        .send()
+        .await
+        .map_err(|e| match provider_type.as_str() {
+            _ => format!("Could not reach {}: {}", preset.name, e),
+        })?;
 
     let status = response.status();
     if status.is_success() {
@@ -2261,6 +2271,69 @@ fn get_logs(state: State<AppState>) -> Vec<LogEntry> {
     state.logs.lock().unwrap().clone()
 }
 
+fn launcher_log_file_path() -> PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".osagent")
+        .join("launcher_output.log")
+}
+
+fn parse_log_file_line(line: &str) -> Option<LogEntry> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some(ts_end) = rest.find("] [") {
+            let timestamp = rest[..ts_end].trim();
+            let level_and_msg = &rest[ts_end + 3..];
+            if let Some(level_end) = level_and_msg.find("] ") {
+                let level = level_and_msg[..level_end].trim().to_lowercase();
+                let message = level_and_msg[level_end + 2..].trim().to_string();
+                return Some(LogEntry {
+                    timestamp: timestamp.to_string(),
+                    level,
+                    message,
+                });
+            }
+        }
+    }
+
+    Some(LogEntry {
+        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+        level: "info".to_string(),
+        message: trimmed.to_string(),
+    })
+}
+
+#[tauri::command]
+fn get_log_file_tail(limit: Option<usize>, offset_from_end: Option<usize>) -> Vec<LogEntry> {
+    let limit = limit.unwrap_or(250).clamp(1, 2000);
+    let offset = offset_from_end.unwrap_or(0);
+    let log_path = launcher_log_file_path();
+
+    let file = match std::fs::File::open(log_path) {
+        Ok(file) => file,
+        Err(_) => return Vec::new(),
+    };
+
+    let reader = BufReader::new(file);
+    let entries: Vec<LogEntry> = reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| parse_log_file_line(&line))
+        .collect();
+
+    if entries.is_empty() || offset >= entries.len() {
+        return Vec::new();
+    }
+
+    let end = entries.len() - offset;
+    let start = end.saturating_sub(limit);
+    entries[start..end].to_vec()
+}
+
 #[tauri::command]
 fn get_build_running(state: State<AppState>) -> bool {
     *state.build_running.lock().unwrap()
@@ -2341,17 +2414,15 @@ async fn discover_setup_provider_models(
     payload: DiscoverProviderModelsPayload,
 ) -> Result<Vec<SetupProviderModel>, String> {
     let provider_type = payload.provider_type.trim().to_lowercase();
-    let preset =
-        provider_preset(&provider_type).ok_or_else(|| "Unsupported provider selected".to_string())?;
+    let preset = provider_preset(&provider_type)
+        .ok_or_else(|| "Unsupported provider selected".to_string())?;
 
     if provider_type != "ollama" {
-        return Ok(
-            preset
-                .models
-                .into_iter()
-                .map(|(id, name)| SetupProviderModel { id, name })
-                .collect(),
-        );
+        return Ok(preset
+            .models
+            .into_iter()
+            .map(|(id, name)| SetupProviderModel { id, name })
+            .collect());
     }
 
     let api_key = resolve_provider_api_key(&state, &provider_type, "");
@@ -3781,7 +3852,10 @@ fn get_pending_update_path() -> Option<std::path::PathBuf> {
     dirs_next::home_dir().map(|h| h.join(".osagent").join("pending_update.json"))
 }
 
-fn spawn_updater_and_exit(launcher_path: &std::path::Path, new_launcher_path: &std::path::Path) -> bool {
+fn spawn_updater_and_exit(
+    launcher_path: &std::path::Path,
+    new_launcher_path: &std::path::Path,
+) -> bool {
     let current_exe = launcher_path.to_string_lossy().to_string();
     let new_exe = new_launcher_path.to_string_lossy().to_string();
     let cleanup_dir = new_launcher_path
@@ -3879,7 +3953,13 @@ fn spawn_updater_and_exit(launcher_path: &std::path::Path, new_launcher_path: &s
         info!("Spawning updater bat: {}", bat_path.display());
 
         let spawned = Command::new("cmd")
-            .args(["/c", "start", "/min", "", bat_path.to_string_lossy().as_ref()])
+            .args([
+                "/c",
+                "start",
+                "/min",
+                "",
+                bat_path.to_string_lossy().as_ref(),
+            ])
             .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn();
 
@@ -3982,7 +4062,10 @@ fn apply_pending_update_if_any() -> bool {
     }
 
     if !pending.staged_path.exists() {
-        info!("Staged update does not exist: {}", pending.staged_path.display());
+        info!(
+            "Staged update does not exist: {}",
+            pending.staged_path.display()
+        );
         let _ = std::fs::remove_file(&pending_path);
         return false;
     }
@@ -4047,8 +4130,14 @@ fn start_process_monitor(app_handle: AppHandle) {
                                     AgentStatus {
                                         running: false,
                                         pid: None,
-                                        osagent_path: state.osagent_path.to_string_lossy().to_string(),
-                                        config_path: state.config_path.to_string_lossy().to_string(),
+                                        osagent_path: state
+                                            .osagent_path
+                                            .to_string_lossy()
+                                            .to_string(),
+                                        config_path: state
+                                            .config_path
+                                            .to_string_lossy()
+                                            .to_string(),
                                     },
                                 );
                             }
@@ -4079,12 +4168,20 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
     }
 
     let state = app_handle.state::<AppState>();
-    add_log(&state, "info", format!("Pending update file found: {}", pending_path.display()));
+    add_log(
+        &state,
+        "info",
+        format!("Pending update file found: {}", pending_path.display()),
+    );
 
     let json = match std::fs::read_to_string(&pending_path) {
         Ok(j) => j,
         Err(e) => {
-            add_log(&state, "error", format!("Failed to read pending update file: {}", e));
+            add_log(
+                &state,
+                "error",
+                format!("Failed to read pending update file: {}", e),
+            );
             return false;
         }
     };
@@ -4092,7 +4189,11 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
     let pending: LauncherPendingUpdate = match serde_json::from_str(&json) {
         Ok(p) => p,
         Err(e) => {
-            add_log(&state, "error", format!("Failed to parse pending update file: {}", e));
+            add_log(
+                &state,
+                "error",
+                format!("Failed to parse pending update file: {}", e),
+            );
             let _ = std::fs::remove_file(&pending_path);
             return false;
         }
@@ -4102,10 +4203,22 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
         return false;
     }
 
-    add_log(&state, "info", format!("Pending update: tag={}, path={}", pending.tag, pending.staged_path.display()));
+    add_log(
+        &state,
+        "info",
+        format!(
+            "Pending update: tag={}, path={}",
+            pending.tag,
+            pending.staged_path.display()
+        ),
+    );
 
     if !pending.staged_path.exists() {
-        add_log(&state, "error", format!("Staged update missing: {}", pending.staged_path.display()));
+        add_log(
+            &state,
+            "error",
+            format!("Staged update missing: {}", pending.staged_path.display()),
+        );
         let _ = std::fs::remove_file(&pending_path);
         return false;
     }
@@ -4118,7 +4231,11 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
         }
     };
 
-    add_log(&state, "info", format!("Applying update {}...", pending.tag));
+    add_log(
+        &state,
+        "info",
+        format!("Applying update {}...", pending.tag),
+    );
     let _ = std::fs::remove_file(&pending_path);
 
     terminate_osagent_processes(&state);
@@ -4177,6 +4294,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_logs,
+            get_log_file_tail,
             get_build_running,
             get_binary_status,
             get_setup_state,

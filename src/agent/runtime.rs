@@ -15,7 +15,7 @@ use crate::error::{OSAgentError, Result};
 use crate::external::{ExternalDirectoryManager, PermissionAction, PermissionPrompt};
 use crate::indexer::CodeIndexer;
 use crate::plugin::PluginManager;
-use crate::skills::SkillLoader;
+use crate::skills::{get_skills_base_dir, SkillLoader};
 use crate::storage::{
     AuditEntry, Message, MessageTokens, QueuedMessage, Session, SessionEventRecord, SqliteStorage,
     ToolCall,
@@ -301,7 +301,14 @@ impl AgentRuntime {
         let skill_loader = if config.tools.skills.enabled {
             let skills_dir =
                 PathBuf::from(shellexpand::tilde(&config.tools.skills.directory).to_string());
-            let mut loader = SkillLoader::new(skills_dir);
+            let legacy_skills_dir = get_skills_base_dir();
+
+            let loader = if legacy_skills_dir != skills_dir {
+                SkillLoader::new(skills_dir).with_additional_skills_dir(legacy_skills_dir)
+            } else {
+                SkillLoader::new(skills_dir)
+            };
+
             if let Err(e) = loader.load_all() {
                 warn!("Failed to load skills: {}", e);
             }
@@ -3031,6 +3038,14 @@ impl AgentRuntime {
             .map(|v| v.to_string())
     }
 
+    fn session_archived(session: &Session) -> bool {
+        session
+            .metadata
+            .get("archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     fn set_session_workspace_id(session: &mut Session, workspace_id: &str) -> Result<()> {
         if !session.metadata.is_object() {
             session.metadata = serde_json::json!({});
@@ -4022,6 +4037,7 @@ impl AgentRuntime {
                 .and_then(|v| v.as_str())
                 .map(|v| v == user_key)
                 .unwrap_or(false)
+                && !Self::session_archived(&session)
             {
                 return Ok(Some(session.id));
             }
@@ -4036,6 +4052,10 @@ impl AgentRuntime {
             }
         }
 
+        self.create_session_for_user(user_key, "discord").await
+    }
+
+    pub async fn create_session_for_user(&self, user_key: &str, source: &str) -> Result<Session> {
         let mut session = self.create_session().await?;
         if !session.metadata.is_object() {
             session.metadata = serde_json::json!({});
@@ -4045,9 +4065,39 @@ impl AgentRuntime {
                 "owner".to_string(),
                 serde_json::Value::String(user_key.to_string()),
             );
+            meta.insert(
+                "source".to_string(),
+                serde_json::Value::String(source.to_string()),
+            );
+            meta.insert("archived".to_string(), serde_json::Value::Bool(false));
+            meta.remove("archived_at");
         }
         self.session_manager.update_session(&session).await?;
         Ok(session)
+    }
+
+    pub async fn archive_session(&self, session_id: &str) -> Result<()> {
+        let mut session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| OSAgentError::Session("Session not found".to_string()))?;
+
+        if !session.metadata.is_object() {
+            session.metadata = serde_json::json!({});
+        }
+
+        let metadata = session.metadata.as_object_mut().ok_or_else(|| {
+            OSAgentError::Parse("Session metadata must be a JSON object".to_string())
+        })?;
+
+        metadata.insert("archived".to_string(), serde_json::Value::Bool(true));
+        metadata.insert(
+            "archived_at".to_string(),
+            serde_json::Value::String(Utc::now().to_rfc3339()),
+        );
+
+        self.session_manager.update_session(&session).await
     }
 
     pub async fn save_config(&self, config_path: &std::path::Path) -> Result<()> {

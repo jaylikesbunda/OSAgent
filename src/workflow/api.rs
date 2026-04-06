@@ -78,7 +78,7 @@ async fn create_workflow(
     let graph_json = req.graph_json.unwrap_or_else(|| {
         serde_json::json!({
             "nodes": [],
-            "edges": []
+            "links": []
         })
         .to_string()
     });

@@ -1,21 +1,31 @@
 window.OSA = window.OSA || {};
 
-OSA.buildContextRingHtml = function(contextState, subagentId) {
-    if (!contextState) return '';
-    const used = contextState.estimated_tokens || 0;
+OSA.getContextRingMetrics = function(contextState) {
+    if (!contextState) return null;
+
+    const used = (contextState.actual_usage && contextState.actual_usage.total > 0)
+        ? contextState.actual_usage.total
+        : (contextState.estimated_tokens || 0);
     const window = contextState.context_window || 1;
     const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
     const circumference = 97.4;
     const offset = circumference - (pct / 100) * circumference;
     const colorClass = pct >= 90 ? 'danger' : pct >= 70 ? 'warning' : '';
+
+    return { used, window, pct, circumference, offset, colorClass };
+};
+
+OSA.buildContextRingHtml = function(contextState, subagentId) {
+    const metrics = OSA.getContextRingMetrics(contextState);
+    if (!metrics) return '';
     return `
-        <div class="subagent-context-ring ${colorClass}" id="subagent-context-ring-${subagentId}" title="Context: ${pct}%">
+        <div class="context-ring subagent-context-ring ${metrics.colorClass}" id="subagent-context-ring-${subagentId}" title="Context: ${metrics.pct}%">
             <svg viewBox="0 0 36 36">
-                <circle class="context-ring-bg" cx="18" cy="18" r="15.5" stroke-width="2.5"/>
-                <circle class="context-ring-progress" cx="18" cy="18" r="15.5" stroke-width="2.5"
-                    stroke-dasharray="97.4" stroke-dashoffset="${offset}"/>
+                <circle class="context-ring-bg" cx="18" cy="18" r="15.5"/>
+                <circle class="context-ring-progress" cx="18" cy="18" r="15.5"
+                    stroke-dasharray="97.4" stroke-dashoffset="${metrics.offset}"/>
             </svg>
-            <span class="subagent-context-pct">${pct}</span>
+            <span class="context-ring-text">${metrics.pct}%</span>
         </div>
     `;
 };
@@ -210,19 +220,16 @@ OSA.updateContextStatus = function(event) {
     
     if (!indicator || !ringProgress || !pctEl) return;
 
-    const used = (event.actual_usage && event.actual_usage.total > 0) ? event.actual_usage.total : (event.estimated_tokens || 0);
-    const window = event.context_window || 1;
-    const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
-    
-    const circumference = 97.4;
-    const offset = circumference - (pct / 100) * circumference;
-    ringProgress.style.strokeDashoffset = offset;
-    pctEl.textContent = pct + '%';
+    const metrics = OSA.getContextRingMetrics(event);
+    if (!metrics) return;
+
+    ringProgress.style.strokeDashoffset = metrics.offset;
+    pctEl.textContent = metrics.pct + '%';
     
     indicator.classList.remove('warning', 'danger');
-    if (pct >= 90) {
+    if (metrics.pct >= 90) {
         indicator.classList.add('danger');
-    } else if (pct >= 70) {
+    } else if (metrics.pct >= 70) {
         indicator.classList.add('warning');
     }
     
@@ -1105,25 +1112,20 @@ OSA.syncSubagentCardState = function(task) {
 };
 
 OSA.updateSubagentContextRing = function(subagentId, contextState) {
-    if (!contextState) return;
+    const metrics = OSA.getContextRingMetrics(contextState);
+    if (!metrics) return;
     const ring = document.getElementById(`subagent-context-ring-${subagentId}`);
     if (!ring) return;
-    const used = contextState.estimated_tokens || 0;
-    const window = contextState.context_window || 1;
-    const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
-    const circumference = 97.4;
-    const offset = circumference - (pct / 100) * circumference;
     const progress = ring.querySelector('.context-ring-progress');
-    const pctEl = ring.querySelector('.subagent-context-pct');
+    const pctEl = ring.querySelector('.context-ring-text');
     if (progress) {
-        progress.style.strokeDashoffset = offset;
-        progress.style.stroke = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '';
+        progress.style.strokeDashoffset = metrics.offset;
     }
-    if (pctEl) pctEl.textContent = pct;
+    if (pctEl) pctEl.textContent = `${metrics.pct}%`;
     ring.classList.remove('warning', 'danger');
-    if (pct >= 90) ring.classList.add('danger');
-    else if (pct >= 70) ring.classList.add('warning');
-    ring.title = `Context: ${pct}%`;
+    if (metrics.pct >= 90) ring.classList.add('danger');
+    else if (metrics.pct >= 70) ring.classList.add('warning');
+    ring.title = `Context: ${metrics.pct}%`;
 };
 
 OSA.restoreSubagentCards = function(subagentTasks) {

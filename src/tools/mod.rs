@@ -26,6 +26,6 @@ pub mod system_status;
 pub mod task;
 pub mod todo;
 pub mod truncation;
-pub mod web;
 pub mod weather;
+pub mod web;
 pub mod web_search;

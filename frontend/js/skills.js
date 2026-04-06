@@ -205,12 +205,14 @@ OSA.SkillsUI = {
 
     renderSkillCard(skill) {
         const isExpanded = this.expandedSkill === skill.name;
-        const emoji = skill.emoji || '+';
+        const iconHtml = skill.icon_url
+            ? `<img class="skill-icon-img" src="${this.escapeHtml(skill.icon_url)}" alt="${this.escapeHtml(skill.name)}">`
+            : `<div class="skill-icon">${this.escapeHtml(skill.emoji || '+')}</div>`;
         
         return `
             <div class="skill-card ${isExpanded ? 'expanded' : ''}" data-skill="${this.escapeHtml(skill.name)}">
                 <div class="skill-card-header" data-skill="${this.escapeHtml(skill.name)}">
-                    <div class="skill-icon">${this.escapeHtml(emoji)}</div>
+                    ${iconHtml}
                     <div class="skill-info">
                         <div class="skill-name">
                             ${this.escapeHtml(skill.name)}
@@ -316,6 +318,7 @@ OSA.SkillsUI = {
                     configEl.innerHTML = `
                         <h4>Configuration</h4>
                         <div class="skill-config-grid">${fieldsHtml}</div>
+                        ${response.has_authorize ? `<button class="btn-action" style="margin-top:12px" onclick="OSA.SkillsUI.authorizeSkill('${this.escapeHtml(name)}')">Authorize</button>` : ''}
                         <button class="btn-action" style="margin-top:12px" onclick="OSA.SkillsUI.saveConfig('${this.escapeHtml(name)}')">Save Configuration</button>
                     `;
 
@@ -364,7 +367,28 @@ OSA.SkillsUI = {
             }
 
             this.showMessage('Configuration saved', 'success');
-            inputs.forEach(input => input.classList.remove('modified'));
+            configEl.querySelectorAll('input[data-key]').forEach(input => input.classList.remove('modified'));
+        } catch (error) {
+            this.showMessage(error.message, 'error');
+        }
+    },
+
+    async authorizeSkill(skillName) {
+        try {
+            const response = await fetch(`/api/skills/${encodeURIComponent(skillName)}/authorize`, {
+                method: 'POST',
+                headers: { 
+                    'Authorization': `Bearer ${OSA.getToken()}`
+                }
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Authorization failed');
+            }
+
+            this.showMessage(data.message || 'Authorization completed', 'success');
         } catch (error) {
             this.showMessage(error.message, 'error');
         }

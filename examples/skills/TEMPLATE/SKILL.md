@@ -7,7 +7,7 @@ requires:
 config:
   - name: MY_API_KEY
     type: api_key
-    description: "API key for the service (shown as password input)"
+    description: "API key for the service"
     required: true
   - name: MY_VARIABLE
     type: string
@@ -18,24 +18,37 @@ config:
     description: "Optional setting with a default"
     required: false
     default: "default-value"
+actions:
+  - name: example_http
+    description: "Example HTTP action that calls an external API"
+    type: http
+    method: POST
+    url: "https://example.com/api/endpoint"
+    headers:
+      Authorization: "Bearer {{ config.MY_API_KEY }}"
+      Accept: "application/json"
+    body:
+      key: "{{ config.MY_VARIABLE }}"
+      arg: "{{ args.arg }}"
+    parameters:
+      - name: arg
+        type: string
+        description: "Argument passed from the agent"
+        required: true
 ---
 # My Skill
 
 Brief description of what this skill enables the agent to do.
 
-## Commands
+## Runtime Actions
 
-### Example Action
-Describe when to use this command.
-
-```bash
-my-cli-tool action --arg "{{ skill.env.MY_VARIABLE }}"
-```
+- `example_http(arg)` demonstrates an HTTP-backed skill action.
 
 ## Configuration
 
 | Variable | Description | Required |
 |----------|-------------|----------|
+| `MY_API_KEY` | API key for the service | Yes |
 | `MY_VARIABLE` | Description of this config | Yes |
 | `OPTIONAL_VAR` | Optional setting | No |
 

@@ -522,6 +522,7 @@ impl Default for ToolsConfig {
                 "question".to_string(),
                 "skill".to_string(),
                 "skill_list".to_string(),
+                "skill_action".to_string(),
                 "lsp".to_string(),
                 "plan_exit".to_string(),
                 "subagent".to_string(),

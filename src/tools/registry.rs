@@ -9,8 +9,8 @@ use crate::indexer::CodeIndexer;
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, calendar, code, codesearch, coordinator, files, lsp, memory, patch, persona,
-    plan, process, question, search, skill, subagent, system_status, task, todo, web, weather,
+    bash, batch, calendar, code, codesearch, coordinator, files, lsp, memory, patch, persona, plan,
+    process, question, search, skill, subagent, system_status, task, todo, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -281,6 +281,10 @@ impl ToolRegistry {
             tools.insert(
                 "skill_list".to_string(),
                 Arc::new(skill::SkillListTool::new(sl.clone())),
+            );
+            tools.insert(
+                "skill_action".to_string(),
+                Arc::new(skill::SkillActionTool::new(sl.clone())),
             );
         }
 

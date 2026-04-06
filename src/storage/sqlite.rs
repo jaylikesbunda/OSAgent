@@ -30,6 +30,18 @@ impl SqliteStorage {
         })
     }
 
+    fn apply_pragmas(conn: &rusqlite::Connection) -> Result<()> {
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA cache_size = -64000;
+             PRAGMA temp_store = MEMORY;",
+        )
+        .map_err(OSAgentError::Storage)?;
+        Ok(())
+    }
+
     pub fn new(database_path: &str) -> Result<Self> {
         let path = PathBuf::from(shellexpand::tilde(database_path).to_string());
         if let Some(parent) = path.parent() {
@@ -39,6 +51,7 @@ impl SqliteStorage {
         }
 
         let conn = rusqlite::Connection::open(&path).map_err(OSAgentError::Storage)?;
+        Self::apply_pragmas(&conn)?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -48,6 +61,7 @@ impl SqliteStorage {
 
     pub fn new_in_memory() -> Result<Self> {
         let conn = rusqlite::Connection::open_in_memory().map_err(OSAgentError::Storage)?;
+        Self::apply_pragmas(&conn)?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -321,7 +335,7 @@ impl SqliteStorage {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE id = ?1")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![id], |row| {
@@ -386,7 +400,7 @@ impl SqliteStorage {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let sessions = stmt
                 .query_map([], |row| {
@@ -431,7 +445,7 @@ impl SqliteStorage {
     pub fn get_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE parent_id = ?1 ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE parent_id = ?1 ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let sessions = stmt
                 .query_map(params![parent_id], |row| {
@@ -531,7 +545,7 @@ impl SqliteStorage {
     pub fn get_checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, session_id, created_at, state, tool_name, tool_input FROM checkpoints WHERE id = ?1")
+                .prepare_cached("SELECT id, session_id, created_at, state, tool_name, tool_input FROM checkpoints WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
             let result = stmt.query_row(params![id], |row| {
                 Ok(Checkpoint {
@@ -555,7 +569,7 @@ impl SqliteStorage {
     pub fn list_checkpoints(&self, session_id: &str) -> Result<Vec<Checkpoint>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, session_id, created_at, state, tool_name, tool_input FROM checkpoints WHERE session_id = ?1 ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, session_id, created_at, state, tool_name, tool_input FROM checkpoints WHERE session_id = ?1 ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let checkpoints = stmt
                 .query_map(params![session_id], |row| {
@@ -599,7 +613,7 @@ impl SqliteStorage {
     pub fn list_audit(&self, limit: usize, offset: usize) -> Result<Vec<AuditEntry>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, timestamp, session_id, tool, input, output, duration_ms, user FROM audit_log ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2")
+                .prepare_cached("SELECT id, timestamp, session_id, tool, input, output, duration_ms, user FROM audit_log ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2")
                 .map_err(OSAgentError::Storage)?;
             let entries = stmt
                 .query_map(params![limit, offset], |row| {
@@ -655,7 +669,7 @@ impl SqliteStorage {
     pub fn list_session_events(&self, session_id: &str) -> Result<Vec<StoredSessionEvent>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT id, session_id, event_type, timestamp, data FROM session_events WHERE session_id = ?1 ORDER BY timestamp ASC",
                 )
                 .map_err(OSAgentError::Storage)?;
@@ -713,7 +727,7 @@ impl SqliteStorage {
     ) -> Result<Vec<FileSnapshotSummary>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT snapshot_id, session_id, tool_name, path, created_at FROM file_snapshots WHERE session_id = ?1 ORDER BY created_at DESC, path ASC",
                 )
                 .map_err(OSAgentError::Storage)?;
@@ -760,7 +774,7 @@ impl SqliteStorage {
     ) -> Result<Vec<FileSnapshotRecord>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT id, snapshot_id, session_id, tool_name, path, existed, content, created_at FROM file_snapshots WHERE session_id = ?1 AND snapshot_id = ?2 ORDER BY path ASC",
                 )
                 .map_err(OSAgentError::Storage)?;
@@ -845,7 +859,7 @@ impl SqliteStorage {
                  FROM tasks ORDER BY created_at"
             };
 
-            let mut stmt = conn.prepare(query).map_err(OSAgentError::Storage)?;
+            let mut stmt = conn.prepare_cached(query).map_err(OSAgentError::Storage)?;
 
             let tasks: Vec<Task> = if let Some(pid) = parent_id {
                 stmt.query_map(params![pid], |row| {
@@ -979,7 +993,7 @@ impl SqliteStorage {
 
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT id, session_id, content, status, priority, position, created_at, updated_at
                      FROM todo_items WHERE session_id = ?1 ORDER BY position ASC",
                 )
@@ -1031,7 +1045,7 @@ impl SqliteStorage {
             let tx = conn.transaction().map_err(OSAgentError::Storage)?;
 
             let mut existing_stmt = tx
-                .prepare(
+                .prepare_cached(
                     "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
                      FROM queued_messages WHERE session_id = ?1 AND client_message_id = ?2 LIMIT 1",
                 )
@@ -1095,7 +1109,7 @@ impl SqliteStorage {
     pub fn list_queued_messages(&self, session_id: &str) -> Result<Vec<QueuedMessage>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
                      FROM queued_messages
                      WHERE session_id = ?1
@@ -1123,7 +1137,7 @@ impl SqliteStorage {
                               ORDER BY position ASC, created_at ASC
                               LIMIT 1";
 
-            let mut stmt = tx.prepare(select_sql).map_err(OSAgentError::Storage)?;
+            let mut stmt = tx.prepare_cached(select_sql).map_err(OSAgentError::Storage)?;
             let dispatching = match stmt.query_row(
                 params![session_id, QueuedMessageStatus::Dispatching.as_str()],
                 Self::queued_message_from_row,
@@ -1139,7 +1153,7 @@ impl SqliteStorage {
                 return Ok(Some(item));
             }
 
-            let mut stmt = tx.prepare(select_sql).map_err(OSAgentError::Storage)?;
+            let mut stmt = tx.prepare_cached(select_sql).map_err(OSAgentError::Storage)?;
             let pending = match stmt.query_row(
                 params![session_id, QueuedMessageStatus::Pending.as_str()],
                 Self::queued_message_from_row,
@@ -1229,7 +1243,7 @@ impl SqliteStorage {
     pub fn get_subagent_task(&self, id: &str) -> Result<Option<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE id = ?1")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![id], |row| {
@@ -1261,7 +1275,7 @@ impl SqliteStorage {
     pub fn get_subagent_task_by_session(&self, session_id: &str) -> Result<Option<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE session_id = ?1")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE session_id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![session_id], |row| {
@@ -1293,7 +1307,7 @@ impl SqliteStorage {
     pub fn list_subagent_tasks(&self, parent_session_id: &str) -> Result<Vec<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE parent_session_id = ?1 ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE parent_session_id = ?1 ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
 
             let tasks = stmt
@@ -1327,7 +1341,7 @@ impl SqliteStorage {
             let tx = conn.transaction().map_err(OSAgentError::Storage)?;
 
             let mut stmt = tx
-                .prepare(
+                .prepare_cached(
                     "SELECT session_id FROM subagent_tasks WHERE status = 'completed' AND completed_at < ?1",
                 )
                 .map_err(OSAgentError::Storage)?;

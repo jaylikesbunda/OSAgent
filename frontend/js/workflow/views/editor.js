@@ -8,12 +8,20 @@ class WorkflowEditor {
     this.selectedNode = null;
     this.isDragging = false;
     this.dragNodeType = null;
+    this.initialized = false;
   }
 
   async init() {
+    this.api.setToken?.((window.OSA && typeof OSA.getToken === 'function' && OSA.getToken()) || '');
+    if (this.initialized) {
+      await this.loadWorkflows();
+      return;
+    }
+
     this.render();
     await this.loadWorkflows();
     this.setupEventListeners();
+    this.initialized = true;
   }
 
   render() {
@@ -177,7 +185,7 @@ class WorkflowEditor {
     }
 
     list.innerHTML = workflows.map(w => `
-      <div class="workflow-item" data-id="${w.id}">
+      <div class="workflow-item${this.state.currentWorkflow?.id === w.id ? ' active' : ''}" data-id="${w.id}">
         <span class="workflow-name">${w.name}</span>
         <span class="workflow-version">v${w.current_version}</span>
       </div>
@@ -198,6 +206,13 @@ class WorkflowEditor {
     if (!workflow) return;
 
     try {
+      if (this.adapter) {
+        this.adapter.destroy();
+        this.adapter = null;
+      }
+
+      this.renderWorkflowList(this.state.workflows || []);
+
       const version = await this.api.getVersion(workflow.id, workflow.current_version);
       this.state.setCurrentVersion(version);
 
@@ -212,6 +227,12 @@ class WorkflowEditor {
       this.adapter.registerNodes();
 
       this.executor = new ExecutionManager(this.adapter, this.state);
+      this.executor.on('nodeStatesChanged', (states) => this.state.emit('nodeStatesChanged', states));
+      this.executor.on('executionCompleted', () => this.onExecutionFinished());
+      this.executor.on('executionFailed', (data) => this.onExecutionFailed(data));
+      this.executor.on('executionError', (data) => this.onExecutionFailed(data));
+      this.executor.on('executionStopped', () => this.onExecutionFinished());
+      this.executor.on('executionCancelled', () => this.onExecutionFinished());
       
       this.adapter.onNodeSelect((node) => {
         this.selectedNode = node;
@@ -253,15 +274,15 @@ class WorkflowEditor {
         propertiesHtml += `
           <div class="property-group">
             <label>Agent ID</label>
-            <input type="text" class="prop-agent-id" value="${node.properties?.agentId || 'main'}">
+            <input type="text" data-prop="agent_id" value="${node.properties?.agent_id || 'main'}">
           </div>
           <div class="property-group">
             <label>System Prompt</label>
-            <textarea class="prop-system-prompt">${node.properties?.systemPrompt || ''}</textarea>
+            <textarea data-prop="system_prompt">${node.properties?.system_prompt || ''}</textarea>
           </div>
           <div class="property-group">
             <label>Task Template</label>
-            <textarea class="prop-task-template">{{input}}</textarea>
+            <textarea data-prop="task_template">${node.properties?.task_template || '{{input}}'}</textarea>
           </div>
         `;
         break;
@@ -269,7 +290,7 @@ class WorkflowEditor {
         propertiesHtml += `
           <div class="property-group">
             <label>Expression</label>
-            <input type="text" class="prop-expression" value="${node.properties?.expression || ''}">
+            <input type="text" data-prop="expression" value="${node.properties?.expression || ''}">
           </div>
         `;
         break;
@@ -277,7 +298,7 @@ class WorkflowEditor {
         propertiesHtml += `
           <div class="property-group">
             <label>Script</label>
-            <textarea class="prop-script">{{input}}</textarea>
+            <textarea data-prop="script">${node.properties?.script || '{{input}}'}</textarea>
           </div>
         `;
         break;
@@ -285,7 +306,7 @@ class WorkflowEditor {
         propertiesHtml += `
           <div class="property-group">
             <label>Milliseconds</label>
-            <input type="number" class="prop-milliseconds" value="${node.properties?.milliseconds || 1000}">
+            <input type="number" data-prop="milliseconds" value="${node.properties?.milliseconds || 1000}">
           </div>
         `;
         break;
@@ -293,14 +314,14 @@ class WorkflowEditor {
         propertiesHtml += `
           <div class="property-group">
             <label>Format</label>
-            <select class="prop-format">
-              <option value="text">Text</option>
-              <option value="json">JSON</option>
+            <select data-prop="format">
+              <option value="text"${(node.properties?.format || 'text') === 'text' ? ' selected' : ''}>Text</option>
+              <option value="json"${node.properties?.format === 'json' ? ' selected' : ''}>JSON</option>
             </select>
           </div>
           <div class="property-group">
             <label>Template</label>
-            <textarea class="prop-template">{{input}}</textarea>
+            <textarea data-prop="template">${node.properties?.template || '{{input}}'}</textarea>
           </div>
         `;
         break;
@@ -314,9 +335,9 @@ class WorkflowEditor {
 
     content.innerHTML = propertiesHtml;
 
-    content.querySelectorAll('input, textarea, select').forEach(input => {
+    content.querySelectorAll('[data-prop]').forEach(input => {
       input.addEventListener('change', (e) => {
-        const propName = e.target.className.replace('prop-', '');
+        const propName = e.target.dataset.prop;
         this.adapter.setNodeProperty(node.id, propName, e.target.value);
       });
     });
@@ -334,7 +355,7 @@ class WorkflowEditor {
     if (!this.adapter) return;
 
     this.adapter.getNodes().forEach(node => {
-      const state = states.get(node.id);
+      const state = states.get(node.id) || states.get(String(node.id));
       if (state) {
         node.executionStatus = state;
       }
@@ -359,10 +380,10 @@ class WorkflowEditor {
   async saveWorkflow() {
     if (!this.state.currentWorkflow) {
       await this.createNewWorkflow();
-      return;
+      return !!this.state.currentWorkflow;
     }
 
-    if (!this.adapter) return;
+    if (!this.adapter) return false;
 
     const graphJson = this.adapter.serialize();
 
@@ -371,14 +392,20 @@ class WorkflowEditor {
       const title = this.container.querySelector('.toolbar-title');
       title.textContent = title.textContent.replace(' *', '');
       await this.loadWorkflows();
+      return true;
     } catch (error) {
       console.error('Failed to save workflow:', error);
       alert('Failed to save workflow: ' + error.message);
+      return false;
     }
   }
 
   async runWorkflow() {
     if (!this.state.currentWorkflow) return;
+    if (!this.executor) return;
+
+    const saved = await this.saveWorkflow();
+    if (!saved || !this.state.currentWorkflow) return;
 
     const btnRun = this.container.querySelector('.btn-run');
     const btnStop = this.container.querySelector('.btn-stop');
@@ -386,17 +413,17 @@ class WorkflowEditor {
     btnRun?.classList.add('hidden');
     btnStop?.classList.remove('hidden');
 
-    await this.executor.startExecution(this.state.currentWorkflow.id);
+    try {
+      await this.executor.startExecution(this.state.currentWorkflow.id);
+    } catch (error) {
+      this.onExecutionFailed({ error: error.message });
+    }
   }
 
   async stopWorkflow() {
+    if (!this.executor) return;
     await this.executor.stopExecution();
-
-    const btnRun = this.container.querySelector('.btn-run');
-    const btnStop = this.container.querySelector('.btn-stop');
-
-    btnRun?.classList.remove('hidden');
-    btnStop?.classList.add('hidden');
+    this.onExecutionFinished();
   }
 
   async createNewWorkflow() {
@@ -430,6 +457,20 @@ class WorkflowEditor {
     if (appView) {
       appView.classList.remove('hidden');
       appView.style.display = 'flex';
+    }
+  }
+
+  onExecutionFinished() {
+    const btnRun = this.container.querySelector('.btn-run');
+    const btnStop = this.container.querySelector('.btn-stop');
+    btnRun?.classList.remove('hidden');
+    btnStop?.classList.add('hidden');
+  }
+
+  onExecutionFailed(data) {
+    this.onExecutionFinished();
+    if (data?.error) {
+      alert('Workflow execution failed: ' + data.error);
     }
   }
 }

@@ -14,14 +14,14 @@ tokio = { version = "1.35", features = ["full"] }
 # Web framework
 axum = "0.7"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "trace", "compression-br", "compression-gzip", "compression-deflate", "limit", "set-header"] }
 
 # Discord bot
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "builder", "http"], optional = true }
 
 # HTTP client
-reqwest = { version = "0.11", features = ["json", "stream"] }
-reqwest-eventsource = "0.5"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest-eventsource = "0.6"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -98,6 +98,7 @@ semver = "1.0"
 aes-gcm = "0.10"
 rand = "0.8"
 sha2 = "0.10"
+local-ip-address = "0.6.11"
 
 [build-dependencies]
 serde_json = "1.0"
@@ -125,9 +126,10 @@ discord = ["serenity"]
 
 [profile.release]
 opt-level = 3
-lto = false
-codegen-units = 4
+lto = "fat"
+codegen-units = 1
 strip = true
+panic = "abort"
 
 [[bench]]
 name = "performance"

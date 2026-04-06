@@ -10,6 +10,14 @@
     margin: 0 auto 24px;
     padding: 16px 0 8px;
     animation: fadeSlideUp 0.3s ease-out;
+    display: flex;
+    flex-direction: column;
+}
+
+:root[data-chat-alignment="split"] .message.user {
+    max-width: min(800px, 82%);
+    margin-left: auto;
+    align-items: flex-end;
 }
 
 .message.task {
@@ -34,6 +42,11 @@
     letter-spacing: 0.05em;
     margin-bottom: 8px;
     color: var(--text-muted);
+}
+
+:root[data-chat-alignment="split"] .message.user .message-role {
+    color: var(--accent);
+    text-align: right;
 }
 
 .message.user .message-role {
@@ -65,8 +78,16 @@
     margin-bottom: 6px;
 }
 
-.message.user .message-content {
+:root[data-chat-alignment="split"] .message.user .message-content {
     color: var(--text-primary);
+    width: fit-content;
+    max-width: 100%;
+}
+
+:root[data-chat-alignment="split"] .message.user .message-content p code {
+    background: var(--bg-tertiary);
+    color: var(--accent);
+    border-color: var(--border);
 }
 
 .queued-notice {

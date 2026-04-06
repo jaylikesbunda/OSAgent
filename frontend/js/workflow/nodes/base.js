@@ -21,10 +21,10 @@ class OSATriggerNode extends OSABaseNode {
     super();
     this.color = '#1a6b3a';
     this.bgcolor = '#1e3a2f';
-    this.addOutput('trigger', 'trigger');
+    this.addOutput('output', 'object');
     this.properties = {
-      nodeId: this.id || `trigger_${Date.now()}`,
-      triggerType: 'manual'
+      node_id: this.id || `trigger_${Date.now()}`,
+      trigger_type: 'manual'
     };
     this.size = [140, 60];
   }
@@ -32,7 +32,7 @@ class OSATriggerNode extends OSABaseNode {
   onExecute() {
     this.setOutputData(0, {
       triggered: true,
-      nodeId: this.properties.nodeId,
+      node_id: this.properties.node_id,
       timestamp: new Date().toISOString()
     });
   }
@@ -46,27 +46,25 @@ class OSAAgentNode extends OSABaseNode {
     super();
     this.color = '#2a5a7a';
     this.bgcolor = '#1e2e3a';
-    this.addInput('context', 'context');
-    this.addOutput('context', 'context');
     this.addOutput('result', 'object');
+    this.addInput('input', 'object');
     this.properties = {
-      nodeId: this.id || `agent_${Date.now()}`,
-      agentId: 'main',
-      systemPrompt: '',
-      taskTemplate: '{{input}}'
+      node_id: this.id || `agent_${Date.now()}`,
+      agent_id: 'main',
+      system_prompt: '',
+      task_template: '{{input}}'
     };
     this.size = [180, 80];
   }
 
   onExecute() {
     const input = this.getInputData(0) || {};
-    const { agentId, systemPrompt, taskTemplate } = this.properties;
+    const { agent_id, system_prompt, task_template } = this.properties;
     
-    this.setOutputData(0, input);
-    this.setOutputData(1, {
-      agentId,
-      task: this.renderTemplate(taskTemplate, input),
-      systemPrompt
+    this.setOutputData(0, {
+      agent_id,
+      task: this.renderTemplate(task_template, input),
+      system_prompt
     });
   }
 
@@ -85,13 +83,7 @@ class OSAAgentNode extends OSABaseNode {
   }
 
   onPropertyChanged(name, value) {
-    if (name === 'agentId') {
-      this.properties.agentId = value;
-    } else if (name === 'systemPrompt') {
-      this.properties.systemPrompt = value;
-    } else if (name === 'taskTemplate') {
-      this.properties.taskTemplate = value;
-    }
+    this.properties[name] = value;
     return true;
   }
 }
@@ -104,10 +96,11 @@ class OSAConditionNode extends OSABaseNode {
     super();
     this.color = '#8a6a20';
     this.bgcolor = '#2a2518';
-    this.addOutput('true', 'flow');
-    this.addOutput('false', 'flow');
+    this.addInput('input', 'object');
+    this.addOutput('true', 'object');
+    this.addOutput('false', 'object');
     this.properties = {
-      nodeId: this.id || `condition_${Date.now()}`,
+      node_id: this.id || `condition_${Date.now()}`,
       expression: 'input.result === "success"'
     };
     this.size = [160, 70];
@@ -118,9 +111,11 @@ class OSAConditionNode extends OSABaseNode {
     const result = this.evaluateExpression(this.properties.expression, input);
     
     if (result) {
-      this.triggerSlot(0, input);
+      this.setOutputData(0, input);
+      this.setOutputData(1, null);
     } else {
-      this.triggerSlot(1, input);
+      this.setOutputData(0, null);
+      this.setOutputData(1, input);
     }
   }
 
@@ -162,7 +157,7 @@ class OSATransformNode extends OSABaseNode {
     this.addInput('input', 'object');
     this.addOutput('output', 'object');
     this.properties = {
-      nodeId: this.id || `transform_${Date.now()}`,
+      node_id: this.id || `transform_${Date.now()}`,
       script: '{{input}}'
     };
     this.size = [160, 70];
@@ -202,10 +197,10 @@ class OSADelayNode extends OSABaseNode {
     super();
     this.color = '#4a4a6a';
     this.bgcolor = '#22222e';
-    this.addInput('trigger', 'flow');
-    this.addOutput('trigger', 'flow');
+    this.addInput('input', 'object');
+    this.addOutput('output', 'object');
     this.properties = {
-      nodeId: this.id || `delay_${Date.now()}`,
+      node_id: this.id || `delay_${Date.now()}`,
       milliseconds: 1000
     };
     this.size = [120, 60];
@@ -213,8 +208,9 @@ class OSADelayNode extends OSABaseNode {
 
   async onExecute() {
     const ms = parseInt(this.properties.milliseconds) || 1000;
+    const input = this.getInputData(0);
     await new Promise(resolve => setTimeout(resolve, ms));
-    this.setOutputData(0, { delayed: true, milliseconds: ms });
+    this.setOutputData(0, input || { delayed: true, milliseconds: ms });
   }
 }
 
@@ -228,7 +224,7 @@ class OSAOutputNode extends OSABaseNode {
     this.bgcolor = '#1e2e1e';
     this.addInput('input', 'object');
     this.properties = {
-      nodeId: this.id || `output_${Date.now()}`,
+      node_id: this.id || `output_${Date.now()}`,
       format: 'text',
       template: '{{input}}',
       destination: 'chat'

@@ -1,6 +1,8 @@
 # Skill Creator Guide
 
-Skills extend OSA's capabilities by connecting to external services and APIs. This guide shows you how to create a skill.
+Skills extend OSA's capabilities by connecting to external services and APIs.
+This guide shows you how to create a skill that the agent can execute at runtime
+without compiling, installing dependencies, or restarting.
 
 ## Skill Anatomy
 
@@ -9,14 +11,15 @@ A skill is a `.oskill` bundle (ZIP file) containing:
 ```
 my-skill/
 ├── manifest.toml    # Skill metadata
-├── SKILL.md         # Instructions for the agent
+├── SKILL.md         # Frontmatter + runtime actions + optional docs
+├── scripts/         # Optional: script-backed actions
 └── icon.png         # Optional icon (256x256)
 ```
 
 ## Step 1: Create the Directory Structure
 
 ```bash
-mkdir -p my-skill
+mkdir -p my-skill/scripts
 cd my-skill
 ```
 
@@ -37,48 +40,91 @@ icon = "icon.png"    # Optional
 
 ## Step 3: Create SKILL.md
 
+The YAML frontmatter between `---` lines defines the skill metadata, required
+configuration, and **runtime actions**. The agent calls actions via the built-in
+`skill_action` tool. Your secrets are never shown to the agent.
+
 ```markdown
 ---
 name: my-service
 description: "My service integration"
 emoji: "🔧"
 requires:
-  bins: ["my-cli-tool"]
+  bins: ["optional-cli"]
+config:
+  - name: API_KEY
+    type: api_key
+    description: "Your API key"
+    required: true
+  - name: BASE_URL
+    type: string
+    description: "API base URL"
+    required: false
+    default: "https://api.example.com"
+actions:
+  - name: status
+    description: "Get current status from the service"
+    type: http
+    method: GET
+    url: "{{ config.BASE_URL }}/status"
+    headers:
+      Authorization: "Bearer {{ config.API_KEY }}"
+      Accept: "application/json"
+  - name: create_record
+    description: "Create a new record"
+    type: http
+    method: POST
+    url: "{{ config.BASE_URL }}/records"
+    headers:
+      Authorization: "Bearer {{ config.API_KEY }}"
+      Content-Type: "application/json"
+    body:
+      name: "{{ args.name }}"
+      value: "{{ args.value }}"
+    parameters:
+      - name: name
+        type: string
+        description: "Record name"
+        required: true
+      - name: value
+        type: string
+        description: "Record value"
+        required: true
+  - name: generate_report
+    description: "Generate a report file"
+    type: script
+    script: "scripts/generate_report.py"
+    parameters:
+      - name: format
+        type: string
+        description: "Report format (json, csv, html)"
+        required: false
 ---
+
 # My Service Skill
 
 Brief description of what this skill enables.
 
-## Commands
+## Runtime Actions
 
-### Action Name
-Description of when to use this command.
-
-```bash
-my-cli-tool action --arg "{{ skill.env.VAR_NAME }}"
-```
+- `status` shows current service status.
+- `create_record(name, value)` creates a record.
+- `generate_report(format?)` generates a report file.
 
 ## Configuration
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `API_KEY` | Your API key from example.com | Yes |
-| `REGION` | Data region (us, eu, ap) | No |
+| `BASE_URL` | API base URL (default: https://api.example.com) | No |
 
 ## Setup
 
-1. Install the CLI: `brew install my-cli-tool`
-2. Get API key from [example.com/keys](https://example.com/keys)
-3. Configure the skill with your credentials
-
-## Usage
-
-Explain how the agent uses this skill in natural language.
+1. Get an API key from https://example.com/keys
+2. Paste it in the skill configuration settings
 ```
 
-### SKILL.md Frontmatter
-
-The YAML frontmatter (between `---` lines) defines:
+### Frontmatter Reference
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -87,24 +133,62 @@ The YAML frontmatter (between `---` lines) defines:
 | `emoji` | string | Emoji for UI display |
 | `requires.bins` | string[] | Required CLI binaries |
 | `requires.files` | string[] | Required files |
+| `config` | list | Configuration fields the user sets in the UI |
+| `actions` | list | Runtime actions the agent can execute |
 
-### Template Variables in Commands
+### Config Field Types
 
-Use `{{ skill.env.VARNAME }}` to reference configuration values:
+| Type | UI Input |
+|------|----------|
+| `api_key` | Password input, masked in UI |
+| `password` | Password input, masked in UI |
+| `string` | Text input |
+| `number` | Numeric input |
+| `boolean` | Toggle |
 
-```bash
-api call --key "{{ skill.env.API_KEY }}" --region "{{ skill.env.REGION | default: 'us' }}"
+### Action Types
+
+#### HTTP Actions
+
+Call REST APIs directly. The engine handles auth headers and response parsing.
+
+```yaml
+type: http
+method: GET|POST|PUT|DELETE|PATCH
+url: "https://api.example.com/endpoint"
+headers:
+  Authorization: "Bearer {{ config.API_KEY }}"
+query:
+  param: "{{ args.value }}"
+body:
+  key: "{{ args.arg }}"
 ```
 
-### Jinja2 Features
+**Template variables:**
+- `{{ config.VAR }}` — resolved from the user's saved skill config
+- `{{ args.param }}` — resolved from the agent's call arguments
 
-Commands support Jinja2 templating:
+#### Script Actions
 
-```bash
-{% for item in items %}
-process --item "{{ item }}"
-{% endfor %}
+Run a bundled script. Scripts receive environment variables:
+
+```yaml
+type: script
+script: "scripts/myscript.py"
 ```
+
+**Environment variables available to scripts:**
+- `OSA_SKILL_NAME` — the skill name
+- `OSA_SKILL_ACTION` — the action name
+- `OSA_SKILL_ARGS_JSON` — full JSON of agent-supplied arguments
+- `OSA_SKILL_ARG_<KEY>` — each argument as an uppercase env var
+- All skill config values (e.g. `API_KEY`, `BASE_URL`)
+
+**Supported script extensions:**
+- `.py` → runs with `python`
+- `.sh` → runs with `sh`
+- `.ps1` → runs with `powershell`
+- `.js` → runs with `node`
 
 ## Step 4: Add an Icon (Optional)
 
@@ -116,11 +200,12 @@ Create a 256x256px PNG icon. Name it `icon.png` in the skill folder.
 # Navigate to parent directory
 cd ..
 
-# Create ZIP bundle
+# Create ZIP bundle (zip is needed because .oskill is a zip with a different extension)
 zip -r my-service.oskill my-service/
 
-# Or on Windows
-powershell -command "Compress-Archive -Path my-service -DestinationPath my-service.oskill"
+# Or on Windows (rename zip to oskill after)
+Compress-Archive -Path my-service -DestinationPath my-service.zip -Force
+Rename-Item my-service.zip my-service.oskill
 ```
 
 ## Step 6: Install and Test
@@ -130,64 +215,45 @@ powershell -command "Compress-Archive -Path my-service -DestinationPath my-servi
 3. Configure your API keys in the skill settings
 4. Click "Test" to verify connectivity
 
+## How the Agent Uses Skills
+
+1. The agent calls `skill_list()` to discover available skills and their actions.
+2. The agent calls `skill_action(skill="my-service", action="status")`.
+3. The backend resolves config, templates arguments, and executes the action.
+4. The agent receives the result. Config secrets are never exposed.
+
 ## Example Skills
 
 See `examples/skills/` for reference implementations:
 
-- **github** - GitHub CLI integration
-- **spotify** - Spotify playback control  
-- **word** - Microsoft Word document creation
-
-## CLI-Based vs API-Based Skills
-
-### CLI-Based (Simpler)
-
-Use shell commands with CLIs:
-
-```bash
-gh issue create --title "Bug"
-spogo play
-```
-
-**Requirements:**
-- CLI tool installed on system
-- Auth configured (token, login, etc.)
-- API keys passed via environment
-
-### API-Based (More Complex)
-
-Use HTTP requests directly:
-
-```bash
-curl -H "Authorization: Bearer {{ skill.env.API_KEY }}" \
-     "{{ skill.env.BASE_URL }}/api/endpoint"
-```
-
-**Requirements:**
-- API authentication (OAuth, API key, etc.)
-- Network access
-- Response parsing
+- **spotify** — Spotify playback control via Web API (HTTP actions)
+- **github** — GitHub REST API integration (HTTP actions)
+- **word** — Word document creation (script action)
 
 ## Best Practices
 
-1. **Use CLI tools when available** - They handle auth and edge cases
-2. **Document required binaries** - Add to `requires.bins`
-3. **Provide sensible defaults** - Use `| default: 'value'`
-4. **Include setup instructions** - Help users get started
-5. **Test with real credentials** - Use the Test button
+1. **Use HTTP actions when possible** — no external CLI needed, zero dependencies
+2. **Use script actions sparingly** — for logic that cannot be expressed declaratively
+3. **Document required configuration** — help users get started
+4. **Keep actions focused** — one action per atomic operation
+5. **Test with real credentials** — use the Test button in the UI
 
 ## Troubleshooting
 
 **Skill not appearing?**
 - Check manifest.toml syntax is valid
 - Ensure SKILL.md exists in skill folder
-- Bundle must be `.oskill` extension
+- Bundle must be `.oskill` extension (ZIP internally)
 
-**CLI not found?**
-- Add to `requires.bins` array
-- Document installation in Setup section
+**Action not found?**
+- Ensure the action name matches what `skill_list` shows
+- Check the YAML `type:` is `http` or `script`
 
-**API errors?**
-- Verify API key is set correctly
-- Check BASE_URL environment variable
-- Test with curl directly first
+**Config errors?**
+- Verify required config fields are set in the skill settings UI
+- Check `{{ config.VAR }}` names match the config field names exactly
+
+**Script errors?**
+- Ensure the script file exists at the path in the `script:` field
+- Check script has the correct file extension
+- Verify the script runs standalone outside OSA

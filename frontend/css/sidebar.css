@@ -108,6 +108,23 @@
     color: var(--text-muted);
 }
 
+.session-search select {
+    width: 100%;
+    margin-top: 8px;
+    padding: 7px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.session-search select:focus {
+    border-color: var(--text-primary);
+}
+
 .session-item {
     padding: 12px 16px;
     border-radius: 8px;
@@ -129,13 +146,26 @@
 }
 
 .session-actions {
-    display: none;
+    display: flex;
     gap: 4px;
     margin-left: auto;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    flex-shrink: 0;
+    transition: opacity 0.15s ease;
 }
 
 .session-item:hover .session-actions {
-    display: flex;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+
+.session-item:focus-within .session-actions {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
 }
 
 .session-action-btn {
@@ -204,6 +234,39 @@
     font-size: 11px;
     color: var(--text-muted);
     margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.session-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.session-source-badge {
+    font-size: 10px;
+    line-height: 1;
+    padding: 3px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    flex-shrink: 0;
+}
+
+.session-source-badge.source-discord {
+    border-color: rgba(88, 101, 242, 0.5);
+    color: #a9b2ff;
+}
+
+.session-source-badge.source-discord-shared {
+    border-color: rgba(86, 204, 242, 0.5);
+    color: #88d8f0;
 }
 
 .sidebar-backdrop {
@@ -244,10 +307,97 @@
 
 .session-icon-running {
     background: var(--bg-tertiary);
+    position: relative;
+    overflow: hidden;
 }
 
-.session-icon-canvas {
+.session-running-orbits {
+    position: relative;
+    width: 24px;
+    height: 24px;
     display: block;
+}
+
+.session-running-track {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 22px;
+    height: 10px;
+    margin-left: -11px;
+    margin-top: -5px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 999px;
+    animation: session-orbit-spin var(--orbit-speed, 2.2s) linear infinite;
+    animation-delay: var(--orbit-delay, 0s);
+    transform: rotate(var(--orbit-tilt, 0deg));
+}
+
+.session-running-track::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: -1px;
+    width: var(--dot-size, 2.4px);
+    height: var(--dot-size, 2.4px);
+    margin-left: calc(var(--dot-size, 2.4px) * -0.5);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.72);
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.22);
+}
+
+.session-running-track.track-a {
+    --orbit-tilt: -23deg;
+    --orbit-speed: 2.2s;
+    --dot-size: 2.6px;
+}
+
+.session-running-track.track-b {
+    --orbit-tilt: 52deg;
+    --orbit-speed: 1.6s;
+    --orbit-delay: -0.4s;
+    --dot-size: 2.2px;
+}
+
+.session-running-track.track-c {
+    --orbit-tilt: -97deg;
+    --orbit-speed: 2.8s;
+    --orbit-delay: -0.8s;
+    --dot-size: 1.8px;
+}
+
+.session-running-core {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 10px;
+    height: 10px;
+    margin-left: -5px;
+    margin-top: -5px;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0.1) 45%, rgba(255, 255, 255, 0) 75%);
+}
+
+.session-running-core::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 3px;
+    height: 3px;
+    margin-left: -1.5px;
+    margin-top: -1.5px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.68);
+}
+
+@keyframes session-orbit-spin {
+    from {
+        transform: rotate(var(--orbit-tilt, 0deg)) rotate(0deg);
+    }
+    to {
+        transform: rotate(var(--orbit-tilt, 0deg)) rotate(360deg);
+    }
 }
 
 .session-name {

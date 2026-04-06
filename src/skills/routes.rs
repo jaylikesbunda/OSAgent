@@ -25,6 +25,7 @@ pub struct SkillInfoResponse {
     pub version: Option<String>,
     pub author: Option<String>,
     pub emoji: Option<String>,
+    pub icon_url: Option<String>,
     pub has_icon: bool,
     pub enabled: bool,
     pub has_config: bool,
@@ -46,11 +47,13 @@ pub struct SkillDetailResponse {
     pub version: Option<String>,
     pub author: Option<String>,
     pub emoji: Option<String>,
+    pub icon_url: Option<String>,
     pub has_icon: bool,
     pub enabled: bool,
     pub content: String,
     pub config: HashMap<String, MaskedValueResponse>,
     pub config_schema: Vec<ConfigFieldResponse>,
+    pub has_authorize: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +112,7 @@ pub fn create_skills_router(skill_service: Arc<SkillService>) -> Router {
         )
         .route("/api/skills/:name/enabled", put(set_skill_enabled))
         .route("/api/skills/:name/test", post(test_skill))
+        .route("/api/skills/:name/authorize", post(authorize_skill))
         .route("/api/skills/:name/export", get(export_skill))
         .route("/api/skills/install", post(install_skill))
         .route("/api/skills/uninstall", post(uninstall_skill))
@@ -130,6 +134,7 @@ async fn list_skills(
                 version: s.version,
                 author: s.author,
                 emoji: s.emoji,
+                icon_url: s.icon_url,
                 has_icon: s.has_icon,
                 enabled: s.enabled,
                 has_config: s.has_config,
@@ -184,11 +189,13 @@ async fn get_skill(
         version: details.info.version,
         author: details.info.author,
         emoji: details.info.emoji,
+        icon_url: details.info.icon_url,
         has_icon: details.info.has_icon,
         enabled: details.info.enabled,
         content: details.content,
         config,
         config_schema,
+        has_authorize: details.has_authorize,
     }))
 }
 
@@ -265,6 +272,23 @@ async fn test_skill(
             env.len()
         ),
     }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthorizeResult {
+    pub message: String,
+}
+
+async fn authorize_skill(
+    Extension(service): Extension<Arc<SkillService>>,
+    Path(name): Path<String>,
+) -> Result<Json<AuthorizeResult>, OSAgentError> {
+    if !service.skill_exists(&name) {
+        return Err(OSAgentError::Unknown(format!("Skill '{}' not found", name)));
+    }
+
+    let output = service.authorize_skill(&name).await?;
+    Ok(Json(AuthorizeResult { message: output }))
 }
 
 #[derive(Debug, Serialize)]
@@ -348,6 +372,7 @@ async fn reload_skills(
                 version: s.version,
                 author: s.author,
                 emoji: s.emoji,
+                icon_url: s.icon_url,
                 has_icon: s.has_icon,
                 enabled: s.enabled,
                 has_config: s.has_config,

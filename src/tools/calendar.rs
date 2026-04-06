@@ -30,7 +30,8 @@ impl CalendarTool {
         let base_dir = std::env::var("OSAGENT_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string()).join(".osagent")
+                PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string())
+                    .join(".osagent")
             });
         Self {
             storage_path: base_dir.join("calendar").join("events.json"),
@@ -48,8 +49,9 @@ impl CalendarTool {
         }
 
         let raw = fs::read_to_string(&self.storage_path).map_err(OSAgentError::Io)?;
-        serde_json::from_str(&raw)
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to parse calendar data: {}", e)))
+        serde_json::from_str(&raw).map_err(|e| {
+            OSAgentError::ToolExecution(format!("Failed to parse calendar data: {}", e))
+        })
     }
 
     fn save_events(&self, events: &[CalendarEvent]) -> Result<()> {
@@ -87,15 +89,14 @@ impl CalendarTool {
         }
 
         if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
-            let naive = date.and_hms_opt(0, 0, 0).ok_or_else(|| {
-                OSAgentError::ToolExecution("Invalid date value".to_string())
-            })?;
+            let naive = date
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| OSAgentError::ToolExecution("Invalid date value".to_string()))?;
             return Self::local_naive_to_fixed(naive);
         }
 
         Err(OSAgentError::ToolExecution(
-            "Invalid datetime. Use RFC3339 or local formats like '2026-04-04 15:30'"
-                .to_string(),
+            "Invalid datetime. Use RFC3339 or local formats like '2026-04-04 15:30'".to_string(),
         ))
     }
 
@@ -166,8 +167,12 @@ impl CalendarTool {
             title: title.trim().to_string(),
             start: start.to_rfc3339(),
             end: end.map(|value| value.to_rfc3339()),
-            description: args["description"].as_str().map(|value| value.trim().to_string()),
-            location: args["location"].as_str().map(|value| value.trim().to_string()),
+            description: args["description"]
+                .as_str()
+                .map(|value| value.trim().to_string()),
+            location: args["location"]
+                .as_str()
+                .map(|value| value.trim().to_string()),
             created_at: now.clone(),
             updated_at: now,
         };
@@ -175,13 +180,19 @@ impl CalendarTool {
         let mut events = self.load_events()?;
         events.push(event.clone());
         self.save_events(&events)?;
-        Ok(format!("Created calendar event\n\n{}", Self::render_event(&event)))
+        Ok(format!(
+            "Created calendar event\n\n{}",
+            Self::render_event(&event)
+        ))
     }
 
     fn list_events(&self, args: &Value, upcoming_only: bool) -> Result<String> {
         let limit = Self::parse_limit(args);
         let now = Utc::now().timestamp();
-        let from = args["from"].as_str().map(Self::parse_datetime).transpose()?;
+        let from = args["from"]
+            .as_str()
+            .map(Self::parse_datetime)
+            .transpose()?;
         let to = args["to"].as_str().map(Self::parse_datetime).transpose()?;
 
         let events = Self::sorted_events(self.load_events()?)
@@ -231,19 +242,23 @@ impl CalendarTool {
             .load_events()?
             .into_iter()
             .find(|event| event.id == id)
-            .ok_or_else(|| OSAgentError::ToolExecution(format!("Calendar event not found: {}", id)))?;
+            .ok_or_else(|| {
+                OSAgentError::ToolExecution(format!("Calendar event not found: {}", id))
+            })?;
         Ok(Self::render_event(&event))
     }
 
     fn update_event(&self, args: &Value) -> Result<String> {
-        let id = args["id"].as_str().ok_or_else(|| {
-            OSAgentError::ToolExecution("id is required for update".to_string())
-        })?;
+        let id = args["id"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("id is required for update".to_string()))?;
         let mut events = self.load_events()?;
         let event = events
             .iter_mut()
             .find(|event| event.id == id)
-            .ok_or_else(|| OSAgentError::ToolExecution(format!("Calendar event not found: {}", id)))?;
+            .ok_or_else(|| {
+                OSAgentError::ToolExecution(format!("Calendar event not found: {}", id))
+            })?;
 
         if let Some(title) = args["title"].as_str() {
             if title.trim().is_empty() {
@@ -257,13 +272,21 @@ impl CalendarTool {
             event.start = Self::parse_datetime(start)?.to_rfc3339();
         }
         if args.get("end").is_some() {
-            event.end = args["end"].as_str().map(Self::parse_datetime).transpose()?.map(|dt| dt.to_rfc3339());
+            event.end = args["end"]
+                .as_str()
+                .map(Self::parse_datetime)
+                .transpose()?
+                .map(|dt| dt.to_rfc3339());
         }
         if args.get("description").is_some() {
-            event.description = args["description"].as_str().map(|value| value.trim().to_string());
+            event.description = args["description"]
+                .as_str()
+                .map(|value| value.trim().to_string());
         }
         if args.get("location").is_some() {
-            event.location = args["location"].as_str().map(|value| value.trim().to_string());
+            event.location = args["location"]
+                .as_str()
+                .map(|value| value.trim().to_string());
         }
 
         let start = DateTime::parse_from_rfc3339(&event.start).map_err(|e| {
@@ -283,18 +306,24 @@ impl CalendarTool {
         event.updated_at = Utc::now().to_rfc3339();
         let updated = event.clone();
         self.save_events(&events)?;
-        Ok(format!("Updated calendar event\n\n{}", Self::render_event(&updated)))
+        Ok(format!(
+            "Updated calendar event\n\n{}",
+            Self::render_event(&updated)
+        ))
     }
 
     fn delete_event(&self, args: &Value) -> Result<String> {
-        let id = args["id"].as_str().ok_or_else(|| {
-            OSAgentError::ToolExecution("id is required for delete".to_string())
-        })?;
+        let id = args["id"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("id is required for delete".to_string()))?;
         let mut events = self.load_events()?;
         let before = events.len();
         events.retain(|event| event.id != id);
         if events.len() == before {
-            return Err(OSAgentError::ToolExecution(format!("Calendar event not found: {}", id)));
+            return Err(OSAgentError::ToolExecution(format!(
+                "Calendar event not found: {}",
+                id
+            )));
         }
         self.save_events(&events)?;
         Ok(format!("Deleted calendar event {}", id))
@@ -394,9 +423,9 @@ impl Tool for CalendarTool {
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
-        let action = args["action"].as_str().ok_or_else(|| {
-            OSAgentError::ToolExecution("action is required".to_string())
-        })?;
+        let action = args["action"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("action is required".to_string()))?;
 
         match action {
             "create" => self.create_event(&args),
@@ -421,7 +450,10 @@ mod tests {
     #[test]
     fn parses_local_datetime_format() {
         let parsed = CalendarTool::parse_datetime("2026-04-04 15:30").unwrap();
-        assert_eq!(parsed.format("%Y-%m-%d %H:%M").to_string(), "2026-04-04 15:30");
+        assert_eq!(
+            parsed.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-04-04 15:30"
+        );
     }
 
     #[tokio::test]

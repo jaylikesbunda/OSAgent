@@ -787,6 +787,8 @@ pub const DEFAULT_TOOLS: &[&str] = &[
     "todoread",
     "question",
     "skill",
+    "skill_list",
+    "skill_action",
     "lsp",
     "plan_exit",
     "subagent",
@@ -1983,12 +1985,16 @@ fn tool_line_detailed(name: &str) -> Option<(String, String)> {
             "question(text=\"Delete all test files?\")".to_string(),
         )),
         "skill" => Some((
-            "- skill: invoke a loaded skill for a specialized workflow".to_string(),
-            "skill(name=\"code_review\", args={\"repo\": \".\"})".to_string(),
+            "- skill: inspect a loaded skill's safe metadata and runtime actions".to_string(),
+            "skill(name=\"spotify\")".to_string(),
         )),
         "skill_list" => Some((
-            "- skill_list: inspect available loaded skills".to_string(),
+            "- skill_list: inspect available loaded skills and their runtime actions".to_string(),
             "skill_list()".to_string(),
+        )),
+        "skill_action" => Some((
+            "- skill_action: execute a runtime action exposed by an installed skill".to_string(),
+            "skill_action(skill=\"spotify\", action=\"pause\")".to_string(),
         )),
         "lsp" => Some((
             "- lsp: query language server definitions, references, and diagnostics".to_string(),
@@ -2101,12 +2107,16 @@ fn tool_line_with_example(name: &str) -> Option<(String, String)> {
             "question(text=\"Proceed with deployment?\")".to_string(),
         )),
         "skill" => Some((
-            "- skill: invoke a loaded skill for a specialized workflow".to_string(),
-            "skill(name=\"refactor\", args={\"target\": \"auth\"})".to_string(),
+            "- skill: inspect a loaded skill's safe metadata and runtime actions".to_string(),
+            "skill(name=\"spotify\")".to_string(),
         )),
         "skill_list" => Some((
-            "- skill_list: inspect available loaded skills".to_string(),
+            "- skill_list: inspect available loaded skills and their runtime actions".to_string(),
             "skill_list()".to_string(),
+        )),
+        "skill_action" => Some((
+            "- skill_action: execute a runtime action exposed by an installed skill".to_string(),
+            "skill_action(skill=\"spotify\", action=\"pause\")".to_string(),
         )),
         "lsp" => Some((
             "- lsp: query language server definitions, references, and diagnostics".to_string(),

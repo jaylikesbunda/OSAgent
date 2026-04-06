@@ -25,37 +25,61 @@ impl SkillBundle {
 
         let mut manifest: Option<BundleManifest> = None;
 
+        // Detect prefix from manifest.toml location
+        let mut root_prefix: Option<PathBuf> = None;
+        for i in 0..archive.len() {
+            let file = archive.by_index(i)?;
+            let raw_path = file.mangled_name();
+            if Self::is_manifest(&raw_path) {
+                if let Some(parent) = raw_path.parent() {
+                    if parent.as_os_str().is_empty() {
+                        root_prefix = None;
+                    } else {
+                        root_prefix = Some(parent.to_path_buf());
+                    }
+                }
+                break;
+            }
+        }
+
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
             let raw_path = file.mangled_name();
-            let outpath = target_dir.join(&raw_path);
 
-            if file.name() == "manifest.toml" {
+            let effective_path = if let Some(ref prefix) = root_prefix {
+                raw_path
+                    .strip_prefix(prefix)
+                    .unwrap_or(&raw_path)
+                    .to_path_buf()
+            } else {
+                raw_path.clone()
+            };
+
+            if Self::is_manifest(&raw_path) {
                 let mut content = String::new();
                 file.read_to_string(&mut content)?;
                 manifest = Some(
                     toml::from_str(&content)
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
                 );
-            } else if outpath
-                .parent()
-                .map(|p| !p.as_os_str().is_empty())
-                .unwrap_or(false)
-            {
-                let comment = file.comment();
-                if !comment.is_empty() && comment.starts_with("icon:") {
-                    continue;
-                }
+                continue;
+            }
 
-                if file.is_dir() {
-                    fs::create_dir_all(&outpath)?;
-                } else {
-                    if let Some(parent) = outpath.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    let mut outfile = fs::File::create(&outpath)?;
-                    std::io::copy(&mut file, &mut outfile)?;
+            let comment = file.comment();
+            if !comment.is_empty() && comment.starts_with("icon:") {
+                continue;
+            }
+
+            let outpath = target_dir.join(&effective_path);
+
+            if file.is_dir() {
+                fs::create_dir_all(&outpath)?;
+            } else {
+                if let Some(parent) = outpath.parent() {
+                    fs::create_dir_all(parent)?;
                 }
+                let mut outfile = fs::File::create(&outpath)?;
+                std::io::copy(&mut file, &mut outfile)?;
             }
         }
 
@@ -141,7 +165,8 @@ impl SkillBundle {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            if file.name() == "manifest.toml" {
+            let path = file.mangled_name();
+            if Self::is_manifest(&path) {
                 let mut content = String::new();
                 file.read_to_string(&mut content)?;
                 return toml::from_str(&content)
@@ -177,6 +202,12 @@ impl SkillBundle {
         }
 
         Ok(())
+    }
+
+    fn is_manifest(path: &std::path::Path) -> bool {
+        path.file_name()
+            .map(|name| name == "manifest.toml")
+            .unwrap_or(false)
     }
 }
 

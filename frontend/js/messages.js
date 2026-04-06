@@ -259,12 +259,12 @@ OSA.setThinkingPreview = function(container, text) {
     previewEl.style.display = preview ? '' : 'none';
 };
 
-OSA.ensureCurrentSessionAssistantMessage = function() {
+OSA.ensureCurrentSessionAssistantMessage = function(forceNew = false) {
     const session = OSA.getCurrentSession();
     if (!session) return null;
     if (!Array.isArray(session.messages)) session.messages = [];
     const last = session.messages[session.messages.length - 1];
-    if (last && last.role === 'assistant' && !OSA.isHiddenSyntheticMessage(last)) return last;
+    if (!forceNew && last && last.role === 'assistant' && !OSA.isHiddenSyntheticMessage(last)) return last;
 
     const next = {
         role: 'assistant',
@@ -432,6 +432,37 @@ OSA.releaseStreamingAssistantMessage = function() {
     OSA.resetStreamingMessage();
 };
 
+OSA.commitStreamingAssistantSegment = function() {
+    const domId = OSA.getStreamingAssistantDomId();
+    if (!domId) return;
+
+    const message = document.getElementById(domId);
+    if (!message) {
+        OSA.resetStreamingMessage();
+        return;
+    }
+
+    message.classList.remove('streaming');
+    OSA.completeThinkingDisplay();
+
+    const contentEl = message.querySelector('.message-content');
+    const rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
+    const thinkingEl = message.querySelector('.thinking-body');
+    const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
+    if (!rawText && !thinkingText) {
+        message.remove();
+        OSA.resetStreamingMessage();
+        return;
+    }
+
+    const actionsEl = message.querySelector('.message-actions');
+    if (actionsEl && rawText) {
+        actionsEl.style.display = '';
+    }
+
+    OSA.resetStreamingMessage();
+};
+
 OSA.createAssistantMessageShell = function() {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return null;
@@ -484,13 +515,35 @@ OSA.beginAssistantResponse = function() {
 };
 
 OSA.beginThinkingDisplay = function() {
-    OSA.ensureCurrentSessionAssistantMessage();
     if (!OSA.getShowThinkingBlocks()) return null;
+
+    const currentMessage = OSA.getStreamingAssistantMessage();
+    const currentContent = currentMessage
+        ? ((currentMessage.querySelector('.message-content')?.dataset.rawText) || '').trim()
+        : '';
+    const session = OSA.getCurrentSession();
+    const last = session && Array.isArray(session.messages)
+        ? session.messages[session.messages.length - 1]
+        : null;
+    const shouldStartNewSegment = !!(
+        currentContent
+        || (last && last.role === 'assistant' && !OSA.isHiddenSyntheticMessage(last) && (last.content || '').trim())
+    );
+
+    if (shouldStartNewSegment) {
+        OSA.commitStreamingAssistantSegment();
+    }
+
+    OSA.ensureCurrentSessionAssistantMessage(shouldStartNewSegment);
     OSA.hideThinkingIndicator();
     const message = OSA.ensureStreamingAssistantMessage();
+    const existingContainer = message ? message.querySelector('.message-thinking') : null;
     const container = OSA.ensureThinkingContainer(message);
     if (!container) return null;
-    container.classList.add('expanded', 'streaming');
+    container.classList.add('streaming');
+    if (!existingContainer || !container.dataset.userToggled) {
+        container.classList.add('expanded');
+    }
     OSA.setThinkingPreview(container, '');
     return container;
 };
