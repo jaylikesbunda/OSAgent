@@ -161,3 +161,21 @@ OSA.setShowThinkingBlocks = value => {
     OSA.showThinkingBlocks = value;
     localStorage.setItem('osagent-show-thinking-blocks', value ? 'true' : 'false');
 };
+OSA.messageChain = {
+    lastEventType: null,
+    lastAssistantDomId: null,
+    pendingToolCallIds: [],
+    eventSeqNumber: 0,
+    lastThinkingEndSeq: 0,
+    lastToolStartSeq: 0,
+};
+OSA.getMessageChain = () => OSA.messageChain;
+OSA.messageChain = {
+    lastEventType: null,
+    lastAssistantDomId: null,
+    pendingToolCallIds: [],
+    eventSeqNumber: 0,
+    lastThinkingEndSeq: 0,
+    lastToolStartSeq: 0,
+};
+OSA.getMessageChain = () => OSA.messageChain;

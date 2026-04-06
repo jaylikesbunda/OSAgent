@@ -296,6 +296,12 @@
     font-family: 'JetBrains Mono', monospace;
 }
 
+.turn-tokens {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+}
+
 .error-card {
     display: flex;
     align-items: center;

@@ -123,11 +123,26 @@ OSA.renderWorkspaceMenu = function() {
     }).join('');
 };
 
-OSA.selectWorkspaceFromMenu = function(workspaceId) {
+OSA.selectWorkspaceFromMenu = async function(workspaceId) {
     const ws = OSA.getWorkspaceState();
     ws.activeWorkspace = workspaceId;
     OSA.setWorkspaceState(ws);
     OSA.onWorkspaceSelectionChange();
+
+    try {
+        const res = await fetch('/api/workspaces/active', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspace_id: workspaceId })
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            console.error('Failed to set active workspace:', data.error || `HTTP ${res.status}`);
+        }
+    } catch (error) {
+        console.error('Failed to set active workspace:', error.message);
+    }
+
     const currentSession = OSA.getCurrentSession();
     if (currentSession?.id) {
         OSA.applySessionWorkspace();
@@ -175,7 +190,7 @@ OSA.renderWorkspacePathsEditor = function(paths) {
     
     container.innerHTML = paths.map((wp, idx) => `
         <div class="workspace-path-row" data-index="${idx}">
-            <input type="text" class="workspace-path-input" value="${OSA.escapeHtml(wp.path || '')}" placeholder="Choose a folder or enter path" />
+            <input type="text" class="workspace-path-input" value="${OSA.escapeHtml(wp.path || '')}" placeholder="Click to browse or type path" data-path-idx="${idx}" />
             <select class="workspace-path-perm">
                 <option value="read_write" ${wp.permission === 'read_write' ? 'selected' : ''}>Read + write</option>
                 <option value="read_only" ${wp.permission === 'read_only' ? 'selected' : ''}>Read only</option>
@@ -185,6 +200,15 @@ OSA.renderWorkspacePathsEditor = function(paths) {
     `).join('') + `<button class="workspace-path-add" type="button" onclick="OSA.browseWorkspacePath()">+ Add path</button>`;
     
     container.dataset.paths = JSON.stringify(paths);
+    
+    container.querySelectorAll('.workspace-path-input').forEach(input => {
+        input.addEventListener('click', function() {
+            if (!this.dataset.browseBound) {
+                this.dataset.browseBound = 'true';
+                OSA.browseWorkspacePathForInput(this);
+            }
+        });
+    });
 };
 
 OSA.removeWorkspacePathRow = function(index) {
@@ -196,6 +220,35 @@ OSA.removeWorkspacePathRow = function(index) {
     }
     paths.splice(index, 1);
     OSA.renderWorkspacePathsEditor(paths);
+};
+
+OSA.browseWorkspacePathForInput = async function(inputEl) {
+    OSA.setWorkspaceInlineStatus('');
+    try {
+        const res = await fetch('/api/workspaces/browse', {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        
+        inputEl.value = data.path;
+        inputEl.dataset.browseBound = '';
+        
+        const container = document.getElementById('workspace-paths-container');
+        let paths = JSON.parse(container.dataset.paths || '[]');
+        const idx = parseInt(inputEl.dataset.pathIdx);
+        if (!isNaN(idx) && paths[idx]) {
+            paths[idx].path = data.path;
+            container.dataset.paths = JSON.stringify(paths);
+        }
+        
+        OSA.setWorkspaceInlineStatus('Folder selected.');
+    } catch (error) {
+        if (error.message !== 'Folder selection was cancelled') {
+            OSA.setWorkspaceInlineStatus(error.message, true);
+        }
+        inputEl.dataset.browseBound = '';
+    }
 };
 
 OSA.browseWorkspacePath = async function() {

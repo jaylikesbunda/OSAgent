@@ -733,6 +733,9 @@ impl AgentRuntime {
         let mut recent_tool_intents: Vec<String> = Vec::new();
         let mut recent_tool_signatures: Vec<String> = Vec::new();
         let mut recent_tool_outcomes: Vec<(String, bool, String)> = Vec::new();
+        let mut total_input_tokens: usize = 0;
+        let mut total_output_tokens: usize = 0;
+        let mut total_tokens: usize = 0;
 
         loop {
             iteration += 1;
@@ -1200,6 +1203,9 @@ impl AgentRuntime {
                             cached_write: usage.cached_write,
                             reasoning: usage.reasoning,
                         });
+                        total_input_tokens += usage.input;
+                        total_output_tokens += usage.output;
+                        total_tokens += usage.total;
                     }
                 }
                 self.session_manager.update_session(&session).await?;
@@ -1224,6 +1230,9 @@ impl AgentRuntime {
                         cached_write: usage.cached_write,
                         reasoning: usage.reasoning,
                     });
+                    total_input_tokens += usage.input;
+                    total_output_tokens += usage.output;
+                    total_tokens += usage.total;
                 }
                 session.messages.push(assistant_message);
                 self.session_manager.update_session(&session).await?;
@@ -1798,6 +1807,18 @@ impl AgentRuntime {
                 self.event_bus.emit(AgentEvent::ResponseComplete {
                     session_id: session_id.to_string(),
                     timestamp: SystemTime::now(),
+                    usage: if total_tokens > 0 {
+                        Some(EventTokenUsage {
+                            input: total_input_tokens,
+                            output: total_output_tokens,
+                            total: total_tokens,
+                            cached_read: None,
+                            cached_write: None,
+                            reasoning: None,
+                        })
+                    } else {
+                        None
+                    },
                 });
                 response_complete_emitted = true;
                 break;
@@ -1922,6 +1943,18 @@ impl AgentRuntime {
             self.event_bus.emit(AgentEvent::ResponseComplete {
                 session_id: session_id.to_string(),
                 timestamp: SystemTime::now(),
+                usage: if total_tokens > 0 {
+                    Some(EventTokenUsage {
+                        input: total_input_tokens,
+                        output: total_output_tokens,
+                        total: total_tokens,
+                        cached_read: None,
+                        cached_write: None,
+                        reasoning: None,
+                    })
+                } else {
+                    None
+                },
             });
         }
 

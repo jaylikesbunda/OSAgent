@@ -428,6 +428,7 @@ OSA.createSession = async function() {
         OSA.parallelToolGroups = [];
         OSA.setSessionQueue([]);
         OSA.renderQueuedMessages([]);
+        OSA.resetMessageChain();
         
         OSA.restoreContextState(session.id, null);
         OSA.connectEventSource(session.id);
@@ -565,6 +566,7 @@ OSA.selectSession = async function(sessionId) {
         OSA.getActiveTools().clear();
         OSA.parallelToolGroups = [];
         OSA._contextGroupState = null;
+        OSA.resetMessageChain();
         
         OSA.connectEventSource(sessionId);
         OSA.hideThinkingIndicator();
@@ -872,6 +874,7 @@ OSA.sendMessage = async function() {
     if (!shouldQueueLocally) {
         OSA.hideThinkingIndicator();
         OSA.releaseStreamingAssistantMessage();
+        OSA.resetMessageChain();
         OSA.setProcessing(true);
         OSA.setHasReceivedResponse(false);
         OSA.setSendButtonStopMode(true);

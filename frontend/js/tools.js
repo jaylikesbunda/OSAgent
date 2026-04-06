@@ -79,6 +79,10 @@ OSA.handleAgentEvent = function(event) {
         return;
     }
 
+    const chain = OSA.getMessageChain();
+    const seq = ++chain.eventSeqNumber;
+    const prevType = chain.lastEventType;
+
     switch (event.type) {
         case 'thinking':
             OSA.setHasReceivedResponse(false);
@@ -90,6 +94,9 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'thinking_start':
+            if (prevType === 'thinking_start') {
+                break;
+            }
             OSA.beginThinkingDisplay();
             break;
 
@@ -98,10 +105,12 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'thinking_end':
+            chain.lastThinkingEndSeq = seq;
             OSA.completeThinkingDisplay();
             break;
 
         case 'response_start':
+            chain.lastAssistantDomId = OSA.getStreamingAssistantDomId() || chain.lastAssistantDomId;
             OSA.beginAssistantResponse();
             OSA.renderQueuedMessages(OSA.getSessionQueue());
             if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
@@ -113,6 +122,11 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'tool_start':
+            chain.lastToolStartSeq = seq;
+            chain.pendingToolCallIds = chain.pendingToolCallIds || [];
+            if (event.tool_call_id && !chain.pendingToolCallIds.includes(event.tool_call_id)) {
+                chain.pendingToolCallIds.push(event.tool_call_id);
+            }
             OSA.finalizeAssistantSegmentForToolCall(event);
             OSA.createToolCard(event);
             OSA.persistToolStart(event);
@@ -125,6 +139,9 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'tool_complete':
+            if (event.tool_call_id) {
+                chain.pendingToolCallIds = (chain.pendingToolCallIds || []).filter(id => id !== event.tool_call_id);
+            }
             OSA.completeToolCard(event);
             OSA.persistToolComplete(event);
             if (event.tool_name === 'task') {
@@ -143,9 +160,11 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'response_complete':
+            chain.pendingToolCallIds = [];
+            chain.lastAssistantDomId = null;
             OSA.setHasReceivedResponse(true);
             if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
-            OSA.completeAssistantResponse();
+            OSA.completeAssistantResponse(event.usage || null);
             OSA.hideThinkingIndicator();
             OSA.setProcessing(false);
             OSA.setStopping(false);
@@ -155,6 +174,7 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'queued_message_dispatched':
+            chain.lastAssistantDomId = null;
             OSA.handleQueuedMessageDispatched(event);
             break;
 
@@ -177,12 +197,14 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'error':
+            chain.pendingToolCallIds = [];
             OSA.handleEventError(event);
             OSA.setStopping(false);
             OSA.setSendButtonStopMode(false);
             break;
 
         case 'cancelled':
+            chain.pendingToolCallIds = [];
             OSA.handleEventCancelled(event);
             break;
 
@@ -197,11 +219,11 @@ OSA.handleAgentEvent = function(event) {
         case 'subagent_completed':
             OSA.handleSubagentCompleted(event);
             break;
-        case 'subagent_completed':
-            OSA.handleSubagentCompleted(event);
-            break;
 
-        default:    }
+        default: break;
+    }
+
+    chain.lastEventType = event.type;
 };
 
 OSA._contextStates = {};
@@ -658,9 +680,13 @@ OSA.restoreContextToolGroup = function(tools, insertBefore = null) {
 
     tools.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 
+    const messageIndex = tools.length > 0 ? (tools[0].message_index || 0) : 0;
+    const groupId = `context-tool-group-${messageIndex}`;
+
     const group = document.createElement('div');
-    group.id = 'context-tool-group';
+    group.id = groupId;
     group.className = 'tool-container context-inline-group';
+    group.dataset.messageIndex = messageIndex;
 
     tools.forEach(t => {
         const label = OSA.toolLabel(t.tool_name);
@@ -670,7 +696,7 @@ OSA.restoreContextToolGroup = function(tools, insertBefore = null) {
 
         const item = document.createElement('div');
         item.className = 'context-inline-item';
-        item.id = `ctx-${t.tool_call_id}`;
+        item.id = `ctx-${t.tool_call_id || Math.random().toString(36).slice(2)}`;
         item.innerHTML = `
             <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
             <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
@@ -689,22 +715,25 @@ OSA.restoreContextToolGroup = function(tools, insertBefore = null) {
 };
 
 OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = false, messageIndex = 0) {
-    let group = OSA.ensureContextToolGroup();
-    if (!group) return;
+    const messagesDiv = document.getElementById('messages');
+    if (!messagesDiv) return;
 
-    const existingCtxGroup = document.getElementById('context-tool-group');
-    const existingMessageIndex = OSA._contextGroupState?.lastMessageIndex;
+    const groupId = `context-tool-group-${messageIndex}`;
+    let group = document.getElementById(groupId);
 
-    if (existingCtxGroup && existingMessageIndex !== undefined && existingMessageIndex !== messageIndex) {
-        existingCtxGroup.remove();
-        OSA._contextGroupState = null;
-        group = OSA.ensureContextToolGroup();
+    if (!group) {
+        group = document.createElement('div');
+        group.id = groupId;
+        group.className = 'tool-container context-inline-group';
+        group.dataset.messageIndex = messageIndex;
+
+        const lastGroup = OSA.findLastContextGroupBefore(messagesDiv);
+        if (lastGroup && lastGroup.nextSibling) {
+            messagesDiv.insertBefore(group, lastGroup.nextSibling);
+        } else {
+            messagesDiv.appendChild(group);
+        }
     }
-
-    if (!group) return;
-
-    OSA._contextGroupState = OSA._contextGroupState || { expanded: false, allDone: false };
-    OSA._contextGroupState.lastMessageIndex = messageIndex;
 
     const toolName = event.tool_name;
     const args = event.arguments || {};
@@ -734,18 +763,23 @@ OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = fal
     }
 };
 
+OSA.findLastContextGroupBefore = function(messagesDiv) {
+    const groups = messagesDiv.querySelectorAll('.context-inline-group');
+    return groups.length > 0 ? groups[groups.length - 1] : null;
+};
+
 OSA.ensureContextToolGroup = function() {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return null;
 
-    const existing = document.getElementById('context-tool-group');
-    if (existing) {
-        OSA._contextGroupState = OSA._contextGroupState || { expanded: false, allDone: false };
-        return existing;
+    const activeGroupId = OSA._activeContextGroupId;
+    if (activeGroupId) {
+        const existing = document.getElementById(activeGroupId);
+        if (existing) return existing;
     }
 
     const group = document.createElement('div');
-    group.id = 'context-tool-group';
+    group.id = activeGroupId || `context-tool-group-${Date.now()}`;
     group.className = 'tool-container context-inline-group';
     messagesDiv.appendChild(group);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;

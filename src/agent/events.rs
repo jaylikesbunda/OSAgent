@@ -62,6 +62,8 @@ pub enum AgentEvent {
     ResponseComplete {
         session_id: String,
         timestamp: SystemTime,
+        #[serde(default)]
+        usage: Option<EventTokenUsage>,
     },
     QueuedMessageDispatched {
         session_id: String,

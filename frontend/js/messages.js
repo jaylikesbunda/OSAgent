@@ -328,8 +328,31 @@ OSA.insertCurrentSessionToolBoundary = function(event) {
 OSA.finalizeAssistantSegmentForToolCall = function(event) {
     OSA.completeThinkingDisplay();
     OSA.pruneEmptyStreamingMessage();
-    OSA.releaseStreamingAssistantMessage();
+    OSA.markStreamingBoundary();
     OSA.insertCurrentSessionToolBoundary(event);
+};
+
+OSA.markStreamingBoundary = function() {
+    const chain = OSA.getMessageChain();
+    const domId = OSA.getStreamingAssistantDomId();
+    if (domId) {
+        chain.lastAssistantDomId = domId;
+        const message = document.getElementById(domId);
+        if (message) {
+            message.classList.remove('streaming');
+            const thinking = message.querySelector('.message-thinking');
+            if (thinking) {
+                thinking.classList.remove('streaming');
+                if (!thinking.dataset.userToggled) {
+                    thinking.classList.remove('expanded');
+                }
+                delete thinking.dataset.userToggled;
+            }
+            message.dataset.boundaryAfter = 'tool';
+        }
+    }
+    OSA.clearPendingFormattedRenders();
+    OSA.setStreamingAssistantDomId(null);
 };
 
 OSA.prepareAssistantMessageElementForStreaming = function(messageEl, sourceMessage, expandThinking = false) {
@@ -410,6 +433,17 @@ OSA.resetStreamingMessage = function() {
     OSA.setStreamingAssistantDomId(null);
 };
 
+OSA.resetMessageChain = function() {
+    OSA.messageChain = {
+        lastEventType: null,
+        lastAssistantDomId: null,
+        pendingToolCallIds: [],
+        eventSeqNumber: 0,
+        lastThinkingEndSeq: 0,
+        lastToolStartSeq: 0,
+    };
+};
+
 OSA.releaseStreamingAssistantMessage = function() {
     const domId = OSA.getStreamingAssistantDomId();
     if (!domId) return;
@@ -428,6 +462,9 @@ OSA.releaseStreamingAssistantMessage = function() {
         }
         delete thinking.dataset.userToggled;
     }
+
+    const chain = OSA.getMessageChain();
+    chain.lastAssistantDomId = domId;
 
     OSA.resetStreamingMessage();
 };
@@ -451,6 +488,10 @@ OSA.commitStreamingAssistantSegment = function() {
     const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
     if (!rawText && !thinkingText) {
         message.remove();
+        const chain = OSA.getMessageChain();
+        if (chain.lastAssistantDomId === domId) {
+            chain.lastAssistantDomId = null;
+        }
         OSA.resetStreamingMessage();
         return;
     }
@@ -459,6 +500,9 @@ OSA.commitStreamingAssistantSegment = function() {
     if (actionsEl && rawText) {
         actionsEl.style.display = '';
     }
+
+    const chain = OSA.getMessageChain();
+    chain.lastAssistantDomId = domId;
 
     OSA.resetStreamingMessage();
 };
@@ -483,6 +527,8 @@ OSA.createAssistantMessageShell = function() {
     `;
     messagesDiv.appendChild(message);
     OSA.setStreamingAssistantDomId(domId);
+    const chain = OSA.getMessageChain();
+    chain.lastAssistantDomId = domId;
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     return message;
 };
@@ -505,6 +551,18 @@ OSA.ensureStreamingAssistantMessage = function() {
             OSA.setStreamingAssistantDomId(null);
         }
     }
+
+    const chain = OSA.getMessageChain();
+    if (chain.lastAssistantDomId && !existingId) {
+        const lastMsg = document.getElementById(chain.lastAssistantDomId);
+        if (lastMsg && lastMsg.isConnected && !lastMsg.classList.contains('streaming')) {
+            const session = OSA.getCurrentSession();
+            const sourceMsg = OSA.getActiveTurnAssistantMessage(session);
+            const restored = OSA.prepareAssistantMessageElementForStreaming(lastMsg, sourceMsg, OSA.getShowThinkingBlocks());
+            if (restored) return restored;
+        }
+    }
+
     return OSA.createAssistantMessageShell();
 };
 
@@ -517,6 +575,7 @@ OSA.beginAssistantResponse = function() {
 OSA.beginThinkingDisplay = function() {
     if (!OSA.getShowThinkingBlocks()) return null;
 
+    const chain = OSA.getMessageChain();
     const currentMessage = OSA.getStreamingAssistantMessage();
     const currentContent = currentMessage
         ? ((currentMessage.querySelector('.message-content')?.dataset.rawText) || '').trim()
@@ -536,7 +595,19 @@ OSA.beginThinkingDisplay = function() {
 
     OSA.ensureCurrentSessionAssistantMessage(shouldStartNewSegment);
     OSA.hideThinkingIndicator();
-    const message = OSA.ensureStreamingAssistantMessage();
+
+    let message = null;
+    if (!shouldStartNewSegment && chain.lastAssistantDomId) {
+        const lastMsg = document.getElementById(chain.lastAssistantDomId);
+        if (lastMsg && lastMsg.isConnected) {
+            const sourceMsg = OSA.getActiveTurnAssistantMessage(session);
+            message = OSA.prepareAssistantMessageElementForStreaming(lastMsg, sourceMsg, true);
+        }
+    }
+    if (!message) {
+        message = OSA.ensureStreamingAssistantMessage();
+    }
+
     const existingContainer = message ? message.querySelector('.message-thinking') : null;
     const container = OSA.ensureThinkingContainer(message);
     if (!container) return null;
@@ -606,7 +677,7 @@ OSA.appendAssistantChunk = function(content) {
     }
 };
 
-OSA.completeAssistantResponse = function() {
+OSA.completeAssistantResponse = function(usage) {
     const domId = OSA.getStreamingAssistantDomId();
     if (!domId) return;
     const message = document.getElementById(domId);
@@ -628,10 +699,29 @@ OSA.completeAssistantResponse = function() {
         if (actionsEl && rawText) actionsEl.style.display = '';
 
         const startTime = OSA.getTurnStartTime();
-        const durationEl = message.querySelector('.turn-duration');
-        if (durationEl && startTime) {
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-            durationEl.textContent = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+        if (startTime) {
+            const elapsedMs = Date.now() - startTime;
+            const elapsedSec = elapsedMs / 1000;
+            const durationEl = message.querySelector('.turn-duration');
+            if (durationEl) {
+                const elapsed = Math.round(elapsedSec);
+                durationEl.textContent = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+            }
+
+            if (usage && usage.output > 0 && elapsedSec > 0) {
+                const tps = (usage.output / elapsedSec).toFixed(1);
+                let tpsEl = message.querySelector('.turn-tokens');
+                if (!tpsEl) {
+                    tpsEl = document.createElement('span');
+                    tpsEl.className = 'turn-tokens';
+                    if (durationEl) {
+                        durationEl.after(tpsEl);
+                    } else {
+                        actionsEl.prepend(tpsEl);
+                    }
+                }
+                tpsEl.textContent = `${tps} tok/s · ${usage.total} total`;
+            }
         }
 
         if (rawText && OSA.getTtsEnabled() && OSA.getVoiceConfig()?.enabled) {
@@ -662,6 +752,10 @@ OSA.pruneEmptyStreamingMessage = function() {
     const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '').trim() : '';
     if (!rawText && !thinkingText) {
         message.remove();
+        const chain = OSA.getMessageChain();
+        if (chain.lastAssistantDomId === domId) {
+            chain.lastAssistantDomId = null;
+        }
         OSA.resetStreamingMessage();
     }
 };
