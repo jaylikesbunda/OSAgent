@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod checkpoint;
 pub mod context_window;
 pub mod coordinator;
+pub mod decision_memory;
 pub mod events;
 pub mod instruction;
 pub mod memory;

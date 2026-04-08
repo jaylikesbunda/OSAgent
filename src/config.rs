@@ -78,6 +78,8 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     pub memory_enabled: bool,
     pub memory_file: String,
+    pub decision_memory_enabled: bool,
+    pub decision_memory_file: String,
     #[serde(default)]
     pub permission_rules: Vec<PermissionRule>,
     #[serde(default)]
@@ -374,6 +376,8 @@ impl Default for AgentConfig {
             max_iterations: 50,
             memory_enabled: false,
             memory_file: default_memory_file(),
+            decision_memory_enabled: true,
+            decision_memory_file: default_decision_memory_file(),
             permission_rules: vec![],
             custom_identity: None,
             custom_priorities: None,
@@ -1358,6 +1362,10 @@ fn default_workspace_path() -> String {
 
 fn default_memory_file() -> String {
     "~/.osagent/memories.json".to_string()
+}
+
+fn default_decision_memory_file() -> String {
+    "~/.osagent/decision_memories.json".to_string()
 }
 
 fn generate_jwt_secret() -> String {

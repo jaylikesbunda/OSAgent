@@ -4,6 +4,7 @@ pub mod calendar;
 pub mod code;
 pub mod codesearch;
 pub mod coordinator;
+pub mod decision_memory;
 pub mod file_cache;
 pub mod files;
 pub mod fuzzy_edit;

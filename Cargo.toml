@@ -120,6 +120,10 @@ path = "src/main.rs"
 name = "osagent-optimize"
 path = "src/bin/optimize.rs"
 
+[[bin]]
+name = "osagent-bench"
+path = "src/bin/osagent-bench.rs"
+
 [features]
 default = []
 discord = ["serenity"]

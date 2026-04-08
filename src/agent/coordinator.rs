@@ -746,6 +746,7 @@ impl Coordinator {
                  - Create new files directly with write_file, always providing both the path and content fields\n\
                  - Do NOT use bash to create directories; write_file already creates parent directories\n\
                  - Use glob or list_files to inspect what exists before reading guessed paths\n\
+                 - Use read_file(filePath=..., offset=..., limit=...) for focused file or directory paging once a path is known\n\
                  - Prefer a coherent, working implementation over splitting work across multiple files speculatively\n\
                  - Run validation if available after making changes",
                 request, synthesis

@@ -1,4 +1,5 @@
 use crate::agent::coordinator::Coordinator;
+use crate::agent::decision_memory::DecisionMemory;
 use crate::agent::events::EventBus;
 use crate::agent::memory::MemoryStore;
 use crate::agent::provider::ToolDefinition;
@@ -9,12 +10,12 @@ use crate::indexer::CodeIndexer;
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, calendar, code, codesearch, coordinator, files, lsp, memory, news, patch, persona,
-    plan, process, question, scheduler, search, skill, subagent, system_status, task, todo,
-    weather, web,
+    bash, batch, calendar, code, codesearch, coordinator, decision_memory, files, lsp, memory,
+    news, patch, persona, plan, process, question, scheduler, search, skill, subagent,
+    system_status, task, todo, weather, web,
 };
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -25,12 +26,51 @@ pub struct ToolExample {
     pub input: Value,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolResult {
+    pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default = "default_tool_result_metadata")]
+    pub metadata: Value,
+}
+
+fn default_tool_result_metadata() -> Value {
+    json!({})
+}
+
+impl ToolResult {
+    pub fn new(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            title: None,
+            metadata: default_tool_result_metadata(),
+        }
+    }
+}
+
+impl From<String> for ToolResult {
+    fn from(output: String) -> Self {
+        ToolResult::new(output)
+    }
+}
+
+impl From<&str> for ToolResult {
+    fn from(output: &str) -> Self {
+        ToolResult::new(output)
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
     async fn execute(&self, args: Value) -> Result<String>;
+
+    async fn execute_result(&self, args: Value) -> Result<ToolResult> {
+        self.execute(args).await.map(ToolResult::from)
+    }
 
     #[allow(dead_code)]
     fn when_to_use(&self) -> &str {
@@ -58,6 +98,7 @@ pub struct ToolRegistry {
     subagent_manager: Option<Arc<SubagentManager>>,
     indexer: Option<Arc<CodeIndexer>>,
     memory_store: Option<Arc<MemoryStore>>,
+    decision_memory: Option<Arc<DecisionMemory>>,
     file_cache: Arc<FileReadCache>,
     coordinator: Option<Arc<Coordinator>>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
@@ -126,6 +167,7 @@ impl ToolRegistry {
             None,
             None,
             None,
+            None,
             cache,
         )
     }
@@ -144,6 +186,7 @@ impl ToolRegistry {
             event_bus,
             skill_loader,
             subagent_manager,
+            None,
             None,
             None,
             cache,
@@ -166,6 +209,7 @@ impl ToolRegistry {
             subagent_manager,
             None,
             None,
+            None,
             file_cache,
         )
     }
@@ -178,6 +222,7 @@ impl ToolRegistry {
         subagent_manager: Option<Arc<SubagentManager>>,
         indexer: Option<Arc<CodeIndexer>>,
         memory_store: Option<Arc<MemoryStore>>,
+        decision_memory: Option<Arc<DecisionMemory>>,
         file_cache: Arc<FileReadCache>,
     ) -> Result<Self> {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -348,6 +393,13 @@ impl ToolRegistry {
             );
         }
 
+        if let Some(ref dm) = decision_memory {
+            tools.insert(
+                "record_decision".to_string(),
+                Arc::new(decision_memory::RecordDecisionTool::new(dm.clone())),
+            );
+        }
+
         Ok(Self {
             tools,
             allowed: config.tools.denied.iter().cloned().collect(),
@@ -358,6 +410,7 @@ impl ToolRegistry {
             subagent_manager,
             indexer,
             memory_store,
+            decision_memory,
             file_cache,
             coordinator: None,
             scheduler: None,
@@ -730,6 +783,11 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, tool_name: &str, args: Value) -> Result<String> {
+        let result = self.execute_result(tool_name, args).await?;
+        Ok(result.output)
+    }
+
+    pub async fn execute_result(&self, tool_name: &str, args: Value) -> Result<ToolResult> {
         let tool = self
             .tools
             .get(tool_name)
@@ -739,7 +797,7 @@ impl ToolRegistry {
             return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
         }
 
-        tool.execute(args).await
+        tool.execute_result(args).await
     }
 
     pub async fn execute_in_workspace(
@@ -748,6 +806,18 @@ impl ToolRegistry {
         args: Value,
         workspace_path: Option<String>,
     ) -> Result<String> {
+        let result = self
+            .execute_in_workspace_result(tool_name, args, workspace_path)
+            .await?;
+        Ok(result.output)
+    }
+
+    pub async fn execute_in_workspace_result(
+        &self,
+        tool_name: &str,
+        args: Value,
+        workspace_path: Option<String>,
+    ) -> Result<ToolResult> {
         if !self.is_allowed(tool_name) {
             return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
         }
@@ -765,10 +835,10 @@ impl ToolRegistry {
             if let Some(tool) =
                 Self::build_tool(tool_name, config, self.storage.clone(), &self.file_cache)
             {
-                return tool.execute(args).await;
+                return tool.execute_result(args).await;
             }
             if let Some(tool) = self.tools.get(tool_name) {
-                return tool.execute(args).await;
+                return tool.execute_result(args).await;
             }
             return Err(OSAgentError::ToolExecution(format!(
                 "Tool not found: {}",
@@ -776,7 +846,7 @@ impl ToolRegistry {
             )));
         }
 
-        self.execute(tool_name, args).await
+        self.execute_result(tool_name, args).await
     }
 
     pub fn file_cache(&self) -> &Arc<FileReadCache> {

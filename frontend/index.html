@@ -705,6 +705,21 @@
                             <input type="text" id="setting-memory-file" placeholder="~/.osagent/memories.json" />
                             <span class="settings-field-hint">JSON file where memories are stored</span>
                         </div>
+                        <div class="toggle-field" style="margin-top:12px">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Enable Approved Decision Memory</label>
+                                <span class="toggle-desc">Capture explicit durable choices like "Approved decision: key=value" and enforce them across sessions</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-decision-memory-enabled" onchange="OSA.onDecisionMemoryToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="settings-field" id="decision-memory-file-field" style="display:none">
+                            <label for="setting-decision-memory-file">Decision Memory File</label>
+                            <input type="text" id="setting-decision-memory-file" placeholder="~/.osagent/decision_memories.json" />
+                            <span class="settings-field-hint">Store durable decisions with: Approved decision: &lt;key&gt;=&lt;value&gt; | optional rationale</span>
+                        </div>
                     </div>
 
                     <div class="settings-group" id="memory-list-group">

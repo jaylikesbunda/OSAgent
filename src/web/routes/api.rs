@@ -1490,6 +1490,8 @@ pub struct SessionToolEvent {
     pub completed: bool,
     pub success: Option<bool>,
     pub output: Option<String>,
+    pub title: Option<String>,
+    pub metadata: Option<serde_json::Value>,
     pub timestamp: i64,
     pub message_index: i32,
 }
@@ -1506,6 +1508,8 @@ pub struct AddToolRequest {
 pub struct UpdateToolRequest {
     pub success: bool,
     pub output: Option<String>,
+    pub title: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 async fn get_session_tools(
@@ -1521,8 +1525,15 @@ async fn get_session_tools(
         )
     })?;
 
-    let mut completions: std::collections::HashMap<String, (bool, Option<String>)> =
-        std::collections::HashMap::new();
+    let mut completions: std::collections::HashMap<
+        String,
+        (
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<serde_json::Value>,
+        ),
+    > = std::collections::HashMap::new();
     for e in &history {
         if e.event_type == "tool_complete" {
             if let Some(call_id) = e.data.get("tool_call_id").and_then(|v| v.as_str()) {
@@ -1536,7 +1547,13 @@ async fn get_session_tools(
                     .get("output")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                completions.insert(call_id.to_string(), (success, output));
+                let title = e
+                    .data
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let metadata = e.data.get("metadata").cloned();
+                completions.insert(call_id.to_string(), (success, output, title, metadata));
             }
         }
     }
@@ -1553,10 +1570,10 @@ async fn get_session_tools(
                 .get("message_index")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0) as i32;
-            let (completed, success, output) = completions
+            let (completed, success, output, title, metadata) = completions
                 .remove(&tool_call_id)
-                .map(|(s, o)| (true, Some(s), o))
-                .unwrap_or((false, None, None));
+                .map(|(s, o, t, m)| (true, Some(s), o, t, m))
+                .unwrap_or((false, None, None, None, None));
             let timestamp = e.timestamp.timestamp();
             Some(SessionToolEvent {
                 tool_call_id,
@@ -1565,6 +1582,8 @@ async fn get_session_tools(
                 completed,
                 success,
                 output,
+                title,
+                metadata,
                 timestamp,
                 message_index,
             })
@@ -1610,6 +1629,8 @@ async fn update_session_tool(
         "tool_call_id": tool_call_id,
         "success": payload.success,
         "output": payload.output,
+        "title": payload.title,
+        "metadata": payload.metadata,
     });
 
     agent

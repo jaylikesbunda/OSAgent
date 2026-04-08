@@ -1909,8 +1909,8 @@ fn tool_line_detailed(name: &str) -> Option<(String, String)> {
             "list_files(path=\"./src\")".to_string(),
         )),
         "read_file" => Some((
-            "- read_file: read a known file and use line ranges when possible".to_string(),
-            "read_file(path=\"src/main.rs\", start_line=1, end_line=50)".to_string(),
+            "- read_file: read a known file or directory and page with offset/limit".to_string(),
+            "read_file(filePath=\"src/main.rs\", offset=1, limit=50)".to_string(),
         )),
         "edit_file" => Some((
             "- edit_file: smart text replacement with exact and fuzzy matching for safe edits".to_string(),
@@ -2031,8 +2031,8 @@ fn tool_line_with_example(name: &str) -> Option<(String, String)> {
             "list_files(path=\".\")".to_string(),
         )),
         "read_file" => Some((
-            "- read_file: read a known file and use line ranges when possible".to_string(),
-            "read_file(path=\"README.md\")".to_string(),
+            "- read_file: read a known file or directory and page with offset/limit".to_string(),
+            "read_file(filePath=\"README.md\", offset=1, limit=200)".to_string(),
         )),
         "edit_file" => Some((
             "- edit_file: smart text replacement with exact and fuzzy matching for safe edits".to_string(),

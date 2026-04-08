@@ -1,5 +1,6 @@
 use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::coordinator::Coordinator;
+use crate::agent::decision_memory::DecisionMemory;
 use crate::agent::events::{AgentEvent, EventBus, EventTokenUsage, ToolStatus};
 use crate::agent::instruction::{format_system_reminder, workspace_instruction_blocks};
 use crate::agent::memory::{MemoryEntry, MemoryStatus, MemoryStore};
@@ -25,7 +26,7 @@ use crate::tools::bash::BashTool;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::guard::ensure_relative_path_not_backups;
 use crate::tools::output::path_touches_tool_outputs;
-use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::{ToolRegistry, ToolResult};
 use crate::tools::truncation::{self, TruncationOptions};
 use chrono::Utc;
 use dashmap::DashMap;
@@ -70,6 +71,7 @@ pub struct AgentRuntime {
     tool_registry: Arc<ToolRegistry>,
     storage: Arc<SqliteStorage>,
     memory_store: Arc<MemoryStore>,
+    decision_memory: Arc<DecisionMemory>,
     external_manager: Arc<ExternalDirectoryManager>,
     plugin_manager: Arc<PluginManager>,
     subagent_manager: Arc<SubagentManager>,
@@ -285,6 +287,10 @@ impl AgentRuntime {
             config.agent.memory_enabled,
             config.agent.memory_file.clone(),
         )?);
+        let decision_memory = Arc::new(DecisionMemory::new(
+            config.agent.decision_memory_enabled,
+            config.agent.decision_memory_file.clone(),
+        )?);
 
         let external_manager = Arc::new(ExternalDirectoryManager::new(
             config.external.permission.clone(),
@@ -365,6 +371,7 @@ impl AgentRuntime {
             Some(subagent_manager.clone()),
             indexer.clone(),
             Some(memory_store.clone()),
+            Some(decision_memory.clone()),
             Arc::new(FileReadCache::with_default_capacity()),
         )?;
 
@@ -411,6 +418,7 @@ impl AgentRuntime {
             tool_registry,
             storage,
             memory_store,
+            decision_memory,
             external_manager,
             plugin_manager,
             subagent_manager,
@@ -692,6 +700,14 @@ impl AgentRuntime {
         }
         session.messages.push(message);
 
+        if let Err(error) = self
+            .decision_memory
+            .maybe_capture_from_user_message(&user_message, &user)
+            .await
+        {
+            warn!("Failed to capture approved decision memory: {}", error);
+        }
+
         // Mark session as running so frontend can restore thinking indicator on switch
         session.task_status = "running".to_string();
         if let Err(e) = self.session_manager.update_session(&session).await {
@@ -821,6 +837,9 @@ impl AgentRuntime {
             };
 
             if !is_roleplay {
+                if let Some(decision_block) = self.decision_memory.prompt_block().await? {
+                    api_messages.push(Message::system(decision_block));
+                }
                 if let Some(memory_block) = self.memory_store.prompt_block().await? {
                     api_messages.push(Message::system(memory_block));
                 }
@@ -862,7 +881,7 @@ impl AgentRuntime {
 
             if repo_exploration_request && iteration == 1 && !is_roleplay {
                 api_messages.push(Message::user(
-                    "For codebase exploration, start broad, then narrow. Use list_files or glob to find likely paths, grep for symbols or keywords, then read only the most relevant files. Stop once you have enough to answer.".to_string(),
+                    "For codebase exploration, start broad, then narrow. Use list_files or glob to find likely paths, grep for symbols or keywords, then use read_file for focused file or directory reads with offset/limit paging. Stop once you have enough to answer.".to_string(),
                 ));
             }
 
@@ -1332,7 +1351,8 @@ impl AgentRuntime {
                         .await?;
 
                     for (tool_call, result) in tool_calls.iter().zip(parallel_results) {
-                        let (output, success, duration_ms, tool_sig, tool_intent) = result;
+                        let (tool_result, success, duration_ms, tool_sig, tool_intent) = result;
+                        let output = tool_result.output.clone();
                         if success {
                             tool_success_count += 1;
                         } else {
@@ -1378,6 +1398,8 @@ impl AgentRuntime {
                             tool_name: tool_call.name.clone(),
                             success,
                             output: truncated_output.clone(),
+                            title: tool_result.title.clone(),
+                            metadata: Self::non_empty_tool_metadata(&tool_result.metadata),
                             duration_ms,
                             timestamp: SystemTime::now(),
                         });
@@ -1398,9 +1420,17 @@ impl AgentRuntime {
 
                         let tool_message =
                             Self::summarize_tool_output_for_context(&tool_call.name, &output);
-                        session
-                            .messages
-                            .push(Message::tool_result(tool_call.id.clone(), tool_message));
+                        session.messages.push(Message::tool_result_with_metadata(
+                            tool_call.id.clone(),
+                            tool_message,
+                            serde_json::json!({
+                                "tool_name": tool_call.name,
+                                "tool_result": {
+                                    "title": tool_result.title,
+                                    "metadata": tool_result.metadata,
+                                }
+                            }),
+                        ));
                     }
                 } else {
                     for (idx, tool_call) in tool_calls.iter().enumerate() {
@@ -1432,6 +1462,8 @@ impl AgentRuntime {
                                 tool_name: tool_call.name.clone(),
                                 success: false,
                                 output: error_msg.clone(),
+                                title: None,
+                                metadata: None,
                                 duration_ms: 0,
                                 timestamp: SystemTime::now(),
                             });
@@ -1496,6 +1528,8 @@ impl AgentRuntime {
                                 tool_name: tool_call.name.clone(),
                                 success: false,
                                 output: loop_msg.clone(),
+                                title: None,
+                                metadata: None,
                                 duration_ms: 0,
                                 timestamp: SystemTime::now(),
                             });
@@ -1559,6 +1593,8 @@ impl AgentRuntime {
                                     tool_name: tool_call.name.clone(),
                                     success: false,
                                     output: "Cancelled by user".to_string(),
+                                    title: None,
+                                    metadata: None,
                                     duration_ms: 0,
                                     timestamp: SystemTime::now(),
                                 });
@@ -1588,8 +1624,9 @@ impl AgentRuntime {
                             } else {
                                 None
                             };
-                        let result = if tool_call.name == "persona" {
+                        let result: Result<ToolResult> = if tool_call.name == "persona" {
                             self.handle_persona_tool_call(&mut session, &tool_call.arguments)
+                                .map(ToolResult::new)
                         } else if tool_call.name == "batch" {
                             let batch_message_index = (session.messages.len() as i32) - 1;
                             self.handle_batch_tool_call(
@@ -1599,6 +1636,7 @@ impl AgentRuntime {
                                 batch_message_index,
                             )
                             .await
+                            .map(ToolResult::new)
                         } else {
                             let mut tool_args = tool_call.arguments.clone();
                             if tool_call.name == "question"
@@ -1610,7 +1648,7 @@ impl AgentRuntime {
                                 tool_args["session_id"] = serde_json::json!(session_id);
                             }
                             self.tool_registry
-                                .execute_in_workspace(
+                                .execute_in_workspace_result(
                                     &tool_call.name,
                                     tool_args,
                                     Some(workspace_path.clone()),
@@ -1635,20 +1673,22 @@ impl AgentRuntime {
                             timestamp: SystemTime::now(),
                         });
 
-                        let (output, audit_output, success) = match result {
-                            Ok(output) => {
+                        let (tool_result, audit_output, success) = match result {
+                            Ok(tool_result) => {
                                 info!(
                                     "Tool {} executed successfully in {}ms",
                                     tool_call.name, duration_ms
                                 );
-                                (output.clone(), output, true)
+                                (tool_result.clone(), tool_result.output.clone(), true)
                             }
                             Err(e) => {
                                 let error_msg = format!("Error: {}", e);
                                 error!("Tool {} failed: {}", tool_call.name, error_msg);
-                                (error_msg.clone(), error_msg, false)
+                                (ToolResult::new(error_msg.clone()), error_msg, false)
                             }
                         };
+
+                        let output = tool_result.output.clone();
 
                         let context_window_tokens = runtime_config.agent.max_tokens * 4;
                         let truncated_output = truncation::maybe_truncate_tool_result(
@@ -1717,6 +1757,8 @@ impl AgentRuntime {
                                 tool_name: tool_call.name.clone(),
                                 success,
                                 output: truncated_output.clone(),
+                                title: tool_result.title.clone(),
+                                metadata: Self::non_empty_tool_metadata(&tool_result.metadata),
                                 duration_ms,
                                 timestamp: SystemTime::now(),
                             });
@@ -1740,9 +1782,17 @@ impl AgentRuntime {
                         if tool_call.name != "batch" {
                             let tool_message =
                                 Self::summarize_tool_output_for_context(&tool_call.name, &output);
-                            session
-                                .messages
-                                .push(Message::tool_result(tool_call.id.clone(), tool_message));
+                            session.messages.push(Message::tool_result_with_metadata(
+                                tool_call.id.clone(),
+                                tool_message,
+                                serde_json::json!({
+                                    "tool_name": tool_call.name,
+                                    "tool_result": {
+                                        "title": tool_result.title,
+                                        "metadata": tool_result.metadata,
+                                    }
+                                }),
+                            ));
                         }
                     }
                 }
@@ -2804,14 +2854,18 @@ impl AgentRuntime {
                             ))
                         } else {
                             registry
-                                .execute_in_workspace(&tool_name, params, Some(workspace_path))
+                                .execute_in_workspace_result(
+                                    &tool_name,
+                                    params,
+                                    Some(workspace_path),
+                                )
                                 .await
                         };
                         let duration_ms = start.elapsed().as_millis() as u64;
 
                         let (success, output) = match result {
                             Ok(out) => (true, out),
-                            Err(e) => (false, e.to_string()),
+                            Err(e) => (false, ToolResult::new(e.to_string())),
                         };
 
                         event_bus.emit(AgentEvent::ToolComplete {
@@ -2819,7 +2873,9 @@ impl AgentRuntime {
                             tool_call_id: internal_id,
                             tool_name,
                             success,
-                            output: output.clone(),
+                            output: output.output.clone(),
+                            title: output.title.clone(),
+                            metadata: Self::non_empty_tool_metadata(&output.metadata),
                             duration_ms,
                             timestamp: SystemTime::now(),
                         });
@@ -2828,7 +2884,7 @@ impl AgentRuntime {
                     }
                 });
 
-        let results: Vec<(bool, String)> = join_all(futures).await;
+        let results: Vec<(bool, ToolResult)> = join_all(futures).await;
         let mut lines = Vec::new();
         let mut success_count = 0usize;
 
@@ -2842,7 +2898,7 @@ impl AgentRuntime {
                 "[{}] {}\n{}",
                 if *success { "ok" } else { "error" },
                 tool_name,
-                Self::summarize_tool_output_for_context(tool_name, output)
+                Self::summarize_tool_output_for_context(tool_name, &output.output)
             ));
         }
 
@@ -2880,7 +2936,7 @@ impl AgentRuntime {
         _iteration: usize,
         _user: &str,
         message_index: i32,
-    ) -> Result<Vec<(String, bool, u64, String, Option<String>)>> {
+    ) -> Result<Vec<(ToolResult, bool, u64, String, Option<String>)>> {
         let session_id = session_id.to_string();
         let workspace_path = active_workspace.resolved_path();
         let registry = self.tool_registry.clone();
@@ -2908,6 +2964,8 @@ impl AgentRuntime {
                         tool_name: tool_call.name.clone(),
                         success: false,
                         output: "Cancelled by user".to_string(),
+                        title: None,
+                        metadata: None,
                         duration_ms: 0,
                         timestamp: SystemTime::now(),
                     });
@@ -2958,13 +3016,12 @@ impl AgentRuntime {
                             &tool_id,
                             &tool_name,
                             false,
-                            "Cancelled by user".to_string(),
+                            ToolResult::new("Cancelled by user"),
                             0,
                         );
                         return (
-                            tool_name,
+                            ToolResult::new("Cancelled by user"),
                             false,
-                            "Cancelled by user".to_string(),
                             0,
                             String::new(),
                             None,
@@ -2974,7 +3031,7 @@ impl AgentRuntime {
                 }
 
                 let result = registry
-                    .execute_in_workspace(&tool_name, args, Some(workspace_path))
+                    .execute_in_workspace_result(&tool_name, args, Some(workspace_path))
                     .await;
 
                 let duration_ms = start.elapsed().as_millis() as u64;
@@ -3000,30 +3057,23 @@ impl AgentRuntime {
                             output.clone(),
                             duration_ms,
                         );
-                        (
-                            tool_name,
-                            true,
-                            output,
-                            duration_ms,
-                            String::new(),
-                            None::<String>,
-                        )
+                        (output, true, duration_ms, String::new(), None::<String>)
                     }
                     Err(e) => {
                         let error_msg = format!("Error: {}", e);
+                        let error_result = ToolResult::new(error_msg.clone());
                         Self::emit_tool_complete(
                             &event_bus,
                             &session_id,
                             &tool_id,
                             &tool_name,
                             false,
-                            error_msg.clone(),
+                            error_result.clone(),
                             duration_ms,
                         );
                         (
-                            tool_name,
+                            error_result,
                             false,
-                            error_msg,
                             duration_ms,
                             String::new(),
                             None::<String>,
@@ -3037,7 +3087,7 @@ impl AgentRuntime {
         let mut outputs = Vec::new();
 
         for (tool_call, result) in tool_calls.iter().zip(results) {
-            let (_tool_name, success, output, duration_ms, _, _) = result;
+            let (tool_result, success, duration_ms, _, _) = result;
 
             let tool_signature = Self::tool_call_signature(&tool_call.name, &tool_call.arguments);
             let tool_intent = Self::tool_intent_signature(&tool_call.name, &tool_call.arguments);
@@ -3048,7 +3098,13 @@ impl AgentRuntime {
                 *tool_failure_count += 1;
             }
 
-            outputs.push((output, success, duration_ms, tool_signature, tool_intent));
+            outputs.push((
+                tool_result,
+                success,
+                duration_ms,
+                tool_signature,
+                tool_intent,
+            ));
         }
 
         Ok(outputs)
@@ -3080,18 +3136,28 @@ impl AgentRuntime {
         tool_call_id: &str,
         tool_name: &str,
         success: bool,
-        output: String,
+        result: ToolResult,
         duration_ms: u64,
     ) {
+        let metadata = Self::non_empty_tool_metadata(&result.metadata);
         event_bus.emit(AgentEvent::ToolComplete {
             session_id: session_id.to_string(),
             tool_call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
             success,
-            output,
+            output: result.output,
+            title: result.title,
+            metadata,
             duration_ms,
             timestamp: SystemTime::now(),
         });
+    }
+
+    fn non_empty_tool_metadata(metadata: &serde_json::Value) -> Option<serde_json::Value> {
+        match metadata {
+            serde_json::Value::Object(map) if map.is_empty() => None,
+            _ => Some(metadata.clone()),
+        }
     }
 
     fn session_workspace_id(session: &Session) -> Option<String> {
@@ -3974,6 +4040,12 @@ impl AgentRuntime {
         {
             warn!("Failed to update memory state: {}", e);
         }
+        if let Err(e) = self.decision_memory.set_config(
+            cfg.agent.decision_memory_enabled,
+            cfg.agent.decision_memory_file.clone(),
+        ) {
+            warn!("Failed to update decision memory state: {}", e);
+        }
     }
 
     pub fn signal_shutdown(&self) {
@@ -4314,19 +4386,34 @@ impl AgentRuntime {
                 while let Some(req) = rx.recv().await {
                     let session_id = match req.session_id {
                         Some(sid) => sid,
-                        None => match this.create_session().await {
-                            Ok(session) => {
-                                info!("Scheduler run_prompt: created session {}", session.id);
-                                session.id
-                            }
-                            Err(e) => {
-                                warn!("Scheduler run_prompt: failed to create session: {}", e);
-                                if let Some(tx) = req.response_tx {
-                                    let _ = tx.send(format!("Failed to create session: {}", e));
+                        None => {
+                            let mut session = match this.create_session().await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!("Scheduler run_prompt: failed to create session: {}", e);
+                                    if let Some(tx) = req.response_tx {
+                                        let _ = tx.send(format!("Failed to create session: {}", e));
+                                    }
+                                    continue;
                                 }
-                                continue;
+                            };
+                            if let Some(source) = &req.source {
+                                if !session.metadata.is_object() {
+                                    session.metadata = serde_json::json!({});
+                                }
+                                if let Some(meta) = session.metadata.as_object_mut() {
+                                    meta.insert(
+                                        "source".to_string(),
+                                        serde_json::Value::String(source.clone()),
+                                    );
+                                }
+                                if let Err(e) = this.session_manager.update_session(&session).await {
+                                    warn!("Failed to set session source: {}", e);
+                                }
                             }
-                        },
+                            info!("Scheduler run_prompt: created session {}", session.id);
+                            session.id
+                        }
                     };
 
                     info!("Scheduler run_prompt: executing in session {}", session_id);

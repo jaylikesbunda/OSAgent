@@ -10,6 +10,7 @@ pub struct RunPromptRequest {
     pub session_id: Option<String>,
     pub prompt: String,
     pub response_tx: Option<oneshot::Sender<String>>,
+    pub source: Option<String>,
 }
 
 #[derive(Clone)]
@@ -46,10 +47,17 @@ impl JobExecutor {
         let message = if let Some(tx) = &self.run_prompt_tx {
             let (response_tx, response_rx) = oneshot::channel();
 
+            let source = if job.discord_channel_id().is_some() {
+                Some("discord".to_string())
+            } else {
+                None
+            };
+
             if let Err(e) = tx.send(RunPromptRequest {
                 session_id: None,
                 prompt: job.message.clone(),
                 response_tx: Some(response_tx),
+                source,
             }) {
                 error!("Failed to dispatch prompt for job {}: {}", job.id, e);
                 return Err(OSAgentError::Config(format!(

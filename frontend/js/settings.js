@@ -201,6 +201,10 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-memory-file').value = config.agent?.memory_file || '~/.osagent/memories.json';
         document.getElementById('memory-file-field').style.display = memEnabled ? '' : 'none';
         document.getElementById('memory-add-form').style.display = memEnabled ? '' : 'none';
+        const decisionMemEnabled = config.agent?.decision_memory_enabled !== false;
+        document.getElementById('setting-decision-memory-enabled').checked = decisionMemEnabled;
+        document.getElementById('setting-decision-memory-file').value = config.agent?.decision_memory_file || '~/.osagent/decision_memories.json';
+        document.getElementById('decision-memory-file-field').style.display = decisionMemEnabled ? '' : 'none';
         
         const voice = OSA.normalizeVoiceConfig(config.voice || {});
         document.getElementById('setting-voice-enabled').checked = !!voice.enabled;
@@ -326,6 +330,8 @@ OSA.saveSettings = async function() {
         thinking_level: document.getElementById('setting-thinking-level').value || 'auto',
         memory_enabled: document.getElementById('setting-memory-enabled').checked,
         memory_file: document.getElementById('setting-memory-file').value || '~/.osagent/memories.json',
+        decision_memory_enabled: document.getElementById('setting-decision-memory-enabled').checked,
+        decision_memory_file: document.getElementById('setting-decision-memory-file').value || '~/.osagent/decision_memories.json',
         custom_identity: customIdentity || null,
         custom_priorities: useCustomPriorities && customPriorities.length > 0 ? customPriorities : null
     };
@@ -882,6 +888,11 @@ OSA.onMemoryToggleChange = function() {
     document.getElementById('memory-file-field').style.display = enabled ? '' : 'none';
     document.getElementById('memory-add-form').style.display = enabled ? '' : 'none';
     if (enabled) OSA.loadMemories();
+};
+
+OSA.onDecisionMemoryToggleChange = function() {
+    const enabled = document.getElementById('setting-decision-memory-enabled').checked;
+    document.getElementById('decision-memory-file-field').style.display = enabled ? '' : 'none';
 };
 
 OSA.loadMemories = async function() {

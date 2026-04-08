@@ -1,8 +1,10 @@
 use crate::config::Config;
 use crate::error::{OSAgentError, Result};
 use crate::tools::guard::{ensure_relative_path_not_backups, path_touches_backups};
-use crate::tools::output::{maybe_store_large_output, path_touches_tool_outputs};
-use crate::tools::registry::{Tool, ToolExample};
+use crate::tools::output::{
+    maybe_store_large_output_result, path_touches_tool_outputs, LargeOutputResult,
+};
+use crate::tools::registry::{Tool, ToolExample, ToolResult};
 use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
@@ -173,7 +175,7 @@ impl GrepTool {
         file_pattern: Option<&str>,
         case_sensitive: bool,
         timeout_secs: u64,
-    ) -> Result<String> {
+    ) -> Result<(LargeOutputResult, usize)> {
         let mut cmd = Command::new(rg_binary_name());
         cmd.args([
             "--no-heading",
@@ -214,21 +216,43 @@ impl GrepTool {
         if !output.status.success() && !output.stderr.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("no matches") || stderr.contains("No files") {
-                return Ok("No matches found".to_string());
+                return Ok((
+                    LargeOutputResult {
+                        display_output: "No matches found".to_string(),
+                        truncated: false,
+                        original_chars: 0,
+                        original_lines: 0,
+                        output_path: None,
+                    },
+                    0,
+                ));
             }
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
         if stdout.is_empty() {
-            return Ok("No matches found".to_string());
+            return Ok((
+                LargeOutputResult {
+                    display_output: "No matches found".to_string(),
+                    truncated: false,
+                    original_chars: 0,
+                    original_lines: 0,
+                    output_path: None,
+                },
+                0,
+            ));
         }
 
-        Ok(maybe_store_large_output(
-            &self.default_workspace()?,
-            self.writable,
-            "grep",
-            &stdout,
+        let matches = stdout.lines().count();
+        Ok((
+            maybe_store_large_output_result(
+                &self.default_workspace()?,
+                self.writable,
+                "grep",
+                &stdout,
+            ),
+            matches,
         ))
     }
 
@@ -239,7 +263,7 @@ impl GrepTool {
         file_pattern: Option<&str>,
         case_sensitive: bool,
         timeout_secs: u64,
-    ) -> Result<String> {
+    ) -> Result<(LargeOutputResult, usize)> {
         let matcher = compile_file_matcher(file_pattern)?;
         let workspace = self.default_workspace()?;
         let pattern_str_owned = pattern_str.to_string();
@@ -310,18 +334,32 @@ impl GrepTool {
         let mut matches = result.map_err(|e| OSAgentError::ToolExecution(e.to_string()))??;
 
         if matches.is_empty() {
-            Ok("No matches found".to_string())
+            Ok((
+                LargeOutputResult {
+                    display_output: "No matches found".to_string(),
+                    truncated: false,
+                    original_chars: 0,
+                    original_lines: 0,
+                    output_path: None,
+                },
+                0,
+            ))
         } else {
+            let match_count = matches.len();
             matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            Ok(maybe_store_large_output(
-                &self.default_workspace()?,
-                writable,
-                "grep",
-                &matches
-                    .into_iter()
-                    .map(|(_, line)| line)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+            let output = matches
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok((
+                maybe_store_large_output_result(
+                    &self.default_workspace()?,
+                    writable,
+                    "grep",
+                    &output,
+                ),
+                match_count,
             ))
         }
     }
@@ -390,6 +428,11 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
+        let result = self.execute_result(args).await?;
+        Ok(result.output)
+    }
+
+    async fn execute_result(&self, args: Value) -> Result<ToolResult> {
         let pattern_str = args["pattern"].as_str().ok_or_else(|| {
             OSAgentError::ToolExecution("Missing 'pattern' parameter".to_string())
         })?;
@@ -411,21 +454,52 @@ impl Tool for GrepTool {
                 )
                 .await
             {
-                Ok(result) => return Ok(result),
+                Ok((result, matches)) => {
+                    return Ok(ToolResult {
+                        output: result.display_output,
+                        title: Some(path.to_string()),
+                        metadata: json!({
+                            "matches": matches,
+                            "truncated": result.truncated,
+                            "output_path": result.output_path,
+                            "original_chars": result.original_chars,
+                            "original_lines": result.original_lines,
+                            "path": path,
+                            "file_pattern": file_pattern,
+                            "case_sensitive": case_sensitive
+                        }),
+                    })
+                }
                 Err(e) => {
                     debug!("ripgrep grep failed ({}), falling back to walkdir", e);
                 }
             }
         }
 
-        self.execute_walkdir_grep(
-            pattern_str,
-            &search_path,
-            file_pattern,
-            case_sensitive,
-            self.timeout_seconds,
-        )
-        .await
+        let (result, matches) = self
+            .execute_walkdir_grep(
+                pattern_str,
+                &search_path,
+                file_pattern,
+                case_sensitive,
+                self.timeout_seconds,
+            )
+            .await?;
+
+        Ok(ToolResult {
+            output: result.display_output,
+            title: Some(path.to_string()),
+            metadata: json!({
+                "matches": matches,
+                "truncated": result.truncated,
+                "output_path": result.output_path,
+                "original_chars": result.original_chars,
+                "original_lines": result.original_lines,
+                "path": path,
+                "file_pattern": file_pattern,
+                "case_sensitive": case_sensitive
+            }),
+        })
     }
 }
 
@@ -497,7 +571,7 @@ impl GlobTool {
         pattern: &str,
         search_path: &Path,
         timeout_secs: u64,
-    ) -> Result<String> {
+    ) -> Result<(LargeOutputResult, usize)> {
         let mut cmd = Command::new(rg_binary_name());
         cmd.args([
             "--files",
@@ -530,7 +604,16 @@ impl GlobTool {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
         if stdout.is_empty() {
-            return Ok("No files found matching pattern".to_string());
+            return Ok((
+                LargeOutputResult {
+                    display_output: "No files found matching pattern".to_string(),
+                    truncated: false,
+                    original_chars: 0,
+                    original_lines: 0,
+                    output_path: None,
+                },
+                0,
+            ));
         }
 
         let workspace_str = self.default_workspace()?.to_string_lossy().to_string();
@@ -547,14 +630,27 @@ impl GlobTool {
             .collect();
 
         if relative_lines.is_empty() {
-            return Ok("No files found matching pattern".to_string());
+            return Ok((
+                LargeOutputResult {
+                    display_output: "No files found matching pattern".to_string(),
+                    truncated: false,
+                    original_chars: 0,
+                    original_lines: 0,
+                    output_path: None,
+                },
+                0,
+            ));
         }
 
-        Ok(maybe_store_large_output(
-            &self.default_workspace()?,
-            self.writable,
-            "glob",
-            &relative_lines.join("\n"),
+        let count = relative_lines.len();
+        Ok((
+            maybe_store_large_output_result(
+                &self.default_workspace()?,
+                self.writable,
+                "glob",
+                &relative_lines.join("\n"),
+            ),
+            count,
         ))
     }
 
@@ -563,7 +659,7 @@ impl GlobTool {
         pattern: &str,
         search_path: &Path,
         timeout_secs: u64,
-    ) -> Result<String> {
+    ) -> Result<(LargeOutputResult, usize)> {
         let pattern_owned = pattern.to_string();
         let workspace = self.default_workspace()?;
         let writable = self.writable;
@@ -622,17 +718,31 @@ impl GlobTool {
         matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
         if matches.is_empty() {
-            Ok("No files found matching pattern".to_string())
+            Ok((
+                LargeOutputResult {
+                    display_output: "No files found matching pattern".to_string(),
+                    truncated: false,
+                    original_chars: 0,
+                    original_lines: 0,
+                    output_path: None,
+                },
+                0,
+            ))
         } else {
-            Ok(maybe_store_large_output(
-                &self.default_workspace()?,
-                writable,
-                "glob",
-                &matches
-                    .into_iter()
-                    .map(|(_, path)| path)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+            let count = matches.len();
+            let output = matches
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok((
+                maybe_store_large_output_result(
+                    &self.default_workspace()?,
+                    writable,
+                    "glob",
+                    &output,
+                ),
+                count,
             ))
         }
     }
@@ -692,6 +802,11 @@ impl Tool for GlobTool {
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
+        let result = self.execute_result(args).await?;
+        Ok(result.output)
+    }
+
+    async fn execute_result(&self, args: Value) -> Result<ToolResult> {
         let pattern = args["pattern"].as_str().ok_or_else(|| {
             OSAgentError::ToolExecution("Missing 'pattern' parameter".to_string())
         })?;
@@ -703,14 +818,99 @@ impl Tool for GlobTool {
                 .execute_rg_glob(pattern, &search_path, self.timeout_seconds)
                 .await
             {
-                Ok(result) => return Ok(result),
+                Ok((result, count)) => {
+                    return Ok(ToolResult {
+                        output: result.display_output,
+                        title: Some(path.to_string()),
+                        metadata: json!({
+                            "count": count,
+                            "truncated": result.truncated,
+                            "output_path": result.output_path,
+                            "original_chars": result.original_chars,
+                            "original_lines": result.original_lines,
+                            "path": path,
+                            "pattern": pattern
+                        }),
+                    })
+                }
                 Err(e) => {
                     debug!("ripgrep glob failed ({}), falling back to walkdir", e);
                 }
             }
         }
 
-        self.execute_walkdir_glob(pattern, &search_path, self.timeout_seconds)
-            .await
+        let (result, count) = self
+            .execute_walkdir_glob(pattern, &search_path, self.timeout_seconds)
+            .await?;
+        Ok(ToolResult {
+            output: result.display_output,
+            title: Some(path.to_string()),
+            metadata: json!({
+                "count": count,
+                "truncated": result.truncated,
+                "output_path": result.output_path,
+                "original_chars": result.original_chars,
+                "original_lines": result.original_lines,
+                "path": path,
+                "pattern": pattern
+            }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use tempfile::tempdir;
+
+    fn config_for_workspace(path: &str) -> Config {
+        let mut config = Config::default();
+        config.agent.workspace = path.to_string();
+        config.agent.workspaces.clear();
+        config.agent.active_workspace = None;
+        config.ensure_workspace_defaults();
+        config
+    }
+
+    #[tokio::test]
+    async fn grep_returns_zero_matches_metadata() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "hello\nworld\n").expect("write file");
+
+        let tool = GrepTool::new(config_for_workspace(&dir.path().to_string_lossy()));
+        let result = Tool::execute_result(
+            &tool,
+            json!({
+                "pattern": "not-present",
+                "path": "."
+            }),
+        )
+        .await
+        .expect("grep result");
+
+        assert_eq!(result.metadata["matches"], 0);
+        assert!(result.output.contains("No matches found"));
+    }
+
+    #[tokio::test]
+    async fn glob_returns_count_metadata() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("one.rs"), "fn a() {}\n").expect("write one");
+        std::fs::write(dir.path().join("two.txt"), "hello\n").expect("write two");
+
+        let tool = GlobTool::new(config_for_workspace(&dir.path().to_string_lossy()));
+        let result = Tool::execute_result(
+            &tool,
+            json!({
+                "pattern": "**/*.rs",
+                "path": "."
+            }),
+        )
+        .await
+        .expect("glob result");
+
+        assert_eq!(result.metadata["count"], 1);
+        assert!(result.output.contains("one.rs"));
     }
 }

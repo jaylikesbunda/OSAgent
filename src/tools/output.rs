@@ -10,6 +10,15 @@ const MAX_INLINE_LINES: usize = 200;
 const MAX_INLINE_CHARS: usize = 12_000;
 const RETENTION_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LargeOutputResult {
+    pub display_output: String,
+    pub truncated: bool,
+    pub original_chars: usize,
+    pub original_lines: usize,
+    pub output_path: Option<String>,
+}
+
 fn sanitize_source(source: &str) -> String {
     let sanitized: String = source
         .chars()
@@ -78,13 +87,28 @@ pub fn maybe_store_large_output(
     source: &str,
     output: &str,
 ) -> String {
+    maybe_store_large_output_result(workspace, writable, source, output).display_output
+}
+
+pub fn maybe_store_large_output_result(
+    workspace: &Path,
+    writable: bool,
+    source: &str,
+    output: &str,
+) -> LargeOutputResult {
     let normalized = output.replace('\r', "");
     let total_lines = normalized.lines().count();
     let total_chars = normalized.chars().count();
     let exceeds_limits = total_lines > MAX_INLINE_LINES || total_chars > MAX_INLINE_CHARS;
 
     if !exceeds_limits {
-        return output.to_string();
+        return LargeOutputResult {
+            display_output: output.to_string(),
+            truncated: false,
+            original_chars: total_chars,
+            original_lines: total_lines,
+            output_path: None,
+        };
     }
 
     let mut preview = normalized
@@ -117,15 +141,58 @@ pub fn maybe_store_large_output(
                 .unwrap_or(&output_path)
                 .display()
                 .to_string();
-            return format!(
-                "{}\n\n[output truncated: {} chars across {} lines]\nFull output saved to {}\nUse read_file with start_line/end_line to inspect specific sections. Cached tool outputs are retained for about 7 days.",
-                preview, total_chars, total_lines, relative
-            );
+            return LargeOutputResult {
+                display_output: format!(
+                    "{}\n\n[output truncated: {} chars across {} lines]\nFull output saved to {}\nUse read_file with offset/limit to inspect specific sections. Cached tool outputs are retained for about 7 days.",
+                    preview, total_chars, total_lines, relative
+                ),
+                truncated: true,
+                original_chars: total_chars,
+                original_lines: total_lines,
+                output_path: Some(relative),
+            };
         }
     }
 
-    format!(
-        "{}\n\n[output truncated: {} chars across {} lines]\nFull output could not be cached; rerun a narrower command or request a specific section.",
-        preview, total_chars, total_lines
-    )
+    LargeOutputResult {
+        display_output: format!(
+            "{}\n\n[output truncated: {} chars across {} lines]\nFull output could not be cached; rerun a narrower command or request a specific section.",
+            preview, total_chars, total_lines
+        ),
+        truncated: true,
+        original_chars: total_chars,
+        original_lines: total_lines,
+        output_path: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn large_output_returns_metadata_when_truncated() {
+        let dir = tempdir().expect("tempdir");
+        let long_text = (0..500)
+            .map(|idx| format!("line-{idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let result = maybe_store_large_output_result(dir.path(), false, "test", &long_text);
+
+        assert!(result.truncated);
+        assert!(result.original_lines >= 500);
+        assert!(result.display_output.contains("output truncated"));
+    }
+
+    #[test]
+    fn small_output_is_not_truncated() {
+        let dir = tempdir().expect("tempdir");
+        let result = maybe_store_large_output_result(dir.path(), false, "test", "hello\nworld");
+
+        assert!(!result.truncated);
+        assert_eq!(result.display_output, "hello\nworld");
+        assert_eq!(result.original_lines, 2);
+    }
 }

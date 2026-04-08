@@ -47,6 +47,10 @@ pub enum AgentEvent {
         tool_name: String,
         success: bool,
         output: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        metadata: Option<serde_json::Value>,
         duration_ms: u64,
         timestamp: SystemTime,
     },

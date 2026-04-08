@@ -231,6 +231,14 @@ impl Message {
     }
 
     pub fn tool_result(tool_call_id: String, content: String) -> Self {
+        Self::tool_result_with_metadata(tool_call_id, content, default_message_metadata())
+    }
+
+    pub fn tool_result_with_metadata(
+        tool_call_id: String,
+        content: String,
+        metadata: serde_json::Value,
+    ) -> Self {
         Self {
             role: "tool".to_string(),
             content,
@@ -238,7 +246,7 @@ impl Message {
             timestamp: Utc::now(),
             tool_calls: None,
             tool_call_id: Some(tool_call_id),
-            metadata: default_message_metadata(),
+            metadata,
             tokens: None,
         }
     }

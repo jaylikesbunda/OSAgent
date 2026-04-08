@@ -1,8 +1,8 @@
 use crate::config::{BashMode, BashToolConfig, Config};
 use crate::error::{OSAgentError, Result};
 use crate::tools::guard::{command_touches_backups, ensure_relative_path_not_backups};
-use crate::tools::output::maybe_store_large_output;
-use crate::tools::registry::{Tool, ToolExample};
+use crate::tools::output::maybe_store_large_output_result;
+use crate::tools::registry::{Tool, ToolExample, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -523,6 +523,11 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
+        let result = self.execute_result(args).await?;
+        Ok(result.output)
+    }
+
+    async fn execute_result(&self, args: Value) -> Result<ToolResult> {
         let command = args["command"].as_str().ok_or_else(|| {
             OSAgentError::ToolExecution("Missing 'command' parameter".to_string())
         })?;
@@ -607,33 +612,40 @@ impl Tool for BashTool {
                 let stdout = String::from_utf8_lossy(&output_result.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
 
-                if !output_result.status.success() {
-                    Ok(maybe_store_large_output(
-                        &self.default_workspace()?,
-                        self.writable,
-                        "bash",
-                        &format!(
+                let (merged_output, exit_code) = if !output_result.status.success() {
+                    (
+                        format!(
                             "Exit code: {}\nStdout:\n{}\nStderr:\n{}",
                             output_result.status.code().unwrap_or(-1),
                             stdout,
                             stderr
                         ),
-                    ))
+                        output_result.status.code().unwrap_or(-1),
+                    )
                 } else if stderr.is_empty() {
-                    Ok(maybe_store_large_output(
-                        &self.default_workspace()?,
-                        self.writable,
-                        "bash",
-                        &stdout,
-                    ))
+                    (stdout, 0)
                 } else {
-                    Ok(maybe_store_large_output(
-                        &self.default_workspace()?,
-                        self.writable,
-                        "bash",
-                        &format!("{}\n{}", stdout, stderr),
-                    ))
-                }
+                    (format!("{}\n{}", stdout, stderr), 0)
+                };
+
+                let summarized = maybe_store_large_output_result(
+                    &self.default_workspace()?,
+                    self.writable,
+                    "bash",
+                    &merged_output,
+                );
+
+                Ok(ToolResult {
+                    output: summarized.display_output,
+                    title: Some(full_command),
+                    metadata: json!({
+                        "exit_code": exit_code,
+                        "truncated": summarized.truncated,
+                        "output_path": summarized.output_path,
+                        "original_chars": summarized.original_chars,
+                        "original_lines": summarized.original_lines,
+                    }),
+                })
             }
             Ok(Err(e)) => Err(OSAgentError::ToolExecution(format!(
                 "Failed to spawn command: {}",

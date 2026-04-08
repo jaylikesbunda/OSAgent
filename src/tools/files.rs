@@ -5,7 +5,7 @@ use crate::tools::file_cache::FileReadCache;
 use crate::tools::fuzzy_edit::{apply_replacement, fuzzy_find};
 use crate::tools::guard::{ensure_relative_path_not_backups, path_touches_backups};
 use crate::tools::output::path_touches_tool_outputs;
-use crate::tools::registry::Tool;
+use crate::tools::registry::{Tool, ToolResult};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -50,6 +50,10 @@ pub struct ReadFileTool {
 }
 
 impl ReadFileTool {
+    const DEFAULT_LIMIT: usize = 200;
+    const MAX_LIMIT: usize = 2000;
+    const MAX_LINE_CHARS: usize = 2000;
+
     pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
         let active_workspace = config.get_active_workspace();
         let workspaces: Vec<PathBuf> = active_workspace
@@ -86,7 +90,7 @@ impl ReadFileTool {
 
         if !full_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(
-                "File not found: {}",
+                "Path not found: {}",
                 path
             )));
         }
@@ -107,6 +111,257 @@ impl ReadFileTool {
             ))
         }
     }
+
+    fn normalize_read_target<'a>(&self, args: &'a Value) -> Result<&'a str> {
+        args["filePath"]
+            .as_str()
+            .or_else(|| args["path"].as_str())
+            .ok_or_else(|| {
+                OSAgentError::ToolExecution(
+                    "Missing 'filePath' parameter (or compatibility alias 'path')".to_string(),
+                )
+            })
+    }
+
+    fn normalize_paging(&self, args: &Value, is_dir: bool) -> Result<(usize, usize)> {
+        if let Some(offset) = args["offset"].as_u64() {
+            let limit = args["limit"].as_u64().unwrap_or(Self::DEFAULT_LIMIT as u64) as usize;
+            let limit = limit.clamp(1, Self::MAX_LIMIT);
+            return Ok((offset.max(1) as usize, limit));
+        }
+
+        if !is_dir {
+            let start_line = args["start_line"].as_u64().unwrap_or(1).max(1) as usize;
+            if let Some(end_line) = args["end_line"].as_u64() {
+                let end_line = end_line.max(start_line as u64) as usize;
+                let limit = end_line.saturating_sub(start_line).saturating_add(1);
+                return Ok((start_line, limit.clamp(1, Self::MAX_LIMIT)));
+            }
+            return Ok((start_line, Self::DEFAULT_LIMIT));
+        }
+
+        Ok((1, Self::DEFAULT_LIMIT))
+    }
+
+    fn format_directory_entry(&self, absolute: &PathBuf, base: &PathBuf) -> String {
+        let relative = absolute.strip_prefix(base).unwrap_or(absolute.as_path());
+        if relative.as_os_str().is_empty() {
+            return ".".to_string();
+        }
+        let mut display = relative.display().to_string();
+        if absolute.is_dir() {
+            display.push('/');
+        }
+        display
+    }
+
+    fn read_directory(
+        &self,
+        dir_path: &PathBuf,
+        offset: usize,
+        limit: usize,
+        requested_path: &str,
+    ) -> Result<ToolResult> {
+        let entries = fs::read_dir(dir_path)
+            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read directory: {}", e)))?;
+
+        let mut formatted: Vec<String> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                OSAgentError::ToolExecution(format!("Failed to read directory entry: {}", e))
+            })?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&self.workspaces[0])
+                .unwrap_or(path.as_path());
+            if path_touches_backups(relative) {
+                continue;
+            }
+            if path_touches_tool_outputs(relative)
+                && !requested_path.starts_with(".osa_tool_outputs")
+            {
+                continue;
+            }
+            formatted.push(self.format_directory_entry(&path, &self.workspaces[0]));
+        }
+
+        formatted.sort();
+
+        if formatted.is_empty() {
+            return Ok(ToolResult {
+                output: "(empty directory)".to_string(),
+                title: Some(requested_path.to_string()),
+                metadata: json!({
+                    "kind": "directory",
+                    "path": requested_path,
+                    "offset": offset,
+                    "limit": limit,
+                    "count": 0,
+                    "truncated": false
+                }),
+            });
+        }
+
+        let start_index = offset.saturating_sub(1);
+        if start_index >= formatted.len() {
+            return Err(OSAgentError::ToolExecution(format!(
+                "offset {} is past end of directory listing ({} entries)",
+                offset,
+                formatted.len()
+            )));
+        }
+        let end_index = (start_index + limit).min(formatted.len());
+        let slice = &formatted[start_index..end_index];
+        let mut output = slice.join("\n");
+
+        let truncated = end_index < formatted.len();
+        if truncated {
+            output.push_str(&format!(
+                "\n\n[Results truncated at {} entries. Use offset={} to continue.]",
+                limit,
+                end_index + 1
+            ));
+        }
+
+        Ok(ToolResult {
+            output,
+            title: Some(requested_path.to_string()),
+            metadata: json!({
+                "kind": "directory",
+                "path": requested_path,
+                "offset": offset,
+                "limit": limit,
+                "count": formatted.len(),
+                "truncated": truncated
+            }),
+        })
+    }
+
+    async fn read_file_text(
+        &self,
+        file_path: &PathBuf,
+        offset: usize,
+        limit: usize,
+        requested_path: &str,
+    ) -> Result<ToolResult> {
+        let fp = file_path.clone();
+        let bytes = tokio::task::spawn_blocking(move || std::fs::read(&fp))
+            .await
+            .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))?
+            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+
+        if bytes.is_empty() {
+            return Ok(ToolResult {
+                output: "(empty file)".to_string(),
+                title: Some(requested_path.to_string()),
+                metadata: json!({
+                    "kind": "file",
+                    "path": requested_path,
+                    "offset": offset,
+                    "limit": limit,
+                    "total_lines": 0,
+                    "truncated": false
+                }),
+            });
+        }
+
+        let sample_len = bytes.len().min(4096);
+        let nul_count = bytes[..sample_len].iter().filter(|b| **b == 0).count();
+        if nul_count > 0 {
+            return Err(OSAgentError::ToolExecution(
+                "File appears to be binary and cannot be displayed as text".to_string(),
+            ));
+        }
+
+        let content = String::from_utf8(bytes).map_err(|_| {
+            OSAgentError::ToolExecution(
+                "File contains non-UTF8 data and cannot be displayed as text".to_string(),
+            )
+        })?;
+
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.clone());
+        self.cache.update(&canonical, &content);
+
+        let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
+        if total_lines == 0 {
+            return Ok(ToolResult {
+                output: "(empty file)".to_string(),
+                title: Some(requested_path.to_string()),
+                metadata: json!({
+                    "kind": "file",
+                    "path": requested_path,
+                    "offset": offset,
+                    "limit": limit,
+                    "total_lines": 0,
+                    "truncated": false
+                }),
+            });
+        }
+
+        let start_line = offset.max(1);
+        if start_line > total_lines {
+            return Err(OSAgentError::ToolExecution(format!(
+                "offset {} is past end of file ({} lines)",
+                start_line, total_lines
+            )));
+        }
+
+        let end_line = (start_line + limit - 1).min(total_lines);
+        let mut output = lines[start_line - 1..end_line]
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let clipped = if line.chars().count() > Self::MAX_LINE_CHARS {
+                    let mut s = line.chars().take(Self::MAX_LINE_CHARS).collect::<String>();
+                    s.push_str("...[line truncated]");
+                    s
+                } else {
+                    (*line).to_string()
+                };
+                format!("{}: {}", start_line + index, clipped)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let truncated = end_line < total_lines;
+        if truncated {
+            output.push_str(&format!(
+                "\n\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
+                start_line,
+                end_line,
+                total_lines,
+                end_line + 1
+            ));
+        } else {
+            output.push_str(&format!(
+                "\n\n[Showing lines {}-{} of {}]",
+                start_line, end_line, total_lines
+            ));
+        }
+
+        if let Some(reminder) =
+            format_system_reminder(&nearby_instruction_blocks(&self.workspaces[0], file_path))
+        {
+            output.push_str("\n\n");
+            output.push_str(&reminder);
+        }
+
+        Ok(ToolResult {
+            output,
+            title: Some(requested_path.to_string()),
+            metadata: json!({
+                "kind": "file",
+                "path": requested_path,
+                "offset": start_line,
+                "limit": limit,
+                "total_lines": total_lines,
+                "truncated": truncated
+            }),
+        })
+    }
 }
 
 #[async_trait]
@@ -116,15 +371,15 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file from the workspace directory with optional line ranges"
+        "Read a file or directory from the workspace with paged output"
     }
 
     fn when_to_use(&self) -> &str {
-        "Use after locating a specific file path and before making edits"
+        "Use when you already have an exact path and need paged file content or directory entries"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for broad discovery; use glob, grep, or list_files first"
+        "Do not use for broad content discovery across many files; use glob or grep first"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
@@ -132,15 +387,23 @@ impl Tool for ReadFileTool {
             crate::tools::registry::ToolExample {
                 description: "Read a whole file".to_string(),
                 input: json!({
-                    "path": "src/main.rs"
+                    "filePath": "src/main.rs"
                 }),
             },
             crate::tools::registry::ToolExample {
-                description: "Read a focused line range".to_string(),
+                description: "Read a focused page of lines".to_string(),
                 input: json!({
-                    "path": "src/main.rs",
-                    "start_line": 40,
-                    "end_line": 90
+                    "filePath": "src/main.rs",
+                    "offset": 40,
+                    "limit": 50
+                }),
+            },
+            crate::tools::registry::ToolExample {
+                description: "Read directory entries".to_string(),
+                input: json!({
+                    "filePath": "src",
+                    "offset": 1,
+                    "limit": 200
                 }),
             },
         ]
@@ -152,104 +415,51 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Relative path to the file within workspace"
+                    "description": "Compatibility alias for filePath"
+                },
+                "filePath": {
+                    "type": "string",
+                    "description": "Relative path to the file or directory within workspace"
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based line/entry offset (default: 1)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum lines/entries to return (default: 200, max: 2000)"
                 },
                 "start_line": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional 1-based start line for partial reads"
+                    "description": "Compatibility alias for offset (file reads only)"
                 },
                 "end_line": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional 1-based end line for partial reads"
+                    "description": "Compatibility alias used with start_line (file reads only)"
                 }
-            },
-            "required": ["path"]
+            }
         })
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
-        let path = args["path"]
-            .as_str()
-            .ok_or_else(|| OSAgentError::ToolExecution("Missing 'path' parameter".to_string()))?;
-        let start_line = args["start_line"].as_u64().unwrap_or(1) as usize;
-        let end_line_arg = args["end_line"].as_u64().map(|value| value as usize);
+        let result = self.execute_result(args).await?;
+        Ok(result.output)
+    }
 
-        let file_path = self.validate_path(path)?;
+    async fn execute_result(&self, args: Value) -> Result<ToolResult> {
+        let path = self.normalize_read_target(&args)?;
+        let target_path = self.validate_path(path)?;
+        let (offset, limit) = self.normalize_paging(&args, target_path.is_dir())?;
 
-        let canonical = file_path
-            .canonicalize()
-            .unwrap_or_else(|_| file_path.clone());
-
-        let wants_range = start_line != 1 || end_line_arg.is_some();
-
-        if !wants_range {
-            if let Some(entry) = self.cache.check_hit(&canonical) {
-                return Ok(FileReadCache::format_stub(&entry, &file_path));
-            }
+        if target_path.is_dir() {
+            return self.read_directory(&target_path, offset, limit, path);
         }
 
-        let fp = file_path.clone();
-        let content = tokio::task::spawn_blocking(move || {
-            std::fs::read_to_string(&fp)
-                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))
-        })
-        .await
-        .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))??;
-
-        if content.is_empty() {
-            return Ok("(empty file)".to_string());
-        }
-
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-        if total_lines == 0 {
-            return Ok("(empty file)".to_string());
-        }
-
-        if !wants_range {
-            self.cache.update(&canonical, &content);
-        }
-
-        let start_line = start_line.max(1);
-        let end_line = end_line_arg.unwrap_or(total_lines).min(total_lines);
-
-        if start_line > end_line {
-            return Err(OSAgentError::ToolExecution(
-                "start_line must be less than or equal to end_line".to_string(),
-            ));
-        }
-
-        if start_line > total_lines {
-            return Err(OSAgentError::ToolExecution(format!(
-                "start_line {} is past end of file ({} lines)",
-                start_line, total_lines
-            )));
-        }
-
-        let mut output = lines[start_line - 1..end_line]
-            .iter()
-            .enumerate()
-            .map(|(index, line)| format!("{}: {}", start_line + index, line))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if start_line != 1 || end_line != total_lines {
-            output.push_str(&format!(
-                "\n[showing lines {}-{} of {}]",
-                start_line, end_line, total_lines
-            ));
-        }
-
-        if let Some(reminder) =
-            format_system_reminder(&nearby_instruction_blocks(&self.workspaces[0], &file_path))
-        {
-            output.push_str("\n\n");
-            output.push_str(&reminder);
-        }
-
-        Ok(output)
+        self.read_file_text(&target_path, offset, limit, path).await
     }
 }
 
@@ -1011,5 +1221,72 @@ impl Tool for DeleteFileTool {
             "Successfully deleted {} (backup at {:?})",
             path, backup_path
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use tempfile::tempdir;
+
+    fn config_for_workspace(path: &str) -> Config {
+        let mut config = Config::default();
+        config.agent.workspace = path.to_string();
+        config.agent.workspaces.clear();
+        config.agent.active_workspace = None;
+        config.ensure_workspace_defaults();
+        config
+    }
+
+    #[tokio::test]
+    async fn read_file_supports_offset_and_limit() {
+        let dir = tempdir().expect("tempdir");
+        let file_path = dir.path().join("sample.txt");
+        std::fs::write(&file_path, "a\nb\nc\nd\n").expect("write file");
+
+        let config = config_for_workspace(&dir.path().to_string_lossy());
+        let tool = ReadFileTool::new(config, Arc::new(FileReadCache::with_default_capacity()));
+
+        let result = Tool::execute_result(
+            &tool,
+            json!({
+                "filePath": "sample.txt",
+                "offset": 2,
+                "limit": 2
+            }),
+        )
+        .await
+        .expect("read result");
+
+        assert!(result.output.contains("2: b"));
+        assert!(result.output.contains("3: c"));
+        assert!(result.output.contains("Use offset=4 to continue"));
+        assert_eq!(result.metadata["kind"], "file");
+    }
+
+    #[tokio::test]
+    async fn read_file_can_read_directory_entries() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("nested")).expect("create nested dir");
+        std::fs::write(dir.path().join("root.txt"), "hello").expect("write file");
+
+        let config = config_for_workspace(&dir.path().to_string_lossy());
+        let tool = ReadFileTool::new(config, Arc::new(FileReadCache::with_default_capacity()));
+
+        let result = Tool::execute_result(
+            &tool,
+            json!({
+                "filePath": ".",
+                "offset": 1,
+                "limit": 10
+            }),
+        )
+        .await
+        .expect("directory read result");
+
+        assert!(result.output.contains("nested/"));
+        assert!(result.output.contains("root.txt"));
+        assert_eq!(result.metadata["kind"], "directory");
     }
 }

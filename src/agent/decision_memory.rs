@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -53,8 +55,8 @@ pub struct DecisionMemoryStatus {
 }
 
 pub struct DecisionMemory {
-    enabled: bool,
-    file_path: PathBuf,
+    enabled: AtomicBool,
+    file_path: RwLock<PathBuf>,
     io_lock: Mutex<()>,
 }
 
@@ -68,26 +70,49 @@ impl DecisionMemory {
         }
 
         Ok(Self {
-            enabled,
-            file_path,
+            enabled: AtomicBool::new(enabled),
+            file_path: RwLock::new(file_path),
             io_lock: Mutex::new(()),
         })
     }
 
     pub fn status(&self) -> DecisionMemoryStatus {
+        let file_path = self.file_path.read().unwrap();
         DecisionMemoryStatus {
-            enabled: self.enabled,
-            file_path: self.file_path.to_string_lossy().to_string(),
+            enabled: self.enabled.load(Ordering::Relaxed),
+            file_path: file_path.to_string_lossy().to_string(),
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_config(&self, enabled: bool, file_path: String) -> Result<()> {
+        let expanded = shellexpand::tilde(&file_path).to_string();
+        let file_path = PathBuf::from(expanded);
+
+        {
+            let mut current = self.file_path.write().unwrap();
+            *current = file_path.clone();
+        }
+
+        self.enabled.store(enabled, Ordering::Relaxed);
+        if enabled {
+            Self::ensure_file_initialized(&file_path)?;
+        }
+
+        Ok(())
+    }
+
     pub async fn list(&self) -> Result<Vec<DecisionEntry>> {
-        if !self.enabled {
+        if !self.is_enabled() {
             return Ok(vec![]);
         }
 
         let _guard = self.io_lock.lock().await;
-        let mut state = Self::read_state(&self.file_path)?;
+        let file_path = self.current_file_path();
+        let mut state = Self::read_state(&file_path)?;
         state
             .decisions
             .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -102,7 +127,7 @@ impl DecisionMemory {
         source: String,
         actor: String,
     ) -> Result<DecisionEntry> {
-        if !self.enabled {
+        if !self.is_enabled() {
             return Err(OSAgentError::ToolExecution(
                 "Decision memory is disabled".to_string(),
             ));
@@ -117,7 +142,8 @@ impl DecisionMemory {
         }
 
         let _guard = self.io_lock.lock().await;
-        let mut state = Self::read_state(&self.file_path)?;
+        let file_path = self.current_file_path();
+        let mut state = Self::read_state(&file_path)?;
         let now = Utc::now();
 
         let maybe_existing = state
@@ -169,17 +195,18 @@ impl DecisionMemory {
             created
         };
 
-        Self::write_state(&self.file_path, &state)?;
+        Self::write_state(&file_path, &state)?;
         Ok(decision)
     }
 
     pub async fn delete(&self, decision_id: &str, actor: String) -> Result<bool> {
-        if !self.enabled {
+        if !self.is_enabled() {
             return Ok(false);
         }
 
         let _guard = self.io_lock.lock().await;
-        let mut state = Self::read_state(&self.file_path)?;
+        let file_path = self.current_file_path();
+        let mut state = Self::read_state(&file_path)?;
         let initial_len = state.decisions.len();
 
         let removed = state
@@ -205,7 +232,7 @@ impl DecisionMemory {
             });
         }
 
-        Self::write_state(&self.file_path, &state)?;
+        Self::write_state(&file_path, &state)?;
         Ok(true)
     }
 
@@ -214,13 +241,27 @@ impl DecisionMemory {
         message: &str,
         actor: &str,
     ) -> Result<Option<DecisionEntry>> {
-        if !self.enabled {
+        if !self.is_enabled() {
             return Ok(None);
         }
 
         let trimmed = message.trim();
         let lower = trimmed.to_lowercase();
-        let prefixes = ["approved decision:", "decision approved:", "approved:"].to_vec();
+
+        if let Some(decision) = self.try_explicit_prefix(trimmed, &lower, actor).await? {
+            return Ok(Some(decision));
+        }
+
+        self.try_natural_patterns(trimmed, &lower, actor).await
+    }
+
+    async fn try_explicit_prefix(
+        &self,
+        trimmed: &str,
+        lower: &str,
+        actor: &str,
+    ) -> Result<Option<DecisionEntry>> {
+        let prefixes = ["approved decision:", "decision approved:", "approved:"];
         let mut payload: Option<&str> = None;
 
         for prefix in prefixes {
@@ -234,6 +275,99 @@ impl DecisionMemory {
             return Ok(None);
         };
 
+        self.parse_key_value_payload(payload, "chat-explicit", actor)
+            .await
+    }
+
+    async fn try_natural_patterns(
+        &self,
+        trimmed: &str,
+        lower: &str,
+        actor: &str,
+    ) -> Result<Option<DecisionEntry>> {
+        let patterns: &[(&str, fn(&str, &str) -> Option<(String, String)>)] = &[
+            ("always use ", Self::parse_always_use),
+            ("from now on use ", Self::parse_from_now_on),
+            ("from now on, use ", Self::parse_from_now_on),
+            ("going forward, use ", Self::parse_from_now_on),
+            ("going forward use ", Self::parse_from_now_on),
+            ("i prefer to use ", Self::parse_prefer),
+            ("i prefer using ", Self::parse_prefer),
+            ("i prefer ", Self::parse_prefer),
+            ("use ", Self::parse_use_instead),
+            ("make sure to use ", Self::parse_from_now_on),
+            ("keep using ", Self::parse_from_now_on),
+            ("stick with ", Self::parse_from_now_on),
+        ];
+
+        for (prefix, extractor) in patterns {
+            if lower.starts_with(prefix) {
+                if let Some((key, value)) = extractor(trimmed, lower) {
+                    return self
+                        .parse_key_value_payload(
+                            &format!("{}={}", key, value),
+                            "chat-detected",
+                            actor,
+                        )
+                        .await;
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn parse_always_use(trimmed: &str, _lower: &str) -> Option<(String, String)> {
+        let rest = trimmed["always use ".len()..].trim();
+        if rest.is_empty() {
+            return None;
+        }
+        let clean = rest.trim_end_matches('.');
+        Some(("preferred_tool".to_string(), clean.to_string()))
+    }
+
+    fn parse_from_now_on(trimmed: &str, _lower: &str) -> Option<(String, String)> {
+        let after = trimmed.find("use ").map(|i| &trimmed[i + 4..])?;
+        let clean = after.trim().trim_end_matches('.');
+        if clean.is_empty() {
+            return None;
+        }
+        Some(("preferred_tool".to_string(), clean.to_string()))
+    }
+
+    fn parse_prefer(trimmed: &str, _lower: &str) -> Option<(String, String)> {
+        let mut rest = trimmed;
+        for prefix in &["I prefer to use ", "I prefer using ", "I prefer "] {
+            if rest.starts_with(prefix) {
+                rest = &rest[prefix.len()..];
+                break;
+            }
+        }
+        let clean = rest.trim().trim_end_matches('.');
+        if clean.is_empty() {
+            return None;
+        }
+        Some(("preference".to_string(), clean.to_string()))
+    }
+
+    fn parse_use_instead(trimmed: &str, lower: &str) -> Option<(String, String)> {
+        if !lower.contains(" instead of ") && !lower.contains(" instead ") {
+            return None;
+        }
+        let after_use = trimmed.find("use ").map(|i| &trimmed[i + 4..])?;
+        let clean = after_use.trim().trim_end_matches('.');
+        if clean.is_empty() {
+            return None;
+        }
+        Some(("preferred_tool".to_string(), clean.to_string()))
+    }
+
+    async fn parse_key_value_payload(
+        &self,
+        payload: &str,
+        source: &str,
+        actor: &str,
+    ) -> Result<Option<DecisionEntry>> {
         let mut rationale = None;
         let mut body = payload;
         if let Some((left, right)) = payload.split_once('|') {
@@ -263,7 +397,7 @@ impl DecisionMemory {
                 key.to_string(),
                 value.to_string(),
                 rationale,
-                "chat-explicit".to_string(),
+                source.to_string(),
                 actor.to_string(),
             )
             .await?;
@@ -272,7 +406,7 @@ impl DecisionMemory {
     }
 
     pub async fn prompt_block(&self) -> Result<Option<String>> {
-        if !self.enabled {
+        if !self.is_enabled() {
             return Ok(None);
         }
 
@@ -304,6 +438,10 @@ impl DecisionMemory {
         );
 
         Ok(Some(lines.join("\n")))
+    }
+
+    fn current_file_path(&self) -> PathBuf {
+        self.file_path.read().unwrap().clone()
     }
 
     fn ensure_file_initialized(path: &Path) -> Result<()> {

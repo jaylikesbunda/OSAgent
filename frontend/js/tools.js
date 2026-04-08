@@ -874,6 +874,13 @@ OSA.completeToolCard = function(event) {
         chevron.style.opacity = '';
     }
 
+    if (event.title) {
+        const subtitleEl = document.getElementById(`subtitle-${toolData.domId}`);
+        if (subtitleEl && !subtitleEl.textContent) {
+            subtitleEl.textContent = String(event.title);
+        }
+    }
+
     if (toolData.isPanel) {
         const output = document.getElementById(`output-${toolData.domId}`);
         if (output) {
@@ -1452,7 +1459,9 @@ OSA.persistToolComplete = async function(event) {
             },
             body: JSON.stringify({
                 success: event.success,
-                output: typeof event.output === 'string' ? event.output : ''
+                output: typeof event.output === 'string' ? event.output : '',
+                title: typeof event.title === 'string' ? event.title : null,
+                metadata: event.metadata && typeof event.metadata === 'object' ? event.metadata : null
             })
         });
     } catch (e) {

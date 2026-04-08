@@ -57,7 +57,16 @@ jobs:
       - name: Build launcher with embedded core
         run: CARGO_TARGET_DIR="$GITHUB_WORKSPACE/launcher/target" OSAGENT_CORE_SOURCE="$GITHUB_WORKSPACE/target/release/osagent" OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater" cargo build --manifest-path launcher/Cargo.toml --release
 
-      - name: Run benchmarks
+      - name: Run runtime benchmarks (debug vs release)
+        run: |
+          cargo run --release --bin osagent-bench -- \
+            --profiles debug,release \
+            --iterations 5 \
+            --output-dir benchmark_results \
+            --json-out benchmark_results/runtime_ci.json \
+            --md-out benchmark_results/runtime_ci.md
+
+      - name: Run micro-benchmarks (criterion)
         run: cargo bench --bench performance -- --save-baseline ci | tee benchmark_results.txt
 
       - name: Upload benchmark results
@@ -66,6 +75,7 @@ jobs:
           name: benchmark-results
           path: |
             benchmark_results.txt
+            benchmark_results/
             target/criterion/
 
       - name: Comment PR with results

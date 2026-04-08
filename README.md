@@ -141,6 +141,33 @@ Release artifacts are the launcher binaries:
 
 See `RELEASING.md` for the GitLab + Cloudflare R2 release flow.
 
+## Runtime Benchmarks
+
+OSA includes an in-repo, reproducible runtime benchmark harness that compares `debug` vs `release` for:
+
+- Startup to first ready API response (`/api/auth/status`)
+- RSS at ready and idle RSS after a fixed settle window
+- Provider-free common workloads:
+  - `health_ping_20x`
+  - `frontend_assets`
+  - `frontend_boot_api`
+  - `session_crud`
+
+Run the full suite:
+
+```bash
+cargo run --release --bin osagent-bench -- --profiles debug,release --iterations 10
+```
+
+Quick wrappers:
+
+```bash
+./bench.sh
+./quick-bench.sh
+```
+
+Outputs are written under `benchmark_results/` as both JSON and Markdown.
+
 ## License
 
 [MIT](LICENSE)
