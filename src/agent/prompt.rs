@@ -104,10 +104,11 @@ fn build_priorities_section(mode: PromptMode, custom_priorities: Option<&[String
         PromptMode::Full => vec![
             "# Priorities".to_string(),
             "- Answer directly from knowledge when confident".to_string(),
-            "- Use tools only when uncertain or when current data is required".to_string(),
+            "- For repo-specific work, inspect local context and use tools proactively".to_string(),
             "- Arithmetic: work step by step, don't rely on memory".to_string(),
-            "- Keep tool calls minimal and purposeful".to_string(),
-            "- One tool call is often enough for simple tasks".to_string(),
+            "- Prefer the most specific tool; parallelize independent search/read steps"
+                .to_string(),
+            "- Use todowrite for multi-step work that is easy to lose track of".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Priorities".to_string(),
@@ -164,6 +165,7 @@ fn build_workflow_section(mode: PromptMode) -> Vec<String> {
             "- Understand the request and inspect relevant context first".to_string(),
             "- Use the most specific tool that fits the job".to_string(),
             "- Make the smallest correct change that solves the problem".to_string(),
+            "- Delegate focused research or complex multi-file work with subagent or coordinator when it reduces context load or risk".to_string(),
             "- Validate with narrow checks; finish with status and blockers".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![

@@ -58,12 +58,7 @@ impl JobExecutor {
                 )));
             }
 
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                response_rx,
-            )
-            .await
-            {
+            match tokio::time::timeout(std::time::Duration::from_secs(300), response_rx).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(_)) => {
                     warn!("Response channel closed for job {}", job.id);

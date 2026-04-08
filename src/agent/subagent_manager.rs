@@ -418,8 +418,7 @@ impl SubagentManager {
         } else {
             PromptMode::Minimal
         };
-        let system_prompt =
-            prompt::build_system_prompt(&allowed_tools, prompt_mode, None, None);
+        let system_prompt = prompt::build_system_prompt(&allowed_tools, prompt_mode, None, None);
 
         if let Ok(Some(mut session)) = storage.get_session(&session_id) {
             session.messages.push(Message::system(system_prompt));
@@ -658,9 +657,14 @@ impl SubagentManager {
                 });
 
                 let start = Instant::now();
-                let result = tool_registry
-                    .execute(&tool_call.name, tool_call.arguments.clone())
-                    .await;
+                let mut tool_args = tool_call.arguments.clone();
+                if matches!(
+                    tool_call.name.as_str(),
+                    "question" | "todowrite" | "todoread"
+                ) {
+                    tool_args["session_id"] = serde_json::json!(session_id.clone());
+                }
+                let result = tool_registry.execute(&tool_call.name, tool_args).await;
                 let duration_ms = start.elapsed().as_millis() as u64;
 
                 match result {

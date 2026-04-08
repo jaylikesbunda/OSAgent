@@ -334,7 +334,11 @@ impl BashTool {
 
         for (pattern, label) in &patterns {
             if lowered.contains(pattern) {
-                tracing::warn!("Blocked destructive pattern: {} (matched: {})", label, pattern);
+                tracing::warn!(
+                    "Blocked destructive pattern: {} (matched: {})",
+                    label,
+                    pattern
+                );
                 return true;
             }
         }

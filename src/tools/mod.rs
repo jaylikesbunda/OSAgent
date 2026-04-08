@@ -11,6 +11,7 @@ pub mod guard;
 pub mod loop_detect;
 pub mod lsp;
 pub mod memory;
+pub mod news;
 pub mod output;
 pub mod patch;
 pub mod persona;

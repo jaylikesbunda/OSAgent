@@ -114,7 +114,8 @@ impl Scheduler {
             let is_one_shot = job.cron_expr.trim().starts_with("in ");
 
             if is_one_shot {
-                if let Err(e) = storage.record_scheduled_job_result(&job.id, true, Utc::now().timestamp())
+                if let Err(e) =
+                    storage.record_scheduled_job_result(&job.id, true, Utc::now().timestamp())
                 {
                     warn!("Failed to update one-shot job {}: {}", job.id, e);
                 }
@@ -126,7 +127,8 @@ impl Scheduler {
                     .next_run(&job.cron_expr)
                     .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(24));
 
-                if let Err(e) = storage.record_scheduled_job_result(&job.id, true, next_run.timestamp())
+                if let Err(e) =
+                    storage.record_scheduled_job_result(&job.id, true, next_run.timestamp())
                 {
                     warn!("Failed to update job next_run for {}: {}", job.id, e);
                     continue;

@@ -4,7 +4,9 @@ param(
 
     [switch]$NoDiscord,
 
-    [switch]$Installer
+    [switch]$Installer,
+
+    [switch]$Fast
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,26 +39,43 @@ if (-not $NoDiscord) {
 }
 
 Write-Host "OSAgent launcher build" -ForegroundColor Green
-Write-Host "Checks  : $Checks"
-Write-Host "Discord : $(-not $NoDiscord)"
+Write-Host "Checks   : $Checks"
+Write-Host "Discord  : $(-not $NoDiscord)"
 Write-Host "Installer: $Installer"
+Write-Host "Fast     : $Fast"
 
-if ($Checks) {
-    Invoke-CargoStep -Label "Check core formatting" -Args @("fmt", "--", "--check")
-    Invoke-CargoStep -Label "Run core clippy" -Args @("clippy", "--all-targets", "--all-features", "--", "-D", "warnings")
-    Invoke-CargoStep -Label "Run core tests" -Args @("test", "--all-features", "--verbose")
-    Invoke-CargoStep -Label "Check launcher formatting" -Args @("fmt", "--manifest-path", "launcher/Cargo.toml", "--all", "--", "--check")
-    Invoke-CargoStep -Label "Run launcher clippy" -Args @("clippy", "--manifest-path", "launcher/Cargo.toml", "--all-targets", "--all-features", "--", "-D", "warnings")
+if ($Fast -and $Checks) {
+    Write-Host "Note: -Fast skips slow checks (clippy, fmt). Tests still run." -ForegroundColor Yellow
 }
 
-Invoke-CargoStep -Label "Build core" -Args (@("build", "--release") + $CoreFeatureArgs)
-Invoke-CargoStep -Label "Build updater" -Args @("build", "--manifest-path", "updater/Cargo.toml", "--release")
+if ($Checks) {
+    if (-not $Fast) {
+        Invoke-CargoStep -Label "Check core formatting" -Args @("fmt", "--", "--check")
+        Invoke-CargoStep -Label "Run core clippy" -Args @("clippy", "--all-targets", "--all-features", "--", "-D", "warnings")
+    }
+    Invoke-CargoStep -Label "Run core tests" -Args @("test", "--all-features", "--verbose")
+    if (-not $Fast) {
+        Invoke-CargoStep -Label "Check launcher formatting" -Args @("fmt", "--manifest-path", "launcher/Cargo.toml", "--all", "--", "--check")
+        Invoke-CargoStep -Label "Run launcher clippy" -Args @("clippy", "--manifest-path", "launcher/Cargo.toml", "--all-targets", "--all-features", "--", "-D", "warnings")
+    }
+}
 
-$env:OSAGENT_CORE_SOURCE = Join-Path $ScriptRoot "target/release/osagent.exe"
-$env:OSAGENT_UPDATER_SOURCE = Join-Path $ScriptRoot "updater/target/release/osagent-updater.exe"
-Invoke-CargoStep -Label "Build launcher (embeds core + updater)" -Args @("build", "--manifest-path", "launcher/Cargo.toml", "--release")
+$Profile = if ($Fast) { "dev-release" } else { "release" }
+$ProfileArg = @("--profile", $Profile)
+
+Invoke-CargoStep -Label "Build core ($Profile)" -Args (@("build") + $ProfileArg + $CoreFeatureArgs)
+Invoke-CargoStep -Label "Build updater ($Profile)" -Args (@("build", "--manifest-path", "updater/Cargo.toml") + $ProfileArg)
+
+$ProfileDir = if ($Fast) { "dev-release" } else { "release" }
+$env:OSAGENT_CORE_SOURCE = Join-Path $ScriptRoot "target/$ProfileDir/osagent.exe"
+$env:OSAGENT_UPDATER_SOURCE = Join-Path $ScriptRoot "updater/target/$ProfileDir/osagent-updater.exe"
+Invoke-CargoStep -Label "Build launcher ($Profile) (embeds core + updater)" -Args (@("build", "--manifest-path", "launcher/Cargo.toml") + $ProfileArg)
 
 if ($Installer) {
+    if ($Fast) {
+        Write-Host ""
+        Write-Host "WARNING: -Installer with -Fast uses dev-release profile. Use without -Fast for production installer." -ForegroundColor Yellow
+    }
     Write-Host ""
     Write-Host "==> Build launcher installer (NSIS + WebView2 bootstrapper)" -ForegroundColor Cyan
     Write-Host "cargo tauri build --bundles nsis" -ForegroundColor DarkGray
@@ -73,9 +92,10 @@ if ($Installer) {
     }
 }
 
-$CoreBinary = Join-Path $ScriptRoot "target/release/osagent.exe"
-$UpdaterBinary = Join-Path $ScriptRoot "updater/target/release/osagent-updater.exe"
-$LauncherBinary = Join-Path $ScriptRoot "launcher/target/release/osagent-launcher.exe"
+$ProfileDir = if ($Fast) { "dev-release" } else { "release" }
+$CoreBinary = Join-Path $ScriptRoot "target/$ProfileDir/osagent.exe"
+$UpdaterBinary = Join-Path $ScriptRoot "updater/target/$ProfileDir/osagent-updater.exe"
+$LauncherBinary = Join-Path $ScriptRoot "launcher/target/$ProfileDir/osagent-launcher.exe"
 $InstallerBinary = Join-Path $ScriptRoot "launcher/target/release/bundle/nsis"
 
 Write-Host ""

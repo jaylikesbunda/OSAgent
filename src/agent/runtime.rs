@@ -394,7 +394,7 @@ impl AgentRuntime {
         let custom_identity = config.agent.custom_identity.as_deref();
         let custom_priorities = config.agent.custom_priorities.as_deref();
         let system_prompt = prompt::build_system_prompt(
-            &config.tools.allowed,
+            &config.tools.denied,
             PromptMode::Full,
             custom_identity,
             custom_priorities,

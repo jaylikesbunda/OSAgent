@@ -9,8 +9,9 @@ use crate::indexer::CodeIndexer;
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, calendar, code, codesearch, coordinator, files, lsp, memory, patch, persona, plan,
-    process, question, scheduler, search, skill, subagent, system_status, task, todo, weather, web,
+    bash, batch, calendar, code, codesearch, coordinator, files, lsp, memory, news, patch, persona,
+    plan, process, question, scheduler, search, skill, subagent, system_status, task, todo,
+    weather, web,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -325,6 +326,10 @@ impl ToolRegistry {
             Arc::new(weather::WeatherTool::new(config.clone())),
         );
         tools.insert(
+            "news".to_string(),
+            Arc::new(news::NewsTool::new(config.clone())),
+        );
+        tools.insert(
             "system_status".to_string(),
             Arc::new(system_status::SystemStatusTool::new(config.clone())),
         );
@@ -345,7 +350,7 @@ impl ToolRegistry {
 
         Ok(Self {
             tools,
-            allowed: config.tools.allowed.iter().cloned().collect(),
+            allowed: config.tools.denied.iter().cloned().collect(),
             base_config: config,
             storage,
             event_bus,
@@ -404,6 +409,7 @@ impl ToolRegistry {
             "process" => Some(Arc::new(process::ProcessTool::new(config))),
             "calendar" => Some(Arc::new(calendar::CalendarTool::new(config.clone()))),
             "weather" => Some(Arc::new(weather::WeatherTool::new(config.clone()))),
+            "news" => Some(Arc::new(news::NewsTool::new(config.clone()))),
             "system_status" => Some(Arc::new(system_status::SystemStatusTool::new(config))),
             "lsp" => Some(Arc::new(lsp::LspTool::new(config))),
             "plan_exit" => Some(Arc::new(plan::PlanExitTool::new())),
@@ -412,7 +418,7 @@ impl ToolRegistry {
     }
 
     pub fn is_allowed(&self, tool_name: &str) -> bool {
-        self.allowed.is_empty() || self.allowed.contains(tool_name)
+        self.allowed.is_empty() || !self.allowed.contains(tool_name)
     }
 
     pub fn is_parallel_safe(&self, tool_name: &str) -> bool {
@@ -429,6 +435,7 @@ impl ToolRegistry {
                 | "todoread"
                 | "process"
                 | "weather"
+                | "news"
                 | "system_status"
                 | "lsp"
         )
@@ -445,7 +452,7 @@ impl ToolRegistry {
         let definitions: Vec<ToolDefinition> = self
             .tools
             .values()
-            .filter(|tool| self.allowed.is_empty() || self.allowed.contains(tool.name()))
+            .filter(|tool| self.allowed.is_empty() || !self.allowed.contains(tool.name()))
             .map(|tool| ToolDefinition {
                 tool_type: "function".to_string(),
                 function: crate::agent::provider::ToolFunction {
@@ -496,6 +503,9 @@ impl ToolRegistry {
             "bash",
             "grep",
             "glob",
+            "todowrite",
+            "subagent",
+            "coordinator",
         ];
         let existing_names: Vec<String> = result.iter().map(|t| t.function.name.clone()).collect();
         for essential in essential_tools.iter() {
@@ -588,10 +598,55 @@ impl ToolRegistry {
                 "web_fetch",
                 &["fetch", "url", "website", "page", "html", "download"],
             ),
-            ("todo", &["todo", "task", "checklist", "task list", "track"]),
+            (
+                "todowrite",
+                &[
+                    "todo",
+                    "checklist",
+                    "task list",
+                    "track",
+                    "progress",
+                    "plan",
+                    "steps",
+                ],
+            ),
+            (
+                "todoread",
+                &[
+                    "todo",
+                    "checklist",
+                    "track",
+                    "progress",
+                    "continue",
+                    "resume",
+                ],
+            ),
+            (
+                "task",
+                &["subtask", "parent task", "task record", "hierarchy"],
+            ),
             (
                 "subagent",
-                &["delegate", "subagent", "worker", "parallel", "split"],
+                &[
+                    "delegate",
+                    "subagent",
+                    "worker",
+                    "parallel",
+                    "split",
+                    "research",
+                    "investigate",
+                ],
+            ),
+            (
+                "coordinator",
+                &[
+                    "coordinate",
+                    "orchestrate",
+                    "multi-file",
+                    "complex change",
+                    "implement",
+                    "verify",
+                ],
             ),
             (
                 "code_python",
@@ -608,6 +663,17 @@ impl ToolRegistry {
             (
                 "weather",
                 &["weather", "temperature", "forecast", "rain", "climate"],
+            ),
+            (
+                "news",
+                &[
+                    "news",
+                    "headlines",
+                    "current events",
+                    "breaking",
+                    "what's happening",
+                    "latest news",
+                ],
             ),
             (
                 "process",
@@ -722,7 +788,7 @@ impl ToolRegistry {
     }
 
     pub fn register_coordinator(&mut self, coordinator: Arc<Coordinator>) {
-        if self.allowed.is_empty() || self.allowed.contains("coordinator") {
+        if self.allowed.is_empty() || !self.allowed.contains("coordinator") {
             self.tools.insert(
                 "coordinator".to_string(),
                 Arc::new(coordinator::CoordinatorTool::new(
@@ -736,7 +802,7 @@ impl ToolRegistry {
     }
 
     pub fn register_scheduler(&mut self, scheduler: Arc<crate::scheduler::Scheduler>) {
-        if self.allowed.is_empty() || self.allowed.contains("schedule") {
+        if self.allowed.is_empty() || !self.allowed.contains("schedule") {
             self.tools.insert(
                 "schedule".to_string(),
                 Arc::new(scheduler::ScheduleTool::new(scheduler.clone())),

@@ -2141,10 +2141,7 @@ impl EventHandler for Handler {
                             _ => &job_type,
                         };
                         let embed = CreateEmbed::new()
-                            .title(format!(
-                                "Scheduled {}",
-                                title_label.replace('_', " ")
-                            ))
+                            .title(format!("Scheduled {}", title_label.replace('_', " ")))
                             .description(&message)
                             .field("Job ID", &job_id[..8], true)
                             .field("Type", &job_type, true)

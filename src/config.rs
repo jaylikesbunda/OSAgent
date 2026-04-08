@@ -173,7 +173,7 @@ pub struct VoiceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
-    pub allowed: Vec<String>,
+    pub denied: Vec<String>,
     pub bash: BashToolConfig,
     pub code_python: CodeToolConfig,
     pub code_node: CodeToolConfig,
@@ -564,42 +564,7 @@ impl Default for SearchConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            allowed: vec![
-                "batch".to_string(),
-                "bash".to_string(),
-                "read_file".to_string(),
-                "write_file".to_string(),
-                "edit_file".to_string(),
-                "apply_patch".to_string(),
-                "list_files".to_string(),
-                "delete_file".to_string(),
-                "grep".to_string(),
-                "glob".to_string(),
-                "web_fetch".to_string(),
-                "web_search".to_string(),
-                "code_python".to_string(),
-                "code_node".to_string(),
-                "code_bash".to_string(),
-                "task".to_string(),
-                "persona".to_string(),
-                "todowrite".to_string(),
-                "todoread".to_string(),
-                "question".to_string(),
-                "skill".to_string(),
-                "skill_list".to_string(),
-                "skill_action".to_string(),
-                "lsp".to_string(),
-                "plan_exit".to_string(),
-                "subagent".to_string(),
-                "coordinator".to_string(),
-                "process".to_string(),
-                "calendar".to_string(),
-                "weather".to_string(),
-                "system_status".to_string(),
-                "codesearch".to_string(),
-                "record_memory".to_string(),
-                "schedule".to_string(),
-            ],
+            denied: vec![],
             bash: BashToolConfig::default(),
             code_python: CodeToolConfig::default(),
             code_node: CodeToolConfig::default(),
@@ -769,14 +734,7 @@ impl Config {
         }
     }
 
-    pub fn migrate_tool_defaults(&mut self) {
-        let default_allowed = ToolsConfig::default().allowed;
-        for tool in default_allowed {
-            if !self.tools.allowed.contains(&tool) {
-                self.tools.allowed.push(tool);
-            }
-        }
-    }
+    pub fn migrate_tool_defaults(&mut self) {}
 
     pub fn migrate_workspace_paths(&mut self) {
         for ws in &mut self.agent.workspaces {

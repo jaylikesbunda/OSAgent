@@ -1924,7 +1924,7 @@ async fn list_tools(
     Extension(agent): Extension<Arc<AgentRuntime>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let config = agent.get_config().await;
-    let allowed_tools = &config.tools.allowed;
+    let denied_tools = &config.tools.denied;
 
     let all_tools = vec![
         "batch",
@@ -1962,7 +1962,7 @@ async fn list_tools(
         .map(|&name| {
             serde_json::json!({
                 "name": name,
-                "enabled": allowed_tools.contains(&name.to_string()),
+                "enabled": !denied_tools.contains(&name.to_string()),
                 "category": match name {
                     "batch" => "management",
                     "bash" => "shell",

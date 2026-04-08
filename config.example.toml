@@ -134,35 +134,7 @@ checkpoint_interval = 5
 # allowed_users = [123456789012345678]
 
 [tools]
-allowed = [
-  "bash",
-  "read_file",
-  "write_file",
-  "edit_file",
-  "delete_file",
-  "list_files",
-  "apply_patch",
-  "batch",
-  "grep",
-  "glob",
-  "process",
-  "code_python",
-  "code_node",
-  "code_bash",
-  "web_fetch",
-  "web_search",
-  "task",
-  "todowrite",
-  "todoread",
-  "persona",
-  "reflect",
-  "question",
-  "skill",
-  "skill_list",
-  "lsp",
-  "subagent",
-  "plan_exit",
-]
+denied = []
 
 [tools.bash]
 allowed_commands = ["ls", "cat", "grep", "git", "npm", "cargo", "python", "node"]

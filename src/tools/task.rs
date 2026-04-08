@@ -67,15 +67,15 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "Manage tasks and subtasks for complex multi-step operations"
+        "Manage durable task and subtask records. Prefer todowrite for session progress tracking."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when breaking down complex tasks into steps, tracking progress, or organizing work"
+        "Use when you need durable task records or explicit parent/subtask structure"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Don't use for simple single-step operations or when task tracking isn't needed"
+        "Don't use for ordinary session planning, progress tracking, or delegation; use todowrite or subagent instead"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
