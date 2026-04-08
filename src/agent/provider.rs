@@ -1577,6 +1577,7 @@ impl OpenAICompatibleProvider {
             "model": model,
             "messages": self.build_messages(&transformed_messages),
             "stream": true,
+            "stream_options": { "include_usage": true },
         });
         if let Some(options) = provider_options.as_object() {
             for (key, value) in options {
@@ -1799,6 +1800,7 @@ impl OpenAICompatibleProvider {
 
         if mode == RequestMode::Responses {
             request_body["stream"] = serde_json::json!(true);
+            request_body["stream_options"] = serde_json::json!({ "include_usage": true });
             let parsed = self
                 .send_responses_request(&request_auth, &request_body, &config)
                 .await?;

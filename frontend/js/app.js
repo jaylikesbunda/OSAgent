@@ -1,5 +1,11 @@
 window.OSA = window.OSA || {};
 
+OSA._debounceTimers = {};
+OSA.debounce = function(key, fn, delay) {
+    if (OSA._debounceTimers[key]) clearTimeout(OSA._debounceTimers[key]);
+    OSA._debounceTimers[key] = setTimeout(() => { delete OSA._debounceTimers[key]; fn(); }, delay);
+};
+
 OSA.WORKFLOW_STYLESHEETS = [
     '/static/css/workflow.css',
     '/static/css/litegraph.min.css'
@@ -381,7 +387,7 @@ OSA.loadSessions = async function() {
 
         list.innerHTML = `
             <div class="session-search">
-                <input type="text" id="session-search-input" placeholder="Search sessions..." oninput="OSA.filterSessions(this.value)" />
+                <input type="text" id="session-search-input" placeholder="Search sessions..." oninput="OSA.debounce('sessionSearch', () => OSA.filterSessions(this.value), 200)" />
                 <select id="session-source-filter" onchange="OSA.setSessionSourceFilter(this.value); OSA.filterSessions(document.getElementById('session-search-input')?.value || '')">
                     <option value="all">All sources</option>
                     <option value="web">Web</option>
@@ -429,6 +435,7 @@ OSA.createSession = async function() {
         OSA.setSessionQueue([]);
         OSA.renderQueuedMessages([]);
         OSA.resetMessageChain();
+        OSA.stopToolSync();
         
         OSA.restoreContextState(session.id, null);
         OSA.connectEventSource(session.id);
@@ -567,6 +574,7 @@ OSA.selectSession = async function(sessionId) {
         OSA.parallelToolGroups = [];
         OSA._contextGroupState = null;
         OSA.resetMessageChain();
+        OSA.stopToolSync();
         
         OSA.connectEventSource(sessionId);
         OSA.hideThinkingIndicator();
@@ -758,12 +766,14 @@ OSA.restoreToolsAtPositions = function(tools) {
     const PARALLEL_WINDOW_MS = 3000;
 
     const regularTools = tools
-        .filter(t => t.tool_name !== 'subagent')
+        .filter(t => t.tool_name !== 'subagent' && !OSA.isContextTool(t.tool_name))
         .sort((a, b) => {
             const messageDelta = toolMessageIndex(a) - toolMessageIndex(b);
             if (messageDelta !== 0) return messageDelta;
             return toolTs(a) - toolTs(b);
         });
+
+    const contextTools = tools.filter(t => OSA.isContextTool(t.tool_name));
 
     const grouped = [];
     let currentGroup = null;
@@ -792,6 +802,7 @@ OSA.restoreToolsAtPositions = function(tools) {
         if (group.tools.length >= 2) {
             const groupDiv = document.createElement('div');
             groupDiv.className = 'parallel-group';
+            groupDiv.dataset.messageIndex = group.messageIndex;
             groupDiv.innerHTML = `
                 <div class="parallel-group-header">
                     <span class="parallel-count">${group.tools.length} tools executed concurrently</span>
@@ -809,6 +820,61 @@ OSA.restoreToolsAtPositions = function(tools) {
             });
         } else {
             OSA.restoreToolCard(group.tools[0], insertBefore);
+        }
+    }
+
+    if (contextTools.length > 0) {
+        const contextByIndex = new Map();
+        for (const t of contextTools) {
+            const mi = toolMessageIndex(t);
+            if (!contextByIndex.has(mi)) contextByIndex.set(mi, []);
+            contextByIndex.get(mi).push(t);
+        }
+
+        const sortedContextGroups = Array.from(contextByIndex.entries())
+            .sort(([a], [b]) => a - b);
+
+        for (const [mi, groupTools] of sortedContextGroups) {
+            groupTools.sort((a, b) => toolTs(a) - toolTs(b));
+
+            const firstTs = toolTs(groupTools[0]);
+            const insertBefore = OSA.findToolInsertBefore(messagesDiv, mi, firstTs);
+
+            const groupId = `context-tool-group-${mi}`;
+            let groupDiv = document.getElementById(groupId);
+            if (!groupDiv) {
+                groupDiv = document.createElement('div');
+                groupDiv.id = groupId;
+                groupDiv.className = 'tool-container context-inline-group';
+                groupDiv.dataset.messageIndex = mi;
+
+                if (insertBefore) {
+                    messagesDiv.insertBefore(groupDiv, insertBefore);
+                } else {
+                    messagesDiv.appendChild(groupDiv);
+                }
+            }
+
+            for (const t of groupTools) {
+                const callId = t.tool_call_id;
+                if (groupDiv.querySelector(`#ctx-${callId}`)) continue;
+
+                const label = OSA.toolLabel(t.tool_name);
+                const detail = OSA.summarizeToolArgs(t.tool_name, t.arguments || {});
+                const isCompleted = t.completed === true;
+                const isSuccess = t.success === true;
+                const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
+
+                const item = document.createElement('div');
+                item.className = 'context-inline-item';
+                item.id = `ctx-${callId}`;
+                item.innerHTML = `
+                    <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
+                    <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
+                    <span class="context-inline-status${isCompleted ? (isSuccess ? ' done' : ' failed') : ' pending'}">${statusText}</span>
+                `;
+                groupDiv.appendChild(item);
+            }
         }
     }
 };

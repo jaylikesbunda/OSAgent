@@ -46,6 +46,8 @@ pub struct MemoryStore {
     enabled: AtomicBool,
     file_path: RwLock<PathBuf>,
     io_lock: Mutex<()>,
+    cached_prompt_block: std::sync::RwLock<Option<String>>,
+    cache_dirty: AtomicBool,
 }
 
 impl MemoryStore {
@@ -61,6 +63,8 @@ impl MemoryStore {
             enabled: AtomicBool::new(enabled),
             file_path: RwLock::new(file_path),
             io_lock: Mutex::new(()),
+            cached_prompt_block: std::sync::RwLock::new(None),
+            cache_dirty: AtomicBool::new(true),
         })
     }
 
@@ -152,6 +156,7 @@ impl MemoryStore {
 
         state.memories.push(entry.clone());
         Self::write_state(&file_path, &state)?;
+        self.invalidate_cache();
         Ok(entry)
     }
 
@@ -197,6 +202,7 @@ impl MemoryStore {
 
         let updated = entry.clone();
         Self::write_state(&file_path, &state)?;
+        self.invalidate_cache();
         Ok(updated)
     }
 
@@ -216,6 +222,7 @@ impl MemoryStore {
         }
 
         Self::write_state(&file_path, &state)?;
+        self.invalidate_cache();
         Ok(true)
     }
 
@@ -225,28 +232,38 @@ impl MemoryStore {
             return Ok(None);
         }
 
+        if !self.cache_dirty.load(Ordering::Relaxed) {
+            if let Ok(guard) = self.cached_prompt_block.read() {
+                if guard.is_some() {
+                    return Ok(guard.clone());
+                }
+            }
+        }
+
         let memories = self.list().await?;
         if memories.is_empty() {
+            let mut guard = self.cached_prompt_block.write().unwrap();
+            *guard = None;
+            self.cache_dirty.store(false, Ordering::Relaxed);
             return Ok(None);
         }
 
         let mut lines = Vec::new();
         lines.push("# User Memory".to_string());
-        lines.push("The following memories have been recorded about the user. Treat them as durable facts unless the user corrects them. Use them to personalize responses and avoid asking for information already known.".to_string());
-        lines.push("If the user asks a direct personal question such as their name, job, preferences, or project details, answer from these memories plainly and confidently.".to_string());
-        lines.push("Do not confuse user facts with your own identity. You are OSA; these memories are about the user.".to_string());
 
-        for m in memories.iter().take(50) {
-            let tag_str = if m.tags.is_empty() {
-                String::new()
-            } else {
-                format!(" [{}]", m.tags.join(", "))
-            };
-            lines.push(format!("\n## {}{}", m.title, tag_str));
-            lines.push(format!("Fact: {}", m.content));
+        for m in memories.iter().take(10) {
+            lines.push(format!("{}: {}", m.title, m.content));
         }
 
-        Ok(Some(lines.join("\n")))
+        let block = lines.join("\n");
+        let mut guard = self.cached_prompt_block.write().unwrap();
+        *guard = Some(block.clone());
+        self.cache_dirty.store(false, Ordering::Relaxed);
+        Ok(Some(block))
+    }
+
+    fn invalidate_cache(&self) {
+        self.cache_dirty.store(true, Ordering::Relaxed);
     }
 
     fn ensure_initialized(path: &Path) -> Result<()> {

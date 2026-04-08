@@ -31,6 +31,23 @@ static SESSION_TO_CHANNEL: std::sync::OnceLock<
     tokio::sync::RwLock<std::collections::HashMap<String, u64>>,
 > = std::sync::OnceLock::new();
 
+static LAST_DISCORD_CHANNEL: std::sync::OnceLock<tokio::sync::RwLock<u64>> =
+    std::sync::OnceLock::new();
+
+fn get_last_discord_channel() -> &'static tokio::sync::RwLock<u64> {
+    LAST_DISCORD_CHANNEL.get_or_init(|| tokio::sync::RwLock::new(0))
+}
+
+pub async fn get_last_discord_channel_id() -> u64 {
+    let lock = get_last_discord_channel().read().await;
+    *lock
+}
+
+pub async fn set_last_discord_channel_id(channel_id: u64) {
+    let mut lock = get_last_discord_channel().write().await;
+    *lock = channel_id;
+}
+
 struct DiscordBotState {
     running: bool,
     stop_tx: Option<oneshot::Sender<()>>,
@@ -513,6 +530,30 @@ impl Handler {
                 discord.allowed_users.is_empty() || discord.allowed_users.contains(&user_id)
             }
             None => true,
+        }
+    }
+
+    async fn persist_discord_channel_id(&self, channel_id: u64) {
+        let config = self.agent.config();
+        let mut cfg = config.write().await;
+        let changed = match &mut cfg.discord {
+            Some(d) => {
+                let changed = d.last_channel_id != Some(channel_id);
+                d.last_channel_id = Some(channel_id);
+                changed
+            }
+            None => {
+                let mut dc = crate::config::DiscordConfig::default();
+                dc.last_channel_id = Some(channel_id);
+                cfg.discord = Some(dc);
+                true
+            }
+        };
+        drop(cfg);
+        if changed {
+            if let Err(e) = self.agent.save_config(&self.config_path).await {
+                warn!("Failed to persist discord channel_id: {}", e);
+            }
         }
     }
 
@@ -2059,6 +2100,62 @@ impl EventHandler for Handler {
                             warn!("Discord: QuestionAsked for unknown session: {}", session_id);
                         }
                     }
+                    Ok(AgentEvent::ScheduledJobFired {
+                        notify_channels,
+                        message,
+                        job_id,
+                        job_type,
+                        session_id,
+                        discord_channel_id,
+                        ..
+                    }) => {
+                        if !notify_channels.iter().any(|c| c == "discord") {
+                            continue;
+                        }
+                        let session_channel = {
+                            if let Some(sid) = &session_id {
+                                let map = get_session_to_channel().read().await;
+                                map.get(sid).copied()
+                            } else {
+                                None
+                            }
+                        };
+
+                        let cid = match discord_channel_id {
+                            Some(cid) => cid,
+                            None => match session_channel {
+                                Some(cid) => cid,
+                                None => {
+                                    let last = get_last_discord_channel_id().await;
+                                    if last == 0 {
+                                        info!("Discord: ScheduledJobFired has discord channel but no session/channel to deliver to");
+                                        continue;
+                                    }
+                                    last
+                                }
+                            },
+                        };
+
+                        let title_label = match job_type.as_str() {
+                            "daily_briefing" => "Daily Briefing",
+                            _ => &job_type,
+                        };
+                        let embed = CreateEmbed::new()
+                            .title(format!(
+                                "Scheduled {}",
+                                title_label.replace('_', " ")
+                            ))
+                            .description(&message)
+                            .field("Job ID", &job_id[..8], true)
+                            .field("Type", &job_type, true)
+                            .color(EMBED_COLOR_INFO);
+                        if let Err(e) = ChannelId::new(cid)
+                            .send_message(&http, CreateMessage::new().embed(embed))
+                            .await
+                        {
+                            warn!("Discord: Failed to send scheduled job embed: {}", e);
+                        }
+                    }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -2216,6 +2313,10 @@ impl EventHandler for Handler {
             return;
         }
 
+        let channel_id = msg.channel_id.get();
+        set_last_discord_channel_id(channel_id).await;
+        self.persist_discord_channel_id(channel_id).await;
+
         let content = msg.content.trim();
 
         if content.starts_with('!') || content.starts_with('/') {
@@ -2275,7 +2376,14 @@ async fn run_discord_bot(
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
-    let handler = Handler::new(agent, config_path);
+    let handler = Handler::new(agent.clone(), config_path);
+
+    if let Some(channel_id) = discord_config.last_channel_id {
+        if channel_id != 0 {
+            set_last_discord_channel_id(channel_id).await;
+            info!("Restored last Discord channel ID: {}", channel_id);
+        }
+    }
 
     let mut client = Client::builder(&discord_config.token, intents)
         .event_handler(handler)

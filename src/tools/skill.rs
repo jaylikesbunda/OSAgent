@@ -270,7 +270,11 @@ impl SkillActionTool {
             return Ok(format!("Action '{}' completed successfully.", action.name));
         }
 
-        if let SkillActionRunner::Http { response_transform: Some(transform), .. } = &action.runner {
+        if let SkillActionRunner::Http {
+            response_transform: Some(transform),
+            ..
+        } = &action.runner
+        {
             return self.transform_response(&text, transform);
         }
 
@@ -311,7 +315,11 @@ impl SkillActionTool {
                     } else if v.is_number() || v.is_boolean() {
                         out.push_str(&format!("{}: {}\n", k, v));
                     } else if v.is_object() || v.is_array() {
-                        out.push_str(&format!("{}: {}\n", k, serde_json::to_string_pretty(v).unwrap_or_default()));
+                        out.push_str(&format!(
+                            "{}: {}\n",
+                            k,
+                            serde_json::to_string_pretty(v).unwrap_or_default()
+                        ));
                     }
                 }
                 Ok(out.trim_end().to_string())
@@ -593,7 +601,7 @@ impl Tool for SkillActionTool {
                 },
                 "args": {
                     "type": "object",
-                    "description": "Action arguments",
+                    "description": "Action-specific parameters (e.g., { \"query\": \"search text\" }) - see skill documentation for required parameters",
                     "additionalProperties": true
                 }
             },
@@ -929,7 +937,10 @@ fn format_item(index: usize, item: &Value) -> String {
         parts.push(name.to_string());
     }
     if let Some(artist) = item.get("artists").and_then(Value::as_array) {
-        let names: Vec<_> = artist.iter().filter_map(|a| a.get("name").and_then(Value::as_str)).collect();
+        let names: Vec<_> = artist
+            .iter()
+            .filter_map(|a| a.get("name").and_then(Value::as_str))
+            .collect();
         if !names.is_empty() {
             parts.push(format!("by {}", names.join(", ")));
         }
@@ -937,7 +948,10 @@ fn format_item(index: usize, item: &Value) -> String {
     if let Some(uri) = item.get("uri").and_then(Value::as_str) {
         parts.push(format!("uri: {}", uri));
     }
-    if let Some(album) = item.get("album").and_then(|v| v.get("name").and_then(Value::as_str)) {
+    if let Some(album) = item
+        .get("album")
+        .and_then(|v| v.get("name").and_then(Value::as_str))
+    {
         parts.push(format!("album: {}", album));
     }
     if let Some(duration_ms) = item.get("duration_ms").and_then(Value::as_u64) {
@@ -946,7 +960,11 @@ fn format_item(index: usize, item: &Value) -> String {
         parts.push(format!("{}:{:02}", mins, secs));
     }
     if parts.is_empty() {
-        return format!("{}. {}\n", index + 1, serde_json::to_string_pretty(item).unwrap_or_default());
+        return format!(
+            "{}. {}\n",
+            index + 1,
+            serde_json::to_string_pretty(item).unwrap_or_default()
+        );
     }
     format!("{}. {}\n", index + 1, parts.join(" | "))
 }

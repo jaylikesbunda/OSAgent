@@ -190,8 +190,13 @@ impl Tool for ReadFileTool {
             }
         }
 
-        let content = fs::read_to_string(&file_path)
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+        let fp = file_path.clone();
+        let content = tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&fp)
+                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))
+        })
+        .await
+        .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))??;
 
         if content.is_empty() {
             return Ok("(empty file)".to_string());
@@ -409,8 +414,14 @@ impl Tool for WriteFileTool {
 
         let backup = self.create_backup(&file_path)?;
 
-        fs::write(&file_path, content)
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
+        let fp = file_path.clone();
+        let content_owned = content.to_string();
+        tokio::task::spawn_blocking(move || {
+            std::fs::write(&fp, content_owned)
+                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))
+        })
+        .await
+        .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))??;
 
         if let Ok(canonical) = file_path.canonicalize() {
             self.cache.invalidate(&canonical);

@@ -93,6 +93,9 @@ async fn serve_static_handler(uri: Uri) -> impl IntoResponse {
 
 pub async fn run(config: Config, config_path: PathBuf) -> crate::error::Result<()> {
     let agent = Arc::new(AgentRuntime::new(config.clone())?);
+    if let Err(e) = agent.start_scheduler().await {
+        tracing::warn!("Failed to start scheduler: {}", e);
+    }
     run_with_agent(config, agent, config_path, None).await
 }
 

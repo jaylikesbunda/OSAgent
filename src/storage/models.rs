@@ -62,6 +62,19 @@ impl Session {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub model: String,
+    pub provider: String,
+    pub metadata: serde_json::Value,
+    pub parent_id: Option<String>,
+    pub agent_type: String,
+    pub task_status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QueuedMessageStatus {
@@ -322,4 +335,68 @@ pub struct SubagentTask {
     pub result: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledJob {
+    pub id: String,
+    pub cron_expr: String,
+    pub message: String,
+    pub job_type: String,
+    pub session_id: Option<String>,
+    pub enabled: bool,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub next_run_at: DateTime<Utc>,
+    pub failure_count: u32,
+    pub notify_channels: Vec<String>,
+}
+
+impl ScheduledJob {
+    pub fn new(
+        cron_expr: String,
+        message: String,
+        job_type: String,
+        session_id: Option<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            cron_expr,
+            message,
+            job_type,
+            session_id,
+            enabled: true,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            last_run_at: None,
+            next_run_at: now,
+            failure_count: 0,
+            notify_channels: vec!["web".to_string()],
+        }
+    }
+
+    pub fn with_channels(mut self, channels: Vec<String>) -> Self {
+        if !channels.is_empty() {
+            self.notify_channels = channels;
+        }
+        self
+    }
+
+    pub fn with_discord_channel_id(mut self, channel_id: Option<String>) -> Self {
+        if let Some(id) = channel_id {
+            if !id.is_empty() {
+                self.metadata["discord_channel_id"] = serde_json::Value::String(id);
+            }
+        }
+        self
+    }
+
+    pub fn discord_channel_id(&self) -> Option<u64> {
+        self.metadata
+            .get("discord_channel_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+    }
 }

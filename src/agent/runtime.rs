@@ -15,10 +15,11 @@ use crate::error::{OSAgentError, Result};
 use crate::external::{ExternalDirectoryManager, PermissionAction, PermissionPrompt};
 use crate::indexer::CodeIndexer;
 use crate::plugin::PluginManager;
+use crate::scheduler::Scheduler;
 use crate::skills::{get_skills_base_dir, SkillLoader};
 use crate::storage::{
-    AuditEntry, Message, MessageTokens, QueuedMessage, Session, SessionEventRecord, SqliteStorage,
-    ToolCall,
+    AuditEntry, Message, MessageTokens, QueuedMessage, Session, SessionEventRecord, SessionSummary,
+    SqliteStorage, ToolCall,
 };
 use crate::tools::bash::BashTool;
 use crate::tools::file_cache::FileReadCache;
@@ -81,6 +82,10 @@ pub struct AgentRuntime {
     active_runs: Arc<DashMap<String, ActiveRunInfo>>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     restart_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    scheduler: Arc<Scheduler>,
+    run_prompt_rx: tokio::sync::Mutex<
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::executor::RunPromptRequest>>,
+    >,
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +380,15 @@ impl AgentRuntime {
         ));
 
         tool_registry_instance.register_coordinator(coordinator.clone());
+
+        let mut scheduler = Scheduler::new(storage.clone(), event_bus.clone());
+
+        let (run_prompt_tx, mut run_prompt_rx) = tokio::sync::mpsc::unbounded_channel();
+        scheduler.set_prompt_sender(run_prompt_tx);
+
+        let scheduler = Arc::new(scheduler);
+
+        tool_registry_instance.register_scheduler(Arc::clone(&scheduler));
         let tool_registry = Arc::new(tool_registry_instance);
 
         let custom_identity = config.agent.custom_identity.as_deref();
@@ -409,6 +423,8 @@ impl AgentRuntime {
             active_runs: Arc::new(DashMap::new()),
             shutdown_tx: Arc::new(watch::channel(false).0),
             restart_tx: Arc::new(std::sync::Mutex::new(None)),
+            scheduler,
+            run_prompt_rx: tokio::sync::Mutex::new(Some(run_prompt_rx)),
         })
     }
 
@@ -774,7 +790,19 @@ impl AgentRuntime {
                 break;
             }
 
-            let tools = self.tool_registry.get_tool_definitions();
+            let tools = if iteration == 1 {
+                let filtered = self
+                    .tool_registry
+                    .get_tool_definitions_for_message(&user_message);
+                info!(
+                    "process_message: Using {} filtered tools (from {} total) based on user message",
+                    filtered.len(),
+                    self.tool_registry.get_tool_definitions().len()
+                );
+                filtered
+            } else {
+                self.tool_registry.get_tool_definitions()
+            };
             info!(
                 "process_message: Calling provider with {} tools",
                 tools.len()
@@ -815,7 +843,10 @@ impl AgentRuntime {
                 }
             }
 
-            api_messages.extend(session.messages.clone());
+            api_messages.reserve(session.messages.len());
+            for msg in &session.messages {
+                api_messages.push(msg.clone());
+            }
             if pending_tool_followup && !is_roleplay {
                 api_messages.push(Message::user(
                     "The last tool calls completed. If the user's request is fully addressed, give a concise final summary and stop. Do NOT start new tangential work, explore unrelated files, or add unsolicited improvements. Only continue with tools if there is a concrete remaining step directly related to the original request.".to_string(),
@@ -3754,6 +3785,10 @@ impl AgentRuntime {
         self.session_manager.list_sessions().await
     }
 
+    pub async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>> {
+        self.session_manager.list_session_summaries().await
+    }
+
     pub async fn enqueue_message(
         &self,
         session_id: &str,
@@ -4247,5 +4282,80 @@ impl AgentRuntime {
 
     pub async fn reload_plugins(&self) -> std::result::Result<(), String> {
         self.plugin_manager.load_all().await
+    }
+
+    pub fn scheduler(&self) -> &Arc<Scheduler> {
+        &self.scheduler
+    }
+
+    pub fn storage(&self) -> &Arc<SqliteStorage> {
+        &self.storage
+    }
+
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    pub fn config(&self) -> Arc<tokio::sync::RwLock<Config>> {
+        Arc::clone(&self.config)
+    }
+
+    pub async fn start_scheduler(self: &Arc<Self>) -> Result<()> {
+        self.scheduler.start().await?;
+
+        let rx = {
+            let mut guard = self.run_prompt_rx.lock().await;
+            guard.take()
+        };
+
+        if let Some(mut rx) = rx {
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    let session_id = match req.session_id {
+                        Some(sid) => sid,
+                        None => match this.create_session().await {
+                            Ok(session) => {
+                                info!("Scheduler run_prompt: created session {}", session.id);
+                                session.id
+                            }
+                            Err(e) => {
+                                warn!("Scheduler run_prompt: failed to create session: {}", e);
+                                if let Some(tx) = req.response_tx {
+                                    let _ = tx.send(format!("Failed to create session: {}", e));
+                                }
+                                continue;
+                            }
+                        },
+                    };
+
+                    info!("Scheduler run_prompt: executing in session {}", session_id);
+                    let result = this
+                        .process_message(&session_id, req.prompt, "scheduler".to_string())
+                        .await;
+
+                    if let Some(tx) = req.response_tx {
+                        let response = match &result {
+                            Ok(r) => r.clone(),
+                            Err(e) => format!("Error: {}", e),
+                        };
+                        let _ = tx.send(response);
+                    }
+
+                    if let Err(e) = result {
+                        error!(
+                            "Scheduler run_prompt failed for session {}: {}",
+                            session_id, e
+                        );
+                    }
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    pub async fn stop_scheduler(&self) {
+        self.scheduler.stop().await;
     }
 }

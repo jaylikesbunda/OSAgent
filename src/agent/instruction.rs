@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const INSTRUCTION_FILES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
-const MAX_TOTAL_CHARS: usize = 8_000;
+const MAX_TOTAL_CHARS: usize = 2_000;
 
 fn read_instruction_file(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;

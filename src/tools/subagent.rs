@@ -35,11 +35,11 @@ impl Tool for SubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Launch a specialized subagent for complex multi-step tasks. The subagent runs as a proper standalone agent session, blocks until complete, and returns its result."
+        "Launch a specialized subagent for complex multi-step tasks. The subagent runs as a proper standalone agent session, blocks until complete, and returns its result. In your prompt, specify exactly what information the subagent should return in its final message. The subagent will only produce one final response back to you."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use this tool when you need to delegate work to a specialized agent. The subagent will run autonomously with its own tools, and you will receive its final response."
+        "Use this tool when you need to delegate work to a specialized agent. The subagent will run autonomously with its own tools, and you will receive its final response. You should summarize the result for the user. The result returned by the agent is not visible to the user."
     }
 
     fn parameters(&self) -> Value {

@@ -45,3 +45,30 @@ OSA.cancelSession = async function(sessionId) {
     });
     return res.json().catch(() => ({}));
 };
+
+OSA.getScheduledJobs = async function() {
+    const res = await OSA.fetchWithAuth('/api/scheduler/jobs');
+    return res.json();
+};
+
+OSA.createScheduledJob = async function(data) {
+    const res = await OSA.fetchWithAuth('/api/scheduler/jobs', {
+        method: 'POST',
+        body: JSON.stringify(data)
+    });
+    return res.json();
+};
+
+OSA.deleteScheduledJob = async function(id) {
+    const res = await OSA.fetchWithAuth(`/api/scheduler/jobs/${id}`, {
+        method: 'DELETE'
+    });
+    return res.ok;
+};
+
+OSA.toggleScheduledJob = async function(id) {
+    const res = await OSA.fetchWithAuth(`/api/scheduler/jobs/${id}/toggle`, {
+        method: 'PATCH'
+    });
+    return res.json();
+};

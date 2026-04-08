@@ -9,170 +9,138 @@ impl ProviderTransforms {
         provider_type: &str,
         model: &str,
     ) -> Vec<Message> {
-        let mut result = messages.to_vec();
+        let mut result: Vec<Message> = messages.to_vec();
 
         match provider_type {
             "anthropic" => {
-                result = Self::filter_empty_content(&result);
-                result = Self::normalize_claude_tool_call_ids(&result);
+                Self::filter_empty_content_in_place(&mut result);
+                Self::normalize_claude_tool_call_ids_in_place(&mut result);
             }
             "openai" => {
-                result = Self::normalize_openai_tool_call_ids(&result);
+                Self::normalize_openai_tool_call_ids_in_place(&mut result);
             }
             "google" | "google-vertex" => {
-                result = Self::filter_empty_content(&result);
-                result = Self::normalize_google_tool_call_ids(&result);
+                Self::filter_empty_content_in_place(&mut result);
+                Self::normalize_google_tool_call_ids_in_place(&mut result);
             }
             "mistral" => {
-                result = Self::normalize_mistral_tool_call_ids(&result);
+                Self::normalize_mistral_tool_call_ids_in_place(&mut result);
                 Self::fix_mistral_message_sequence(&mut result);
             }
             "ollama" | "deepseek" | "groq" | "xai" => {
-                result = Self::filter_empty_content(&result);
+                Self::filter_empty_content_in_place(&mut result);
             }
             _ => {}
         }
 
         if model.contains("claude") {
-            result = Self::normalize_claude_tool_call_ids(&result);
+            Self::normalize_claude_tool_call_ids_in_place(&mut result);
         }
 
         if model.contains("mistral") || model.to_lowercase().contains("mistral") {
-            result = Self::normalize_mistral_tool_call_ids(&result);
+            Self::normalize_mistral_tool_call_ids_in_place(&mut result);
         }
 
         result
     }
 
-    pub fn filter_empty_content(messages: &[Message]) -> Vec<Message> {
-        messages
-            .iter()
-            .filter(|msg| {
-                if msg.role == "tool" {
-                    return !msg.content.trim().is_empty();
+    fn filter_empty_content_in_place(messages: &mut Vec<Message>) {
+        messages.retain(|msg| {
+            if msg.role == "tool" {
+                return !msg.content.trim().is_empty();
+            }
+            if msg.role == "user" || msg.role == "system" {
+                return !msg.content.trim().is_empty();
+            }
+            if msg.role == "assistant" {
+                if msg.tool_calls.is_some() {
+                    return true;
                 }
-                if msg.role == "user" || msg.role == "system" {
-                    return !msg.content.trim().is_empty();
-                }
-                if msg.role == "assistant" {
-                    if msg.tool_calls.is_some() {
-                        return true;
-                    }
-                    return !msg.content.trim().is_empty();
-                }
-                true
-            })
-            .cloned()
-            .collect()
+                return !msg.content.trim().is_empty();
+            }
+            true
+        });
     }
 
-    pub fn normalize_claude_tool_call_ids(messages: &[Message]) -> Vec<Message> {
-        messages
-            .iter()
-            .map(|msg| {
-                if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                    let mut new_msg = msg.clone();
-                    if let Some(ref mut calls) = new_msg.tool_calls {
-                        for call in calls {
-                            call.id = call
-                                .id
-                                .chars()
-                                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                                .collect();
-                            if call.id.is_empty() {
-                                call.id = format!(
-                                    "tool_{}",
-                                    uuid::Uuid::new_v4()
-                                        .to_string()
-                                        .replace("-", "")
-                                        .chars()
-                                        .take(8)
-                                        .collect::<String>()
-                                );
-                            }
+    fn normalize_claude_tool_call_ids_in_place(messages: &mut [Message]) {
+        for msg in messages.iter_mut() {
+            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
+                if let Some(ref mut calls) = msg.tool_calls {
+                    for call in calls.iter_mut() {
+                        call.id = call
+                            .id
+                            .chars()
+                            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                            .collect();
+                        if call.id.is_empty() {
+                            call.id = format!(
+                                "tool_{}",
+                                uuid::Uuid::new_v4()
+                                    .to_string()
+                                    .replace("-", "")
+                                    .chars()
+                                    .take(8)
+                                    .collect::<String>()
+                            );
                         }
                     }
-                    new_msg
-                } else {
-                    msg.clone()
                 }
-            })
-            .collect()
+            }
+        }
     }
 
-    pub fn normalize_mistral_tool_call_ids(messages: &[Message]) -> Vec<Message> {
-        messages
-            .iter()
-            .map(|msg| {
-                if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                    let mut new_msg = msg.clone();
-                    if let Some(ref mut calls) = new_msg.tool_calls {
-                        for call in calls {
-                            let normalized: String = call
-                                .id
-                                .chars()
-                                .filter(|c| c.is_alphanumeric())
-                                .take(9)
-                                .collect();
-                            call.id = if normalized.len() < 9 {
-                                format!("{}{}", normalized, "0".repeat(9 - normalized.len()))
-                            } else {
-                                normalized
-                            };
-                        }
+    fn normalize_mistral_tool_call_ids_in_place(messages: &mut [Message]) {
+        for msg in messages.iter_mut() {
+            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
+                if let Some(ref mut calls) = msg.tool_calls {
+                    for call in calls.iter_mut() {
+                        let normalized: String = call
+                            .id
+                            .chars()
+                            .filter(|c| c.is_alphanumeric())
+                            .take(9)
+                            .collect();
+                        call.id = if normalized.len() < 9 {
+                            format!("{}{}", normalized, "0".repeat(9 - normalized.len()))
+                        } else {
+                            normalized
+                        };
                     }
-                    new_msg
-                } else {
-                    msg.clone()
                 }
-            })
-            .collect()
+            }
+        }
     }
 
-    pub fn normalize_openai_tool_call_ids(messages: &[Message]) -> Vec<Message> {
-        messages
-            .iter()
-            .map(|msg| {
-                if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                    let mut new_msg = msg.clone();
-                    if let Some(ref mut calls) = new_msg.tool_calls {
-                        for call in calls {
-                            call.id = call
-                                .id
-                                .chars()
-                                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                                .collect();
-                        }
+    fn normalize_openai_tool_call_ids_in_place(messages: &mut [Message]) {
+        for msg in messages.iter_mut() {
+            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
+                if let Some(ref mut calls) = msg.tool_calls {
+                    for call in calls.iter_mut() {
+                        call.id = call
+                            .id
+                            .chars()
+                            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                            .collect();
                     }
-                    new_msg
-                } else {
-                    msg.clone()
                 }
-            })
-            .collect()
+            }
+        }
     }
 
-    pub fn normalize_google_tool_call_ids(messages: &[Message]) -> Vec<Message> {
-        messages
-            .iter()
-            .map(|msg| {
-                if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                    let mut new_msg = msg.clone();
-                    if let Some(ref mut calls) = new_msg.tool_calls {
-                        for call in calls {
-                            call.id = call
-                                .id
-                                .chars()
-                                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                                .collect();
-                        }
+    fn normalize_google_tool_call_ids_in_place(messages: &mut [Message]) {
+        for msg in messages.iter_mut() {
+            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
+                if let Some(ref mut calls) = msg.tool_calls {
+                    for call in calls.iter_mut() {
+                        call.id = call
+                            .id
+                            .chars()
+                            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                            .collect();
                     }
-                    new_msg
-                } else {
-                    msg.clone()
                 }
-            })
-            .collect()
+            }
+        }
     }
 
     pub fn fix_mistral_message_sequence(messages: &mut [Message]) {

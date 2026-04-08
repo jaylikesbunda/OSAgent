@@ -18,6 +18,7 @@
     <link rel="stylesheet" href="/static/css/question.css">
     <link rel="stylesheet" href="/static/css/responsive.css">
     <link rel="stylesheet" href="/static/css/skills.css">
+    <link rel="stylesheet" href="/static/css/jobs.css">
 </head>
 <body>
     <div class="app">
@@ -48,6 +49,12 @@
                     <button class="clear-btn" onclick="clearSessions()">Clear sessions</button>
                 </div>
                 <div class="sessions-list" id="sessions-list"></div>
+                <div class="sidebar-footer">
+                    <button class="sidebar-jobs-btn" onclick="OSA.Jobs.show()" title="Scheduled Jobs">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        Jobs
+                    </button>
+                </div>
             </div>
 
             <div class="main">
@@ -90,7 +97,7 @@
                             </div>
                             <div id="model-dropdown" class="model-dropdown hidden">
                                 <div class="model-dropdown-search">
-                                    <input type="text" id="model-search" placeholder="Search models..." oninput="handleModelSearch(event)" onkeydown="handleModelDropdownKeydown(event)" />
+                                    <input type="text" id="model-search" placeholder="Search models..." oninput="OSA.debounce('modelSearch', () => handleModelSearch(event), 200)" onkeydown="handleModelDropdownKeydown(event)" />
                                 </div>
                                 <div class="model-dropdown-list"></div>
                             </div>
@@ -489,7 +496,7 @@
                     <div class="settings-group">
                         <div class="settings-group-title">Catalog Search</div>
                         <div class="settings-field">
-                            <input type="text" id="model-catalog-search" placeholder="Filter by name, ID, or provider..." oninput="OSA.filterSettingsModels(this.value)" />
+                            <input type="text" id="model-catalog-search" placeholder="Filter by name, ID, or provider..." oninput="OSA.debounce('settingsModelSearch', () => OSA.filterSettingsModels(this.value), 200)" />
                         </div>
                         <div id="all-models-list" class="model-catalog-list">Loading...</div>
                     </div>
@@ -1032,6 +1039,97 @@
         </div>
     </div>
 
+    <div id="jobs-modal" class="modal hidden" onclick="if(event.target===this)OSA.Jobs.hide()">
+        <div class="jobs-modal-content">
+            <div class="jobs-modal-header">
+                <div class="jobs-modal-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    <h2>Scheduled Jobs</h2>
+                </div>
+                <div class="jobs-header-actions">
+                    <button class="btn-ghost jobs-refresh-btn" onclick="OSA.Jobs.load()" title="Refresh">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        Refresh
+                    </button>
+                    <button class="btn-action" onclick="OSA.Jobs.showCreateForm()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        New Job
+                    </button>
+                    <button class="modal-close" onclick="OSA.Jobs.hide()">&times;</button>
+                </div>
+            </div>
+            <div class="jobs-modal-body">
+                <div class="jobs-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="jobs-create-modal" class="modal hidden" onclick="if(event.target===this)OSA.Jobs.hideCreateForm()">
+        <div class="jobs-create-content">
+            <div class="jobs-create-header">
+                <h2>New Scheduled Job</h2>
+                <button class="modal-close" onclick="OSA.Jobs.hideCreateForm()">&times;</button>
+            </div>
+            <form class="jobs-create-form" onsubmit="event.preventDefault();OSA.Jobs.createJob()">
+                <div class="settings-field">
+                    <label for="job-type">Job Type</label>
+                    <select id="job-type" onchange="OSA.Jobs.onTypeChange()">
+                        <option value="reminder">Reminder</option>
+                        <option value="run_prompt" selected>Run Prompt</option>
+                        <option value="daily_briefing">Daily Briefing</option>
+                    </select>
+                </div>
+                <div class="settings-field">
+                    <label for="job-when">When</label>
+                    <input type="text" id="job-when" placeholder="e.g. in 30m, at 3pm, every hour, @daily, 0 9 * * *" autocomplete="off">
+                    <span class="settings-field-hint">Supports natural language or cron expressions</span>
+                </div>
+                <div class="settings-field">
+                    <label for="job-message">Message / Prompt</label>
+                    <textarea id="job-message" placeholder="What should the agent do?" rows="3"></textarea>
+                </div>
+                <div class="settings-field">
+                    <label>Notify via</label>
+                    <div class="jobs-notify-options">
+                        <label class="jobs-notify-option">
+                            <input type="checkbox" id="notify-web" checked>
+                            <span class="jobs-notify-label">Web</span>
+                        </label>
+                        <label class="jobs-notify-option">
+                            <input type="checkbox" id="notify-discord">
+                            <span class="jobs-notify-label">Discord</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="settings-field" id="discord-channel-field" style="display:none">
+                    <label for="discord-channel-id">Discord Channel ID</label>
+                    <input type="text" id="discord-channel-id" placeholder="e.g. 123456789012345678 (optional, uses last active channel if empty)" autocomplete="off">
+                    <span class="settings-field-hint">Optional. Leave empty to use the last active Discord channel.</span>
+                </div>
+                <div class="jobs-create-footer">
+                    <button type="button" class="btn-ghost" onclick="OSA.Jobs.hideCreateForm()">Cancel</button>
+                    <button type="submit" class="btn-action">Create Job</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="jobs-delete-modal" class="modal hidden" onclick="if(event.target===this)OSA.Jobs.hideDeleteConfirm()">
+        <div class="jobs-delete-content">
+            <div class="jobs-delete-header">
+                <div class="jobs-delete-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </div>
+                <h2>Delete Job</h2>
+            </div>
+            <p class="jobs-delete-msg">Are you sure you want to delete this scheduled job? This cannot be undone.</p>
+            <div class="jobs-delete-footer">
+                <button class="btn-ghost" onclick="OSA.Jobs.hideDeleteConfirm()">Cancel</button>
+                <button class="btn-danger" id="jobs-delete-confirm-btn" style="padding:8px 18px;font-size:13px">Delete</button>
+            </div>
+        </div>
+    </div>
+
     <script defer src="/static/js/state.js"></script>
     <script defer src="/static/js/utils.js"></script>
     <script defer src="/static/js/api.js"></script>
@@ -1046,6 +1144,7 @@
     <script defer src="/static/js/todos.js"></script>
     <script defer src="/static/js/question.js"></script>
     <script defer src="/static/js/skills.js"></script>
+    <script defer src="/static/js/jobs.js"></script>
     <script defer src="/static/js/app.js"></script>
 </body>
 </html>

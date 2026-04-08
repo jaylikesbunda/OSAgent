@@ -79,15 +79,27 @@ impl WeatherTool {
     }
 
     fn render_report(value: &Value, location: Option<&str>, units: &str, days: usize) -> String {
-        let resolved_location = value["nearest_area"]
+        let api_location = value["nearest_area"]
             .as_array()
             .and_then(|areas| areas.first())
             .and_then(|area| area["areaName"].as_array())
             .and_then(|names| names.first())
             .and_then(|name| name["value"].as_str())
-            .map(ToString::to_string)
-            .or_else(|| location.map(ToString::to_string))
-            .unwrap_or_else(|| "current location".to_string());
+            .map(ToString::to_string);
+        let region = value["nearest_area"]
+            .as_array()
+            .and_then(|areas| areas.first())
+            .and_then(|area| area["region"].as_array())
+            .and_then(|regions| regions.first())
+            .and_then(|region| region["value"].as_str())
+            .map(ToString::to_string);
+
+        let resolved_location = match (&api_location, &region, location) {
+            (Some(city), Some(reg), _) => format!("{}, {}", city, reg),
+            (Some(city), None, _) => city.clone(),
+            (None, _, Some(loc)) => loc.to_string(),
+            _ => "current location".to_string(),
+        };
         let current = value["current_condition"]
             .as_array()
             .and_then(|entries| entries.first());
@@ -184,11 +196,15 @@ impl Tool for WeatherTool {
         vec![
             ToolExample {
                 description: "Check a city forecast".to_string(),
-                input: json!({"location": "Boston", "days": 2}),
+                input: json!({"location": "Boston,MA", "days": 2}),
+            },
+            ToolExample {
+                description: "Use country for disambiguation".to_string(),
+                input: json!({"location": "Perth,Australia"}),
             },
             ToolExample {
                 description: "Use imperial units".to_string(),
-                input: json!({"location": "Austin", "units": "imperial"}),
+                input: json!({"location": "Austin,TX", "units": "imperial"}),
             },
         ]
     }
@@ -199,7 +215,7 @@ impl Tool for WeatherTool {
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "Optional location such as 'Boston', 'Paris', or '94107'"
+                    "description": "Location for weather. Use 'City,CountryCode' or 'City,StateCode' to avoid ambiguity (e.g. 'Perth,AU', 'Portland,OR', 'London,UK'). Supports city names, zip codes, airport codes, and coordinates."
                 },
                 "units": {
                     "type": "string",

@@ -1,3 +1,4 @@
+use super::scheduler;
 use crate::agent::memory::MemoryEntry;
 use crate::agent::persona::{ActivePersona, PersonaOption};
 use crate::agent::runtime::AgentRuntime;
@@ -9,7 +10,9 @@ use crate::oauth::provider::{
 use crate::oauth::{generate_oauth_state, generate_pkce_pair, PkcePair};
 use crate::plugin::LoadedPlugin;
 use crate::skills::SkillService;
-use crate::storage::{FileSnapshotSummary, QueuedMessage, Session, StoredSessionEvent};
+use crate::storage::{
+    FileSnapshotSummary, QueuedMessage, Session, SessionSummary, StoredSessionEvent,
+};
 use crate::web::{auth, middleware::AuthLayer};
 use crate::workflow::api::WorkflowState;
 use crate::workflow::artifact_store::ArtifactStore;
@@ -272,6 +275,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
                 .post(create_session)
                 .delete(delete_sessions),
         )
+        .route("/api/session-summaries", get(list_session_summaries))
         .route(
             "/api/sessions/:id",
             get(get_session).patch(patch_session).delete(delete_session),
@@ -368,7 +372,8 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/update/check", get(check_update))
         .route("/api/update/download", post(download_update))
         .route("/api/update/install", post(install_update))
-        .route("/api/update/status", get(update_status));
+        .route("/api/update/status", get(update_status))
+        .merge(scheduler::create_scheduler_router());
 
     public_routes
         .merge(protected_routes.layer(AuthLayer::new(secret.clone())))
@@ -652,7 +657,11 @@ async fn get_network_info(
         .map(|ip| ip.to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string());
     let lan_url = format!("http://{}:{}", lan_ip, port);
-    Ok(Json(NetworkInfoResponse { lan_ip, port, lan_url }))
+    Ok(Json(NetworkInfoResponse {
+        lan_ip,
+        port,
+        lan_url,
+    }))
 }
 
 async fn get_discord_bot_status(
@@ -1322,6 +1331,21 @@ async fn list_sessions(
     })?;
 
     Ok(Json(sessions))
+}
+
+async fn list_session_summaries(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<Vec<SessionSummary>>, (StatusCode, Json<ErrorResponse>)> {
+    let summaries = agent.list_session_summaries().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(summaries))
 }
 
 async fn create_session(
@@ -2073,11 +2097,22 @@ async fn tts_synthesize(
                     Json(ErrorResponse { error: e }),
                 ))?;
 
-            let audio_data = std::fs::read(&output_path)
-                .map_err(|e| (
+            let output_path_clone = output_path.clone();
+            let audio_data = tokio::task::spawn_blocking(move || {
+                std::fs::read(&output_path_clone).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse { error: format!("Failed to read audio: {}", e) }),
+                    )
+                })
+            })
+            .await
+            .map_err(|e| {
+                (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse { error: format!("Failed to read audio: {}", e) }),
-                ))?;
+                    Json(ErrorResponse { error: format!("spawn_blocking error: {}", e) }),
+                )
+            })??;
 
             let _ = std::fs::remove_file(&output_path);
 
@@ -2243,14 +2278,26 @@ async fn voice_transcribe(
     })?;
 
     let audio_path = temp_dir.path().join("audio.wav");
-    std::fs::write(&audio_path, &audio_bytes).map_err(|e| {
+    let ap = audio_path.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&ap, &audio_bytes).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to write audio file: {}", e),
+                }),
+            )
+        })
+    })
+    .await
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to write audio file: {}", e),
+                error: format!("spawn_blocking error: {}", e),
             }),
         )
-    })?;
+    })??;
 
     let text = crate::voice::whisper::transcribe(
         &audio_path,
@@ -4542,16 +4589,27 @@ async fn voice_upload(
         (id, name.clone(), models_dir.join(&name))
     };
 
-    std::fs::write(&file_path, &bytes).map_err(|e| {
+    let size_bytes = bytes.len() as u64;
+    let fp = file_path.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&fp, bytes).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to write file: {}", e),
+                }),
+            )
+        })
+    })
+    .await
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to write file: {}", e),
+                error: format!("spawn_blocking error: {}", e),
             }),
         )
-    })?;
-
-    let size_bytes = bytes.len() as u64;
+    })??;
     let model = crate::voice::InstalledModel {
         id: model_id.clone(),
         model_type: model_type.to_string(),

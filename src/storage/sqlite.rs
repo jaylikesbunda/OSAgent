@@ -253,6 +253,42 @@ impl SqliteStorage {
 
                 CREATE INDEX IF NOT EXISTS idx_subagent_parent ON subagent_tasks(parent_session_id);
                 CREATE INDEX IF NOT EXISTS idx_subagent_status ON subagent_tasks(status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_subagent_session ON subagent_tasks(session_id);
+                CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
+
+                CREATE TABLE IF NOT EXISTS session_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    thinking TEXT,
+                    timestamp INTEGER NOT NULL,
+                    tool_calls BLOB,
+                    tool_call_id TEXT,
+                    metadata BLOB,
+                    tokens BLOB,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, timestamp);
+
+                CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                    id TEXT PRIMARY KEY,
+                    cron_expr TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    job_type TEXT NOT NULL,
+                    session_id TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    metadata BLOB,
+                    created_at INTEGER NOT NULL,
+                    last_run_at INTEGER,
+                    next_run_at INTEGER NOT NULL,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    notify_channels BLOB NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_enabled ON scheduled_jobs(enabled, next_run_at);
+                CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session ON scheduled_jobs(session_id);
                 "#,
             )
             .map_err(OSAgentError::Storage)?;
@@ -430,6 +466,36 @@ impl SqliteStorage {
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(OSAgentError::Storage)?;
             Ok(sessions)
+        })
+    }
+
+    pub fn list_session_summaries(&self) -> Result<Vec<SessionSummary>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status FROM sessions ORDER BY created_at DESC")
+                .map_err(OSAgentError::Storage)?;
+            let summaries = stmt
+                .query_map([], |row| {
+                    let metadata_bytes: Vec<u8> = row.get(5)?;
+                    Ok(SessionSummary {
+                        id: row.get(0)?,
+                        created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(1)?, 0)
+                            .unwrap_or_else(Utc::now),
+                        updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(2)?, 0)
+                            .unwrap_or_else(Utc::now),
+                        model: row.get(3)?,
+                        provider: row.get(4)?,
+                        metadata: serde_json::from_slice(&metadata_bytes)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                        parent_id: row.get(6)?,
+                        agent_type: row.get(7)?,
+                        task_status: row.get(8)?,
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(summaries)
         })
     }
 
@@ -912,16 +978,19 @@ impl SqliteStorage {
     ) -> Result<Vec<crate::tools::task::Task>> {
         use crate::tools::task::Task;
 
-        let mut tasks = Vec::new();
+        let mut tasks = Vec::with_capacity(descriptions.len());
 
-        for desc in descriptions {
-            let task = Task::new(desc, Some(task_id.to_string()));
-
-            self.with_conn(|conn| {
-                conn.execute(
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+            {
+                let mut stmt = tx.prepare_cached(
                     "INSERT INTO tasks (id, description, status, parent_id, created_at, updated_at, metadata)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                ).map_err(OSAgentError::Storage)?;
+
+                for desc in descriptions {
+                    let task = Task::new(desc, Some(task_id.to_string()));
+                    stmt.execute(params![
                         task.id,
                         task.description,
                         serde_json::to_string(&task.status).unwrap(),
@@ -929,14 +998,13 @@ impl SqliteStorage {
                         task.created_at.timestamp(),
                         task.updated_at.timestamp(),
                         serde_json::to_vec(&task.metadata).unwrap(),
-                    ],
-                ).map_err(OSAgentError::Storage)?;
-
-                Ok(())
-            })?;
-
-            tasks.push(task);
-        }
+                    ]).map_err(OSAgentError::Storage)?;
+                    tasks.push(task);
+                }
+            }
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(())
+        })?;
 
         Ok(tasks)
     }
@@ -1361,6 +1429,167 @@ impl SqliteStorage {
 
             tx.commit().map_err(OSAgentError::Storage)?;
             Ok(session_ids.len())
+        })
+    }
+
+    fn scheduled_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledJob> {
+        let last_run_at: Option<i64> = row.get(8)?;
+        let notify_channels_bytes: Option<Vec<u8>> = row.get(11).ok();
+        let notify_channels = notify_channels_bytes
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_else(|| vec!["web".to_string()]);
+        Ok(ScheduledJob {
+            id: row.get(0)?,
+            cron_expr: row.get(1)?,
+            message: row.get(2)?,
+            job_type: row.get(3)?,
+            session_id: row.get(4)?,
+            enabled: row.get::<_, i64>(5)? != 0,
+            metadata: serde_json::from_slice(&row.get::<_, Vec<u8>>(6)?)
+                .unwrap_or_else(|_| serde_json::json!({})),
+            created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(7)?, 0)
+                .unwrap_or_else(Utc::now),
+            last_run_at: last_run_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+            next_run_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(9)?, 0)
+                .unwrap_or_else(Utc::now),
+            failure_count: row.get::<_, i64>(10)?.try_into().unwrap_or(0),
+            notify_channels,
+        })
+    }
+
+    pub fn create_scheduled_job(&self, job: &ScheduledJob) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO scheduled_jobs (id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    job.id,
+                    job.cron_expr,
+                    job.message,
+                    job.job_type,
+                    job.session_id,
+                    if job.enabled { 1 } else { 0 },
+                    serde_json::to_vec(&job.metadata).unwrap_or_default(),
+                    job.created_at.timestamp(),
+                    job.last_run_at.map(|dt| dt.timestamp()),
+                    job.next_run_at.timestamp(),
+                    job.failure_count as i64,
+                    serde_json::to_vec(&job.notify_channels).unwrap_or_default(),
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    pub fn get_scheduled_job(&self, id: &str) -> Result<Option<ScheduledJob>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels FROM scheduled_jobs WHERE id = ?1")
+                .map_err(OSAgentError::Storage)?;
+
+            let result = stmt.query_row(params![id], Self::scheduled_job_from_row);
+            match result {
+                Ok(job) => Ok(Some(job)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(OSAgentError::Storage(e)),
+            }
+        })
+    }
+
+    pub fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels FROM scheduled_jobs ORDER BY next_run_at ASC")
+                .map_err(OSAgentError::Storage)?;
+
+            let jobs = stmt
+                .query_map([], Self::scheduled_job_from_row)
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(jobs)
+        })
+    }
+
+    pub fn list_enabled_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels FROM scheduled_jobs WHERE enabled = 1 ORDER BY next_run_at ASC")
+                .map_err(OSAgentError::Storage)?;
+
+            let jobs = stmt
+                .query_map([], Self::scheduled_job_from_row)
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(jobs)
+        })
+    }
+
+    pub fn update_scheduled_job(&self, job: &ScheduledJob) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE scheduled_jobs SET cron_expr = ?1, message = ?2, job_type = ?3, session_id = ?4, enabled = ?5, metadata = ?6, last_run_at = ?7, next_run_at = ?8, failure_count = ?9, notify_channels = ?10 WHERE id = ?11",
+                params![
+                    job.cron_expr,
+                    job.message,
+                    job.job_type,
+                    job.session_id,
+                    if job.enabled { 1 } else { 0 },
+                    serde_json::to_vec(&job.metadata).unwrap_or_default(),
+                    job.last_run_at.map(|dt| dt.timestamp()),
+                    job.next_run_at.timestamp(),
+                    job.failure_count as i64,
+                    serde_json::to_vec(&job.notify_channels).unwrap_or_default(),
+                    job.id,
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_scheduled_job(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM scheduled_jobs WHERE id = ?1", params![id])
+                .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    pub fn disable_scheduled_job(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE scheduled_jobs SET enabled = 0 WHERE id = ?1",
+                params![id],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    pub fn record_scheduled_job_result(
+        &self,
+        id: &str,
+        success: bool,
+        next_run: i64,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            if success {
+                conn.execute(
+                    "UPDATE scheduled_jobs SET last_run_at = ?1, next_run_at = ?2, failure_count = 0 WHERE id = ?3",
+                    params![Utc::now().timestamp(), next_run, id],
+                )
+                .map_err(OSAgentError::Storage)?;
+            } else {
+                conn.execute(
+                    "UPDATE scheduled_jobs SET failure_count = failure_count + 1 WHERE id = ?1",
+                    params![id],
+                )
+                .map_err(OSAgentError::Storage)?;
+            }
+            Ok(())
         })
     }
 }

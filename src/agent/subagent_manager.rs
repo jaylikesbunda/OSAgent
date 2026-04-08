@@ -413,8 +413,13 @@ impl SubagentManager {
             .filter(|tool| available_tool_names.contains(tool))
             .collect();
         // Subagents use default identity and priorities (no custom sections)
+        let prompt_mode = if agent_type == "explore" {
+            PromptMode::Explore
+        } else {
+            PromptMode::Minimal
+        };
         let system_prompt =
-            prompt::build_system_prompt(&allowed_tools, PromptMode::Minimal, None, None);
+            prompt::build_system_prompt(&allowed_tools, prompt_mode, None, None);
 
         if let Ok(Some(mut session)) = storage.get_session(&session_id) {
             session.messages.push(Message::system(system_prompt));
@@ -422,10 +427,23 @@ impl SubagentManager {
             let _ = storage.update_session(&session);
         }
 
-        let max_iterations = 50;
+        let max_iterations = if agent_type == "explore" { 100 } else { 50 };
+        let budget_warning_at = (max_iterations as f64 * 0.75) as usize;
+        let mut budget_warned = false;
         let mut tool_count = 0;
 
         for iteration in 0..max_iterations {
+            if !budget_warned && iteration >= budget_warning_at {
+                budget_warned = true;
+                if let Ok(Some(mut session)) = storage.get_session(&session_id) {
+                    session.messages.push(Message::synthetic_user(
+                        "You are approaching your iteration limit. Stop exploring now and synthesize all your findings into a comprehensive final summary. Do not make any more tool calls.".to_string(),
+                        "budget_warning",
+                    ));
+                    let _ = storage.update_session(&session);
+                }
+            }
+
             let result = Self::run_iteration(
                 session_id.clone(),
                 parent_session_id.clone(),
@@ -701,6 +719,7 @@ impl SubagentManager {
 
     async fn extract_result(storage: &Arc<SqliteStorage>, session_id: &str) -> Result<String> {
         if let Ok(Some(session)) = storage.get_session(session_id) {
+            // First: find the last assistant message with no tool calls and non-empty content
             let final_message = session.messages.iter().rev().find(|message| {
                 message.role == "assistant"
                     && !message.content.trim().is_empty()
@@ -717,15 +736,33 @@ impl SubagentManager {
                 return Ok(message.content.clone());
             }
 
-            let fallback_message = session.messages.iter().rev().find(|message| {
+            // Second: find the last assistant message with non-empty content even if it has tool calls
+            let fallback_with_tools = session.messages.iter().rev().find(|message| {
                 message.role == "assistant"
                     && !message.content.trim().is_empty()
                     && !Self::is_synthetic_message(message)
                     && !Self::looks_like_internal_tool_dump(&message.content)
             });
 
-            if let Some(message) = fallback_message {
+            if let Some(message) = fallback_with_tools {
                 return Ok(message.content.clone());
+            }
+
+            // Third: synthesize from tool results — collect the last few non-empty tool outputs
+            let tool_results: Vec<String> = session
+                .messages
+                .iter()
+                .rev()
+                .filter(|m| m.role == "tool" && !m.content.trim().is_empty())
+                .take(5)
+                .map(|m| m.content.clone())
+                .collect();
+
+            if !tool_results.is_empty() {
+                return Ok(format!(
+                    "Subagent completed with tool results but no final summary.\n\nRecent findings:\n{}",
+                    tool_results.join("\n---\n")
+                ));
             }
         }
         Ok("No result available".to_string())

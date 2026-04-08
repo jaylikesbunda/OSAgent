@@ -195,21 +195,29 @@ impl SkillService {
     ) -> Result<String, OSAgentError> {
         let config = self.config_store.load_config(name).unwrap_or_default();
 
-        let client_id = config.settings.get(&tr.client_id_field).cloned().ok_or_else(|| {
-            OSAgentError::Unknown(format!(
-                "{} not configured for skill '{}'",
-                tr.client_id_field, name
-            ))
-        })?;
+        let client_id = config
+            .settings
+            .get(&tr.client_id_field)
+            .cloned()
+            .ok_or_else(|| {
+                OSAgentError::Unknown(format!(
+                    "{} not configured for skill '{}'",
+                    tr.client_id_field, name
+                ))
+            })?;
         let client_secret = if tr.client_secret_field.is_empty() {
             String::new()
         } else {
-            config.settings.get(&tr.client_secret_field).cloned().ok_or_else(|| {
-                OSAgentError::Unknown(format!(
-                    "{} not configured for skill '{}'",
-                    tr.client_secret_field, name
-                ))
-            })?
+            config
+                .settings
+                .get(&tr.client_secret_field)
+                .cloned()
+                .ok_or_else(|| {
+                    OSAgentError::Unknown(format!(
+                        "{} not configured for skill '{}'",
+                        tr.client_secret_field, name
+                    ))
+                })?
         };
 
         let authorize_url = tr.authorize_url.as_ref().unwrap();
@@ -238,26 +246,22 @@ impl SkillService {
         info!("Opening browser for '{}': {}", name, auth_url);
         open_browser(&auth_url)?;
 
-        let (stream, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            listener.accept(),
-        )
-        .await
-        .map_err(|_| {
-            OSAgentError::Unknown("Timed out waiting for authorization callback".into())
-        })?
-        .map_err(|e| {
-            OSAgentError::Unknown(format!("Failed to accept callback connection: {}", e))
-        })?;
+        let (stream, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(120), listener.accept())
+                .await
+                .map_err(|_| {
+                    OSAgentError::Unknown("Timed out waiting for authorization callback".into())
+                })?
+                .map_err(|e| {
+                    OSAgentError::Unknown(format!("Failed to accept callback connection: {}", e))
+                })?;
 
         let request_bytes = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             read_http_request(stream),
         )
         .await
-        .map_err(|_| {
-            OSAgentError::Unknown("Timed out reading callback request".into())
-        })??;
+        .map_err(|_| OSAgentError::Unknown("Timed out reading callback request".into()))??;
 
         let (auth_code, error_param) = parse_callback_params(&request_bytes);
 
@@ -271,7 +275,8 @@ impl SkillService {
 
         if let Some(err) = error_param {
             return Err(OSAgentError::Unknown(format!(
-                "Authorization denied: {}", err
+                "Authorization denied: {}",
+                err
             )));
         }
         let code = auth_code.ok_or_else(|| {
@@ -295,14 +300,13 @@ impl SkillService {
             .form(&body)
             .send()
             .await
-            .map_err(|e| {
-                OSAgentError::Unknown(format!("Token exchange request failed: {}", e))
-            })?;
+            .map_err(|e| OSAgentError::Unknown(format!("Token exchange request failed: {}", e)))?;
 
         let status = response.status();
-        let response_text = response.text().await.map_err(|e| {
-            OSAgentError::Unknown(format!("Failed to read token response: {}", e))
-        })?;
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| OSAgentError::Unknown(format!("Failed to read token response: {}", e)))?;
 
         if !status.is_success() {
             return Err(OSAgentError::Unknown(format!(
@@ -315,7 +319,12 @@ impl SkillService {
             OSAgentError::Unknown(format!("Token response is not valid JSON: {}", e))
         })?;
 
-        self.save_tokens(name, &tokens, &tr.refresh_token_field, &tr.access_token_field)
+        self.save_tokens(
+            name,
+            &tokens,
+            &tr.refresh_token_field,
+            &tr.access_token_field,
+        )
     }
 
     async fn authorize_via_script(
@@ -419,14 +428,20 @@ impl SkillService {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        info!("Authorize script stdout for '{}': {} bytes", name, stdout.len());
+        info!(
+            "Authorize script stdout for '{}': {} bytes",
+            name,
+            stdout.len()
+        );
 
         let json_line = stdout
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
                 if trimmed.starts_with('{') && trimmed.ends_with('}') {
-                    serde_json::from_str::<serde_json::Value>(trimmed).ok().map(|_| trimmed)
+                    serde_json::from_str::<serde_json::Value>(trimmed)
+                        .ok()
+                        .map(|_| trimmed)
                 } else {
                     None
                 }
@@ -434,7 +449,10 @@ impl SkillService {
             .next_back();
 
         let json_str = json_line.ok_or_else(|| {
-            warn!("No JSON line found in authorize output for '{}'. Raw output:\n{}", name, stdout);
+            warn!(
+                "No JSON line found in authorize output for '{}'. Raw output:\n{}",
+                name, stdout
+            );
             OSAgentError::Unknown(format!(
                 "Authorize script for '{}' did not return a valid JSON object. Output:\n{}",
                 name, stdout
@@ -447,7 +465,8 @@ impl SkillService {
 
         if let Some(err) = tokens.get("error").and_then(|v| v.as_str()) {
             return Err(OSAgentError::Unknown(format!(
-                "Authorize script returned error: {}", err
+                "Authorize script returned error: {}",
+                err
             )));
         }
 
@@ -465,32 +484,52 @@ impl SkillService {
         let mut config = self.config_store.load_config(name).unwrap_or_default();
 
         if let Some(rt) = tokens.get("refresh_token").and_then(|v| v.as_str()) {
-            info!("Saving refresh_token to config key '{}' for skill '{}'", refresh_token_field, name);
-            config.settings.insert(refresh_token_field.to_string(), rt.to_string());
+            info!(
+                "Saving refresh_token to config key '{}' for skill '{}'",
+                refresh_token_field, name
+            );
+            config
+                .settings
+                .insert(refresh_token_field.to_string(), rt.to_string());
             saved_keys.push(refresh_token_field.to_string());
         } else {
-            warn!("No refresh_token found in authorize output for skill '{}'", name);
+            warn!(
+                "No refresh_token found in authorize output for skill '{}'",
+                name
+            );
         }
         if let Some(at) = tokens.get("access_token").and_then(|v| v.as_str()) {
-            info!("Saving access_token to config key '{}' for skill '{}'", access_token_field, name);
-            config.settings.insert(access_token_field.to_string(), at.to_string());
+            info!(
+                "Saving access_token to config key '{}' for skill '{}'",
+                access_token_field, name
+            );
+            config
+                .settings
+                .insert(access_token_field.to_string(), at.to_string());
             saved_keys.push(access_token_field.to_string());
         } else {
-            warn!("No access_token found in authorize output for skill '{}'", name);
+            warn!(
+                "No access_token found in authorize output for skill '{}'",
+                name
+            );
         }
 
         if saved_keys.is_empty() {
             return Err(OSAgentError::Unknown(
-                "Authorize returned JSON but contained no refresh_token or access_token fields".to_string()
+                "Authorize returned JSON but contained no refresh_token or access_token fields"
+                    .to_string(),
             ));
         }
 
-        self.config_store.save_config(name, &config).map_err(|e| {
-            OSAgentError::Unknown(format!("Failed to save tokens: {}", e))
-        })?;
+        self.config_store
+            .save_config(name, &config)
+            .map_err(|e| OSAgentError::Unknown(format!("Failed to save tokens: {}", e)))?;
 
         let verify = self.config_store.load_config(name).map_err(|e| {
-            OSAgentError::Unknown(format!("Saved tokens but failed to verify ({}). Try authorizing again.", e))
+            OSAgentError::Unknown(format!(
+                "Saved tokens but failed to verify ({}). Try authorizing again.",
+                e
+            ))
         })?;
         for key in &saved_keys {
             if !verify.settings.contains_key(key) {
@@ -501,7 +540,11 @@ impl SkillService {
             }
         }
 
-        info!("Tokens saved and verified for skill '{}' ({} keys)", name, saved_keys.len());
+        info!(
+            "Tokens saved and verified for skill '{}' ({} keys)",
+            name,
+            saved_keys.len()
+        );
         Ok("Authorization successful! Tokens saved automatically.".to_string())
     }
 }
@@ -537,7 +580,11 @@ impl SkillService {
 
         let has_authorize = parse_frontmatter(&content)
             .map(|schema| {
-                schema.token_refresh.as_ref().map(|tr| tr.supports_native_oauth()).unwrap_or(false)
+                schema
+                    .token_refresh
+                    .as_ref()
+                    .map(|tr| tr.supports_native_oauth())
+                    .unwrap_or(false)
                     || schema.actions.iter().any(|a| a.name == "authorize")
             })
             .unwrap_or(false);
@@ -557,12 +604,15 @@ struct CallbackRequest {
     path: String,
 }
 
-async fn read_http_request(mut stream: tokio::net::TcpStream) -> Result<CallbackRequest, OSAgentError> {
+async fn read_http_request(
+    mut stream: tokio::net::TcpStream,
+) -> Result<CallbackRequest, OSAgentError> {
     use tokio::io::AsyncReadExt;
     let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await.map_err(|e| {
-        OSAgentError::Unknown(format!("Failed to read callback request: {}", e))
-    })?;
+    let n = stream
+        .read(&mut buf)
+        .await
+        .map_err(|e| OSAgentError::Unknown(format!("Failed to read callback request: {}", e)))?;
     let request = String::from_utf8_lossy(&buf[..n]).to_string();
     let path = request
         .lines()
@@ -596,12 +646,14 @@ async fn send_http_response(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(response.as_bytes()).await.map_err(|e| {
-        OSAgentError::Unknown(format!("Failed to send callback response: {}", e))
-    })?;
-    stream.write_all(body).await.map_err(|e| {
-        OSAgentError::Unknown(format!("Failed to send callback body: {}", e))
-    })?;
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| OSAgentError::Unknown(format!("Failed to send callback response: {}", e)))?;
+    stream
+        .write_all(body)
+        .await
+        .map_err(|e| OSAgentError::Unknown(format!("Failed to send callback body: {}", e)))?;
     let _ = stream.shutdown().await;
     Ok(())
 }
@@ -616,8 +668,6 @@ fn open_browser(url: &str) -> Result<(), OSAgentError> {
     } else {
         Command::new("xdg-open").arg(url).spawn()
     };
-    result.map_err(|e| {
-        OSAgentError::Unknown(format!("Failed to open browser: {}", e))
-    })?;
+    result.map_err(|e| OSAgentError::Unknown(format!("Failed to open browser: {}", e)))?;
     Ok(())
 }

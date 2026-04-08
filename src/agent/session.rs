@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::storage::{Session, SqliteStorage};
+use crate::storage::{Session, SessionSummary, SqliteStorage};
 
 #[derive(Clone)]
 pub struct SessionManager {
@@ -34,6 +34,10 @@ impl SessionManager {
 
     pub async fn list_sessions(&self) -> Result<Vec<Session>> {
         self.storage.list_sessions()
+    }
+
+    pub async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>> {
+        self.storage.list_session_summaries()
     }
 
     pub async fn delete_session(&self, id: &str) -> Result<()> {

@@ -300,6 +300,7 @@
     font-size: 11px;
     color: var(--text-muted);
     font-family: 'JetBrains Mono', monospace;
+    align-self: center;
 }
 
 .error-card {

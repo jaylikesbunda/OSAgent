@@ -19,6 +19,7 @@ pub mod process;
 pub mod question;
 pub mod reflect;
 pub mod registry;
+pub mod scheduler;
 pub mod search;
 pub mod skill;
 pub mod subagent;

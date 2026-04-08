@@ -10,11 +10,11 @@ use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     bash, batch, calendar, code, codesearch, coordinator, files, lsp, memory, patch, persona, plan,
-    process, question, search, skill, subagent, system_status, task, todo, weather, web,
+    process, question, scheduler, search, skill, subagent, system_status, task, todo, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[allow(dead_code)]
@@ -49,7 +49,7 @@ pub trait Tool: Send + Sync {
 
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
-    allowed: Vec<String>,
+    allowed: HashSet<String>,
     base_config: Config,
     storage: Arc<crate::storage::SqliteStorage>,
     event_bus: Option<Arc<EventBus>>,
@@ -59,6 +59,8 @@ pub struct ToolRegistry {
     memory_store: Option<Arc<MemoryStore>>,
     file_cache: Arc<FileReadCache>,
     coordinator: Option<Arc<Coordinator>>,
+    scheduler: Option<Arc<crate::scheduler::Scheduler>>,
+    cached_tool_definitions: std::sync::RwLock<Option<Vec<ToolDefinition>>>,
 }
 
 impl ToolRegistry {
@@ -343,7 +345,7 @@ impl ToolRegistry {
 
         Ok(Self {
             tools,
-            allowed: config.tools.allowed.clone(),
+            allowed: config.tools.allowed.iter().cloned().collect(),
             base_config: config,
             storage,
             event_bus,
@@ -353,6 +355,8 @@ impl ToolRegistry {
             memory_store,
             file_cache,
             coordinator: None,
+            scheduler: None,
+            cached_tool_definitions: std::sync::RwLock::new(None),
         })
     }
 
@@ -408,7 +412,7 @@ impl ToolRegistry {
     }
 
     pub fn is_allowed(&self, tool_name: &str) -> bool {
-        self.allowed.contains(&tool_name.to_string())
+        self.allowed.is_empty() || self.allowed.contains(tool_name)
     }
 
     pub fn is_parallel_safe(&self, tool_name: &str) -> bool {
@@ -431,9 +435,17 @@ impl ToolRegistry {
     }
 
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        {
+            let cache = self.cached_tool_definitions.read().unwrap();
+            if let Some(ref defs) = *cache {
+                return defs.clone();
+            }
+        }
+
+        let definitions: Vec<ToolDefinition> = self
+            .tools
             .values()
-            .filter(|tool| self.allowed.contains(&tool.name().to_string()))
+            .filter(|tool| self.allowed.is_empty() || self.allowed.contains(tool.name()))
             .map(|tool| ToolDefinition {
                 tool_type: "function".to_string(),
                 function: crate::agent::provider::ToolFunction {
@@ -442,7 +454,213 @@ impl ToolRegistry {
                     parameters: tool.parameters(),
                 },
             })
-            .collect()
+            .collect();
+
+        let mut cache = self.cached_tool_definitions.write().unwrap();
+        *cache = Some(definitions.clone());
+        definitions
+    }
+
+    pub fn get_tool_definitions_for_message(&self, user_message: &str) -> Vec<ToolDefinition> {
+        let all_tools = self.get_tool_definitions();
+        if all_tools.len() <= 15 {
+            return all_tools;
+        }
+
+        let message_lower = user_message.to_lowercase();
+        let mut scored: Vec<(ToolDefinition, usize)> = all_tools
+            .into_iter()
+            .map(|tool| {
+                let score = Self::score_tool_relevance(
+                    &tool.function.name,
+                    &tool.function.description,
+                    &message_lower,
+                );
+                (tool, score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let top_count = 12.min(scored.len());
+        let mut result: Vec<ToolDefinition> = Vec::with_capacity(top_count + 5);
+
+        for (tool, _) in scored.iter().take(top_count) {
+            result.push(tool.clone());
+        }
+
+        let essential_tools = [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "bash",
+            "grep",
+            "glob",
+        ];
+        let existing_names: Vec<String> = result.iter().map(|t| t.function.name.clone()).collect();
+        for essential in essential_tools.iter() {
+            if !existing_names.contains(&essential.to_string()) {
+                if let Some((tool, _)) = scored.iter().find(|(t, _)| t.function.name == *essential)
+                {
+                    if result.len() < 18 {
+                        result.push(tool.clone());
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    fn score_tool_relevance(tool_name: &str, tool_description: &str, message: &str) -> usize {
+        let mut score = 0usize;
+
+        let keywords: &[(&str, &[&str])] = &[
+            (
+                "read_file",
+                &[
+                    "read",
+                    "view",
+                    "show",
+                    "file",
+                    "content",
+                    "code",
+                    "look at",
+                    "check file",
+                    "see",
+                ],
+            ),
+            (
+                "write_file",
+                &[
+                    "write",
+                    "create",
+                    "new file",
+                    "make file",
+                    "save",
+                    "generate",
+                ],
+            ),
+            (
+                "edit_file",
+                &[
+                    "edit", "change", "modify", "update", "replace", "fix", "add to",
+                ],
+            ),
+            (
+                "bash",
+                &[
+                    "run", "execute", "command", "shell", "terminal", "build", "test", "compile",
+                    "npm", "cargo", "git",
+                ],
+            ),
+            (
+                "grep",
+                &[
+                    "search", "find", "grep", "pattern", "look for", "where is", "contains",
+                ],
+            ),
+            (
+                "glob",
+                &[
+                    "find",
+                    "glob",
+                    "list",
+                    "files",
+                    "directory",
+                    "path",
+                    "pattern",
+                ],
+            ),
+            (
+                "web_search",
+                &[
+                    "search",
+                    "web",
+                    "internet",
+                    "google",
+                    "online",
+                    "latest",
+                    "find online",
+                ],
+            ),
+            (
+                "web_fetch",
+                &["fetch", "url", "website", "page", "html", "download"],
+            ),
+            ("todo", &["todo", "task", "checklist", "task list", "track"]),
+            (
+                "subagent",
+                &["delegate", "subagent", "worker", "parallel", "split"],
+            ),
+            (
+                "code_python",
+                &["python", "code", "script", "compute", "calculate"],
+            ),
+            (
+                "code_node",
+                &["javascript", "js", "node", "typescript", "ts"],
+            ),
+            (
+                "calendar",
+                &["calendar", "event", "schedule", "meeting", "appointment"],
+            ),
+            (
+                "weather",
+                &["weather", "temperature", "forecast", "rain", "climate"],
+            ),
+            (
+                "process",
+                &["process", "running", "kill", "ps", "memory", "cpu"],
+            ),
+            (
+                "system_status",
+                &["system", "status", "os", "disk", "uptime", "machine"],
+            ),
+            ("skill", &["skill", "plugin", "extension"]),
+            (
+                "question",
+                &["question", "ask", "confirm", "clarify", "approve"],
+            ),
+            ("persona", &["persona", "style", "tone", "personality"]),
+            ("plan_exit", &["plan", "planning", "exit"]),
+        ];
+
+        if let Some((_, keyword_list)) = keywords.iter().find(|(name, _)| *name == tool_name) {
+            for keyword in *keyword_list {
+                if message.contains(keyword) {
+                    score += 10;
+                }
+            }
+        }
+
+        if tool_description.to_lowercase().contains("file") && message.contains("file") {
+            score += 3;
+        }
+        if tool_description.to_lowercase().contains("search")
+            && (message.contains("search") || message.contains("find"))
+        {
+            score += 3;
+        }
+        if tool_description.to_lowercase().contains("web")
+            && (message.contains("web") || message.contains("online") || message.contains("search"))
+        {
+            score += 3;
+        }
+
+        let high_priority_tools = [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "bash",
+            "grep",
+            "glob",
+        ];
+        if high_priority_tools.contains(&tool_name) {
+            score = score.saturating_add(5);
+        }
+
+        score
     }
 
     pub async fn execute(&self, tool_name: &str, args: Value) -> Result<String> {
@@ -504,7 +722,7 @@ impl ToolRegistry {
     }
 
     pub fn register_coordinator(&mut self, coordinator: Arc<Coordinator>) {
-        if self.allowed.contains(&"coordinator".to_string()) || self.allowed.is_empty() {
+        if self.allowed.is_empty() || self.allowed.contains("coordinator") {
             self.tools.insert(
                 "coordinator".to_string(),
                 Arc::new(coordinator::CoordinatorTool::new(
@@ -513,6 +731,18 @@ impl ToolRegistry {
                 )),
             );
             self.coordinator = Some(coordinator);
+            *self.cached_tool_definitions.write().unwrap() = None;
+        }
+    }
+
+    pub fn register_scheduler(&mut self, scheduler: Arc<crate::scheduler::Scheduler>) {
+        if self.allowed.is_empty() || self.allowed.contains("schedule") {
+            self.tools.insert(
+                "schedule".to_string(),
+                Arc::new(scheduler::ScheduleTool::new(scheduler.clone())),
+            );
+            self.scheduler = Some(scheduler);
+            *self.cached_tool_definitions.write().unwrap() = None;
         }
     }
 }

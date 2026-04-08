@@ -199,6 +199,15 @@ pub enum AgentEvent {
         workers_spawned: usize,
         timestamp: SystemTime,
     },
+    ScheduledJobFired {
+        session_id: Option<String>,
+        job_id: String,
+        job_type: String,
+        message: String,
+        notify_channels: Vec<String>,
+        discord_channel_id: Option<u64>,
+        timestamp: SystemTime,
+    },
 }
 
 pub struct QuestionChannel {
@@ -246,6 +255,7 @@ impl AgentEvent {
             AgentEvent::SubagentProgress { session_id, .. } => session_id,
             AgentEvent::SubagentCompleted { session_id, .. } => session_id,
             AgentEvent::CoordinatorPhase { session_id, .. } => session_id,
+            AgentEvent::ScheduledJobFired { session_id, .. } => session_id.as_deref().unwrap_or(""),
         }
     }
 }

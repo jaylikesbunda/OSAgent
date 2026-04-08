@@ -30,6 +30,8 @@ pub struct Config {
     pub update: UpdateConfig,
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +153,7 @@ pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
     pub allowed_users: Vec<u64>,
+    pub last_channel_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,10 +190,20 @@ pub struct SkillsConfig {
     pub directory: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BashMode {
+    Allowlist,
+    #[default]
+    Permissive,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BashToolConfig {
     pub allowed_commands: Vec<String>,
+    pub blocked_commands: Vec<String>,
+    pub mode: BashMode,
     pub timeout_seconds: u64,
 }
 
@@ -275,6 +288,24 @@ impl Default for UpdateConfig {
 #[derive(Default)]
 pub struct ExperimentalConfig {
     pub workflows_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulerConfig {
+    pub enabled: bool,
+    pub max_concurrent: usize,
+    pub max_retries: usize,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_concurrent: 3,
+            max_retries: 3,
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -422,6 +453,7 @@ impl Default for LspConfig {
 impl Default for BashToolConfig {
     fn default() -> Self {
         Self {
+            mode: BashMode::Permissive,
             allowed_commands: vec![
                 "ls".to_string(),
                 "cat".to_string(),
@@ -457,6 +489,39 @@ impl Default for BashToolConfig {
                 "which".to_string(),
                 "powershell".to_string(),
                 "pwsh".to_string(),
+            ],
+            blocked_commands: vec![
+                "format".to_string(),
+                "mkfs".to_string(),
+                "shutdown".to_string(),
+                "reboot".to_string(),
+                "halt".to_string(),
+                "poweroff".to_string(),
+                "sudo".to_string(),
+                "doas".to_string(),
+                "runas".to_string(),
+                "su".to_string(),
+                "dd".to_string(),
+                "systemctl".to_string(),
+                "service".to_string(),
+                "regedit".to_string(),
+                "reg".to_string(),
+                "diskpart".to_string(),
+                "netsh".to_string(),
+                "net".to_string(),
+                "taskkill".to_string(),
+                "kill".to_string(),
+                "killall".to_string(),
+                "pkill".to_string(),
+                "chown".to_string(),
+                "chmod".to_string(),
+                "chattr".to_string(),
+                "passwd".to_string(),
+                "userdel".to_string(),
+                "useradd".to_string(),
+                "groupdel".to_string(),
+                "fdisk".to_string(),
+                "parted".to_string(),
             ],
             timeout_seconds: 30,
         }
@@ -533,6 +598,7 @@ impl Default for ToolsConfig {
                 "system_status".to_string(),
                 "codesearch".to_string(),
                 "record_memory".to_string(),
+                "schedule".to_string(),
             ],
             bash: BashToolConfig::default(),
             code_python: CodeToolConfig::default(),
@@ -618,6 +684,7 @@ impl Config {
             plugins: PluginConfig::default(),
             update: UpdateConfig::default(),
             experimental: ExperimentalConfig::default(),
+            scheduler: SchedulerConfig::default(),
         };
         cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();

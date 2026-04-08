@@ -556,10 +556,14 @@ OSA.ensureStreamingAssistantMessage = function() {
     if (chain.lastAssistantDomId && !existingId) {
         const lastMsg = document.getElementById(chain.lastAssistantDomId);
         if (lastMsg && lastMsg.isConnected && !lastMsg.classList.contains('streaming')) {
-            const session = OSA.getCurrentSession();
-            const sourceMsg = OSA.getActiveTurnAssistantMessage(session);
-            const restored = OSA.prepareAssistantMessageElementForStreaming(lastMsg, sourceMsg, OSA.getShowThinkingBlocks());
-            if (restored) return restored;
+            if (OSA.transcriptHasBlockingSiblingAfter(lastMsg)) {
+                chain.lastAssistantDomId = null;
+            } else {
+                const session = OSA.getCurrentSession();
+                const sourceMsg = OSA.getActiveTurnAssistantMessage(session);
+                const restored = OSA.prepareAssistantMessageElementForStreaming(lastMsg, sourceMsg, OSA.getShowThinkingBlocks());
+                if (restored) return restored;
+            }
         }
     }
 
@@ -714,13 +718,17 @@ OSA.completeAssistantResponse = function(usage) {
                 if (!tpsEl) {
                     tpsEl = document.createElement('span');
                     tpsEl.className = 'turn-tokens';
-                    if (durationEl) {
+                    const copyBtn = actionsEl ? actionsEl.querySelector('.msg-action-btn') : null;
+                    if (copyBtn) {
+                        copyBtn.after(tpsEl);
+                    } else if (durationEl) {
                         durationEl.after(tpsEl);
                     } else {
                         actionsEl.prepend(tpsEl);
                     }
                 }
-                tpsEl.textContent = `${tps} tok/s · ${usage.total} total`;
+                tpsEl.textContent = `${tps} tok/s`;
+                tpsEl.title = `${usage.total} total tokens`;
             }
         }
 
@@ -974,6 +982,10 @@ OSA.renderMessages = function(messages) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return;
 
+    const savedTools = Array.from(messagesDiv.querySelectorAll(
+        '.tool-container, .parallel-group, .subagent-card, .coordinator-card'
+    ));
+
     const visibleMessages = messages
         .map((message, originalIndex) => ({ message, originalIndex }))
         .filter(({ message }) => {
@@ -1004,6 +1016,26 @@ OSA.renderMessages = function(messages) {
                 ${actionsHtml}
             </div>`;
         }).join('');
+
+    if (savedTools.length > 0) {
+        savedTools.forEach(toolEl => {
+            const toolMsgIdx = parseInt(toolEl.dataset.messageIndex, 10);
+            if (isNaN(toolMsgIdx)) {
+                messagesDiv.appendChild(toolEl);
+                return;
+            }
+            const allMsgs = Array.from(messagesDiv.querySelectorAll('.message'));
+            const insertBefore = allMsgs.find(msg => {
+                const msgIdx = parseInt(msg.dataset.messageIndex || '0', 10);
+                return msgIdx > toolMsgIdx;
+            });
+            if (insertBefore) {
+                messagesDiv.insertBefore(toolEl, insertBefore);
+            } else {
+                messagesDiv.appendChild(toolEl);
+            }
+        });
+    }
 
     OSA.resetStreamingMessage();
     messagesDiv.scrollTop = messagesDiv.scrollHeight;

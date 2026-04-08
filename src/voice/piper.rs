@@ -615,27 +615,33 @@ pub async fn synthesize(
         voice_path.ok_or_else(|| "No Piper voice installed. Download a voice first.".to_string())?
     };
 
-    let mut output = Command::new(&binary_path)
-        .args([
-            "--model",
-            &voice.to_string_lossy(),
-            "--output_file",
-            &output_path.to_string_lossy(),
-        ])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to run Piper: {}", e))?;
+    let text_owned = text.to_string();
+    let output_path_owned = output_path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut output = Command::new(&binary_path)
+            .args([
+                "--model",
+                &voice.to_string_lossy(),
+                "--output_file",
+                &output_path_owned.to_string_lossy(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to run Piper: {}", e))?;
 
-    if let Some(ref mut stdin) = output.stdin {
-        use std::io::Write;
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("Failed to write to Piper: {}", e))?;
-    }
+        if let Some(ref mut stdin) = output.stdin {
+            use std::io::Write;
+            stdin
+                .write_all(text_owned.as_bytes())
+                .map_err(|e| format!("Failed to write to Piper: {}", e))?;
+        }
 
-    let result = output
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for Piper: {}", e))?;
+        output
+            .wait_with_output()
+            .map_err(|e| format!("Failed to wait for Piper: {}", e))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))??;
 
     if !result.status.success() {
         return Err(format!(

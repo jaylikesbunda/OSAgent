@@ -649,10 +649,14 @@ pub async fn transcribe(
         args.push(lang.to_string());
     }
 
-    let output = Command::new(&binary_path)
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Failed to run Whisper: {}", e))?;
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(&binary_path)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("Failed to run Whisper: {}", e))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))??;
 
     if !output.status.success() {
         return Err(format!(

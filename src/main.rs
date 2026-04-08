@@ -26,6 +26,7 @@ mod lsp;
 mod oauth;
 mod permission;
 mod plugin;
+mod scheduler;
 mod skills;
 mod storage;
 mod tools;
@@ -205,6 +206,10 @@ async fn main() -> anyhow::Result<()> {
 
                 let agent = std::sync::Arc::new(agent::AgentRuntime::new(config.clone())?);
                 let shutdown_rx = agent.subscribe_shutdown();
+
+                if let Err(e) = agent.start_scheduler().await {
+                    tracing::warn!("Failed to start scheduler: {}", e);
+                }
 
                 if discord_enabled {
                     #[cfg(feature = "discord")]

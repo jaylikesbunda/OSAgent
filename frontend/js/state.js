@@ -45,6 +45,7 @@ OSA.parallelToolWindow = 500;
 OSA.pendingFormattedElements = new Set();
 OSA.pendingFormattedFrame = null;
 OSA.sessionSelectionRequestId = 0;
+OSA._toolSyncInterval = null;
 
 OSA.getToken = () => OSA.token;
 OSA.setToken = t => { OSA.token = t; localStorage.setItem('token', t); };

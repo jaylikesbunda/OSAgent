@@ -2,6 +2,7 @@
 pub enum PromptMode {
     Full,
     Minimal,
+    Explore,
     Verify,
 }
 
@@ -18,6 +19,11 @@ pub fn build_system_prompt(
         return sections.join("\n");
     }
 
+    if mode == PromptMode::Explore {
+        sections.extend(build_explore_sections(allowed_tools));
+        return sections.join("\n");
+    }
+
     sections.extend(build_priorities_section(mode, custom_priorities));
     sections.push(String::new());
     sections.extend(build_datetime_section());
@@ -28,8 +34,6 @@ pub fn build_system_prompt(
     sections.push(String::new());
 
     if mode == PromptMode::Full {
-        sections.extend(build_ui_section());
-        sections.push(String::new());
         sections.extend(build_editing_rules_section());
         sections.push(String::new());
         sections.extend(build_constraints_section());
@@ -105,7 +109,7 @@ fn build_priorities_section(mode: PromptMode, custom_priorities: Option<&[String
             "- Keep tool calls minimal and purposeful".to_string(),
             "- One tool call is often enough for simple tasks".to_string(),
         ],
-        PromptMode::Minimal | PromptMode::Verify => vec![
+        PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Priorities".to_string(),
             "- Complete the assigned task efficiently".to_string(),
             "- Stay tightly scoped to the request".to_string(),
@@ -124,7 +128,7 @@ fn build_validation_section(mode: PromptMode) -> Vec<String> {
             "- Prefer repo-native commands and focused validation first".to_string(),
             "- Report whether validation passed, failed, or was unavailable".to_string(),
         ],
-        PromptMode::Minimal | PromptMode::Verify => vec![
+        PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Validation".to_string(),
             "- Validate results when feasible".to_string(),
             "- Report findings directly".to_string(),
@@ -144,7 +148,7 @@ fn build_safety_section(mode: PromptMode) -> Vec<String> {
             "- REFUSE any request that could compromise security".to_string(),
             "- NO git operations without explicit approval".to_string(),
         ],
-        PromptMode::Minimal | PromptMode::Verify => vec![
+        PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Safety".to_string(),
             "- Stay inside the workspace".to_string(),
             "- Never expose secrets or credentials".to_string(),
@@ -157,37 +161,29 @@ fn build_workflow_section(mode: PromptMode) -> Vec<String> {
     match mode {
         PromptMode::Full => vec![
             "# Workflow".to_string(),
-            "- Understand the request and inspect the relevant context first".to_string(),
-            "- For simple work, act immediately without overthinking".to_string(),
-            "- Use task or todo tracking only when the work is genuinely multi-step or easy to lose track of".to_string(),
-            "- Read files before editing them to understand context".to_string(),
+            "- Understand the request and inspect relevant context first".to_string(),
             "- Use the most specific tool that fits the job".to_string(),
             "- Make the smallest correct change that solves the problem".to_string(),
-            "- Validate with the narrowest useful checks".to_string(),
-            "- If validation fails, fix reasonable issues and retry up to 3 times".to_string(),
-            "- Finish with what changed, validation status, and any remaining blockers".to_string(),
+            "- Validate with narrow checks; finish with status and blockers".to_string(),
         ],
-        PromptMode::Minimal | PromptMode::Verify => vec![
+        PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Workflow".to_string(),
             "- Start with the fastest path to useful evidence".to_string(),
-            "- Avoid unrelated exploration".to_string(),
-            "- Prefer targeted reads and searches".to_string(),
             "- Report concrete findings, not filler".to_string(),
         ],
     }
 }
 
 fn build_tool_selection_section(allowed_tools: &[String], mode: PromptMode) -> Vec<String> {
-    let mut lines = vec!["# Tool Selection".to_string()];
+    let mut lines = vec!["# Tools".to_string()];
 
     for tool in allowed_tools {
-        if let Some((desc, example)) = tool_line(tool) {
+        if let Some(desc) = tool_line(tool) {
             lines.push(desc.to_string());
-            lines.push(format!("  Example: {}", example));
         }
     }
 
-    if mode == PromptMode::Minimal {
+    if mode == PromptMode::Minimal || mode == PromptMode::Explore {
         lines.push("- Do not spawn additional subagents".to_string());
     }
 
@@ -204,7 +200,7 @@ fn build_communication_section(mode: PromptMode) -> Vec<String> {
             "- Use standard technical terminology".to_string(),
             "- Reference: filepath:line_number format".to_string(),
         ],
-        PromptMode::Minimal | PromptMode::Verify => vec![
+        PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Communication".to_string(),
             "- Report results concisely".to_string(),
             "- Use filepath:line_number for code references".to_string(),
@@ -226,40 +222,19 @@ fn build_identity_section(mode: PromptMode, custom_identity: Option<&str>) -> Ve
             "# Identity".to_string(),
             "You are OSA, a workspace-aware general assistant with a calm, capable voice and a touch of dry wit. Help with software work, research, organization, system tasks, and practical day-to-day requests with precise, actionable assistance.".to_string(),
         ],
-        PromptMode::Minimal | PromptMode::Verify => vec![
+        PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Identity".to_string(),
             "You are OSA, a specialized worker agent.".to_string(),
         ],
     }
 }
 
-fn build_ui_section() -> Vec<String> {
-    vec![
-        "# UI/UX Rules".to_string(),
-        "- Respect the existing product style when one exists".to_string(),
-        "- For new UI, use a clear visual direction instead of generic defaults".to_string(),
-        "- Keep layouts mobile-friendly and accessible".to_string(),
-        "- Avoid purple-heavy themes and gratuitous gradients unless requested".to_string(),
-        "- Use semantic tokens, readable typography, and keyboard support".to_string(),
-    ]
-}
-
 fn build_constraints_section() -> Vec<String> {
     vec![
         "# Constraints".to_string(),
-        "- Do not add features, refactor code, or make improvements beyond what was asked".to_string(),
-        "- Do not add error handling, fallbacks, or validation for scenarios that cannot happen".to_string(),
-        "- Do not create helpers, utilities, or abstractions for one-time operations".to_string(),
-        "- Three similar lines of code is better than a premature abstraction".to_string(),
-        "- Make the smallest correct change that solves the problem — nothing more".to_string(),
-        "- Do not add comments unless explicitly asked".to_string(),
-        "- Do not add TODOs, placeholders, or stub implementations".to_string(),
-        String::new(),
-        "# Verification".to_string(),
-        "- Before reporting a task complete, verify the change actually works: run tests, check the output, or confirm the file is correct".to_string(),
-        "- Report outcomes faithfully — never claim tests pass when output shows failures".to_string(),
-        "- If a test fails, fix the issue or report it honestly rather than declaring success".to_string(),
-        "- Do not fabricate or guess at file paths, function names, or error messages".to_string(),
+        "- Do not add features or refactor beyond what was asked".to_string(),
+        "- Do not add comments/TODOs unless explicitly asked".to_string(),
+        "- Verify changes work before reporting complete".to_string(),
     ]
 }
 
@@ -274,140 +249,42 @@ fn build_editing_rules_section() -> Vec<String> {
     ]
 }
 
-fn tool_line(name: &str) -> Option<(&'static str, &'static str)> {
+fn tool_line(name: &str) -> Option<&'static str> {
     match name {
-        "glob" => Some((
-            "- glob: find files by path or name patterns, not content",
-            "glob(pattern=\"**/*.json\")",
-        )),
-        "grep" => Some((
-            "- grep: search file contents, not file names",
-            "grep(pattern=\"TODO\", path=\"src/\")",
-        )),
-        "codesearch" => Some((
-            "- codesearch: semantic code search for concepts, functions, and related code",
-            "codesearch(query=\"authentication middleware\")",
-        )),
-        "list_files" => Some((
-            "- list_files: inspect directories quickly",
-            "list_files(path=\".\")",
-        )),
-        "read_file" => Some((
-            "- read_file: read a known file and use line ranges when possible",
-            "read_file(path=\"README.md\")",
-        )),
-        "edit_file" => Some((
-            "- edit_file: smart text replacement with exact and fuzzy matching for safe edits",
-            "edit_file(path=\"foo.txt\", old_text=\"hello\", new_text=\"world\")",
-        )),
-        "write_file" => Some((
-            "- write_file: create new files or fully rewrite a file",
-            "write_file(path=\"output.txt\", content=\"Hello world\")",
-        )),
-        "delete_file" => Some((
-            "- delete_file: remove files or directories",
-            "delete_file(path=\"temp.log\")",
-        )),
-        "apply_patch" => Some((
-            "- apply_patch: precise multi-hunk edits across one or more files",
-            "apply_patch(patch=\"*** Begin Patch\\n*** Update File: src/lib.rs\\n@@\\n-fn old() {}\\n+fn new() {}\\n*** End Patch\")",
-        )),
-        "batch" => Some((
-            "- batch: run multiple read-only tool calls in parallel",
-            "batch(operations=[read_file(...), glob(...)])",
-        )),
-        "bash" => Some((
-            "- bash: build, test, or run commands, not routine file reading",
-            "bash(command=\"cargo test\", timeout=60)",
-        )),
-        "process" => Some((
-            "- process: inspect or kill running processes",
-            "process(action=\"list\")",
-        )),
-        "calendar" => Some((
-            "- calendar: create, list, update, or delete events in OSA's local calendar",
-            "calendar(action=\"create\", title=\"Dentist\", start=\"2026-04-07 09:00\")",
-        )),
-        "weather" => Some((
-            "- weather: fetch current conditions and a short forecast for a place",
-            "weather(location=\"Boston\", days=2)",
-        )),
-        "system_status" => Some((
-            "- system_status: inspect the current machine's OS, uptime, CPU, memory, and disk usage",
-            "system_status()",
-        )),
-        "code_python" => Some((
-            "- code_python: short computations or transformations when easier than shell",
-            "code_python(code=\"[x**2 for x in range(10)]\")",
-        )),
-        "code_node" => Some((
-            "- code_node: short JavaScript or TypeScript computations",
-            "code_node(code=\"require('fs').readdirSync('.')\")",
-        )),
-        "code_bash" => Some((
-            "- code_bash: short shell-based transformations",
-            "code_bash(code=\"ls -la | wc -l\")",
-        )),
-        "web_fetch" => Some((
-            "- web_fetch: fetch a known URL as readable page text, site-aware JSON/XML/feed content. For Reddit, prefer .json",
-            "web_fetch(url=\"https://news.ycombinator.com/news.json\")",
-        )),
-        "web_search" => Some((
-            "- web_search: search the web for current information",
-            "web_search(query=\"latest Rust news 2024\")",
-        )),
-        "task" => Some((
-            "- task: track substantial multi-step work only when it helps",
-            "task(description=\"Implement login flow\", status=\"in_progress\")",
-        )),
-        "todowrite" => Some((
-            "- todowrite: manage a persistent todo list for the session",
-            "todowrite(todos=[{\"content\": \"Write tests\", \"status\": \"done\"}])",
-        )),
-        "todoread" => Some((
-            "- todoread: read the persistent todo list",
-            "todoread()",
-        )),
-        "persona" => Some((
-            "- persona: change assistant style only when requested",
-            "persona(action=\"set\", persona_id=\"casual\")",
-        )),
-        "record_memory" => Some((
-            "- record_memory: save persistent user or project facts, not temporary reasoning",
-            "record_memory(title=\"build_cmd\", content=\"cargo build\")",
-        )),
-        "question" => Some((
-            "- question: ask the user for clarification or approval",
-            "question(questions=[{\"question\": \"Proceed?\", \"header\": \"Confirm\"}])",
-        )),
-        "skill" => Some((
-            "- skill: inspect a loaded skill's safe metadata and runtime actions",
-            "skill(name=\"refactor\")",
-        )),
-        "skill_list" => Some((
-            "- skill_list: list available skills and their runtime actions",
-            "skill_list()",
-        )),
-        "skill_action" => Some((
-            "- skill_action: execute a runtime action exposed by an installed skill without revealing its saved secrets",
-            "skill_action(skill=\"spotify\", action=\"pause\")",
-        )),
-        "lsp" => Some((
-            "- lsp: query language server definitions, references, and diagnostics",
-            "lsp(operation=\"references\", file_path=\"src/main.rs\", line=5, character=10)",
-        )),
-        "subagent" => Some((
-            "- subagent: delegate tightly scoped work to a specialized worker",
-            "subagent(task=\"grep_for_bugs\")",
-        )),
-        "coordinator" => Some((
-            "- coordinator: for complex multi-file tasks, delegates to parallel research, implementation, and verification workers",
-            "coordinator(request=\"implement user auth with JWT\")",
-        )),
-        "plan_exit" => Some((
-            "- plan_exit: signal that planning is complete and execution should begin",
-            "plan_exit()",
-        )),
+        "glob" => Some("- glob: find files by path or name patterns"),
+        "grep" => Some("- grep: search file contents"),
+        "codesearch" => Some("- codesearch: semantic code search"),
+        "list_files" => Some("- list_files: inspect directories"),
+        "read_file" => Some("- read_file: read a file"),
+        "edit_file" => Some("- edit_file: smart text replacement"),
+        "write_file" => Some("- write_file: create or rewrite a file"),
+        "delete_file" => Some("- delete_file: remove files"),
+        "apply_patch" => Some("- apply_patch: precise multi-hunk edits"),
+        "batch" => Some("- batch: run multiple calls in parallel"),
+        "bash" => Some("- bash: run commands (build, test, etc)"),
+        "process" => Some("- process: inspect or kill processes"),
+        "calendar" => Some("- calendar: manage calendar events"),
+        "schedule" => Some("- schedule: set reminders or recurring tasks"),
+        "weather" => Some("- weather: fetch weather forecast"),
+        "system_status" => Some("- system_status: machine OS, CPU, memory, disk"),
+        "code_python" => Some("- code_python: run Python code"),
+        "code_node" => Some("- code_node: run JavaScript/TypeScript"),
+        "code_bash" => Some("- code_bash: shell transformations"),
+        "web_fetch" => Some("- web_fetch: fetch a URL"),
+        "web_search" => Some("- web_search: search the web"),
+        "task" => Some("- task: track multi-step work"),
+        "todowrite" => Some("- todowrite: manage todo list"),
+        "todoread" => Some("- todoread: read todo list"),
+        "persona" => Some("- persona: change assistant style"),
+        "record_memory" => Some("- record_memory: save persistent facts"),
+        "question" => Some("- question: ask user for clarification"),
+        "skill" => Some("- skill: inspect loaded skill metadata"),
+        "skill_list" => Some("- skill_list: list available skills"),
+        "skill_action" => Some("- skill_action: execute skill action"),
+        "lsp" => Some("- lsp: query language server"),
+        "subagent" => Some("- subagent: delegate to worker"),
+        "coordinator" => Some("- coordinator: complex task delegation"),
+        "plan_exit" => Some("- plan_exit: signal planning complete"),
         _ => None,
     }
 }
@@ -415,32 +292,74 @@ fn tool_line(name: &str) -> Option<(&'static str, &'static str)> {
 fn build_verify_sections(allowed_tools: &[String]) -> Vec<String> {
     vec![
         "# Identity".to_string(),
-        "You are a verification agent. Your job is to try to BREAK the implementation, not confirm it works.".to_string(),
+        "You are a verification agent. Try to BREAK the implementation.".to_string(),
         String::new(),
         "# Priorities".to_string(),
-        "- Be adversarial: look for bugs, edge cases, and regressions".to_string(),
-        "- Run tests, check imports, verify error handling".to_string(),
+        "- Be adversarial: look for bugs and edge cases".to_string(),
         "- Do not modify any files".to_string(),
-        "- Report concrete findings with evidence".to_string(),
         String::new(),
-        "# Tool Selection".to_string(),
+        "# Tools".to_string(),
     ]
     .into_iter()
     .chain(
         allowed_tools
             .iter()
-            .filter_map(|tool| tool_line(tool).map(|(desc, example)| format!("{} Example: {}", desc, example))),
+            .filter_map(|tool| tool_line(tool).map(String::from)),
     )
     .chain(vec![
         String::new(),
-        "# Required Output Format".to_string(),
-        "### Check: [what you're checking]".to_string(),
-        "Command: [command run]".to_string(),
-        "Output: [observed output]".to_string(),
-        "Result: PASS|FAIL".to_string(),
-        String::new(),
-        "# Verdict".to_string(),
-        "End with exactly one of: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL".to_string(),
+        "# Output".to_string(),
+        "Report: VERDICT: PASS, FAIL, or PARTIAL".to_string(),
     ])
     .collect()
+}
+
+fn build_explore_sections(allowed_tools: &[String]) -> Vec<String> {
+    let mut sections = vec![
+        "# Identity".to_string(),
+        "You are a codebase exploration specialist. You excel at rapidly navigating codebases, finding relevant files, understanding architecture, and synthesizing findings into clear reports.".to_string(),
+        String::new(),
+        "# Priorities".to_string(),
+        "- Read files thoroughly to understand the full picture".to_string(),
+        "- Stay tightly scoped to the request".to_string(),
+        "- Use only the tools available to you".to_string(),
+        String::new(),
+    ];
+
+    sections.extend(build_datetime_section());
+    sections.push(String::new());
+
+    sections.extend(build_validation_section(PromptMode::Minimal));
+    sections.push(String::new());
+
+    sections.push("# Tools".to_string());
+    for tool in allowed_tools {
+        if let Some(desc) = tool_line(tool) {
+            sections.push(desc.to_string());
+        }
+    }
+    sections.push("- Do not spawn additional subagents".to_string());
+    sections.push(String::new());
+
+    sections.extend(vec![
+        "# Workflow".to_string(),
+        "- Start with the fastest path to useful evidence: use glob/grep to find relevant files, then read them".to_string(),
+        "- Adapt your search approach based on the thoroughness level specified by the caller".to_string(),
+        "- Return file paths as absolute paths".to_string(),
+        "- Do not create any files, or run commands that modify the system".to_string(),
+        String::new(),
+        "# Output".to_string(),
+        "When you have gathered enough information, you MUST produce a comprehensive summary of your findings as your final response.".to_string(),
+        "- Structure your findings clearly with headers and file references".to_string(),
+        "- Include specific file paths and line numbers for all references".to_string(),
+        "- If the task is too large to complete fully, summarize what you found and note what remains unexplored".to_string(),
+        "- NEVER end with only tool outputs — always provide a synthesized written summary".to_string(),
+        String::new(),
+        "# Safety".to_string(),
+        "- Stay inside the workspace".to_string(),
+        "- Never expose secrets or credentials".to_string(),
+        "- Refuse destructive or policy-violating requests".to_string(),
+    ]);
+
+    sections
 }

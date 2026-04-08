@@ -1,4 +1,4 @@
-use crate::config::{BashToolConfig, Config};
+use crate::config::{BashMode, BashToolConfig, Config};
 use crate::error::{OSAgentError, Result};
 use crate::tools::guard::{command_touches_backups, ensure_relative_path_not_backups};
 use crate::tools::output::maybe_store_large_output;
@@ -284,11 +284,18 @@ impl BashTool {
         format!("{} {}", command, suffix)
     }
 
-    fn is_allowed_command(&self, command: &str) -> bool {
+    fn is_allowed_command(&self, command_head: &str) -> bool {
         self.config
             .allowed_commands
             .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(command))
+            .any(|allowed| allowed.eq_ignore_ascii_case(command_head))
+    }
+
+    fn is_blocked_command(&self, command_head: &str) -> bool {
+        self.config
+            .blocked_commands
+            .iter()
+            .any(|blocked| blocked.eq_ignore_ascii_case(command_head))
     }
 
     fn contains_blocked_delete(command: &str) -> bool {
@@ -302,6 +309,125 @@ impl BashTool {
                 )
             })
     }
+
+    fn contains_destructive_pattern(command: &str) -> bool {
+        let lowered = command.to_lowercase();
+        let patterns = [
+            ("git push --force", "git force push"),
+            ("git push -f ", "git force push"),
+            ("git push --force-with-lease", "git force push"),
+            ("git reset --hard", "git hard reset"),
+            ("git clean -f", "git force clean"),
+            ("git checkout -- .", "git checkout all changes"),
+            ("git restore .", "git restore all changes"),
+            ("rm -rf /", "recursive root delete"),
+            ("rm -rf /*", "recursive root glob delete"),
+            ("rm -rf ~", "recursive home delete"),
+            ("rm -rf ~/", "recursive home delete"),
+            ("rm -rf $home", "recursive home delete"),
+            ("rd /s /q c:", "recursive windows root delete"),
+            ("rd /s /q \\", "recursive windows root delete"),
+            ("drop table", "SQL drop table"),
+            ("truncate table", "SQL truncate table"),
+            (":(){:|:&};:", "fork bomb"),
+        ];
+
+        for (pattern, label) in &patterns {
+            if lowered.contains(pattern) {
+                tracing::warn!("Blocked destructive pattern: {} (matched: {})", label, pattern);
+                return true;
+            }
+        }
+
+        let tokens: Vec<&str> = lowered
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        for window in tokens.windows(3) {
+            if (window[0] == "delete" || window[0] == "delete_from")
+                && window[1] == "from"
+                && !window[2..].contains(&"where")
+            {
+                tracing::warn!("Blocked destructive pattern: DELETE FROM without WHERE");
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn contains_injection(command: &str) -> Result<()> {
+        let lowered = command.to_lowercase();
+
+        let shell_builtins = ["eval ", "exec "];
+        for builtin in &shell_builtins {
+            if lowered.contains(builtin) {
+                return Err(OSAgentError::ToolExecution(format!(
+                    "Shell builtin '{}' is blocked to prevent injection attacks",
+                    builtin.trim()
+                )));
+            }
+        }
+
+        if lowered.contains("$ifs") || lowered.contains("${ifs") {
+            return Err(OSAgentError::ToolExecution(
+                "$IFS manipulation is blocked".to_string(),
+            ));
+        }
+
+        if lowered.contains("/proc/") && lowered.contains("/environ") {
+            return Err(OSAgentError::ToolExecution(
+                "Access to /proc/*/environ is blocked".to_string(),
+            ));
+        }
+
+        if lowered.contains("$(") || lowered.contains('`') {
+            if Self::contains_blocked_delete(command) {
+                return Err(OSAgentError::ToolExecution(
+                    "Command substitution wrapping delete commands is blocked".to_string(),
+                ));
+            }
+            if Self::contains_destructive_pattern(command) {
+                return Err(OSAgentError::ToolExecution(
+                    "Command substitution wrapping destructive operations is blocked".to_string(),
+                ));
+            }
+            if lowered.contains("/proc/") {
+                return Err(OSAgentError::ToolExecution(
+                    "Command substitution accessing /proc is blocked".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_commands(&self, command_heads: &[String]) -> Result<()> {
+        match self.config.mode {
+            BashMode::Permissive => {
+                for head in command_heads {
+                    if self.is_blocked_command(head) {
+                        return Err(OSAgentError::ToolExecution(format!(
+                            "Command '{}' is blocked for system safety",
+                            head
+                        )));
+                    }
+                }
+            }
+            BashMode::Allowlist => {
+                for head in command_heads {
+                    if !self.is_allowed_command(head) {
+                        return Err(OSAgentError::ToolExecution(format!(
+                            "Command '{}' is not in the allowed list",
+                            head
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -311,15 +437,15 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run shell commands inside the workspace with quoting-aware execution and optional working directory control"
+        "Run shell commands inside the workspace. Supports any command except blocked system commands and destructive operations. Direct deletes (rm, del) are blocked - use delete_file instead."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for build, test, run, and repo-native CLI commands after inspecting the relevant files"
+        "Use for build, test, run, git operations, and any CLI commands. Prefer dedicated tools for file reads, edits, and deletes."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for routine file reads, content search, or tiny edits that dedicated tools handle better"
+        "Do not use for file deletion (use delete_file), routine file reads (use read_file), or small edits (use edit_file or apply_patch)"
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -332,11 +458,23 @@ impl Tool for BashTool {
                 }),
             },
             ToolExample {
+                description: "Create project structure".to_string(),
+                input: json!({
+                    "command": "mkdir -p src/components src/utils"
+                }),
+            },
+            ToolExample {
                 description: "Use a subdirectory with a timeout override".to_string(),
                 input: json!({
                     "command": "npm run build",
                     "workdir": "frontend",
                     "timeout_seconds": 120
+                }),
+            },
+            ToolExample {
+                description: "Run pip install".to_string(),
+                input: json!({
+                    "command": "pip install -r requirements.txt"
                 }),
             },
             ToolExample {
@@ -419,19 +557,21 @@ impl Tool for BashTool {
             ));
         }
 
+        if Self::contains_destructive_pattern(&full_command) {
+            return Err(OSAgentError::ToolExecution(
+                "Command contains a destructive pattern (force push, hard reset, root delete, etc.) that is blocked for safety."
+                    .to_string(),
+            ));
+        }
+
+        Self::contains_injection(&full_command)?;
+
         let command_heads = Self::extract_command_heads(&full_command);
         if command_heads.is_empty() {
             return Err(OSAgentError::ToolExecution("Empty command".to_string()));
         }
 
-        for command_head in &command_heads {
-            if !self.is_allowed_command(command_head) {
-                return Err(OSAgentError::ToolExecution(format!(
-                    "Command '{}' is not in the allowed list",
-                    command_head
-                )));
-            }
-        }
+        self.validate_commands(&command_heads)?;
 
         let workspace = self.validate_workdir(workdir)?;
         let timeout_duration = Duration::from_secs(timeout_seconds);
