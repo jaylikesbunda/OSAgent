@@ -13,6 +13,7 @@ OSA.modalModelDropdownOpen = false;
 OSA.modalModelSearchQuery = '';
 OSA.modalProviderModels = [];
 OSA.ollamaModelDebounce = null;
+OSA.providerCatalogPromise = null;
 
 // ── Favourite Models ─────────────────────────────────────────
 
@@ -92,13 +93,29 @@ OSA.buildModelOptionHtml = function(m, providerId, currentModel, opts) {
     '</div>';
 };
 
-OSA.loadProviderCatalog = async function() {
-    try {
-        const data = await OSA.getJson('/api/providers/catalog');
-        OSA.providerCatalog = data;
-    } catch (error) {
-        console.error('Failed to load provider catalog:', error);
+OSA.loadProviderCatalog = async function(force = false) {
+    if (!force && OSA.providerCatalog?.providers?.length) {
+        return OSA.providerCatalog;
     }
+
+    if (!force && OSA.providerCatalogPromise) {
+        return OSA.providerCatalogPromise;
+    }
+
+    OSA.providerCatalogPromise = OSA.getJson('/api/providers/catalog')
+        .then(function(data) {
+            OSA.providerCatalog = data || { providers: [], all_models: [] };
+            return OSA.providerCatalog;
+        })
+        .catch(function(error) {
+            console.error('Failed to load provider catalog:', error);
+            return OSA.providerCatalog;
+        })
+        .finally(function() {
+            OSA.providerCatalogPromise = null;
+        });
+
+    return OSA.providerCatalogPromise;
 };
 
 OSA.sortProvidersForDropdown = function(providers) {
@@ -203,6 +220,14 @@ OSA.renderModelDropdown = async function() {
             dropdown.querySelector('.model-dropdown-list').innerHTML = '<div class="model-empty">Search failed</div>';
         }
         return;
+    }
+
+    if (!OSA.providerCatalog?.providers?.length) {
+        const list = dropdown.querySelector('.model-dropdown-list');
+        if (list) {
+            list.innerHTML = '<div class="model-empty">Loading models...</div>';
+        }
+        await OSA.loadProviderCatalog();
     }
 
     const { providers, all_models } = OSA.providerCatalog;

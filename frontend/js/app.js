@@ -6,6 +6,32 @@ OSA.debounce = function(key, fn, delay) {
     OSA._debounceTimers[key] = setTimeout(() => { delete OSA._debounceTimers[key]; fn(); }, delay);
 };
 
+OSA.prefetchedSessions = null;
+OSA._startupDeferredQueued = false;
+OSA.runWhenIdle = function(callback, timeout = 1200) {
+    if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(() => callback(), { timeout });
+        return;
+    }
+    setTimeout(callback, 0);
+};
+
+OSA.queueDeferredStartupTasks = function() {
+    if (OSA._startupDeferredQueued) return;
+    OSA._startupDeferredQueued = true;
+
+    setTimeout(function() {
+        OSA.loadPersonaCatalog();
+        OSA.loadSessionPersona();
+    }, 0);
+
+    OSA.runWhenIdle(function() {
+        OSA.initVoice();
+        OSA.loadProviderCatalog();
+        OSA.refreshWorkflowAvailability?.();
+    });
+};
+
 OSA.WORKFLOW_STYLESHEETS = [
     '/static/css/workflow.css',
     '/static/css/litegraph.min.css'
@@ -146,10 +172,9 @@ OSA.checkAuthAndInit = async function() {
         
         const token = OSA.getToken();
         if (token) {
-            const validRes = await fetch('/api/sessions', {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
+            const validRes = await OSA.fetchWithAuth('/api/sessions');
             if (validRes.ok) {
+                OSA.prefetchedSessions = await validRes.json().catch(() => null);
                 OSA.showApp();
                 return;
             } else {
@@ -211,6 +236,8 @@ OSA.logout = function() {
 OSA.showLogin = function() {
     document.getElementById('login-view').classList.remove('hidden');
     document.getElementById('app-view').classList.add('hidden');
+    OSA._startupDeferredQueued = false;
+    OSA.prefetchedSessions = null;
 };
 
 OSA.showApp = function() {
@@ -219,15 +246,11 @@ OSA.showApp = function() {
     document.getElementById('app-view').style.display = 'flex';
     
     OSA.initSidebarState();
+    OSA.initTheme();
     OSA.loadSessions();
     OSA.loadWorkspaces();
-    OSA.loadPersonaCatalog();
-    OSA.loadSessionPersona();
-    OSA.initVoice();
     OSA.loadModel();
-    OSA.loadProviderCatalog();
-    OSA.initTheme();
-    OSA.refreshWorkflowAvailability?.();
+    OSA.queueDeferredStartupTasks();
 };
 
 OSA.loadModel = async function() {
@@ -285,10 +308,19 @@ OSA.updateModel = async function() {
 
 OSA.loadSessions = async function() {
     try {
-        const res = await fetch('/api/sessions', {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-        });
-        const sessions = await res.json();
+        let sessions = null;
+        if (Array.isArray(OSA.prefetchedSessions)) {
+            sessions = OSA.prefetchedSessions;
+            OSA.prefetchedSessions = null;
+        } else {
+            const res = await OSA.fetchWithAuth('/api/sessions');
+            sessions = await res.json();
+        }
+
+        if (!Array.isArray(sessions)) {
+            sessions = [];
+        }
+
         const sessionIds = new Set(sessions.map(function(session) { return session.id; }));
         
         const currentSession = OSA.getCurrentSession();

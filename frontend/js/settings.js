@@ -79,9 +79,8 @@ OSA.persistThinkingLevel = async function(value, providerId, model) {
         }
     };
 
-    const res = await fetch('/api/config', {
+    const res = await OSA.fetchWithAuth('/api/config', {
         method: 'PUT',
-        headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(next)
     });
     if (!res.ok) {
@@ -131,9 +130,10 @@ OSA.onCustomIdentityToggleChange = function() {
     const field = document.getElementById('custom-identity-field');
     const textarea = document.getElementById('setting-custom-identity');
     if (field) {
-        field.style.display = checkbox && checkbox.checked ? '' : 'none';
+        const enabled = !!(checkbox && checkbox.checked);
+        field.classList.toggle('hidden', !enabled);
         // Populate with default if empty and being enabled
-        if (checkbox && checkbox.checked && textarea && !textarea.value.trim()) {
+        if (enabled && textarea && !textarea.value.trim()) {
             textarea.value = OSA.DEFAULT_IDENTITY;
         }
     }
@@ -144,9 +144,10 @@ OSA.onCustomPrioritiesToggleChange = function() {
     const field = document.getElementById('custom-priorities-field');
     const textarea = document.getElementById('setting-custom-priorities');
     if (field) {
-        field.style.display = checkbox && checkbox.checked ? '' : 'none';
+        const enabled = !!(checkbox && checkbox.checked);
+        field.classList.toggle('hidden', !enabled);
         // Populate with default if empty and being enabled
-        if (checkbox && checkbox.checked && textarea && !textarea.value.trim()) {
+        if (enabled && textarea && !textarea.value.trim()) {
             textarea.value = OSA.DEFAULT_PRIORITIES;
         }
     }
@@ -166,7 +167,7 @@ OSA.closeSettings = function() {
 
 OSA.loadSettings = async function() {
     try {
-        const res = await fetch('/api/config', { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
+        const res = await OSA.fetchWithAuth('/api/config');
         const config = await res.json();
         if (!res.ok) throw new Error(config.error || `HTTP ${res.status}`);
         OSA.setCachedConfig(config);
@@ -187,10 +188,10 @@ OSA.loadSettings = async function() {
         const customPriorities = config.agent?.custom_priorities || [];
         document.getElementById('setting-use-custom-identity').checked = !!customIdentity;
         document.getElementById('setting-custom-identity').value = customIdentity;
-        document.getElementById('custom-identity-field').style.display = customIdentity ? '' : 'none';
+        document.getElementById('custom-identity-field').classList.toggle('hidden', !customIdentity);
         document.getElementById('setting-use-custom-priorities').checked = customPriorities.length > 0;
         document.getElementById('setting-custom-priorities').value = customPriorities.join('\n');
-        document.getElementById('custom-priorities-field').style.display = customPriorities.length > 0 ? '' : 'none';
+        document.getElementById('custom-priorities-field').classList.toggle('hidden', customPriorities.length === 0);
         await OSA.refreshThinkingOptions(
             OSA.currentModelProviderId || config.default_provider,
             OSA.currentModelId || config.default_model || config.provider?.model || '',
@@ -199,12 +200,12 @@ OSA.loadSettings = async function() {
         const memEnabled = config.agent?.memory_enabled === true;
         document.getElementById('setting-memory-enabled').checked = memEnabled;
         document.getElementById('setting-memory-file').value = config.agent?.memory_file || '~/.osagent/memories.json';
-        document.getElementById('memory-file-field').style.display = memEnabled ? '' : 'none';
-        document.getElementById('memory-add-form').style.display = memEnabled ? '' : 'none';
+        document.getElementById('memory-file-field').classList.toggle('hidden', !memEnabled);
+        document.getElementById('memory-add-form').classList.toggle('hidden', !memEnabled);
         const decisionMemEnabled = config.agent?.decision_memory_enabled !== false;
         document.getElementById('setting-decision-memory-enabled').checked = decisionMemEnabled;
         document.getElementById('setting-decision-memory-file').value = config.agent?.decision_memory_file || '~/.osagent/decision_memories.json';
-        document.getElementById('decision-memory-file-field').style.display = decisionMemEnabled ? '' : 'none';
+        document.getElementById('decision-memory-file-field').classList.toggle('hidden', !decisionMemEnabled);
         
         const voice = OSA.normalizeVoiceConfig(config.voice || {});
         document.getElementById('setting-voice-enabled').checked = !!voice.enabled;
@@ -353,9 +354,8 @@ OSA.saveSettings = async function() {
     };
     
     try {
-        const res = await fetch('/api/config', {
+        const res = await OSA.fetchWithAuth('/api/config', {
             method: 'PUT',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify(newConfig)
         });
         if (!res.ok) {
@@ -423,7 +423,7 @@ OSA.loadVoiceInstallStatus = async function() {
     const statusDiv = document.getElementById('voice-install-status');
     if (!statusDiv) return;
     try {
-        const res = await fetch('/api/voice/status', { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
+        const res = await OSA.fetchWithAuth('/api/voice/status');
         const data = await res.json();
         statusDiv.innerHTML = `
             <div class="install-status-grid">
@@ -454,9 +454,8 @@ OSA.installVoiceModels = async function() {
     statusDiv.innerHTML = '<span class="not-installed">Downloading models...</span>';
     
     try {
-        const res = await fetch('/api/voice/install', {
+        const res = await OSA.fetchWithAuth('/api/voice/install', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 install_whisper: sttProvider === 'whisper-local',
                 whisper_model: 'base',
@@ -539,9 +538,8 @@ OSA.changePassword = async function() {
     }
     
     try {
-        const res = await fetch('/api/auth/password', {
+        const res = await OSA.fetchWithAuth('/api/auth/password', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
         });
         if (!res.ok) {
@@ -657,9 +655,8 @@ OSA.restartServer = async function() {
     successDiv.classList.add('hidden');
     
     try {
-        const res = await fetch('/api/admin/restart', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        const res = await OSA.fetchWithAuth('/api/admin/restart', {
+            method: 'POST'
         });
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
@@ -707,9 +704,7 @@ OSA.renderDiscordBotStatus = function(status, message) {
 
 OSA.loadDiscordBotStatus = async function(message) {
     try {
-        const res = await fetch('/api/discord/status', {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-        });
+        const res = await OSA.fetchWithAuth('/api/discord/status');
         const status = await res.json();
         if (!res.ok) throw new Error(status.error || `HTTP ${res.status}`);
         OSA.renderDiscordBotStatus(status, message);
@@ -727,9 +722,8 @@ OSA.startDiscordBot = async function() {
     stopBtn.disabled = true;
 
     try {
-        const res = await fetch('/api/discord/start', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        const res = await OSA.fetchWithAuth('/api/discord/start', {
+            method: 'POST'
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -748,9 +742,8 @@ OSA.stopDiscordBot = async function() {
     stopBtn.disabled = true;
 
     try {
-        const res = await fetch('/api/discord/stop', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        const res = await OSA.fetchWithAuth('/api/discord/stop', {
+            method: 'POST'
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -775,9 +768,7 @@ OSA.refreshWorkflowAvailability = async function() {
     try {
         let config = OSA.getCachedConfig();
         if (!config) {
-            const res = await fetch('/api/config', {
-                headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-            });
+            const res = await OSA.fetchWithAuth('/api/config');
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.error || `HTTP ${res.status}`);
@@ -885,21 +876,21 @@ OSA.initTheme = function() {
 
 OSA.onMemoryToggleChange = function() {
     const enabled = document.getElementById('setting-memory-enabled').checked;
-    document.getElementById('memory-file-field').style.display = enabled ? '' : 'none';
-    document.getElementById('memory-add-form').style.display = enabled ? '' : 'none';
+    document.getElementById('memory-file-field').classList.toggle('hidden', !enabled);
+    document.getElementById('memory-add-form').classList.toggle('hidden', !enabled);
     if (enabled) OSA.loadMemories();
 };
 
 OSA.onDecisionMemoryToggleChange = function() {
     const enabled = document.getElementById('setting-decision-memory-enabled').checked;
-    document.getElementById('decision-memory-file-field').style.display = enabled ? '' : 'none';
+    document.getElementById('decision-memory-file-field').classList.toggle('hidden', !enabled);
 };
 
 OSA.loadMemories = async function() {
     const list = document.getElementById('memory-list');
     if (!list) return;
     try {
-        const res = await fetch('/api/memories', { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
+        const res = await OSA.fetchWithAuth('/api/memories');
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         if (!data.enabled) {
@@ -941,9 +932,8 @@ OSA.addMemory = async function() {
     const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
     if (!title || !content) { alert('Title and content are required.'); return; }
     try {
-        const res = await fetch('/api/memories', {
+        const res = await OSA.fetchWithAuth('/api/memories', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ title, content, tags })
         });
         const data = await res.json();
@@ -960,9 +950,8 @@ OSA.addMemory = async function() {
 OSA.deleteMemory = async function(id) {
     if (!confirm('Delete this memory?')) return;
     try {
-        const res = await fetch(`/api/memories/${id}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        const res = await OSA.fetchWithAuth(`/api/memories/${id}`, {
+            method: 'DELETE'
         });
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
@@ -1000,9 +989,8 @@ OSA.saveMemoryEdit = async function() {
     const tagsRaw = document.getElementById('edit-memory-tags').value.trim();
     const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
     try {
-        const res = await fetch(`/api/memories/${id}`, {
+        const res = await OSA.fetchWithAuth(`/api/memories/${id}`, {
             method: 'PUT',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ title, content, tags })
         });
         const data = await res.json();
@@ -1108,12 +1096,8 @@ OSA.downloadUpdate = async function() {
     progressText.textContent = '0%';
     
     try {
-        const response = await fetch('/api/update/download', {
+        const response = await OSA.fetchWithAuth('/api/update/download', {
             method: 'POST',
-            headers: {
-                'Authorization': 'Bearer ' + OSA.getToken(),
-                'Content-Type': 'application/json'
-            },
             body: JSON.stringify({ tag: OSA.pendingUpdateTag, channel: channel })
         });
         
@@ -1154,12 +1138,8 @@ OSA.installUpdate = async function() {
     btn.textContent = 'Restarting...';
     
     try {
-        const response = await fetch('/api/update/install', {
+        const response = await OSA.fetchWithAuth('/api/update/install', {
             method: 'POST',
-            headers: {
-                'Authorization': 'Bearer ' + OSA.getToken(),
-                'Content-Type': 'application/json'
-            },
             body: JSON.stringify({ tag: OSA.pendingUpdateTag })
         });
         

@@ -383,31 +383,31 @@ OSA._updateContextModalContent = function() {
     const cacheRow = document.getElementById('ctx-cache-row');
     
     if (actualUsage && (actualUsage.input > 0 || actualUsage.total > 0)) {
-        actualRow.style.display = 'flex';
+        actualRow.classList.remove('hidden');
         document.getElementById('ctx-actual-input').textContent = formatTokens(actualUsage.input || actualUsage.total);
         
         if (actualUsage.output > 0) {
-            outputRow.style.display = 'flex';
+            outputRow.classList.remove('hidden');
             document.getElementById('ctx-output').textContent = formatTokens(actualUsage.output);
         } else {
-            outputRow.style.display = 'none';
+            outputRow.classList.add('hidden');
         }
         
         const cacheRead = actualUsage.cached_read || 0;
         const cacheWrite = actualUsage.cached_write || 0;
         if (cacheRead > 0 || cacheWrite > 0) {
-            cacheRow.style.display = 'flex';
+            cacheRow.classList.remove('hidden');
             const parts = [];
             if (cacheRead > 0) parts.push('R:' + formatTokens(cacheRead));
             if (cacheWrite > 0) parts.push('W:' + formatTokens(cacheWrite));
             document.getElementById('ctx-cache').textContent = parts.join(' / ');
         } else {
-            cacheRow.style.display = 'none';
+            cacheRow.classList.add('hidden');
         }
     } else {
-        actualRow.style.display = 'none';
-        outputRow.style.display = 'none';
-        cacheRow.style.display = 'none';
+        actualRow.classList.add('hidden');
+        outputRow.classList.add('hidden');
+        cacheRow.classList.add('hidden');
     }
 };
 
@@ -1593,12 +1593,8 @@ OSA.handleWorkflowFailed = function(event) {
 OSA.answerWorkflowApproval = async function(questionId, answer, button) {
     if (!questionId) return;
     try {
-        await fetch('/api/questions/answer', {
+        await OSA.fetchWithAuth('/api/questions/answer', {
             method: 'POST',
-            headers: {
-                ...OSA.getAuthHeaders(),
-                'Content-Type': 'application/json'
-            },
             body: JSON.stringify({
                 question_id: questionId,
                 answers: [[answer]]
@@ -1662,12 +1658,8 @@ OSA.persistToolStart = async function(event) {
     const session = OSA.getCurrentSession();
     if (!session) return;
     try {
-        await fetch(`/api/sessions/${session.id}/tools`, {
+        await OSA.fetchWithAuth(`/api/sessions/${session.id}/tools`, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OSA.getToken()}`,
-                'Content-Type': 'application/json'
-            },
             body: JSON.stringify({
                 tool_call_id: event.tool_call_id,
                 tool_name: event.tool_name,
@@ -1684,12 +1676,8 @@ OSA.persistToolComplete = async function(event) {
     const session = OSA.getCurrentSession();
     if (!session) return;
     try {
-        await fetch(`/api/sessions/${session.id}/tools/${event.tool_call_id}`, {
+        await OSA.fetchWithAuth(`/api/sessions/${session.id}/tools/${event.tool_call_id}`, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OSA.getToken()}`,
-                'Content-Type': 'application/json'
-            },
             body: JSON.stringify({
                 success: event.success,
                 output: typeof event.output === 'string' ? event.output : '',
@@ -1704,9 +1692,8 @@ OSA.persistToolComplete = async function(event) {
 
 OSA.cancelSubagent = async function(subagentId) {
     try {
-        const response = await fetch(`/api/subagents/${subagentId}`, {
-            method: 'DELETE',
-            headers: OSA.getAuthHeaders()
+        const response = await OSA.fetchWithAuth(`/api/subagents/${subagentId}`, {
+            method: 'DELETE'
         });
         if (response.ok) {
             const statusBadge = document.getElementById(`subagent-status-${subagentId}`);

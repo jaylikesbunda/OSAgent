@@ -29,7 +29,7 @@ OSA.Jobs = {
         const field = document.getElementById('discord-channel-field');
         const cb = document.getElementById('notify-discord');
         if (field && cb) {
-            field.style.display = cb.checked ? '' : 'none';
+            field.classList.toggle('hidden', !cb.checked);
         }
     },
 

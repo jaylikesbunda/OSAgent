@@ -1160,11 +1160,11 @@ OSA.renderTodoDockList = function(dock, todos) {
     if (!list) return;
 
     if (!OSA.getTodoDockExpanded()) {
-        list.style.display = 'none';
+        list.classList.add('hidden');
         return;
     }
 
-    list.style.display = '';
+    list.classList.remove('hidden');
     const order = { in_progress: 0, pending: 1, completed: 2, cancelled: 3 };
     const sorted = [...todos].sort((a, b) => {
         const left = order[(a.status || 'pending').toLowerCase()] ?? 99;

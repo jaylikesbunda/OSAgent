@@ -244,12 +244,9 @@
 }
 
 @media (max-width: 400px) {
-    .input-icon-btn:nth-child(3) {
+    .input-right-bar #attach-btn {
         display: none;
     }
-}
-    font-size: 13px;
-    font-weight: 600;
 }
 
 .context-trigger-label {
@@ -534,6 +531,11 @@
 .workspace-field label {
     font-size: 12px;
     color: var(--text-secondary);
+}
+
+.workspace-path-hint {
+    font-weight: normal;
+    opacity: 0.7;
 }
 
 .workspace-field input,

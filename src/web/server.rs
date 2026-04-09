@@ -1,9 +1,11 @@
 use crate::agent::runtime::AgentRuntime;
 use crate::config::Config;
 use crate::web::routes::create_router;
-use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,6 +21,45 @@ use tracing::{info, warn};
 struct FrontendAssets;
 
 static INDEX_HTML: &str = "index.html";
+
+fn build_etag(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("W/\"{:x}-{}\"", hasher.finish(), bytes.len())
+}
+
+fn matches_if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').any(|candidate| candidate.trim() == etag || candidate.trim() == "*"))
+        .unwrap_or(false)
+}
+
+fn static_asset_response(
+    request_headers: &HeaderMap,
+    bytes: &[u8],
+    content_type: &str,
+    cache_control: &'static str,
+) -> Response {
+    let etag = build_etag(bytes);
+    if matches_if_none_match(request_headers, &etag) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, cache_control)
+            .body(axum::body::Body::empty())
+            .unwrap();
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, cache_control)
+        .body(axum::body::Body::from(bytes.to_vec()))
+        .unwrap()
+}
 
 fn build_cors_layer(config: &Config) -> CorsLayer {
     let allowed_origins: Vec<HeaderValue> = config
@@ -52,12 +93,18 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
     }
 }
 
-async fn serve_static_handler(uri: Uri) -> impl IntoResponse {
+async fn serve_static_handler(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
     let path = uri.path();
 
     if path == "/" || path.is_empty() {
         if let Some(content) = FrontendAssets::get(INDEX_HTML) {
-            return Html(String::from_utf8_lossy(&content.data).to_string()).into_response();
+            return static_asset_response(
+                &headers,
+                content.data.as_ref(),
+                "text/html; charset=utf-8",
+                "no-cache",
+            )
+            .into_response();
         }
     }
 
@@ -76,17 +123,24 @@ async fn serve_static_handler(uri: Uri) -> impl IntoResponse {
                 .as_ref()
                 .to_string();
 
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime_type)
-                .body(axum::body::Body::from(content.data.to_vec()))
-                .unwrap()
-                .into_response();
+            return static_asset_response(
+                &headers,
+                content.data.as_ref(),
+                &mime_type,
+                "public, max-age=0, must-revalidate",
+            )
+            .into_response();
         }
     }
 
     if let Some(content) = FrontendAssets::get(INDEX_HTML) {
-        return Html(String::from_utf8_lossy(&content.data).to_string()).into_response();
+        return static_asset_response(
+            &headers,
+            content.data.as_ref(),
+            "text/html; charset=utf-8",
+            "no-cache",
+        )
+        .into_response();
     }
 
     (StatusCode::NOT_FOUND, "Not Found").into_response()

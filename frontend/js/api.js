@@ -1,11 +1,16 @@
 window.OSA = window.OSA || {};
 
-OSA.fetchWithAuth = async function(url, options = {}) {
-    const headers = options.headers || {};
-    if (!headers['Authorization'] && OSA.getToken()) {
-        headers['Authorization'] = `Bearer ${OSA.getToken()}`;
+OSA.getAuthHeaders = function(extraHeaders = {}) {
+    const headers = { ...extraHeaders };
+    if (!headers.Authorization && OSA.getToken()) {
+        headers.Authorization = `Bearer ${OSA.getToken()}`;
     }
-    if (!headers['Content-Type'] && options.body && typeof options.body === 'string') {
+    return headers;
+};
+
+OSA.fetchWithAuth = async function(url, options = {}) {
+    const headers = OSA.getAuthHeaders(options.headers || {});
+    if (!headers['Content-Type'] && !headers['content-type'] && options.body && typeof options.body === 'string') {
         headers['Content-Type'] = 'application/json';
     }
     return fetch(url, { ...options, headers });

@@ -35,7 +35,7 @@
             </div>
         </div>
 
-        <div id="app-view" class="hidden" style="display: none; width: 100%; height: 100%;">
+        <div id="app-view" class="hidden app-view">
             <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="closeSidebar()"></div>
             <div class="sidebar">
                 <div class="sidebar-header">
@@ -140,7 +140,7 @@
                             </div>
                             <div class="dock-chevron">&#9662;</div>
                         </div>
-                        <div class="dock-list" style="display: none;"></div>
+                        <div class="dock-list hidden"></div>
                     </div>
                     <div class="input-area">
                          <div id="image-preview-container" class="image-preview-container hidden"></div>
@@ -157,7 +157,7 @@
                             </div>
                             <div class="input-right-bar">
                                 <input type="text" id="message-input" placeholder="Type a message... ( / for commands)" onkeypress="if(event.key==='Enter')sendMessage()" oninput="OSA.handleSlashInput()" />
-                                <input type="file" id="image-upload" accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.js,.jsx,.ts,.tsx,.rs,.py,.html,.css,.toml,.yaml,.yml,.xml,.sql,.sh,.ps1,.bat,.ini,.log" multiple style="display:none" />
+                                <input type="file" id="image-upload" class="hidden" accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.js,.jsx,.ts,.tsx,.rs,.py,.html,.css,.toml,.yaml,.yml,.xml,.sql,.sh,.ps1,.bat,.ini,.log" multiple />
                                 <button id="attach-btn" class="input-icon-btn" type="button" onclick="document.getElementById('image-upload').click()" title="Attach file">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
                                 </button>
@@ -192,7 +192,7 @@
                                         <input type="text" id="workspace-inline-name" placeholder="My App Workspace" />
                                     </div>
                                     <div class="workspace-field full">
-                                        <label>Paths <span style="font-weight: normal; opacity: 0.7;">(click + to add)</span></label>
+                                        <label>Paths <span class="workspace-path-hint">(click + to add)</span></label>
                                         <div id="workspace-paths-container" class="workspace-paths-container">
                                         </div>
                                     </div>
@@ -273,15 +273,15 @@
                         <span class="context-detail-label">Status</span>
                         <span class="context-detail-value" id="ctx-status">-</span>
                     </div>
-                    <div class="context-detail-row" id="ctx-actual-row" style="display:none">
+                    <div class="context-detail-row hidden" id="ctx-actual-row">
                         <span class="context-detail-label">Actual Input</span>
                         <span class="context-detail-value" id="ctx-actual-input">-</span>
                     </div>
-                    <div class="context-detail-row" id="ctx-output-row" style="display:none">
+                    <div class="context-detail-row hidden" id="ctx-output-row">
                         <span class="context-detail-label">Output</span>
                         <span class="context-detail-value" id="ctx-output">-</span>
                     </div>
-                    <div class="context-detail-row" id="ctx-cache-row" style="display:none">
+                    <div class="context-detail-row hidden" id="ctx-cache-row">
                         <span class="context-detail-label">Cache</span>
                         <span class="context-detail-value" id="ctx-cache">-</span>
                     </div>
@@ -306,23 +306,23 @@
     <div id="workflow-editor" class="workflow-editor hidden"></div>
 
     <!-- Memory Edit Modal -->
-    <div id="memory-edit-modal" class="modal hidden" style="z-index:1100" onclick="if(event.target===this)OSA.closeMemoryEdit()">
-        <div class="modal-dialog" style="max-width:520px;width:100%;background:var(--bg-primary);border-radius:12px;padding:24px;border:1px solid var(--border)">
-            <h3 style="margin:0 0 16px;font-size:16px">Edit Memory</h3>
+    <div id="memory-edit-modal" class="modal memory-edit-modal hidden" onclick="if(event.target===this)OSA.closeMemoryEdit()">
+        <div class="modal-dialog memory-edit-dialog">
+            <h3 class="memory-edit-title">Edit Memory</h3>
             <input type="hidden" id="edit-memory-id" />
-            <div class="settings-field" style="margin-bottom:12px">
+            <div class="settings-field memory-edit-field">
                 <label for="edit-memory-title">Title</label>
                 <input type="text" id="edit-memory-title" placeholder="Memory title" />
             </div>
-            <div class="settings-field" style="margin-bottom:12px">
+            <div class="settings-field memory-edit-field">
                 <label for="edit-memory-content">Content</label>
-                <textarea id="edit-memory-content" rows="5" style="resize:vertical;font-family:inherit;font-size:13px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);width:100%;box-sizing:border-box"></textarea>
+                <textarea id="edit-memory-content" class="memory-edit-textarea" rows="5"></textarea>
             </div>
-            <div class="settings-field" style="margin-bottom:20px">
+            <div class="settings-field memory-edit-field-last">
                 <label for="edit-memory-tags">Tags (comma-separated)</label>
                 <input type="text" id="edit-memory-tags" placeholder="e.g. preference, project" />
             </div>
-            <div style="display:flex;gap:8px;justify-content:flex-end">
+            <div class="memory-edit-actions">
                 <button type="button" class="btn-ghost" onclick="OSA.closeMemoryEdit()">Cancel</button>
                 <button type="button" class="btn-action" onclick="OSA.saveMemoryEdit()">Save</button>
             </div>
@@ -415,7 +415,7 @@
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Compatibility Fallback</div>
-                        <div class="settings-field-hint" style="margin-bottom:12px">These legacy fields remain available for older flows, but the main provider/model experience now lives in the Models tab.</div>
+                        <div class="settings-field-hint settings-field-hint-spaced">These legacy fields remain available for older flows, but the main provider/model experience now lives in the Models tab.</div>
                         <div class="settings-field">
                             <label for="setting-base-url">Base URL</label>
                             <input type="text" id="setting-base-url" placeholder="https://api.openai.com/v1" />
@@ -465,13 +465,13 @@
                     <div class="settings-group">
                         <div class="settings-group-title">Accent Color</div>
                         <div class="accent-presets">
-                            <button class="accent-swatch" data-color="#7c7cff" title="Purple" style="background:#7c7cff"></button>
-                            <button class="accent-swatch" data-color="#4a9eff" title="Blue" style="background:#4a9eff"></button>
-                            <button class="accent-swatch" data-color="#00d4ff" title="Cyan" style="background:#00d4ff"></button>
-                            <button class="accent-swatch" data-color="#4ade80" title="Green" style="background:#4ade80"></button>
-                            <button class="accent-swatch" data-color="#fb923c" title="Orange" style="background:#fb923c"></button>
-                            <button class="accent-swatch" data-color="#f472b6" title="Pink" style="background:#f472b6"></button>
-                            <button class="accent-swatch" data-color="#ff6b6b" title="Red" style="background:#ff6b6b"></button>
+                            <button class="accent-swatch accent-swatch-purple" data-color="#7c7cff" title="Purple"></button>
+                            <button class="accent-swatch accent-swatch-blue" data-color="#4a9eff" title="Blue"></button>
+                            <button class="accent-swatch accent-swatch-cyan" data-color="#00d4ff" title="Cyan"></button>
+                            <button class="accent-swatch accent-swatch-green" data-color="#4ade80" title="Green"></button>
+                            <button class="accent-swatch accent-swatch-orange" data-color="#fb923c" title="Orange"></button>
+                            <button class="accent-swatch accent-swatch-pink" data-color="#f472b6" title="Pink"></button>
+                            <button class="accent-swatch accent-swatch-red" data-color="#ff6b6b" title="Red"></button>
                             <label class="accent-swatch accent-swatch-custom" title="Custom color">
                                 <input type="color" id="accent-color-picker" oninput="OSA.setAccent(this.value)" />
                             </label>
@@ -496,7 +496,7 @@
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Connected & Available Routes</div>
-                        <div class="settings-field-hint" style="margin-bottom:12px">Connected providers stay at the top. Expand a provider to switch its model or edit its connection.</div>
+                        <div class="settings-field-hint settings-field-hint-spaced">Connected providers stay at the top. Expand a provider to switch its model or edit its connection.</div>
                         <div id="model-catalog-list" class="model-catalog-list">Loading...</div>
                     </div>
                     <div class="settings-group">
@@ -554,7 +554,7 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="settings-field" id="custom-identity-field" style="display:none;">
+                        <div class="settings-field hidden" id="custom-identity-field">
                             <label for="setting-custom-identity">Custom Identity Text</label>
                             <textarea id="setting-custom-identity" rows="3" placeholder="Enter custom identity description (e.g., 'You are a helpful coding assistant...')"></textarea>
                             <span class="settings-field-hint">This replaces the entire Identity section in the system prompt. Leave blank to use default.</span>
@@ -569,7 +569,7 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="settings-field" id="custom-priorities-field" style="display:none;">
+                        <div class="settings-field hidden" id="custom-priorities-field">
                             <label for="setting-custom-priorities">Custom Priorities</label>
                             <textarea id="setting-custom-priorities" rows="5" placeholder="- Priority one&#10;- Priority two&#10;- Priority three"></textarea>
                             <span class="settings-field-hint">Enter each priority on a new line. These will appear under the "# Priorities" section. Leave blank to use default.</span>
@@ -655,7 +655,7 @@
                                 <label for="setting-voice-language">Language</label>
                                 <input type="text" id="setting-voice-language" placeholder="en" />
                             </div>
-                            <div class="settings-field" style="max-width:120px">
+                            <div class="settings-field settings-field-narrow">
                                 <label for="setting-voice-speed">Speed</label>
                                 <input type="number" id="setting-voice-speed" step="0.1" min="0.5" max="2" placeholder="1.0" />
                             </div>
@@ -706,12 +706,12 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="settings-field" id="memory-file-field" style="display:none">
+                        <div class="settings-field hidden" id="memory-file-field">
                             <label for="setting-memory-file">Memory File</label>
                             <input type="text" id="setting-memory-file" placeholder="~/.osagent/memories.json" />
                             <span class="settings-field-hint">JSON file where memories are stored</span>
                         </div>
-                        <div class="toggle-field" style="margin-top:12px">
+                        <div class="toggle-field toggle-field-spaced">
                             <div class="toggle-info">
                                 <label class="toggle-label">Enable Approved Decision Memory</label>
                                 <span class="toggle-desc">Capture explicit durable choices like "Approved decision: key=value" and enforce them across sessions</span>
@@ -721,7 +721,7 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="settings-field" id="decision-memory-file-field" style="display:none">
+                        <div class="settings-field hidden" id="decision-memory-file-field">
                             <label for="setting-decision-memory-file">Decision Memory File</label>
                             <input type="text" id="setting-decision-memory-file" placeholder="~/.osagent/decision_memories.json" />
                             <span class="settings-field-hint">Store durable decisions with: Approved decision: &lt;key&gt;=&lt;value&gt; | optional rationale</span>
@@ -729,14 +729,14 @@
                     </div>
 
                     <div class="settings-group" id="memory-list-group">
-                        <div class="settings-group-title" style="display:flex;align-items:center;justify-content:space-between">
+                        <div class="settings-group-title settings-group-title-inline">
                             <span>Recorded Memories</span>
-                            <button type="button" class="btn-ghost" style="font-size:12px" onclick="OSA.loadMemories()">Refresh</button>
+                            <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.loadMemories()">Refresh</button>
                         </div>
                         <div id="memory-list" class="decision-list">Enable memory to view and manage memories.</div>
-                        <div class="settings-inline-form" id="memory-add-form" style="display:none">
+                        <div class="settings-inline-form hidden" id="memory-add-form">
                             <input type="text" id="memory-title" placeholder="Title (e.g. Preferred language)" />
-                            <textarea id="memory-content" placeholder="Memory content..." rows="3" style="resize:vertical;font-family:inherit;font-size:13px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);width:100%;box-sizing:border-box"></textarea>
+                            <textarea id="memory-content" class="memory-inline-textarea" placeholder="Memory content..." rows="3"></textarea>
                             <input type="text" id="memory-tags" placeholder="Tags (comma-separated, optional)" />
                             <div class="settings-form-actions">
                                 <button type="button" class="btn-action" onclick="OSA.addMemory()">Add Memory</button>
@@ -814,19 +814,19 @@
                             </div>
                         </div>
                         
-                        <div id="custom-network-fields" class="hidden" style="margin-top: 16px;">
+                        <div id="custom-network-fields" class="hidden settings-block-spaced">
                             <div class="settings-field-row">
                                 <div class="settings-field flex-1">
                                     <label for="setting-bind">Bind Address</label>
                                     <input type="text" id="setting-bind" placeholder="127.0.0.1" />
                                 </div>
-                                <div class="settings-field" style="max-width:120px">
+                                <div class="settings-field settings-field-narrow">
                                     <label for="setting-port">Port</label>
                                     <input type="number" id="setting-port" placeholder="8765" oninput="OSA.onPortChange()" />
                                 </div>
                             </div>
                         </div>
-                        <div class="settings-field" style="margin-top: 16px;">
+                        <div class="settings-field settings-field-spaced">
                             <label for="setting-cors-allowed-origins">Allowed CORS Origins</label>
                             <textarea id="setting-cors-allowed-origins" rows="3" placeholder="https://example.com&#10;http://localhost:3000" oninput="OSA.onNetworkSettingsChange()"></textarea>
                             <div class="settings-help">Leave empty to keep the API same-origin only. Enter one origin per line or comma-separated. Restart required after changes.</div>
@@ -1012,7 +1012,7 @@
                             <svg class="provider-input-icon" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M5.5 4a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0zM8 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4 8H2v7h12V8h-2v1.5a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V8H7v1.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V8z"/></svg>
                             <input type="password" id="provider-api-key" class="provider-input" placeholder="sk-..." autocomplete="off" />
                         </div>
-                        <div class="validation-badge" id="validation-badge" style="display:none"></div>
+                        <div class="validation-badge hidden" id="validation-badge"></div>
                     </div>
                     <div class="provider-input-group">
                         <label for="provider-base-url" class="provider-input-label">Base URL</label>
@@ -1122,7 +1122,7 @@
                         </label>
                     </div>
                 </div>
-                <div class="settings-field" id="discord-channel-field" style="display:none">
+                <div class="settings-field hidden" id="discord-channel-field">
                     <label for="discord-channel-id">Discord Channel ID</label>
                     <input type="text" id="discord-channel-id" placeholder="e.g. 123456789012345678 (optional, uses last active channel if empty)" autocomplete="off">
                     <span class="settings-field-hint">Optional. Leave empty to use the last active Discord channel.</span>
@@ -1146,7 +1146,7 @@
             <p class="jobs-delete-msg">Are you sure you want to delete this scheduled job? This cannot be undone.</p>
             <div class="jobs-delete-footer">
                 <button class="btn-ghost" onclick="OSA.Jobs.hideDeleteConfirm()">Cancel</button>
-                <button class="btn-danger" id="jobs-delete-confirm-btn" style="padding:8px 18px;font-size:13px">Delete</button>
+                <button class="btn-danger btn-danger-large" id="jobs-delete-confirm-btn">Delete</button>
             </div>
         </div>
     </div>

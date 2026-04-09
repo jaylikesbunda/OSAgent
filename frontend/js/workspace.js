@@ -66,6 +66,9 @@ OSA.togglePersonaMenu = function() {
     const trigger = document.getElementById('persona-trigger');
     if (!menu || !trigger) return;
     OSA.closeWorkspaceMenu();
+    if (!OSA.getAvailablePersonas()?.length) {
+        OSA.loadPersonaCatalog();
+    }
     menu.classList.toggle('hidden');
     trigger.classList.toggle('open');
 };
@@ -130,9 +133,8 @@ OSA.selectWorkspaceFromMenu = async function(workspaceId) {
     OSA.onWorkspaceSelectionChange();
 
     try {
-        const res = await fetch('/api/workspaces/active', {
+        const res = await OSA.fetchWithAuth('/api/workspaces/active', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspace_id: workspaceId })
         });
         if (!res.ok) {
@@ -225,9 +227,7 @@ OSA.removeWorkspacePathRow = function(index) {
 OSA.browseWorkspacePathForInput = async function(inputEl) {
     OSA.setWorkspaceInlineStatus('');
     try {
-        const res = await fetch('/api/workspaces/browse', {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-        });
+        const res = await OSA.fetchWithAuth('/api/workspaces/browse');
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         
@@ -254,9 +254,7 @@ OSA.browseWorkspacePathForInput = async function(inputEl) {
 OSA.browseWorkspacePath = async function() {
     OSA.setWorkspaceInlineStatus('');
     try {
-        const res = await fetch('/api/workspaces/browse', {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
-        });
+        const res = await OSA.fetchWithAuth('/api/workspaces/browse');
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         
@@ -321,9 +319,8 @@ OSA.applySessionWorkspace = async function() {
     const workspaceId = OSA.selectedWorkspaceId();
     try {
         const url = '/api/sessions/' + encodeURIComponent(currentSession.id) + '/workspace';
-        const res = await fetch(url, {
+        const res = await OSA.fetchWithAuth(url, {
             method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + OSA.getToken(), 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspace_id: workspaceId })
         });
         const data = await res.json();
@@ -374,9 +371,8 @@ OSA.saveWorkspaceInline = async function() {
     const url = exists ? `/api/workspaces/${encodeURIComponent(id)}` : '/api/workspaces';
     
     try {
-        const res = await fetch(url, {
+        const res = await OSA.fetchWithAuth(url, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ id, name, paths: dedupedPaths, description: description || null })
         });
         const data = await res.json();
@@ -446,7 +442,7 @@ OSA.renderWorkspaceList = function() {
 
 OSA.loadWorkspaces = async function() {
     try {
-        const res = await fetch('/api/workspaces', { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
+        const res = await OSA.fetchWithAuth('/api/workspaces');
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         const ws = OSA.getWorkspaceState();
@@ -472,7 +468,7 @@ OSA.loadSessionWorkspace = async function() {
     }
     const sessionId = currentSession.id;
     try {
-        const res = await fetch(`/api/sessions/${sessionId}/workspace`, { headers: { 'Authorization': `Bearer ${OSA.getToken()}` } });
+        const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/workspace`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         const activeSession = OSA.getCurrentSession();
@@ -504,9 +500,8 @@ OSA.deleteWorkspace = async function(workspaceId) {
     }
     if (!confirm(`Delete workspace '${workspaceId}'?`)) return;
     try {
-        const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+        const res = await OSA.fetchWithAuth(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+            method: 'DELETE'
         });
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
@@ -524,9 +519,8 @@ OSA.setActiveWorkspaceFromSettings = async function() {
     if (!select) return;
     const workspaceId = select.value;
     try {
-        const res = await fetch('/api/workspaces/active', {
+        const res = await OSA.fetchWithAuth('/api/workspaces/active', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspace_id: workspaceId })
         });
         const data = await res.json();
@@ -553,9 +547,8 @@ OSA.upsertWorkspaceFromForm = async function() {
     const exists = ws.workspaces.some(w => w.id === id);
     const url = exists ? `/api/workspaces/${encodeURIComponent(id)}` : '/api/workspaces';
     try {
-        const res = await fetch(url, {
+        const res = await OSA.fetchWithAuth(url, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ id, name, path, description: description || null })
         });
         const data = await res.json();
