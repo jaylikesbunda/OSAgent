@@ -69,6 +69,7 @@ sysinfo = "0.30"
 
 # Base64 encoding
 base64 = "0.22"
+pdf-extract = "0.7"
 
 # Async streaming
 async-stream = "0.3"

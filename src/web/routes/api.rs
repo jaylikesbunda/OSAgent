@@ -25,6 +25,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use base64::Engine;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -101,11 +102,23 @@ pub struct CreateSessionRequest {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttachmentRequest {
+    pub filename: String,
+    pub mime: String,
+    pub data_url: String,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub message: String,
     pub session_id: String,
     pub client_message_id: Option<String>,
+    #[serde(default)]
+    pub images: Vec<AttachmentRequest>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,6 +129,96 @@ pub struct SendMessageResponse {
     pub queued: bool,
     pub queue_position: Option<i64>,
     pub queue_item: Option<QueuedMessage>,
+}
+
+const MAX_ATTACHMENT_BYTES: usize = 12 * 1024 * 1024;
+const MAX_ATTACHMENT_TEXT_CHARS: usize = 24_000;
+const MAX_TOTAL_ATTACHMENT_CONTEXT_CHARS: usize = 72_000;
+
+fn attachment_extension(filename: &str) -> String {
+    std::path::Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn is_pdf_attachment(mime: &str, filename: &str) -> bool {
+    mime.eq_ignore_ascii_case("application/pdf") || attachment_extension(filename) == "pdf"
+}
+
+fn is_text_attachment(mime: &str, filename: &str) -> bool {
+    if mime.starts_with("text/") {
+        return true;
+    }
+
+    matches!(
+        attachment_extension(filename).as_str(),
+        "txt"
+            | "md"
+            | "markdown"
+            | "json"
+            | "csv"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "rs"
+            | "py"
+            | "html"
+            | "css"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "xml"
+            | "sql"
+            | "sh"
+            | "ps1"
+            | "bat"
+            | "ini"
+            | "log"
+    )
+}
+
+fn parse_data_url(data_url: &str) -> Result<(String, Vec<u8>), String> {
+    let Some((meta, payload)) = data_url.split_once(',') else {
+        return Err("Invalid attachment payload".to_string());
+    };
+    if !meta.starts_with("data:") || !meta.contains(";base64") {
+        return Err("Unsupported attachment encoding".to_string());
+    }
+
+    let mime = meta
+        .trim_start_matches("data:")
+        .split(';')
+        .next()
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| "Invalid attachment base64 data".to_string())?;
+    Ok((mime, bytes))
+}
+
+fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
+    let char_count = value.chars().count();
+    if char_count <= limit {
+        return (value.to_string(), false);
+    }
+
+    let truncated = value.chars().take(limit).collect::<String>();
+    (truncated, true)
+}
+
+fn build_attachment_context_section(filename: &str, mime: &str, text: &str, truncated: bool) -> String {
+    let mut section = format!(
+        "Attached file: {}\nMIME type: {}\nExtracted text:\n{}",
+        filename, mime, text
+    );
+    if truncated {
+        section.push_str("\n\n[Attachment text was truncated for context size limits.]");
+    }
+    section
 }
 
 #[derive(Debug, Deserialize)]
@@ -1674,8 +1777,134 @@ async fn send_message(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+    let raw_attachments = if payload.attachments.is_empty() {
+        payload.images
+    } else {
+        payload.attachments
+    };
+
+    let mut images = Vec::new();
+    let mut attachment_summaries = Vec::new();
+    let mut attachment_sections = Vec::new();
+
+    for attachment in raw_attachments {
+        let (decoded_mime, bytes) = parse_data_url(&attachment.data_url).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error }),
+            )
+        })?;
+
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Attachment '{}' exceeds the {} MB limit",
+                        attachment.filename,
+                        MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                    ),
+                }),
+            ));
+        }
+
+        let mime = if attachment.mime.trim().is_empty() {
+            decoded_mime
+        } else {
+            attachment.mime.clone()
+        };
+
+        if mime.starts_with("image/") {
+            images.push(crate::storage::MessageImage {
+                filename: attachment.filename.clone(),
+                mime: mime.clone(),
+                data_url: attachment.data_url,
+            });
+            attachment_summaries.push(crate::storage::MessageAttachment {
+                filename: attachment.filename,
+                mime,
+                kind: "image".to_string(),
+                size_bytes: bytes.len(),
+                truncated: false,
+            });
+            continue;
+        }
+
+        let extracted_text = if is_pdf_attachment(&mime, &attachment.filename) {
+            pdf_extract::extract_text_from_mem(&bytes).map_err(|error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Failed to extract text from '{}': {}",
+                            attachment.filename, error
+                        ),
+                    }),
+                )
+            })?
+        } else if is_text_attachment(&mime, &attachment.filename) {
+            String::from_utf8_lossy(&bytes).into_owned()
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Unsupported attachment type for '{}'. Supported: images, PDF, and text-like files.",
+                        attachment.filename
+                    ),
+                }),
+            ));
+        };
+
+        let (truncated_text, truncated) = truncate_chars(&extracted_text, MAX_ATTACHMENT_TEXT_CHARS);
+        attachment_sections.push(build_attachment_context_section(
+            &attachment.filename,
+            &mime,
+            &truncated_text,
+            truncated,
+        ));
+        attachment_summaries.push(crate::storage::MessageAttachment {
+            filename: attachment.filename,
+            mime,
+            kind: "document".to_string(),
+            size_bytes: bytes.len(),
+            truncated,
+        });
+    }
+
+    let attachment_context = if attachment_sections.is_empty() {
+        None
+    } else {
+        let joined = attachment_sections.join("\n\n---\n\n");
+        let (truncated_joined, truncated) = truncate_chars(&joined, MAX_TOTAL_ATTACHMENT_CONTEXT_CHARS);
+        Some(if truncated {
+            format!(
+                "{}\n\n[Some attachment context was truncated for total context limits.]",
+                truncated_joined
+            )
+        } else {
+            truncated_joined
+        })
+    };
+
+    tracing::info!(
+        "send_message: session={} client_message_id={} images={} attachments={} text_chars={}",
+        session_id,
+        client_message_id,
+        images.len(),
+        attachment_summaries.len(),
+        payload.message.chars().count()
+    );
+
     let (queue_item, created) = agent
-        .enqueue_message(&session_id, &client_message_id, &payload.message)
+        .enqueue_message(
+            &session_id,
+            &client_message_id,
+            &payload.message,
+            &images,
+            attachment_context.as_deref(),
+            &attachment_summaries,
+        )
         .await
         .map_err(|e| {
             (
@@ -4043,16 +4272,24 @@ fn extract_ollama_context_window(payload: &serde_json::Value) -> Option<usize> {
     None
 }
 
-async fn fetch_ollama_context_window(
+struct OllamaModelInfo {
+    context_window: Option<usize>,
+    supports_vision: bool,
+}
+
+async fn fetch_ollama_model_info(
     client: &reqwest::Client,
     normalized_base: &str,
     api_key: Option<&str>,
     model_id: &str,
-) -> Option<usize> {
+) -> Option<OllamaModelInfo> {
     let cache_key = format!("{}|{}", normalized_base, model_id);
     if let Some(cached) = ollama_context_cache().get(&cache_key) {
         if cached.value().1.elapsed() < Duration::from_secs(600) {
-            return Some(cached.value().0);
+            return Some(OllamaModelInfo {
+                context_window: Some(cached.value().0),
+                supports_vision: false,
+            });
         }
     }
 
@@ -4078,9 +4315,23 @@ async fn fetch_ollama_context_window(
         Err(_) => return None,
     };
 
-    let context = extract_ollama_context_window(&payload)?;
-    ollama_context_cache().insert(cache_key, (context, Instant::now()));
-    Some(context)
+    let context_window = extract_ollama_context_window(&payload);
+
+    let supports_vision = payload
+        .get("details")
+        .and_then(|d| d.get("families"))
+        .and_then(|f| f.as_array())
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some("clip")))
+        .unwrap_or(false);
+
+    if let Some(ctx) = context_window {
+        ollama_context_cache().insert(cache_key, (ctx, Instant::now()));
+    }
+
+    Some(OllamaModelInfo {
+        context_window,
+        supports_vision,
+    })
 }
 
 fn normalize_ollama_base_url(base_url: &str) -> String {
@@ -4189,6 +4440,7 @@ async fn fetch_live_ollama_models(
             } else {
                 model.name
             };
+            let supports_vision = false;
 
             Some(crate::agent::model_catalog::ModelInfo {
                 id,
@@ -4199,7 +4451,7 @@ async fn fetch_live_ollama_models(
                 input_limit: None,
                 output_limit: 0,
                 supports_tools: false,
-                supports_vision: false,
+                supports_vision,
                 category: "installed".to_string(),
                 available: true,
             })
@@ -4207,11 +4459,12 @@ async fn fetch_live_ollama_models(
         .collect();
 
     for model in &mut models {
-        if let Some(context_window) =
-            fetch_ollama_context_window(&client, &normalized_base, api_key.as_deref(), &model.id)
+        if let Some(info) =
+            fetch_ollama_model_info(&client, &normalized_base, api_key.as_deref(), &model.id)
                 .await
         {
-            model.context_window = context_window;
+            model.context_window = info.context_window.unwrap_or(0);
+            model.supports_vision = info.supports_vision;
         }
     }
 

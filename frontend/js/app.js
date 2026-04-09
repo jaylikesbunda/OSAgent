@@ -926,7 +926,8 @@ OSA.sendMessage = async function() {
 
     const input = document.getElementById('message-input');
     const message = input.value.trim();
-    if (!message) return;
+    const attachments = OSA.getAttachments().slice();
+    if (!message && attachments.length === 0) return;
 
     const clientMessageId = OSA.generateClientMessageId();
     const shouldQueueLocally = OSA.isAgentProcessing() || (OSA.getSessionQueue() || []).length > 0;
@@ -934,6 +935,8 @@ OSA.sendMessage = async function() {
 
     input.value = '';
     OSA.hideSlashMenu();
+    OSA.clearAttachments();
+    OSA.renderAttachmentPreviews();
     OSA.setInputHistoryIndex(-1);
     OSA.getInputHistory().push(message);
     if (OSA.getInputHistory().length > 100) OSA.getInputHistory().shift();
@@ -958,18 +961,26 @@ OSA.sendMessage = async function() {
         const optimisticMessage = OSA.appendUserMessageToChat(message, {
             clientMessageId,
             timestamp: new Date().toISOString(),
+            attachments: attachments,
         });
         if (optimisticMessage) optimisticMessage.id = optimisticDomId;
     }
 
+    const attachmentPayload = attachments.map(att => ({
+        filename: att.filename,
+        mime: att.mime,
+        data_url: att.dataUrl,
+    }));
+
     try {
+        OSA.clearAttachmentStatus();
         const res = await fetch(`/api/sessions/${currentSession.id}/send`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${OSA.getToken()}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ message, session_id: currentSession.id, client_message_id: clientMessageId })
+            body: JSON.stringify({ message, session_id: currentSession.id, client_message_id: clientMessageId, attachments: attachmentPayload })
         });
         const data = await res.json().catch(() => ({}));
         
@@ -1008,6 +1019,9 @@ OSA.sendMessage = async function() {
         }
     } catch (error) {
         console.error('Failed to send message:', error);
+        if ((error.message || '').toLowerCase().includes('attachment')) {
+            OSA.setAttachmentStatus(error.message, 'error');
+        }
         if (currentSession && Array.isArray(currentSession.messages) && !shouldQueueLocally) {
             const last = currentSession.messages[currentSession.messages.length - 1];
             if (last && last.role === 'user' && last.content === message) {
@@ -1695,5 +1709,229 @@ OSA.closeWorkflowEditor = function() {
 };
 
 window.openWorkflowEditor = OSA.openWorkflowEditor;
+
+OSA.ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+OSA.ACCEPTED_ATTACHMENT_EXTENSIONS = ['pdf', 'txt', 'md', 'markdown', 'json', 'csv', 'js', 'jsx', 'ts', 'tsx', 'rs', 'py', 'html', 'css', 'toml', 'yaml', 'yml', 'xml', 'sql', 'sh', 'ps1', 'bat', 'ini', 'log'];
+OSA.MAX_ATTACHMENT_SIZE = 12 * 1024 * 1024;
+
+OSA.setAttachmentStatus = function(message, tone = 'info') {
+    const status = document.getElementById('attachment-status');
+    if (!status) return;
+
+    if (OSA._attachmentStatusTimer) {
+        clearTimeout(OSA._attachmentStatusTimer);
+        OSA._attachmentStatusTimer = null;
+    }
+
+    if (!message) {
+        status.innerHTML = '';
+        status.classList.add('hidden');
+        status.dataset.state = 'hidden';
+        return;
+    }
+
+    status.innerHTML = '';
+    const text = document.createElement('span');
+    text.className = 'attachment-status-text';
+    text.textContent = message;
+
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'attachment-status-dismiss';
+    dismiss.setAttribute('aria-label', 'Dismiss attachment status');
+    dismiss.textContent = 'x';
+    dismiss.addEventListener('click', () => OSA.clearAttachmentStatus());
+
+    status.appendChild(text);
+    status.appendChild(dismiss);
+    status.classList.remove('hidden');
+    status.dataset.state = tone;
+
+    if (tone === 'error') {
+        OSA._attachmentStatusTimer = setTimeout(() => OSA.clearAttachmentStatus(), 6000);
+    }
+};
+
+OSA.clearAttachmentStatus = function() {
+    OSA.setAttachmentStatus('');
+};
+
+OSA.getAttachmentExtension = function(filename) {
+    const parts = String(filename || '').split('.');
+    return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : '';
+};
+
+OSA.isSupportedAttachmentFile = function(file) {
+    if (OSA.ACCEPTED_IMAGE_TYPES.includes(file.type)) return true;
+    return OSA.ACCEPTED_ATTACHMENT_EXTENSIONS.includes(OSA.getAttachmentExtension(file.name));
+};
+
+OSA.handleAttachmentFile = async function(file) {
+    if (!OSA.isSupportedAttachmentFile(file)) {
+        OSA.setAttachmentStatus(`Unsupported attachment type: ${file.name}`, 'error');
+        return;
+    }
+    if (file.size > OSA.MAX_ATTACHMENT_SIZE) {
+        OSA.setAttachmentStatus(
+            `Attachment too large: ${file.name}. Limit is ${Math.round(OSA.MAX_ATTACHMENT_SIZE / (1024 * 1024))} MB.`,
+            'error'
+        );
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+        OSA.clearAttachmentStatus();
+        OSA.addAttachment({
+            kind: OSA.ACCEPTED_IMAGE_TYPES.includes(file.type) ? 'image' : 'document',
+            id: 'att-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+            filename: file.name,
+            mime: file.type || 'application/octet-stream',
+            sizeBytes: file.size,
+            dataUrl: reader.result,
+        });
+        OSA.renderAttachmentPreviews();
+    };
+    reader.onerror = () => {
+        OSA.setAttachmentStatus(`Failed to read attachment: ${file.name}`, 'error');
+    };
+    reader.readAsDataURL(file);
+};
+
+OSA.renderAttachmentPreviews = function() {
+    const container = document.getElementById('image-preview-container');
+    if (!container) return;
+    const attachments = OSA.getAttachments();
+    if (attachments.length === 0) {
+        container.classList.add('hidden');
+        container.innerHTML = '';
+        return;
+    }
+    container.classList.remove('hidden');
+    container.innerHTML = '';
+    attachments.forEach(att => {
+        const thumb = document.createElement('div');
+        thumb.className = 'image-preview-thumb';
+        if (att.kind === 'image') {
+            thumb.innerHTML = `
+                <img class="expandable-image" data-image-src="${att.dataUrl}" src="${att.dataUrl}" alt="${OSA.escapeHtml(att.filename)}" />
+                <button class="image-preview-remove" onclick="OSA.handleRemoveAttachment('${att.id}')">&times;</button>
+                <div class="image-preview-filename">${OSA.escapeHtml(att.filename)}</div>
+            `;
+        } else {
+            const ext = OSA.getAttachmentExtension(att.filename) || 'file';
+            thumb.classList.add('file-preview-thumb');
+            thumb.innerHTML = `
+                <div class="file-preview-icon">${OSA.escapeHtml(ext.toUpperCase().slice(0, 4))}</div>
+                <button class="image-preview-remove" onclick="OSA.handleRemoveAttachment('${att.id}')">&times;</button>
+                <div class="image-preview-filename">${OSA.escapeHtml(att.filename)}</div>
+            `;
+        }
+        container.appendChild(thumb);
+    });
+};
+
+OSA.handleRemoveAttachment = function(id) {
+    const attachments = OSA.getAttachments();
+    OSA.setAttachments(attachments.filter(a => a.id !== id));
+    OSA.renderAttachmentPreviews();
+};
+
+OSA.ensureImagePreviewModal = function() {
+    let modal = document.getElementById('image-preview-modal');
+    if (modal) return modal;
+
+    modal = document.createElement('div');
+    modal.id = 'image-preview-modal';
+    modal.className = 'image-preview-modal hidden';
+    modal.innerHTML = `
+        <div class="image-preview-modal-backdrop"></div>
+        <div class="image-preview-modal-content">
+            <button class="image-preview-modal-close" type="button" aria-label="Close image preview">&times;</button>
+            <img id="image-preview-modal-img" src="" alt="Expanded attachment preview" />
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const close = () => modal.classList.add('hidden');
+    modal.querySelector('.image-preview-modal-backdrop').addEventListener('click', close);
+    modal.querySelector('.image-preview-modal-close').addEventListener('click', close);
+    modal.addEventListener('click', (event) => {
+        if (event.target === modal) close();
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') close();
+    });
+
+    return modal;
+};
+
+OSA.openImagePreviewModal = function(src) {
+    if (!src) return;
+    const modal = OSA.ensureImagePreviewModal();
+    const img = document.getElementById('image-preview-modal-img');
+    if (!img) return;
+    img.src = src;
+    modal.classList.remove('hidden');
+};
+
+OSA.setupAttachmentPicker = function() {
+    const fileInput = document.getElementById('image-upload');
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            files.forEach(file => OSA.handleAttachmentFile(file));
+            e.target.value = '';
+        });
+    }
+
+    const input = document.getElementById('message-input');
+    if (input) {
+        input.addEventListener('paste', async (e) => {
+            const items = Array.from(e.clipboardData.items);
+            const fileItems = items.filter(item => item.kind === 'file');
+            if (fileItems.length > 0) {
+                e.preventDefault();
+                for (const item of fileItems) {
+                    const file = item.getAsFile();
+                    if (file) await OSA.handleAttachmentFile(file);
+                }
+                return;
+            }
+        });
+    }
+
+    const inputArea = document.querySelector('.input-area');
+    if (inputArea) {
+        inputArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            inputArea.classList.add('drag-over');
+        });
+        inputArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            inputArea.classList.remove('drag-over');
+        });
+        inputArea.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            inputArea.classList.remove('drag-over');
+            const files = Array.from(e.dataTransfer.files);
+            for (const file of files) {
+                if (OSA.isSupportedAttachmentFile(file)) {
+                    await OSA.handleAttachmentFile(file);
+                }
+            }
+        });
+    }
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    OSA.setupAttachmentPicker();
+    OSA.ensureImagePreviewModal();
+    document.body.addEventListener('click', (event) => {
+        const image = event.target.closest('.expandable-image');
+        if (!image) return;
+        const src = image.dataset.imageSrc || image.getAttribute('src');
+        OSA.openImagePreviewModal(src);
+    });
+});
 
 OSA.checkAuthAndInit();

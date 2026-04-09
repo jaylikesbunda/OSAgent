@@ -15,6 +15,15 @@ impl SqliteStorage {
     fn queued_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedMessage> {
         let status: String = row.get(4)?;
         let dispatched_at_ts: Option<i64> = row.get(8)?;
+        let images_json: Option<String> = row.get(9).unwrap_or(None);
+        let images: Vec<crate::storage::MessageImage> = images_json
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let attachment_context: Option<String> = row.get(10).unwrap_or(None);
+        let attachments_json: Option<String> = row.get(11).unwrap_or(None);
+        let attachments: Vec<crate::storage::MessageAttachment> = attachments_json
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
         Ok(QueuedMessage {
             id: row.get(0)?,
             session_id: row.get(1)?,
@@ -27,6 +36,9 @@ impl SqliteStorage {
             updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(7)?, 0)
                 .unwrap_or_else(Utc::now),
             dispatched_at: dispatched_at_ts.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+            images,
+            attachment_context,
+            attachments,
         })
     }
 
@@ -124,6 +136,48 @@ impl SqliteStorage {
 
                 if !has_context_state {
                     conn.execute("ALTER TABLE sessions ADD COLUMN context_state BLOB", [])?;
+                }
+
+                let has_images_json: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('queued_messages') WHERE name='images_json'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_images_json {
+                    conn.execute("ALTER TABLE queued_messages ADD COLUMN images_json TEXT", [])?;
+                }
+
+                let has_attachment_context: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('queued_messages') WHERE name='attachment_context'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_attachment_context {
+                    conn.execute(
+                        "ALTER TABLE queued_messages ADD COLUMN attachment_context TEXT",
+                        [],
+                    )?;
+                }
+
+                let has_attachments_json: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('queued_messages') WHERE name='attachments_json'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_attachments_json {
+                    conn.execute(
+                        "ALTER TABLE queued_messages ADD COLUMN attachments_json TEXT",
+                        [],
+                    )?;
                 }
             } else {
                 conn.execute_batch(
@@ -228,7 +282,10 @@ impl SqliteStorage {
                     position INTEGER NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
-                    dispatched_at INTEGER
+                    dispatched_at INTEGER,
+                    images_json TEXT,
+                    attachment_context TEXT,
+                    attachments_json TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_todo_session ON todo_items(session_id, position);
@@ -1108,13 +1165,16 @@ impl SqliteStorage {
         session_id: &str,
         client_message_id: &str,
         content: &str,
+        images: &[crate::storage::MessageImage],
+        attachment_context: Option<&str>,
+        attachments: &[crate::storage::MessageAttachment],
     ) -> Result<(QueuedMessage, bool)> {
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(OSAgentError::Storage)?;
 
             let mut existing_stmt = tx
                 .prepare_cached(
-                    "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
+                    "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at, COALESCE(images_json, '[]'), attachment_context, COALESCE(attachments_json, '[]')
                      FROM queued_messages WHERE session_id = ?1 AND client_message_id = ?2 LIMIT 1",
                 )
                 .map_err(OSAgentError::Storage)?;
@@ -1140,6 +1200,16 @@ impl SqliteStorage {
                 .map_err(OSAgentError::Storage)?;
 
             let now = Utc::now();
+            let images_json = if images.is_empty() {
+                None
+            } else {
+                serde_json::to_string(images).ok()
+            };
+            let attachments_json = if attachments.is_empty() {
+                None
+            } else {
+                serde_json::to_string(attachments).ok()
+            };
             let item = QueuedMessage {
                 id: Uuid::new_v4().to_string(),
                 session_id: session_id.to_string(),
@@ -1150,11 +1220,14 @@ impl SqliteStorage {
                 created_at: now,
                 updated_at: now,
                 dispatched_at: None,
+                images: images.to_vec(),
+                attachment_context: attachment_context.map(|value| value.to_string()),
+                attachments: attachments.to_vec(),
             };
 
             tx.execute(
-                "INSERT INTO queued_messages (id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO queued_messages (id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at, images_json, attachment_context, attachments_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     &item.id,
                     &item.session_id,
@@ -1165,6 +1238,9 @@ impl SqliteStorage {
                     item.created_at.timestamp(),
                     item.updated_at.timestamp(),
                     item.dispatched_at.map(|dt| dt.timestamp()),
+                    images_json,
+                    item.attachment_context,
+                    attachments_json,
                 ],
             )
             .map_err(OSAgentError::Storage)?;
@@ -1173,12 +1249,11 @@ impl SqliteStorage {
             Ok((item, true))
         })
     }
-
     pub fn list_queued_messages(&self, session_id: &str) -> Result<Vec<QueuedMessage>> {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
+                    "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at, COALESCE(images_json, '[]'), attachment_context, COALESCE(attachments_json, '[]')
                      FROM queued_messages
                      WHERE session_id = ?1
                      ORDER BY position ASC, created_at ASC",
@@ -1199,7 +1274,7 @@ impl SqliteStorage {
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(OSAgentError::Storage)?;
 
-            let select_sql = "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at
+            let select_sql = "SELECT id, session_id, client_message_id, content, status, position, created_at, updated_at, dispatched_at, COALESCE(images_json, '[]'), attachment_context, COALESCE(attachments_json, '[]')
                               FROM queued_messages
                               WHERE session_id = ?1 AND status = ?2
                               ORDER BY position ASC, created_at ASC

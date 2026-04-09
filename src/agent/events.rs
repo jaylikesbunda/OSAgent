@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
+use crate::storage::{MessageAttachment, MessageImage};
 use crate::tools::question::Question;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -74,6 +75,10 @@ pub enum AgentEvent {
         queue_entry_id: String,
         client_message_id: String,
         content: String,
+        #[serde(default)]
+        images: Vec<MessageImage>,
+        #[serde(default)]
+        attachments: Vec<MessageAttachment>,
         timestamp: SystemTime,
     },
     ContextUpdate {

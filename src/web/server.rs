@@ -6,6 +6,7 @@ use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::watch;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -105,31 +106,62 @@ pub async fn run_with_agent(
     config_path: PathBuf,
     shutdown_rx: Option<watch::Receiver<bool>>,
 ) -> crate::error::Result<()> {
+    let startup_total = Instant::now();
+
+    let workspace_start = Instant::now();
     for workspace in config.list_workspaces() {
         std::fs::create_dir_all(shellexpand::tilde(&workspace.resolved_path()).to_string())
             .map_err(crate::error::OSAgentError::Io)?;
     }
+    info!(
+        target: "osagent::startup",
+        "phase=web_workspace_dirs elapsed_ms={:.2}",
+        workspace_start.elapsed().as_secs_f64() * 1000.0
+    );
 
+    let router_start = Instant::now();
     let api_routes = create_router(config.clone(), agent.clone(), config_path);
+    info!(
+        target: "osagent::startup",
+        "phase=web_router_create elapsed_ms={:.2}",
+        router_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     let keep_alive = SetResponseHeaderLayer::if_not_present(
         header::CONNECTION,
         HeaderValue::from_static("keep-alive"),
     );
 
+    let app_build_start = Instant::now();
     let app = api_routes
         .fallback(serve_static_handler)
         .layer(keep_alive)
         .layer(CompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(50 * 1024 * 1024))
         .layer(build_cors_layer(&config));
+    info!(
+        target: "osagent::startup",
+        "phase=web_app_layers elapsed_ms={:.2}",
+        app_build_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     let bind_addr = format!("{}:{}", config.server.bind, config.server.port);
     info!("OSA web server listening on http://{}", bind_addr);
 
+    let bind_start = Instant::now();
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .map_err(|e| crate::error::OSAgentError::Unknown(e.to_string()))?;
+    info!(
+        target: "osagent::startup",
+        "phase=web_listener_bind elapsed_ms={:.2}",
+        bind_start.elapsed().as_secs_f64() * 1000.0
+    );
+    info!(
+        target: "osagent::startup",
+        "phase=web_run_with_agent_ready elapsed_ms={:.2}",
+        startup_total.elapsed().as_secs_f64() * 1000.0
+    );
 
     let graceful = axum::serve(listener, app);
 

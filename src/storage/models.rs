@@ -110,6 +110,12 @@ pub struct QueuedMessage {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub dispatched_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub images: Vec<MessageImage>,
+    #[serde(default)]
+    pub attachment_context: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -154,6 +160,28 @@ pub struct SessionContextState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageImage {
+    pub filename: String,
+    pub mime: String,
+    pub data_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageAttachment {
+    pub filename: String,
+    pub mime: String,
+    pub kind: String,
+    #[serde(default)]
+    pub size_bytes: usize,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+fn default_message_images() -> Vec<MessageImage> {
+    Vec::new()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
@@ -166,6 +194,8 @@ pub struct Message {
     pub metadata: serde_json::Value,
     #[serde(default)]
     pub tokens: Option<MessageTokens>,
+    #[serde(default = "default_message_images")]
+    pub images: Vec<MessageImage>,
 }
 
 fn default_message_metadata() -> serde_json::Value {
@@ -183,6 +213,7 @@ impl Message {
             tool_call_id: None,
             metadata: default_message_metadata(),
             tokens: None,
+            images: Vec::new(),
         }
     }
 
@@ -196,6 +227,21 @@ impl Message {
             tool_call_id: None,
             metadata: default_message_metadata(),
             tokens: None,
+            images: Vec::new(),
+        }
+    }
+
+    pub fn user_with_images(content: String, images: Vec<MessageImage>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content,
+            thinking: None,
+            timestamp: Utc::now(),
+            tool_calls: None,
+            tool_call_id: None,
+            metadata: default_message_metadata(),
+            tokens: None,
+            images,
         }
     }
 
@@ -218,6 +264,7 @@ impl Message {
             tool_call_id: None,
             metadata: default_message_metadata(),
             tokens: None,
+            images: Vec::new(),
         }
     }
 
@@ -248,6 +295,7 @@ impl Message {
             tool_call_id: Some(tool_call_id),
             metadata,
             tokens: None,
+            images: Vec::new(),
         }
     }
 }

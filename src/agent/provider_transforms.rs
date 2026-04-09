@@ -50,7 +50,13 @@ impl ProviderTransforms {
                 return !msg.content.trim().is_empty();
             }
             if msg.role == "user" || msg.role == "system" {
-                return !msg.content.trim().is_empty();
+                if !msg.content.trim().is_empty() {
+                    return true;
+                }
+                if !msg.images.is_empty() {
+                    return true;
+                }
+                return false;
             }
             if msg.role == "assistant" {
                 if msg.tool_calls.is_some() {

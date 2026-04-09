@@ -915,12 +915,38 @@ OSA.removeQueuedMessageElements = function() {
     document.querySelectorAll('#messages .queued-notice').forEach(el => el.remove());
 };
 
+OSA.renderAttachmentMarkup = function(attachments = []) {
+    const imageAttachments = attachments.filter(att => att.kind === 'image' || (att.mime || '').startsWith('image/'));
+    const fileAttachments = attachments.filter(att => !(att.kind === 'image' || (att.mime || '').startsWith('image/')));
+
+    let html = '';
+    if (imageAttachments.length > 0) {
+        html += '<div class="message-image-grid">';
+        imageAttachments.forEach(att => {
+            const src = att.dataUrl || att.data_url || '';
+            html += `<div class="message-image-thumb"><img class="expandable-image" data-image-src="${src}" src="${src}" alt="${OSA.escapeHtml(att.filename || '')}" /></div>`;
+        });
+        html += '</div>';
+    }
+
+    if (fileAttachments.length > 0) {
+        html += '<div class="message-attachment-list">';
+        fileAttachments.forEach(att => {
+            html += `<div class="message-attachment-chip">${OSA.escapeHtml(att.filename || '')}</div>`;
+        });
+        html += '</div>';
+    }
+
+    return html;
+};
+
 OSA.appendUserMessageToChat = function(content, options = {}) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return null;
 
     const currentSession = OSA.getCurrentSession();
     const clientMessageId = options.clientMessageId || '';
+    const attachments = options.attachments || options.images || [];
 
     if (currentSession) {
         if (!Array.isArray(currentSession.messages)) currentSession.messages = [];
@@ -938,8 +964,9 @@ OSA.appendUserMessageToChat = function(content, options = {}) {
                 timestamp: options.timestamp || new Date().toISOString(),
                 tool_calls: null,
                 tool_call_id: null,
-                metadata: clientMessageId ? { client_message_id: clientMessageId } : {},
+                metadata: clientMessageId ? { client_message_id: clientMessageId, attachments: attachments.filter(att => att.kind !== 'image').map(att => ({ filename: att.filename, mime: att.mime, kind: att.kind || 'document', size_bytes: att.sizeBytes || 0, truncated: !!att.truncated })) } : { attachments: attachments.filter(att => att.kind !== 'image').map(att => ({ filename: att.filename, mime: att.mime, kind: att.kind || 'document', size_bytes: att.sizeBytes || 0, truncated: !!att.truncated })) },
                 tokens: null,
+                images: attachments.filter(att => att.kind === 'image' || (att.mime || '').startsWith('image/')).map(img => ({ filename: img.filename, mime: img.mime, data_url: img.dataUrl || img.data_url })),
             });
         }
     }
@@ -953,12 +980,14 @@ OSA.appendUserMessageToChat = function(content, options = {}) {
     const emptyState = messagesDiv.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
+    const attachmentsHtml = OSA.renderAttachmentMarkup(attachments);
+
     const message = document.createElement('div');
     message.className = 'message user';
     if (clientMessageId) message.dataset.clientMessageId = clientMessageId;
     message.innerHTML = `
         <div class="message-role">You</div>
-        <div class="message-content">${OSA.escapeHtml(content)}</div>
+        <div class="message-content">${OSA.escapeHtml(content)}${attachmentsHtml}</div>
     `;
     messagesDiv.appendChild(message);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -971,9 +1000,17 @@ OSA.handleQueuedMessageDispatched = function(event) {
     const queue = (OSA.getSessionQueue() || []).filter(item => item.id !== event.queue_entry_id);
     OSA.setSessionQueue(queue);
     OSA.removeQueuedMessageElements();
+    const dispatchedAttachments = [];
+    if (Array.isArray(event.images)) {
+        event.images.forEach(img => dispatchedAttachments.push({ ...img, kind: 'image' }));
+    }
+    if (Array.isArray(event.attachments)) {
+        event.attachments.forEach(att => dispatchedAttachments.push(att));
+    }
     OSA.appendUserMessageToChat(event.content || '', {
         clientMessageId: event.client_message_id || '',
         timestamp: event.timestamp,
+        attachments: dispatchedAttachments,
     });
     OSA.renderQueuedMessages(queue);
 };
@@ -1009,10 +1046,19 @@ OSA.renderMessages = function(messages) {
             const actionsHtml = (m.role === 'assistant' && (m.content || '').trim())
                 ? `<div class="message-actions"><button class="msg-action-btn" onclick="OSA.copyAssistantMessageElement(this)" title="Copy">Copy</button></div>`
                 : '';
+            const attachmentItems = [];
+            if (m.role === 'user' && Array.isArray(m.images)) {
+                m.images.forEach(img => attachmentItems.push(img));
+            }
+            if (m.role === 'user' && m.metadata && Array.isArray(m.metadata.attachments)) {
+                m.metadata.attachments.forEach(att => attachmentItems.push(att));
+            }
+            const attachmentsHtml = OSA.renderAttachmentMarkup(attachmentItems);
             return `<div class="message ${m.role}" data-ts="${ts}" data-message-index="${originalIndex}">
                 <div class="message-role">${m.role === 'user' ? 'You' : 'OSA'}</div>
                 ${thinkingHtml}
                 ${contentBlock}
+                ${attachmentsHtml}
                 ${actionsHtml}
             </div>`;
         }).join('');

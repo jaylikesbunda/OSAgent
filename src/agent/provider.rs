@@ -1,7 +1,7 @@
 use crate::config::{AgentConfig, ProviderConfig};
 use crate::error::{OSAgentError, Result};
 use crate::oauth::{extract_account_id, OAuthStorage, OAuthTokenEntry};
-use crate::storage::models::{Message, ToolCall};
+use crate::storage::models::{Message, MessageImage, ToolCall};
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::{Event, RequestBuilderExt};
@@ -203,7 +203,18 @@ impl OpenAICompatibleProvider {
         })
     }
 
-    fn build_messages(&self, messages: &[Message]) -> Vec<serde_json::Value> {
+    fn build_messages(&self, messages: &[Message], provider_type: &str) -> Vec<serde_json::Value> {
+        let image_url_as_string = provider_type == "ollama";
+        let total_images = messages.iter().map(|msg| msg.images.len()).sum::<usize>();
+        if total_images > 0 {
+            info!(
+                "build_messages: provider_type={} messages={} total_images={} ollama_string_format={}",
+                provider_type,
+                messages.len(),
+                total_images,
+                image_url_as_string
+            );
+        }
         messages
             .iter()
             .map(|msg| {
@@ -233,8 +244,31 @@ impl OpenAICompatibleProvider {
                             .collect();
                         value["tool_calls"] = serde_json::json!(formatted_calls);
                     }
-                    // Always use empty string, never null for content
                     value["content"] = serde_json::json!(msg.content);
+                } else if !msg.images.is_empty() {
+                    let mut content_parts: Vec<serde_json::Value> = Vec::new();
+                    if !msg.content.is_empty() {
+                        content_parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": msg.content
+                        }));
+                    }
+                    for img in &msg.images {
+                        if image_url_as_string {
+                            content_parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": img.data_url
+                            }));
+                        } else {
+                            content_parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": img.data_url
+                                }
+                            }));
+                        }
+                    }
+                    value["content"] = serde_json::json!(content_parts);
                 } else {
                     value["content"] = serde_json::json!(msg.content);
                 }
@@ -249,7 +283,7 @@ impl OpenAICompatibleProvider {
 
         for msg in messages {
             match msg.role.as_str() {
-                "system" | "user" | "assistant" => {
+                "system" | "assistant" => {
                     if !msg.content.is_empty() {
                         input.push(serde_json::json!({
                             "role": msg.role,
@@ -267,6 +301,45 @@ impl OpenAICompatibleProvider {
                                     "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
                                 }));
                             }
+                        }
+                    }
+                }
+                "user" => {
+                    if !msg.content.is_empty() || !msg.images.is_empty() {
+                        if !msg.images.is_empty() {
+                            let mut content_parts: Vec<serde_json::Value> = Vec::new();
+                            if !msg.content.is_empty() {
+                                content_parts.push(serde_json::json!({
+                                    "type": "input_text",
+                                    "text": msg.content
+                                }));
+                            }
+                            for img in &msg.images {
+                                content_parts.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": img.data_url
+                                }));
+                            }
+                            input.push(serde_json::json!({
+                                "role": "user",
+                                "content": content_parts
+                            }));
+                        } else {
+                            input.push(serde_json::json!({
+                                "role": "user",
+                                "content": msg.content,
+                            }));
+                        }
+                    }
+
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        for tool_call in tool_calls {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+                            }));
                         }
                     }
                 }
@@ -1575,7 +1648,7 @@ impl OpenAICompatibleProvider {
             .default_options(&config.provider_type, &config.model);
         let mut request_body = serde_json::json!({
             "model": model,
-            "messages": self.build_messages(&transformed_messages),
+            "messages": self.build_messages(&transformed_messages, &config.provider_type),
             "stream": true,
             "stream_options": { "include_usage": true },
         });
@@ -1724,7 +1797,7 @@ impl OpenAICompatibleProvider {
         let mut request_body = match mode {
             RequestMode::ChatCompletions | RequestMode::Custom => serde_json::json!({
                 "model": model,
-                "messages": self.build_messages(&transformed_messages),
+            "messages": self.build_messages(&transformed_messages, &config.provider_type),
             }),
             RequestMode::Responses => serde_json::json!({
                 "model": model,

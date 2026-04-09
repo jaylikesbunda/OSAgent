@@ -171,12 +171,9 @@ OSA.messageChain = {
     lastToolStartSeq: 0,
 };
 OSA.getMessageChain = () => OSA.messageChain;
-OSA.messageChain = {
-    lastEventType: null,
-    lastAssistantDomId: null,
-    pendingToolCallIds: [],
-    eventSeqNumber: 0,
-    lastThinkingEndSeq: 0,
-    lastToolStartSeq: 0,
-};
-OSA.getMessageChain = () => OSA.messageChain;
+OSA.attachments = [];
+OSA.getAttachments = () => OSA.attachments;
+OSA.setAttachments = arr => OSA.attachments = arr;
+OSA.addAttachment = attachment => OSA.attachments.push(attachment);
+OSA.removeAttachment = id => { OSA.attachments = OSA.attachments.filter(a => a.id !== id); };
+OSA.clearAttachments = () => { OSA.attachments = []; };

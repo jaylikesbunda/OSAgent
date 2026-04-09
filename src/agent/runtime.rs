@@ -19,7 +19,7 @@ use crate::plugin::PluginManager;
 use crate::scheduler::Scheduler;
 use crate::skills::{get_skills_base_dir, SkillLoader};
 use crate::storage::{
-    AuditEntry, Message, MessageTokens, QueuedMessage, Session, SessionEventRecord, SessionSummary,
+    AuditEntry, Message, MessageAttachment, MessageImage, MessageTokens, QueuedMessage, Session, SessionEventRecord, SessionSummary,
     SqliteStorage, ToolCall,
 };
 use crate::tools::bash::BashTool;
@@ -200,10 +200,31 @@ impl AgentRuntime {
     }
 
     pub fn new(config: Config) -> Result<Self> {
+        let startup_profile = std::env::var("OSAGENT_STARTUP_PROFILE")
+            .map(|v| {
+                let s = v.trim().to_ascii_lowercase();
+                s == "1" || s == "true" || s == "yes" || s == "on"
+            })
+            .unwrap_or(false);
+        let startup_total = Instant::now();
+        let mut phase_start = Instant::now();
+        let log_phase = |name: &str, phase_start: &mut Instant| {
+            if startup_profile {
+                info!(
+                    target: "osagent::startup",
+                    "phase={} elapsed_ms={:.2}",
+                    name,
+                    phase_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            *phase_start = Instant::now();
+        };
+
         let mut config = config;
         config.ensure_workspace_defaults();
         config.migrate_legacy_provider();
         let agent_settings = Arc::new(tokio::sync::RwLock::new(config.agent.clone()));
+        log_phase("config_init", &mut phase_start);
 
         let catalog = Arc::new(ModelCatalog::new());
         let oauth_dir = PathBuf::from(shellexpand::tilde(&config.storage.database).to_string())
@@ -216,6 +237,7 @@ impl AgentRuntime {
             .clear_all_tasks()
             .map_err(|e| warn!("Failed to clear tasks on startup: {}", e))
             .ok();
+        log_phase("storage_init", &mut phase_start);
         let mut provider_instances: Vec<(String, Arc<dyn Provider>)> = Vec::new();
 
         for provider_cfg in &config.providers {
@@ -254,6 +276,7 @@ impl AgentRuntime {
             );
             provider_instances.push((config.provider.provider_type.clone(), provider));
         }
+        log_phase("providers_init", &mut phase_start);
 
         let active_provider_id = if !config.default_provider.is_empty() {
             config.default_provider.clone()
@@ -291,6 +314,7 @@ impl AgentRuntime {
             config.agent.decision_memory_enabled,
             config.agent.decision_memory_file.clone(),
         )?);
+        log_phase("session_and_memory_init", &mut phase_start);
 
         let external_manager = Arc::new(ExternalDirectoryManager::new(
             config.external.permission.clone(),
@@ -306,6 +330,7 @@ impl AgentRuntime {
                 warn!("Failed to load plugins: {}", e);
             }
         }
+        log_phase("plugin_init", &mut phase_start);
 
         let event_bus = EventBus::new();
 
@@ -327,6 +352,7 @@ impl AgentRuntime {
         } else {
             None
         };
+        log_phase("skills_init", &mut phase_start);
 
         let mut subagent_manager = SubagentManager::new(
             storage.clone(),
@@ -362,6 +388,7 @@ impl AgentRuntime {
         } else {
             None
         };
+        log_phase("search_indexer_init", &mut phase_start);
 
         let mut tool_registry_instance = ToolRegistry::with_indexer(
             config.clone(),
@@ -374,6 +401,7 @@ impl AgentRuntime {
             Some(decision_memory.clone()),
             Arc::new(FileReadCache::with_default_capacity()),
         )?;
+        log_phase("tool_registry_init", &mut phase_start);
 
         let workspace_root = PathBuf::from(
             shellexpand::tilde(&config.get_active_workspace().resolved_path()).to_string(),
@@ -397,6 +425,7 @@ impl AgentRuntime {
 
         tool_registry_instance.register_scheduler(Arc::clone(&scheduler));
         let tool_registry = Arc::new(tool_registry_instance);
+        log_phase("coordinator_and_scheduler_init", &mut phase_start);
 
         let custom_identity = config.agent.custom_identity.as_deref();
         let custom_priorities = config.agent.custom_priorities.as_deref();
@@ -406,6 +435,15 @@ impl AgentRuntime {
             custom_identity,
             custom_priorities,
         );
+        log_phase("system_prompt_build", &mut phase_start);
+
+        if startup_profile {
+            info!(
+                target: "osagent::startup",
+                "phase=agent_runtime_new_total elapsed_ms={:.2}",
+                startup_total.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
         Ok(Self {
             config: Arc::new(tokio::sync::RwLock::new(config)),
@@ -547,7 +585,7 @@ impl AgentRuntime {
 
         tokio::spawn(async move {
             let result = runtime
-                .process_message_internal(&session_id, user_message, user.clone(), None, None)
+                .process_message_internal(&session_id, user_message, user.clone(), None, None, None, None, None)
                 .await;
             if let Err(error) = &result {
                 error!(
@@ -602,6 +640,9 @@ impl AgentRuntime {
                         "client_message_id": client_message_id,
                     })),
                     Some(queued_message.id.clone()),
+                    Some(queued_message.images.clone()),
+                    queued_message.attachment_context.clone(),
+                    Some(queued_message.attachments.clone()),
                 )
                 .await;
 
@@ -643,7 +684,7 @@ impl AgentRuntime {
     ) -> Result<String> {
         let run_guard = self.try_start_run(session_id, &user)?;
         let result = self
-            .process_message_internal(session_id, user_message, user, None, None)
+            .process_message_internal(session_id, user_message, user, None, None, None, None, None)
             .await;
         drop(run_guard);
         result
@@ -656,6 +697,9 @@ impl AgentRuntime {
         user: String,
         message_metadata: Option<serde_json::Value>,
         queue_entry_id: Option<String>,
+        images: Option<Vec<MessageImage>>,
+        attachment_context: Option<String>,
+        attachments: Option<Vec<MessageAttachment>>,
     ) -> Result<String> {
         info!("process_message: Starting for session {}", session_id);
 
@@ -694,9 +738,42 @@ impl AgentRuntime {
             .and_then(|value| value.as_str())
             .map(|value| value.to_string());
 
-        let mut message = Message::user(user_message.clone());
+        let image_items = images.unwrap_or_default();
+        let image_count = image_items.len();
+        let attachment_items = attachments.unwrap_or_default();
+        let visible_attachments = attachment_items
+            .iter()
+            .filter(|attachment| attachment.kind != "image")
+            .cloned()
+            .collect::<Vec<_>>();
+        info!(
+            "process_message: adding user message with {} image(s), {} attachment(s), and {} text chars",
+            image_count,
+            attachment_items.len(),
+            user_message.chars().count()
+        );
+
+        if let Some(context) = attachment_context {
+            if !context.trim().is_empty() {
+                session.messages.push(Message::synthetic_user(
+                    context,
+                    "attachment_context",
+                ));
+            }
+        }
+
+        let mut message = Message::user_with_images(user_message.clone(), image_items.clone());
         if let Some(metadata) = message_metadata {
             message.metadata = metadata;
+        }
+        if !attachment_items.is_empty() {
+            if let Some(obj) = message.metadata.as_object_mut() {
+                obj.insert(
+                    "attachments".to_string(),
+                    serde_json::to_value(&visible_attachments)
+                        .unwrap_or_else(|_| serde_json::json!([])),
+                );
+            }
         }
         session.messages.push(message);
 
@@ -727,6 +804,8 @@ impl AgentRuntime {
                     .clone()
                     .unwrap_or_else(|| queue_entry_id.clone()),
                 content: user_message.clone(),
+                images: image_items.clone(),
+                attachments: visible_attachments.clone(),
                 timestamp: SystemTime::now(),
             });
         }
@@ -3860,12 +3939,22 @@ impl AgentRuntime {
         session_id: &str,
         client_message_id: &str,
         content: &str,
+        images: &[MessageImage],
+        attachment_context: Option<&str>,
+        attachments: &[MessageAttachment],
     ) -> Result<(QueuedMessage, bool)> {
         if self.get_session(session_id).await?.is_none() {
             return Err(OSAgentError::Session("Session not found".to_string()));
         }
         self.storage
-            .enqueue_message(session_id, client_message_id, content)
+            .enqueue_message(
+                session_id,
+                client_message_id,
+                content,
+                images,
+                attachment_context,
+                attachments,
+            )
     }
 
     pub async fn list_queued_messages(&self, session_id: &str) -> Result<Vec<QueuedMessage>> {
@@ -4407,7 +4496,8 @@ impl AgentRuntime {
                                         serde_json::Value::String(source.clone()),
                                     );
                                 }
-                                if let Err(e) = this.session_manager.update_session(&session).await {
+                                if let Err(e) = this.session_manager.update_session(&session).await
+                                {
                                     warn!("Failed to set session source: {}", e);
                                 }
                             }

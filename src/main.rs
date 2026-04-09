@@ -14,6 +14,7 @@
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::Instant;
 use tracing::{error, info, Level};
 use tracing_subscriber::EnvFilter;
 
@@ -204,12 +205,24 @@ async fn main() -> anyhow::Result<()> {
                 let discord_enabled = cfg!(feature = "discord")
                     && config.discord.as_ref().map(|d| d.enabled).unwrap_or(false);
 
+                let runtime_start = Instant::now();
                 let agent = std::sync::Arc::new(agent::AgentRuntime::new(config.clone())?);
+                info!(
+                    target: "osagent::startup",
+                    "phase=main_agent_runtime_construct elapsed_ms={:.2}",
+                    runtime_start.elapsed().as_secs_f64() * 1000.0
+                );
                 let shutdown_rx = agent.subscribe_shutdown();
 
+                let scheduler_start = Instant::now();
                 if let Err(e) = agent.start_scheduler().await {
                     tracing::warn!("Failed to start scheduler: {}", e);
                 }
+                info!(
+                    target: "osagent::startup",
+                    "phase=main_scheduler_start elapsed_ms={:.2}",
+                    scheduler_start.elapsed().as_secs_f64() * 1000.0
+                );
 
                 if discord_enabled {
                     #[cfg(feature = "discord")]
