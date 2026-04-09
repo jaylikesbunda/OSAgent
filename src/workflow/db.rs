@@ -20,6 +20,7 @@ impl WorkflowDb {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
+                default_workspace_id TEXT,
                 current_version INTEGER DEFAULT 1,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
@@ -27,6 +28,11 @@ impl WorkflowDb {
             "#,
             [],
         )?;
+
+        let _ = conn.execute(
+            "ALTER TABLE workflows ADD COLUMN default_workspace_id TEXT",
+            [],
+        );
 
         conn.execute(
             r#"
@@ -109,8 +115,14 @@ impl WorkflowDb {
     pub fn create_workflow(&self, workflow: &Workflow) -> Result<()> {
         self.with_conn_mut(|conn| {
             conn.execute(
-                "INSERT INTO workflows (id, name, description, current_version) VALUES (?, ?, ?, ?)",
-                rusqlite::params![workflow.id, workflow.name, workflow.description, workflow.current_version],
+                "INSERT INTO workflows (id, name, description, default_workspace_id, current_version) VALUES (?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    workflow.id,
+                    workflow.name,
+                    workflow.description,
+                    workflow.default_workspace_id,
+                    workflow.current_version
+                ],
             )?;
             Ok(())
         })
@@ -118,7 +130,7 @@ impl WorkflowDb {
 
     pub fn get_workflow(&self, id: &str) -> Result<Option<Workflow>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT id, name, description, current_version, created_at, updated_at FROM workflows WHERE id = ?")?;
+            let mut stmt = conn.prepare("SELECT id, name, description, default_workspace_id, current_version, created_at, updated_at FROM workflows WHERE id = ?")?;
             let mut rows = stmt.query(rusqlite::params![id])?;
 
             if let Some(row) = rows.next()? {
@@ -126,9 +138,10 @@ impl WorkflowDb {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     description: row.get(2)?,
-                    current_version: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    default_workspace_id: row.get(3)?,
+                    current_version: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 }))
             } else {
                 Ok(None)
@@ -138,7 +151,7 @@ impl WorkflowDb {
 
     pub fn list_workflows(&self) -> Result<Vec<Workflow>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT id, name, description, current_version, created_at, updated_at FROM workflows ORDER BY updated_at DESC")?;
+            let mut stmt = conn.prepare("SELECT id, name, description, default_workspace_id, current_version, created_at, updated_at FROM workflows ORDER BY updated_at DESC")?;
             let mut rows = stmt.query([])?;
 
             let mut workflows = Vec::new();
@@ -147,9 +160,10 @@ impl WorkflowDb {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     description: row.get(2)?,
-                    current_version: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    default_workspace_id: row.get(3)?,
+                    current_version: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 });
             }
             Ok(workflows)
@@ -161,6 +175,20 @@ impl WorkflowDb {
             conn.execute(
                 "UPDATE workflows SET current_version = ?, updated_at = datetime('now') WHERE id = ?",
                 rusqlite::params![new_version, id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_default_workspace_id(
+        &self,
+        id: &str,
+        default_workspace_id: Option<&str>,
+    ) -> Result<()> {
+        self.with_conn_mut(|conn| {
+            conn.execute(
+                "UPDATE workflows SET default_workspace_id = ?, updated_at = datetime('now') WHERE id = ?",
+                rusqlite::params![default_workspace_id, id],
             )?;
             Ok(())
         })

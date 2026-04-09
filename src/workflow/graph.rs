@@ -365,6 +365,10 @@ fn parse_node_type(type_str: &str) -> NodeType {
             Some("transform") => return NodeType::Transform,
             Some("delay") => return NodeType::Delay,
             Some("output") => return NodeType::Output,
+            Some("file_input") => return NodeType::FileInput,
+            Some("file_output") => return NodeType::FileOutput,
+            Some("approval") => return NodeType::Approval,
+            Some("foreach") => return NodeType::ForEach,
             _ => {}
         }
     }
@@ -376,6 +380,10 @@ fn parse_node_type(type_str: &str) -> NodeType {
         "osa_transform" | "transform" => NodeType::Transform,
         "osa_delay" | "delay" => NodeType::Delay,
         "osa_output" | "output" => NodeType::Output,
+        "osa_file_input" | "file_input" => NodeType::FileInput,
+        "osa_file_output" | "file_output" => NodeType::FileOutput,
+        "osa_approval" | "approval" => NodeType::Approval,
+        "osa_foreach" | "foreach" => NodeType::ForEach,
         _ => NodeType::Agent,
     }
 }
@@ -395,6 +403,10 @@ pub fn to_litegraph_json(graph: &WorkflowGraph) -> Result<String> {
             NodeType::Transform => "osa/transform",
             NodeType::Delay => "osa/delay",
             NodeType::Output => "osa/output",
+            NodeType::FileInput => "osa/file_input",
+            NodeType::FileOutput => "osa/file_output",
+            NodeType::Approval => "osa/approval",
+            NodeType::ForEach => "osa/foreach",
         };
 
         let mut properties = node.config.clone();

@@ -62,6 +62,7 @@ async fn create_workflow(
         id: workflow_id.clone(),
         name: req.name,
         description: req.description,
+        default_workspace_id: req.default_workspace_id,
         current_version: 1,
         created_at: Utc::now().to_rfc3339(),
         updated_at: Utc::now().to_rfc3339(),
@@ -144,48 +145,61 @@ async fn update_workflow(
 ) -> Response {
     match state.db.get_workflow(&id) {
         Ok(Some(workflow)) => {
-            let new_version = workflow.current_version + 1;
-
-            if let Err(e) = parse_litegraph_json(&req.graph_json) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::<()>::error(format!(
-                        "Invalid graph JSON: {}",
-                        e
-                    ))),
-                )
-                    .into_response();
+            if let Some(default_workspace_id) = req.default_workspace_id {
+                if let Err(e) = state
+                    .db
+                    .set_default_workspace_id(&id, default_workspace_id.as_deref())
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse::<()>::error(e.to_string())),
+                    )
+                        .into_response();
+                }
             }
 
-            let version = WorkflowVersion {
-                id: Uuid::new_v4().to_string(),
-                workflow_id: id.clone(),
-                version: new_version,
-                graph_json: req.graph_json.clone(),
-                created_at: Utc::now().to_rfc3339(),
-            };
+            if let Some(graph_json) = req.graph_json.clone() {
+                let new_version = workflow.current_version + 1;
 
-            if let Err(e) = state.db.create_version(&version) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::<()>::error(e.to_string())),
-                )
-                    .into_response();
+                if let Err(e) = parse_litegraph_json(&graph_json) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::<()>::error(format!(
+                            "Invalid graph JSON: {}",
+                            e
+                        ))),
+                    )
+                        .into_response();
+                }
+
+                let version = WorkflowVersion {
+                    id: Uuid::new_v4().to_string(),
+                    workflow_id: id.clone(),
+                    version: new_version,
+                    graph_json: graph_json.clone(),
+                    created_at: Utc::now().to_rfc3339(),
+                };
+
+                if let Err(e) = state.db.create_version(&version) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse::<()>::error(e.to_string())),
+                    )
+                        .into_response();
+                }
+
+                if let Err(e) = state.db.update_workflow(&id, new_version) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse::<()>::error(e.to_string())),
+                    )
+                        .into_response();
+                }
+
+                let _ = state
+                    .artifact_store
+                    .store_workflow_version(&id, new_version, graph_json.as_bytes());
             }
-
-            if let Err(e) = state.db.update_workflow(&id, new_version) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::<()>::error(e.to_string())),
-                )
-                    .into_response();
-            }
-
-            let _ = state.artifact_store.store_workflow_version(
-                &id,
-                new_version,
-                req.graph_json.as_bytes(),
-            );
 
             match state.db.get_workflow(&id) {
                 Ok(Some(updated)) => Json(ApiResponse::success(updated)).into_response(),
@@ -312,11 +326,17 @@ async fn execute_workflow(
                     .executor
                     .execute_workflow(
                         &id,
+                        &workflow.name,
                         &version.graph_json,
                         workflow.current_version,
                         req.initial_context,
                         req.parameters,
                         req.parent_session_id,
+                        req.attachments,
+                        req.images,
+                        req.source,
+                        req.notify_channels,
+                        req.discord_channel_id,
                     )
                     .await;
 

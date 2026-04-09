@@ -1341,6 +1341,7 @@ OSA.SLASH_COMMANDS = [
     { cmd: '/new', label: 'New session', desc: 'Create a new chat session', action: () => OSA.createSession() },
     { cmd: '/model', label: 'Set model', desc: 'Focus the model input', action: () => { const m = document.getElementById('model-input'); if (m) m.focus(); } },
     { cmd: '/settings', label: 'Settings', desc: 'Open settings panel', action: () => OSA.openSettings() },
+    { cmd: '/workflow', label: 'Workflows', desc: 'Open workflow editor', action: () => OSA.openWorkflowEditor() },
     { cmd: '/compact', label: 'Compact', desc: 'Summarize and compact the conversation', action: () => { const i = document.getElementById('message-input'); if (i) { i.value = 'Summarize our conversation so far and continue'; OSA.sendMessage(); } } },
     { cmd: '/clear', label: 'Clear screen', desc: 'Clear the message display', action: () => { document.getElementById('messages').innerHTML = ''; } },
     { cmd: '/reset', label: 'Reset session', desc: 'Clear messages and start fresh', action: () => OSA.createSession() },

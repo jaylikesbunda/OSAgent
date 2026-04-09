@@ -210,7 +210,12 @@ fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
     (truncated, true)
 }
 
-fn build_attachment_context_section(filename: &str, mime: &str, text: &str, truncated: bool) -> String {
+fn build_attachment_context_section(
+    filename: &str,
+    mime: &str,
+    text: &str,
+    truncated: bool,
+) -> String {
     let mut section = format!(
         "Attached file: {}\nMIME type: {}\nExtracted text:\n{}",
         filename, mime, text
@@ -315,6 +320,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         workflow_db.clone(),
         artifact_store.clone(),
         subagent_manager,
+        agent.event_bus().clone(),
     );
     let workflow_executor = Arc::new(executor);
 
@@ -1788,12 +1794,8 @@ async fn send_message(
     let mut attachment_sections = Vec::new();
 
     for attachment in raw_attachments {
-        let (decoded_mime, bytes) = parse_data_url(&attachment.data_url).map_err(|error| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error }),
-            )
-        })?;
+        let (decoded_mime, bytes) = parse_data_url(&attachment.data_url)
+            .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
 
         if bytes.len() > MAX_ATTACHMENT_BYTES {
             return Err((
@@ -1856,7 +1858,8 @@ async fn send_message(
             ));
         };
 
-        let (truncated_text, truncated) = truncate_chars(&extracted_text, MAX_ATTACHMENT_TEXT_CHARS);
+        let (truncated_text, truncated) =
+            truncate_chars(&extracted_text, MAX_ATTACHMENT_TEXT_CHARS);
         attachment_sections.push(build_attachment_context_section(
             &attachment.filename,
             &mime,
@@ -1876,7 +1879,8 @@ async fn send_message(
         None
     } else {
         let joined = attachment_sections.join("\n\n---\n\n");
-        let (truncated_joined, truncated) = truncate_chars(&joined, MAX_TOTAL_ATTACHMENT_CONTEXT_CHARS);
+        let (truncated_joined, truncated) =
+            truncate_chars(&joined, MAX_TOTAL_ATTACHMENT_CONTEXT_CHARS);
         Some(if truncated {
             format!(
                 "{}\n\n[Some attachment context was truncated for total context limits.]",
@@ -4460,8 +4464,7 @@ async fn fetch_live_ollama_models(
 
     for model in &mut models {
         if let Some(info) =
-            fetch_ollama_model_info(&client, &normalized_base, api_key.as_deref(), &model.id)
-                .await
+            fetch_ollama_model_info(&client, &normalized_base, api_key.as_deref(), &model.id).await
         {
             model.context_window = info.context_window.unwrap_or(0);
             model.supports_vision = info.supports_vision;

@@ -15,7 +15,7 @@ class OSABaseNode {
 
 class OSATriggerNode extends OSABaseNode {
   static type = 'osa/trigger';
-  static title = 'Trigger';
+  static title = 'Start';
 
   constructor() {
     super();
@@ -40,7 +40,7 @@ class OSATriggerNode extends OSABaseNode {
 
 class OSAAgentNode extends OSABaseNode {
   static type = 'osa/agent';
-  static title = 'Agent';
+  static title = 'AI Task';
 
   constructor() {
     super();
@@ -90,7 +90,7 @@ class OSAAgentNode extends OSABaseNode {
 
 class OSAConditionNode extends OSABaseNode {
   static type = 'osa/condition';
-  static title = 'Condition';
+  static title = 'If / Else';
 
   constructor() {
     super();
@@ -101,7 +101,7 @@ class OSAConditionNode extends OSABaseNode {
     this.addOutput('false', 'object');
     this.properties = {
       node_id: this.id || `condition_${Date.now()}`,
-      expression: 'input.result === "success"'
+      expression: 'true'
     };
     this.size = [160, 70];
   }
@@ -148,7 +148,7 @@ class OSAConditionNode extends OSABaseNode {
 
 class OSATransformNode extends OSABaseNode {
   static type = 'osa/transform';
-  static title = 'Transform';
+  static title = 'Format Text';
 
   constructor() {
     super();
@@ -191,7 +191,7 @@ class OSATransformNode extends OSABaseNode {
 
 class OSADelayNode extends OSABaseNode {
   static type = 'osa/delay';
-  static title = 'Delay';
+  static title = 'Wait';
 
   constructor() {
     super();
@@ -216,7 +216,7 @@ class OSADelayNode extends OSABaseNode {
 
 class OSAOutputNode extends OSABaseNode {
   static type = 'osa/output';
-  static title = 'Output';
+  static title = 'Show Result';
 
   constructor() {
     super();
@@ -259,6 +259,118 @@ class OSAOutputNode extends OSABaseNode {
   }
 }
 
+class OSAFileInputNode extends OSABaseNode {
+  static type = 'osa/file_input';
+  static title = 'Load File';
+
+  constructor() {
+    super();
+    this.color = '#2a6f54';
+    this.bgcolor = '#1d3228';
+    this.addOutput('output', 'object');
+    this.properties = {
+      node_id: this.id || `file_input_${Date.now()}`,
+      path: '',
+      use_attachment: true,
+      attachment_index: 0
+    };
+    this.size = [170, 70];
+  }
+
+  onExecute() {
+    this.setOutputData(0, {
+      path: this.properties.path,
+      use_attachment: !!this.properties.use_attachment,
+      attachment_index: Number(this.properties.attachment_index || 0)
+    });
+  }
+}
+
+class OSAFileOutputNode extends OSABaseNode {
+  static type = 'osa/file_output';
+  static title = 'Save File';
+
+  constructor() {
+    super();
+    this.color = '#2a6f54';
+    this.bgcolor = '#1d3228';
+    this.addInput('input', 'object');
+    this.addOutput('output', 'object');
+    this.properties = {
+      node_id: this.id || `file_output_${Date.now()}`,
+      path: '',
+      content_template: '{{input}}',
+      create_dirs: true
+    };
+    this.size = [180, 80];
+  }
+
+  onExecute() {
+    const input = this.getInputData(0);
+    this.setOutputData(0, {
+      path: this.properties.path,
+      content_template: this.properties.content_template,
+      create_dirs: !!this.properties.create_dirs,
+      input
+    });
+  }
+}
+
+class OSAApprovalNode extends OSABaseNode {
+  static type = 'osa/approval';
+  static title = 'Ask Human';
+
+  constructor() {
+    super();
+    this.color = '#7a4b20';
+    this.bgcolor = '#2c2118';
+    this.addInput('input', 'object');
+    this.addOutput('approved', 'object');
+    this.addOutput('rejected', 'object');
+    this.properties = {
+      node_id: this.id || `approval_${Date.now()}`,
+      prompt: 'Approve workflow step?',
+      approve_label: 'Approve',
+      reject_label: 'Reject'
+    };
+    this.size = [180, 80];
+  }
+
+  onExecute() {
+    const input = this.getInputData(0) || {};
+    this.setOutputData(0, input);
+    this.setOutputData(1, input);
+  }
+}
+
+class OSAForEachNode extends OSABaseNode {
+  static type = 'osa/foreach';
+  static title = 'Repeat List';
+
+  constructor() {
+    super();
+    this.color = '#4c4f7a';
+    this.bgcolor = '#22243a';
+    this.addInput('input', 'object');
+    this.addOutput('output', 'object');
+    this.properties = {
+      node_id: this.id || `foreach_${Date.now()}`,
+      items_template: '{{input}}',
+      item_variable: 'item'
+    };
+    this.size = [170, 80];
+  }
+
+  onExecute() {
+    const input = this.getInputData(0);
+    this.setOutputData(0, {
+      items_template: this.properties.items_template,
+      item_variable: this.properties.item_variable,
+      input
+    });
+  }
+}
+
 function registerOSANodes(LiteGraph) {
   LiteGraph.registerNodeType('osa/trigger', OSATriggerNode);
   LiteGraph.registerNodeType('osa/agent', OSAAgentNode);
@@ -266,6 +378,10 @@ function registerOSANodes(LiteGraph) {
   LiteGraph.registerNodeType('osa/transform', OSATransformNode);
   LiteGraph.registerNodeType('osa/delay', OSADelayNode);
   LiteGraph.registerNodeType('osa/output', OSAOutputNode);
+  LiteGraph.registerNodeType('osa/file_input', OSAFileInputNode);
+  LiteGraph.registerNodeType('osa/file_output', OSAFileOutputNode);
+  LiteGraph.registerNodeType('osa/approval', OSAApprovalNode);
+  LiteGraph.registerNodeType('osa/foreach', OSAForEachNode);
 }
 
 window.registerOSANodes = registerOSANodes;

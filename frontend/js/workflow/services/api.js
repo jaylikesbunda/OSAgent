@@ -56,8 +56,15 @@ class WorkflowAPI {
     return Object.prototype.hasOwnProperty.call(payload, 'data') ? payload.data : payload;
   }
 
-  async createWorkflow(name, description = null) {
-    return this.request('POST', '/workflows', { name, description });
+  async createWorkflow(name, description = null, options = {}) {
+    return this.request('POST', '/workflows', {
+      name,
+      description,
+      graph_json: options.graphJson || null,
+      default_workspace_id: Object.prototype.hasOwnProperty.call(options, 'defaultWorkspaceId')
+        ? options.defaultWorkspaceId
+        : null,
+    });
   }
 
   async listWorkflows(limit = 100, offset = 0) {
@@ -68,8 +75,15 @@ class WorkflowAPI {
     return this.request('GET', `/workflows/${id}`);
   }
 
-  async updateWorkflow(id, graphJson) {
-    return this.request('PUT', `/workflows/${id}`, { graph_json: graphJson });
+  async updateWorkflow(id, options = {}) {
+    const payload = {};
+    if (Object.prototype.hasOwnProperty.call(options, 'graphJson')) {
+      payload.graph_json = options.graphJson;
+    }
+    if (Object.prototype.hasOwnProperty.call(options, 'defaultWorkspaceId')) {
+      payload.default_workspace_id = options.defaultWorkspaceId;
+    }
+    return this.request('PUT', `/workflows/${id}`, payload);
   }
 
   async deleteWorkflow(id) {
@@ -88,10 +102,16 @@ class WorkflowAPI {
     return this.request('POST', `/workflows/${id}/rollback/${version}`);
   }
 
-  async executeWorkflow(id, initialContext = null, parameters = {}) {
+  async executeWorkflow(id, options = {}) {
     return this.request('POST', `/workflows/${id}/execute`, {
-      initial_context: initialContext,
-      parameters
+      initial_context: options.initialContext || null,
+      parameters: options.parameters || {},
+      parent_session_id: options.parentSessionId || null,
+      attachments: options.attachments || [],
+      images: options.images || [],
+      source: options.source || null,
+      notify_channels: options.notifyChannels || [],
+      discord_channel_id: options.discordChannelId || null
     });
   }
 

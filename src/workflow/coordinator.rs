@@ -305,6 +305,12 @@ impl SafeWorkflowCoordinator {
             NodeType::Transform => self.execute_transform_safe(node, input, context).await,
             NodeType::Delay => self.execute_delay_safe(node, input, context).await,
             NodeType::Output => self.execute_output_safe(node, input, context).await,
+            NodeType::FileInput | NodeType::FileOutput | NodeType::Approval | NodeType::ForEach => {
+                Err(OSAgentError::Workflow(format!(
+                    "Node type '{}' is not supported by safe coordinator yet",
+                    node.node_type.as_str()
+                )))
+            }
         }
     }
 
@@ -363,6 +369,7 @@ impl SafeWorkflowCoordinator {
                 system_prompt: None,
                 task_template: "{{input}}".to_string(),
                 input_mapping: HashMap::new(),
+                file_context: None,
             });
 
         let task = self.render_template(&config.task_template, input, context);

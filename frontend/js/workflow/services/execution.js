@@ -5,11 +5,12 @@ class ExecutionManager {
     this.isRunning = false;
     this.currentRunId = null;
     this.eventSource = null;
+    this.workflowSessionId = null;
     this.pollTimer = null;
     this.nodeStates = new Map();
   }
 
-  async startExecution(workflowId) {
+  async startExecution(workflowId, runOptions = {}) {
     if (this.isRunning) {
       console.warn('Execution already in progress');
       return;
@@ -23,7 +24,33 @@ class ExecutionManager {
 
     try {
       const api = new WorkflowAPI();
-      const result = await api.executeWorkflow(workflowId);
+      const sessionMode = runOptions.sessionMode || 'workflow';
+      let parentSessionId = runOptions.parentSessionId || null;
+
+      if (!parentSessionId) {
+        if (sessionMode === 'current') {
+          const activeSession = (window.OSA && typeof OSA.getCurrentSession === 'function')
+            ? OSA.getCurrentSession()
+            : null;
+          parentSessionId = activeSession?.id || null;
+        } else {
+          parentSessionId = await this.createWorkflowSession(runOptions.workspaceId);
+        }
+      }
+
+      if (sessionMode !== 'current' && parentSessionId) {
+        this.startWorkflowEventStream(parentSessionId);
+      }
+
+      const result = await api.executeWorkflow(workflowId, {
+        parentSessionId,
+        source: 'web',
+        notifyChannels: ['web'],
+        parameters: runOptions.parameters || {},
+        attachments: runOptions.attachments || [],
+        images: runOptions.images || [],
+        initialContext: runOptions.initialContext || null
+      });
       
       this.currentRunId = result.run_id || result.id;
       this.state.addRun({
@@ -151,6 +178,12 @@ class ExecutionManager {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+    this.workflowSessionId = null;
   }
 
   clearNodeStates() {
@@ -192,6 +225,73 @@ class ExecutionManager {
     const upperEvent = event.charAt(0).toUpperCase() + event.slice(1);
     const name = `on${upperEvent}`;
     this[name] = callback;
+  }
+
+  async createWorkflowSession(workspaceId) {
+    const token = (window.OSA && typeof OSA.getToken === 'function') ? OSA.getToken() : null;
+    const resolvedWorkspaceId = workspaceId || this.getActiveWorkspaceId();
+    const response = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ workspace_id: resolvedWorkspaceId })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.id) {
+      throw new Error(payload?.error || `Failed to create workflow session (${response.status})`);
+    }
+
+    this.workflowSessionId = payload.id;
+    return payload.id;
+  }
+
+  getActiveWorkspaceId() {
+    if (window.OSA && typeof OSA.getWorkspaceState === 'function') {
+      return OSA.getWorkspaceState()?.activeWorkspace || 'default';
+    }
+    return 'default';
+  }
+
+  startWorkflowEventStream(sessionId) {
+    if (!sessionId) return;
+
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+
+    const token = (window.OSA && typeof OSA.getToken === 'function') ? OSA.getToken() : '';
+    const url = token
+      ? `/api/sessions/${sessionId}/events?token=${encodeURIComponent(token)}`
+      : `/api/sessions/${sessionId}/events`;
+
+    this.eventSource = new EventSource(url);
+    this.eventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (!this.isWorkflowEvent(payload?.type)) return;
+        if (window.OSA && typeof OSA.handleAgentEvent === 'function') {
+          OSA.handleAgentEvent(payload);
+        }
+      } catch (err) {
+        console.warn('Failed to parse workflow event stream payload:', err);
+      }
+    };
+
+    this.eventSource.onerror = () => {
+      if (this.eventSource && this.isRunning) {
+        this.eventSource.close();
+        this.eventSource = null;
+      }
+    };
+  }
+
+  isWorkflowEvent(eventType) {
+    if (!eventType || typeof eventType !== 'string') return false;
+    return eventType.startsWith('workflow_');
   }
 }
 

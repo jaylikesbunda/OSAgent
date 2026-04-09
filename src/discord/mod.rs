@@ -1,16 +1,19 @@
 use crate::agent::events::AgentEvent;
 use crate::agent::runtime::AgentRuntime;
 use crate::config::DiscordConfig;
+use crate::workflow::artifact_store::ArtifactStore;
+use crate::workflow::db::WorkflowDb;
+use crate::workflow::executor::WorkflowExecutor;
 use dashmap::DashMap;
 use serenity::{
     async_trait,
     builder::{
-        CreateAutocompleteResponse, CreateCommand, CreateEmbed, CreateEmbedFooter,
-        CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-        EditInteractionResponse,
+        CreateActionRow, CreateAutocompleteResponse, CreateButton, CreateCommand, CreateEmbed,
+        CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
+        CreateMessage, EditInteractionResponse,
     },
     model::{
-        application::{Command, CommandInteraction, CommandOptionType},
+        application::{ButtonStyle, Command, CommandInteraction, CommandOptionType},
         channel::Message,
         colour::Colour,
         gateway::Ready,
@@ -21,6 +24,7 @@ use serenity::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, time::SystemTime};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
@@ -217,6 +221,54 @@ impl Handler {
             .description(desc)
             .colour(color);
         Self::send_ephemeral_embed_command(ctx, command, embed).await;
+    }
+
+    async fn handle_workflow_component(
+        &self,
+        ctx: &Context,
+        component: &serenity::model::application::ComponentInteraction,
+    ) {
+        let custom_id = component.data.custom_id.as_str();
+        let (question_id, answer, is_approve) =
+            if let Some(qid) = custom_id.strip_prefix("wf_approve:") {
+                (qid, "Approve", true)
+            } else if let Some(qid) = custom_id.strip_prefix("wf_reject:") {
+                (qid, "Reject", false)
+            } else {
+                return;
+            };
+
+        let found = self
+            .agent
+            .answer_question(question_id, vec![vec![answer.to_string()]])
+            .await;
+
+        let label = if is_approve { "Approved" } else { "Rejected" };
+        let response_text = if found {
+            format!("{} by {}", label, component.user.name)
+        } else {
+            "This approval request is no longer active.".to_string()
+        };
+
+        let _ = component
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::UpdateMessage(
+                    CreateInteractionResponseMessage::new()
+                        .content(response_text)
+                        .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(
+                            "workflow-approval-handled",
+                        )
+                        .label(label)
+                        .style(if is_approve {
+                            ButtonStyle::Success
+                        } else {
+                            ButtonStyle::Danger
+                        })
+                        .disabled(true)])]),
+                ),
+            )
+            .await;
     }
 
     pub fn new(agent: Arc<AgentRuntime>, config_path: PathBuf) -> Self {
@@ -557,6 +609,62 @@ impl Handler {
         }
     }
 
+    fn workflow_paths() -> (PathBuf, PathBuf) {
+        let base = PathBuf::from(std::env::var("OSAGENT_DATA_DIR").unwrap_or_else(|_| {
+            std::env::var("OSAGENT_WORKSPACE").unwrap_or_else(|_| ".".to_string())
+        }));
+        (base.join("workflow.db"), base.join("workflow_artifacts"))
+    }
+
+    fn build_workflow_services(
+        &self,
+    ) -> std::result::Result<(Arc<WorkflowDb>, Arc<WorkflowExecutor>), String> {
+        let (db_path, artifact_path) = Self::workflow_paths();
+        let workflow_db = Arc::new(WorkflowDb::new(db_path));
+        workflow_db
+            .init_tables()
+            .map_err(|e| format!("Failed to initialize workflow db: {}", e))?;
+
+        let artifact_store = Arc::new(ArtifactStore::new(artifact_path));
+        artifact_store
+            .init()
+            .map_err(|e| format!("Failed to initialize workflow artifacts: {}", e))?;
+
+        let subagent_manager = self.agent.get_subagent_manager();
+        let (executor, _event_rx) = WorkflowExecutor::new(
+            workflow_db.clone(),
+            artifact_store,
+            subagent_manager,
+            self.agent.event_bus().clone(),
+        );
+        Ok((workflow_db, Arc::new(executor)))
+    }
+
+    fn format_workflow_output(output: &serde_json::Value) -> String {
+        let text = if let Some(s) = output.as_str() {
+            s.to_string()
+        } else if let Some(obj) = output.as_object() {
+            if let Some(val) = obj.get("output") {
+                if let Some(s) = val.as_str() {
+                    s.to_string()
+                } else {
+                    val.to_string()
+                }
+            } else {
+                output.to_string()
+            }
+        } else {
+            output.to_string()
+        };
+
+        if text.chars().count() > 1800 {
+            let clipped = text.chars().take(1800).collect::<String>();
+            format!("{}...", clipped)
+        } else {
+            text
+        }
+    }
+
     async fn register_commands(&self, http: &serenity::http::Http) {
         let commands = vec![
             CreateCommand::new("new").description("Create a new AI session"),
@@ -735,6 +843,25 @@ impl Handler {
                         "Your message to the AI",
                     )
                     .required(true),
+                ),
+            CreateCommand::new("workflow")
+                .description("Run a workflow")
+                .add_option(
+                    serenity::builder::CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "name",
+                        "Workflow name",
+                    )
+                    .set_autocomplete(true)
+                    .required(true),
+                )
+                .add_option(
+                    serenity::builder::CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "input",
+                        "Optional input for the workflow trigger",
+                    )
+                    .required(false),
                 ),
             CreateCommand::new("persona")
                 .description("Manage personas for this session")
@@ -1389,6 +1516,7 @@ impl Handler {
             .field("/lsp <operation> <file>", "Run LSP operations", false)
             .field("/settings", "Show current configuration", false)
             .field("/chat <message>", "Send a message to the AI", false)
+            .field("/workflow <name> [input]", "Run a workflow", false)
             .field("/help", "Show this help message", false)
             .footer(CreateEmbedFooter::new(
                 "Tip: Just type a message in the channel to chat with the AI",
@@ -1571,6 +1699,240 @@ impl Handler {
         .await;
         if !tool_event_task.is_finished() {
             tool_event_task.abort();
+        }
+    }
+
+    async fn handle_workflow_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        workflow_name: &str,
+        input: Option<&str>,
+    ) {
+        let user_id = command.user.id.get();
+
+        if !self.is_authorized(user_id).await {
+            Self::send_unauthorized_response_command(ctx, command).await;
+            return;
+        }
+
+        let embed = CreateEmbed::new()
+            .title("Workflow Starting")
+            .description(format!("Running workflow `{}`...", workflow_name))
+            .colour(EMBED_COLOR_INFO);
+
+        if let Err(e) = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .embed(embed)
+                        .ephemeral(true),
+                ),
+            )
+            .await
+        {
+            error!(
+                "Discord: Failed to send workflow processing response: {}",
+                e
+            );
+            return;
+        }
+
+        let session_id = match self.get_or_create_session(user_id).await {
+            Ok(id) => id,
+            Err(e) => {
+                error!("Discord: failed to get/create session for workflow: {}", e);
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().embed(
+                            CreateEmbed::new()
+                                .title("Session Error")
+                                .description("Failed to create session.")
+                                .colour(EMBED_COLOR_ERROR),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let (workflow_db, executor) = match self.build_workflow_services() {
+            Ok(svc) => svc,
+            Err(e) => {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().embed(
+                            CreateEmbed::new()
+                                .title("Workflow Service Error")
+                                .description(format!("```\n{}\n```", e))
+                                .colour(EMBED_COLOR_ERROR),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let workflow = match workflow_db.list_workflows().and_then(|workflows| {
+            workflows
+                .into_iter()
+                .find(|wf| wf.name.eq_ignore_ascii_case(workflow_name))
+                .ok_or_else(|| {
+                    crate::error::OSAgentError::Workflow(format!(
+                        "Workflow '{}' not found",
+                        workflow_name
+                    ))
+                })
+        }) {
+            Ok(wf) => wf,
+            Err(e) => {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().embed(
+                            CreateEmbed::new()
+                                .title("Workflow Not Found")
+                                .description(format!("```\n{}\n```", e))
+                                .colour(EMBED_COLOR_ERROR),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let version = match workflow_db.get_version(&workflow.id, workflow.current_version) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().embed(
+                            CreateEmbed::new()
+                                .title("Workflow Version Missing")
+                                .description("Current workflow version not found.")
+                                .colour(EMBED_COLOR_ERROR),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+            Err(e) => {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().embed(
+                            CreateEmbed::new()
+                                .title("Workflow Error")
+                                .description(format!("```\n{}\n```", e))
+                                .colour(EMBED_COLOR_ERROR),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let mut parameters = HashMap::new();
+        if let Some(trigger_input) = input {
+            if !trigger_input.trim().is_empty() {
+                parameters.insert(
+                    "trigger_input".to_string(),
+                    serde_json::Value::String(trigger_input.to_string()),
+                );
+            }
+        }
+
+        let channel_id = command.channel_id.get();
+        set_last_discord_channel_id(channel_id).await;
+        self.persist_discord_channel_id(channel_id).await;
+
+        if let Some(workspace_id) = workflow.default_workspace_id.as_deref() {
+            if let Err(e) = self
+                .agent
+                .set_session_workspace(&session_id, workspace_id)
+                .await
+            {
+                warn!(
+                    "Discord: Failed to apply workflow workspace lock '{}' for session {}: {}",
+                    workspace_id, session_id, e
+                );
+            }
+        }
+
+        let result = executor
+            .execute_workflow(
+                &workflow.id,
+                &workflow.name,
+                &version.graph_json,
+                workflow.current_version,
+                None,
+                parameters,
+                Some(session_id.clone()),
+                vec![],
+                vec![],
+                Some(format!("discord:{}", user_id)),
+                vec!["discord".to_string()],
+                Some(channel_id),
+            )
+            .await;
+
+        match result {
+            Ok(run_result) => {
+                let embed = if run_result.status == "completed" {
+                    let output = run_result
+                        .output
+                        .as_ref()
+                        .map(Self::format_workflow_output)
+                        .unwrap_or_else(|| "Workflow completed.".to_string());
+
+                    CreateEmbed::new()
+                        .title("Workflow Completed")
+                        .description(output)
+                        .field("Workflow", workflow.name, true)
+                        .field(
+                            "Run",
+                            run_result.run_id.chars().take(8).collect::<String>(),
+                            true,
+                        )
+                        .colour(EMBED_COLOR_SUCCESS)
+                } else {
+                    CreateEmbed::new()
+                        .title("Workflow Failed")
+                        .description(
+                            run_result
+                                .error
+                                .unwrap_or_else(|| "Unknown workflow failure".to_string()),
+                        )
+                        .field("Workflow", workflow.name, true)
+                        .field(
+                            "Run",
+                            run_result.run_id.chars().take(8).collect::<String>(),
+                            true,
+                        )
+                        .colour(EMBED_COLOR_ERROR)
+                };
+
+                let _ = command
+                    .edit_response(&ctx.http, EditInteractionResponse::new().embed(embed))
+                    .await;
+            }
+            Err(e) => {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().embed(
+                            CreateEmbed::new()
+                                .title("Workflow Execution Error")
+                                .description(format!("```\n{}\n```", e))
+                                .colour(EMBED_COLOR_ERROR),
+                        ),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -2055,6 +2417,61 @@ impl Handler {
             error!("Discord: Failed to respond to autocomplete: {}", e);
         }
     }
+
+    async fn handle_workflow_autocomplete(&self, ctx: &Context, command: &CommandInteraction) {
+        let query = command
+            .data
+            .options
+            .iter()
+            .find(|o| o.name == "name")
+            .and_then(|o| o.value.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let choices = match self.build_workflow_services() {
+            Ok((db, _executor)) => match db.list_workflows() {
+                Ok(workflows) => {
+                    let mut values: Vec<(String, String)> = workflows
+                        .into_iter()
+                        .filter(|wf| {
+                            query.is_empty()
+                                || wf.name.to_lowercase().contains(&query)
+                                || wf.id.to_lowercase().contains(&query)
+                        })
+                        .take(DEFAULT_WORKSPACE_CHOICE_LIMIT)
+                        .map(|wf| (wf.name.clone(), wf.name))
+                        .collect();
+                    if values.is_empty() {
+                        values.push(("No workflows found".to_string(), "".to_string()));
+                    }
+                    values
+                }
+                Err(e) => {
+                    warn!("Discord: Failed to list workflows for autocomplete: {}", e);
+                    vec![("Workflow lookup failed".to_string(), "".to_string())]
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "Discord: Failed to initialize workflow services for autocomplete: {}",
+                    e
+                );
+                vec![("Workflow service unavailable".to_string(), "".to_string())]
+            }
+        };
+
+        let mut response = CreateAutocompleteResponse::new();
+        for (label, value) in choices.into_iter().filter(|(_, value)| !value.is_empty()) {
+            response = response.add_string_choice(label, value);
+        }
+
+        if let Err(e) = command
+            .create_response(&ctx.http, CreateInteractionResponse::Autocomplete(response))
+            .await
+        {
+            error!("Discord: Failed to respond to workflow autocomplete: {}", e);
+        }
+    }
 }
 
 enum ResponsePart {
@@ -2153,6 +2570,137 @@ impl EventHandler for Handler {
                             warn!("Discord: Failed to send scheduled job embed: {}", e);
                         }
                     }
+                    Ok(AgentEvent::WorkflowApprovalRequested {
+                        notify_channels,
+                        discord_channel_id,
+                        prompt,
+                        approve_label,
+                        reject_label,
+                        question_id,
+                        workflow_id,
+                        run_id,
+                        ..
+                    }) => {
+                        if !notify_channels.iter().any(|c| c == "discord") {
+                            continue;
+                        }
+
+                        let cid = match discord_channel_id {
+                            Some(cid) => cid,
+                            None => {
+                                let last = get_last_discord_channel_id().await;
+                                if last == 0 {
+                                    continue;
+                                }
+                                last
+                            }
+                        };
+
+                        let embed = CreateEmbed::new()
+                            .title("Workflow Approval Required")
+                            .description(prompt)
+                            .field("Workflow", &workflow_id, true)
+                            .field("Run", run_id.chars().take(8).collect::<String>(), true)
+                            .colour(EMBED_COLOR_WARNING);
+
+                        let components = vec![CreateActionRow::Buttons(vec![
+                            CreateButton::new(format!("wf_approve:{}", question_id))
+                                .label(approve_label)
+                                .style(ButtonStyle::Success),
+                            CreateButton::new(format!("wf_reject:{}", question_id))
+                                .label(reject_label)
+                                .style(ButtonStyle::Danger),
+                        ])];
+
+                        if let Err(e) = ChannelId::new(cid)
+                            .send_message(
+                                &http,
+                                CreateMessage::new().embed(embed).components(components),
+                            )
+                            .await
+                        {
+                            warn!("Discord: Failed to send workflow approval embed: {}", e);
+                        }
+                    }
+                    Ok(AgentEvent::WorkflowCompleted {
+                        notify_channels,
+                        discord_channel_id,
+                        output,
+                        workflow_id,
+                        run_id,
+                        ..
+                    }) => {
+                        if !notify_channels.iter().any(|c| c == "discord") {
+                            continue;
+                        }
+
+                        let cid = match discord_channel_id {
+                            Some(cid) => cid,
+                            None => {
+                                let last = get_last_discord_channel_id().await;
+                                if last == 0 {
+                                    continue;
+                                }
+                                last
+                            }
+                        };
+
+                        let output_text = output
+                            .as_ref()
+                            .map(Handler::format_workflow_output)
+                            .unwrap_or_else(|| "Workflow completed.".to_string());
+
+                        let embed = CreateEmbed::new()
+                            .title("Workflow Completed")
+                            .description(output_text)
+                            .field("Workflow", &workflow_id, true)
+                            .field("Run", run_id.chars().take(8).collect::<String>(), true)
+                            .colour(EMBED_COLOR_SUCCESS);
+
+                        if let Err(e) = ChannelId::new(cid)
+                            .send_message(&http, CreateMessage::new().embed(embed))
+                            .await
+                        {
+                            warn!("Discord: Failed to send workflow completion embed: {}", e);
+                        }
+                    }
+                    Ok(AgentEvent::WorkflowFailed {
+                        notify_channels,
+                        discord_channel_id,
+                        error,
+                        workflow_id,
+                        run_id,
+                        ..
+                    }) => {
+                        if !notify_channels.iter().any(|c| c == "discord") {
+                            continue;
+                        }
+
+                        let cid = match discord_channel_id {
+                            Some(cid) => cid,
+                            None => {
+                                let last = get_last_discord_channel_id().await;
+                                if last == 0 {
+                                    continue;
+                                }
+                                last
+                            }
+                        };
+
+                        let embed = CreateEmbed::new()
+                            .title("Workflow Failed")
+                            .description(error)
+                            .field("Workflow", &workflow_id, true)
+                            .field("Run", run_id.chars().take(8).collect::<String>(), true)
+                            .colour(EMBED_COLOR_ERROR);
+
+                        if let Err(e) = ChannelId::new(cid)
+                            .send_message(&http, CreateMessage::new().embed(embed))
+                            .await
+                        {
+                            warn!("Discord: Failed to send workflow failure embed: {}", e);
+                        }
+                    }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -2171,7 +2719,14 @@ impl EventHandler for Handler {
                 self.handle_workspace_autocomplete(&ctx, command).await;
             } else if command.data.name == "persona" {
                 self.handle_persona_autocomplete(&ctx, command).await;
+            } else if command.data.name == "workflow" {
+                self.handle_workflow_autocomplete(&ctx, command).await;
             }
+            return;
+        }
+
+        if let Some(component) = interaction.as_message_component() {
+            self.handle_workflow_component(&ctx, component).await;
             return;
         }
 
@@ -2284,6 +2839,24 @@ impl EventHandler for Handler {
                     {
                         self.handle_chat_command(&ctx, command, message).await;
                     }
+                }
+                "workflow" => {
+                    let workflow_name = command
+                        .data
+                        .options
+                        .iter()
+                        .find(|o| o.name == "name")
+                        .and_then(|o| o.value.as_str())
+                        .unwrap_or("");
+                    let input = command
+                        .data
+                        .options
+                        .iter()
+                        .find(|o| o.name == "input")
+                        .and_then(|o| o.value.as_str());
+
+                    self.handle_workflow_command(&ctx, command, workflow_name, input)
+                        .await;
                 }
                 "answer" => {
                     if let Some(answer) =

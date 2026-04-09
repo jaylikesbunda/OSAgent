@@ -6,6 +6,8 @@ pub struct Workflow {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub default_workspace_id: Option<String>,
     pub current_version: i32,
     pub created_at: String,
     pub updated_at: String,
@@ -106,6 +108,10 @@ pub enum NodeType {
     Transform,
     Delay,
     Output,
+    FileInput,
+    FileOutput,
+    Approval,
+    ForEach,
 }
 
 impl NodeType {
@@ -117,6 +123,10 @@ impl NodeType {
             NodeType::Transform => "transform",
             NodeType::Delay => "delay",
             NodeType::Output => "output",
+            NodeType::FileInput => "file_input",
+            NodeType::FileOutput => "file_output",
+            NodeType::Approval => "approval",
+            NodeType::ForEach => "foreach",
         }
     }
 
@@ -128,6 +138,10 @@ impl NodeType {
             "transform" => Some(NodeType::Transform),
             "delay" => Some(NodeType::Delay),
             "output" => Some(NodeType::Output),
+            "file_input" => Some(NodeType::FileInput),
+            "file_output" => Some(NodeType::FileOutput),
+            "approval" => Some(NodeType::Approval),
+            "foreach" => Some(NodeType::ForEach),
             _ => None,
         }
     }
@@ -140,6 +154,8 @@ pub struct AgentNodeConfig {
     pub task_template: String,
     #[serde(default)]
     pub input_mapping: HashMap<String, String>,
+    #[serde(default)]
+    pub file_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +181,74 @@ pub struct OutputNodeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileInputNodeConfig {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub use_attachment: bool,
+    #[serde(default)]
+    pub attachment_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOutputNodeConfig {
+    pub path: String,
+    #[serde(default = "default_file_output_template")]
+    pub content_template: String,
+    #[serde(default)]
+    pub create_dirs: bool,
+}
+
+fn default_file_output_template() -> String {
+    "{{input}}".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalNodeConfig {
+    #[serde(default = "default_approval_prompt")]
+    pub prompt: String,
+    #[serde(default = "default_approval_label")]
+    pub approve_label: String,
+    #[serde(default = "default_reject_label")]
+    pub reject_label: String,
+}
+
+fn default_approval_prompt() -> String {
+    "Approve workflow step?".to_string()
+}
+
+fn default_approval_label() -> String {
+    "Approve".to_string()
+}
+
+fn default_reject_label() -> String {
+    "Reject".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForEachNodeConfig {
+    #[serde(default = "default_foreach_items_template")]
+    pub items_template: String,
+    #[serde(default = "default_foreach_item_variable")]
+    pub item_variable: String,
+}
+
+fn default_foreach_items_template() -> String {
+    "{{input}}".to_string()
+}
+
+fn default_foreach_item_variable() -> String {
+    "item".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowAttachment {
+    pub filename: String,
+    pub mime: String,
+    pub data_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowResult {
     pub run_id: String,
     pub status: String,
@@ -177,11 +261,16 @@ pub struct CreateWorkflowRequest {
     pub name: String,
     pub description: Option<String>,
     pub graph_json: Option<String>,
+    #[serde(default)]
+    pub default_workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateWorkflowRequest {
-    pub graph_json: String,
+    #[serde(default)]
+    pub graph_json: Option<String>,
+    #[serde(default)]
+    pub default_workspace_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,4 +279,14 @@ pub struct ExecuteWorkflowRequest {
     #[serde(default)]
     pub parameters: HashMap<String, serde_json::Value>,
     pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<WorkflowAttachment>,
+    #[serde(default)]
+    pub images: Vec<WorkflowAttachment>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub notify_channels: Vec<String>,
+    #[serde(default)]
+    pub discord_channel_id: Option<u64>,
 }

@@ -73,7 +73,7 @@ OSA.CONTEXT_TOOLS = new Set(['read_file', 'list_files', 'glob', 'grep']);
 
 OSA.handleAgentEvent = function(event) {
     const isStopping = OSA.isAgentStopping();
-    const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked'];
+    const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked', 'workflow_started', 'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed', 'workflow_completed', 'workflow_failed'];
     
     if (isStopping && ignoreDuringStop.includes(event.type)) {
         return;
@@ -227,6 +227,34 @@ OSA.handleAgentEvent = function(event) {
             if (OSA.Jobs) {
                 OSA.Jobs.showNotification(event.message, event.job_type || 'info');
             }
+            break;
+
+        case 'workflow_started':
+            OSA.handleWorkflowStarted(event);
+            break;
+
+        case 'workflow_node_started':
+            OSA.handleWorkflowNodeStarted(event);
+            break;
+
+        case 'workflow_node_completed':
+            OSA.handleWorkflowNodeCompleted(event);
+            break;
+
+        case 'workflow_node_failed':
+            OSA.handleWorkflowNodeFailed(event);
+            break;
+
+        case 'workflow_completed':
+            OSA.handleWorkflowCompleted(event);
+            break;
+
+        case 'workflow_failed':
+            OSA.handleWorkflowFailed(event);
+            break;
+
+        case 'workflow_approval_requested':
+            OSA.handleWorkflowApprovalRequested(event);
             break;
 
         default: break;
@@ -1402,6 +1430,211 @@ OSA.handleSubagentComplete = function(event) {
             return;
         }
     }
+};
+
+OSA._activeWorkflows = OSA._activeWorkflows || new Map();
+
+OSA.workflowNodeDomId = function(runId, nodeId) {
+    return `workflow-node-${runId}-${String(nodeId || '').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+};
+
+OSA.ensureWorkflowCard = function(runId, workflowName) {
+    let card = document.getElementById(`workflow-${runId}`);
+    if (card) return card;
+
+    const messagesDiv = document.getElementById('messages');
+    if (!messagesDiv) return null;
+
+    const emptyState = messagesDiv.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    card = document.createElement('div');
+    card.id = `workflow-${runId}`;
+    card.className = 'workflow-card';
+    card.innerHTML = `
+        <div class="workflow-header" onclick="OSA.toggleWorkflowCard('${runId}')">
+            <div class="workflow-info">
+                <span class="workflow-icon">WF</span>
+                <span class="workflow-title">${OSA.escapeHtml(workflowName || 'Workflow')}</span>
+            </div>
+            <div class="workflow-status">
+                <span class="workflow-status-badge running" id="workflow-status-${runId}">running</span>
+                <span class="workflow-chevron" id="workflow-chevron-${runId}">&#x25B6;</span>
+            </div>
+        </div>
+        <div class="workflow-body" id="workflow-body-${runId}" style="display:none">
+            <div class="workflow-body-inner">
+                <div class="workflow-nodes" id="workflow-nodes-${runId}"></div>
+                <div class="workflow-output" id="workflow-output-${runId}" style="display:none"></div>
+            </div>
+        </div>
+    `;
+
+    messagesDiv.appendChild(card);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    return card;
+};
+
+OSA.toggleWorkflowCard = function(runId) {
+    const body = document.getElementById(`workflow-body-${runId}`);
+    const chevron = document.getElementById(`workflow-chevron-${runId}`);
+    if (!body) return;
+
+    const isExpanded = body.style.display !== 'none';
+    body.style.display = isExpanded ? 'none' : 'block';
+    if (chevron) {
+        chevron.style.transform = isExpanded ? '' : 'rotate(90deg)';
+    }
+};
+
+OSA.setWorkflowStatus = function(runId, status) {
+    const statusEl = document.getElementById(`workflow-status-${runId}`);
+    if (!statusEl) return;
+    statusEl.textContent = status;
+    statusEl.className = `workflow-status-badge ${status}`;
+};
+
+OSA.upsertWorkflowNode = function(runId, nodeId, nodeType, status, details = '') {
+    const nodesEl = document.getElementById(`workflow-nodes-${runId}`);
+    if (!nodesEl) return;
+
+    const domId = OSA.workflowNodeDomId(runId, nodeId);
+    let row = document.getElementById(domId);
+    if (!row) {
+        row = document.createElement('div');
+        row.id = domId;
+        row.className = 'workflow-node-row';
+        nodesEl.appendChild(row);
+    }
+
+    row.innerHTML = `
+        <span class="workflow-node-state ${status}"></span>
+        <span class="workflow-node-label">${OSA.escapeHtml(nodeType || nodeId || 'node')}</span>
+        <span class="workflow-node-detail">${OSA.escapeHtml(details || status)}</span>
+    `;
+};
+
+OSA.handleWorkflowStarted = function(event) {
+    const runId = event.run_id;
+    if (!runId) return;
+    OSA.ensureWorkflowCard(runId, event.workflow_name || event.workflow_id || 'Workflow');
+    OSA.setWorkflowStatus(runId, 'running');
+    OSA._activeWorkflows.set(runId, {
+        runId,
+        workflowId: event.workflow_id,
+        workflowName: event.workflow_name || event.workflow_id,
+        status: 'running'
+    });
+};
+
+OSA.handleWorkflowNodeStarted = function(event) {
+    const runId = event.run_id;
+    if (!runId) return;
+    OSA.ensureWorkflowCard(runId, event.workflow_name || event.workflow_id || 'Workflow');
+    OSA.upsertWorkflowNode(runId, event.node_id, event.node_type, 'running', 'running');
+};
+
+OSA.handleWorkflowNodeCompleted = function(event) {
+    const runId = event.run_id;
+    if (!runId) return;
+    const detail = event.output_preview || 'completed';
+    OSA.upsertWorkflowNode(runId, event.node_id, event.node_type, 'completed', detail);
+};
+
+OSA.handleWorkflowNodeFailed = function(event) {
+    const runId = event.run_id;
+    if (!runId) return;
+    OSA.upsertWorkflowNode(runId, event.node_id, event.node_type, 'failed', event.error || 'failed');
+    OSA.setWorkflowStatus(runId, 'failed');
+};
+
+OSA.handleWorkflowCompleted = function(event) {
+    const runId = event.run_id;
+    if (!runId) return;
+    OSA.ensureWorkflowCard(runId, event.workflow_name || event.workflow_id || 'Workflow');
+    OSA.setWorkflowStatus(runId, 'completed');
+    const outputEl = document.getElementById(`workflow-output-${runId}`);
+    if (outputEl) {
+        let outputText = '';
+        if (event.output && typeof event.output === 'object') {
+            outputText = JSON.stringify(event.output, null, 2);
+        } else if (typeof event.output === 'string') {
+            outputText = event.output;
+        }
+        if (outputText) {
+            outputEl.style.display = 'block';
+            outputEl.innerHTML = `<div class="workflow-output-label">Output:</div><pre class="workflow-output-text">${OSA.escapeHtml(outputText)}</pre>`;
+        }
+    }
+
+    const data = OSA._activeWorkflows.get(runId);
+    if (data) {
+        data.status = 'completed';
+    }
+};
+
+OSA.handleWorkflowFailed = function(event) {
+    const runId = event.run_id;
+    if (!runId) return;
+    OSA.ensureWorkflowCard(runId, event.workflow_name || event.workflow_id || 'Workflow');
+    OSA.setWorkflowStatus(runId, 'failed');
+    const outputEl = document.getElementById(`workflow-output-${runId}`);
+    if (outputEl) {
+        outputEl.style.display = 'block';
+        outputEl.innerHTML = `<div class="workflow-output-label">Error:</div><pre class="workflow-output-text">${OSA.escapeHtml(event.error || 'Workflow failed')}</pre>`;
+    }
+
+    const data = OSA._activeWorkflows.get(runId);
+    if (data) {
+        data.status = 'failed';
+    }
+};
+
+OSA.answerWorkflowApproval = async function(questionId, answer, button) {
+    if (!questionId) return;
+    try {
+        await fetch('/api/questions/answer', {
+            method: 'POST',
+            headers: {
+                ...OSA.getAuthHeaders(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                question_id: questionId,
+                answers: [[answer]]
+            })
+        });
+
+        const row = button?.closest('.workflow-approval-actions');
+        if (row) {
+            row.querySelectorAll('button').forEach(btn => {
+                btn.disabled = true;
+            });
+        }
+    } catch (err) {
+        console.error('Failed to answer workflow approval:', err);
+    }
+};
+
+OSA.handleWorkflowApprovalRequested = function(event) {
+    const runId = event.run_id;
+    if (!runId) return;
+    OSA.ensureWorkflowCard(runId, event.workflow_name || event.workflow_id || 'Workflow');
+    OSA.upsertWorkflowNode(runId, event.node_id, 'approval', 'running', 'awaiting approval');
+
+    const nodesEl = document.getElementById(`workflow-nodes-${runId}`);
+    if (!nodesEl) return;
+
+    const container = document.createElement('div');
+    container.className = 'workflow-approval';
+    container.innerHTML = `
+        <div class="workflow-approval-prompt">${OSA.escapeHtml(event.prompt || 'Approval required')}</div>
+        <div class="workflow-approval-actions">
+            <button class="workflow-approval-btn approve" onclick="OSA.answerWorkflowApproval('${OSA.escapeHtml(event.question_id || '')}', '${OSA.escapeHtml(event.approve_label || 'Approve')}', this)">${OSA.escapeHtml(event.approve_label || 'Approve')}</button>
+            <button class="workflow-approval-btn reject" onclick="OSA.answerWorkflowApproval('${OSA.escapeHtml(event.question_id || '')}', '${OSA.escapeHtml(event.reject_label || 'Reject')}', this)">${OSA.escapeHtml(event.reject_label || 'Reject')}</button>
+        </div>
+    `;
+    nodesEl.appendChild(container);
 };
 
 OSA.toggleSubagentCard = function(subagentId) {

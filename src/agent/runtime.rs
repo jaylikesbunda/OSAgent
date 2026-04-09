@@ -19,8 +19,8 @@ use crate::plugin::PluginManager;
 use crate::scheduler::Scheduler;
 use crate::skills::{get_skills_base_dir, SkillLoader};
 use crate::storage::{
-    AuditEntry, Message, MessageAttachment, MessageImage, MessageTokens, QueuedMessage, Session, SessionEventRecord, SessionSummary,
-    SqliteStorage, ToolCall,
+    AuditEntry, Message, MessageAttachment, MessageImage, MessageTokens, QueuedMessage, Session,
+    SessionEventRecord, SessionSummary, SqliteStorage, ToolCall,
 };
 use crate::tools::bash::BashTool;
 use crate::tools::file_cache::FileReadCache;
@@ -585,7 +585,16 @@ impl AgentRuntime {
 
         tokio::spawn(async move {
             let result = runtime
-                .process_message_internal(&session_id, user_message, user.clone(), None, None, None, None, None)
+                .process_message_internal(
+                    &session_id,
+                    user_message,
+                    user.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await;
             if let Err(error) = &result {
                 error!(
@@ -755,10 +764,9 @@ impl AgentRuntime {
 
         if let Some(context) = attachment_context {
             if !context.trim().is_empty() {
-                session.messages.push(Message::synthetic_user(
-                    context,
-                    "attachment_context",
-                ));
+                session
+                    .messages
+                    .push(Message::synthetic_user(context, "attachment_context"));
             }
         }
 
@@ -3946,15 +3954,14 @@ impl AgentRuntime {
         if self.get_session(session_id).await?.is_none() {
             return Err(OSAgentError::Session("Session not found".to_string()));
         }
-        self.storage
-            .enqueue_message(
-                session_id,
-                client_message_id,
-                content,
-                images,
-                attachment_context,
-                attachments,
-            )
+        self.storage.enqueue_message(
+            session_id,
+            client_message_id,
+            content,
+            images,
+            attachment_context,
+            attachments,
+        )
     }
 
     pub async fn list_queued_messages(&self, session_id: &str) -> Result<Vec<QueuedMessage>> {
