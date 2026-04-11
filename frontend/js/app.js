@@ -220,23 +220,37 @@ OSA.logout = function() {
     OSA.resetSessionCheckpoints();
     OSA.setSessionInspectorState({ history: [], snapshots: [] });
     
+    OSA.disconnectLiveSessionChannel();
+    
+    OSA.showLogin();
+};
+
+OSA.disconnectLiveSessionChannel = function() {
     const es = OSA.getEventSource();
     if (es) {
         es.close();
         OSA.setEventSource(null);
     }
+
     const reconnectTimer = OSA.getEventReconnectTimer();
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         OSA.setEventReconnectTimer(null);
     }
+
     const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
     if (ws) {
+        ws._osaSuppressReconnect = true;
         ws.close();
         OSA.setWebSocket(null);
     }
-    
-    OSA.showLogin();
+
+    if (typeof OSA.setEventSourceSessionId === 'function') {
+        OSA.setEventSourceSessionId(null);
+    }
+    if (typeof OSA.cancelSpeechOutput === 'function') {
+        OSA.cancelSpeechOutput();
+    }
 };
 
 OSA.showLogin = function() {
@@ -479,7 +493,7 @@ OSA.createSession = async function() {
         OSA.restoreContextState(session.id, null);
         OSA.connectEventSource(session.id);
 
-        document.getElementById('messages').innerHTML = '';
+        OSA.resetTranscriptView();
         OSA.resetStreamingMessage();
         const sessionName = OSA.getSessionDisplayName(session);
         OSA.setHeaderBaseTitle(sessionName);
@@ -513,9 +527,10 @@ OSA.loadSessionCheckpoints = async function(sessionId, options = {}) {
 
     const requestId = options.requestId || 0;
     const silent = !!options.silent;
+    const signal = options.signal;
 
     try {
-        const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/checkpoints`);
+        const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/checkpoints`, { signal });
         if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return [];
 
         const data = await res.json().catch(() => []);
@@ -541,6 +556,9 @@ OSA.loadSessionCheckpoints = async function(sessionId, options = {}) {
 
         return checkpoints;
     } catch (error) {
+        if (error && error.name === 'AbortError') {
+            return [];
+        }
         OSA.setSessionCheckpoints(sessionId, []);
         if (!silent) {
             console.error('Failed to load session checkpoints:', error);
@@ -591,7 +609,13 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
         OSA.hideThinkingIndicator();
 
         if (!streamingMessage) {
-            OSA.renderMessages(session.messages || []);
+            OSA.syncRenderedMessages(session.messages || [], {
+                resetStreaming: false,
+                stickToBottom: false,
+                preferTail: true,
+                keepWindow: true,
+                preserveScroll: true,
+            });
             OSA.adoptStreamingAssistantFromRenderedSession(session);
             return;
         }
@@ -618,16 +642,39 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
 };
 
 OSA.selectSession = async function(sessionId) {
+    const perfStart = OSA.perfNow ? OSA.perfNow() : Date.now();
     const requestId = OSA.beginSessionSelection ? OSA.beginSessionSelection() : 0;
+    const previousController = OSA.getSessionSelectionAbortController ? OSA.getSessionSelectionAbortController() : null;
+    if (previousController) {
+        previousController.abort();
+    }
+    const selectionController = new AbortController();
+    OSA.setSessionSelectionAbortController?.(selectionController);
+    const { signal } = selectionController;
     OSA.markSessionListSelection(sessionId);
 
     try {
+        await new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, 75);
+            signal.addEventListener('abort', () => {
+                clearTimeout(timer);
+                reject(new DOMException('Selection aborted', 'AbortError'));
+            }, { once: true });
+        });
+
         const res = await fetch(`/api/sessions/${sessionId}`, {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+            signal,
         });
         if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return;
         const session = await res.json();
         if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return;
+        OSA.perfLog?.('selectSession:session', {
+            sessionId,
+            requestId,
+            fetchMs: Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart),
+            messages: Array.isArray(session.messages) ? session.messages.length : 0,
+        });
 
         const isCurrentSelection = () => {
             if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return false;
@@ -636,22 +683,28 @@ OSA.selectSession = async function(sessionId) {
         };
 
         const pendingToolsRequest = fetch(`/api/sessions/${sessionId}/tools`, {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+            signal,
         }).catch(() => null);
         const pendingSubagentsRequest = fetch(`/api/sessions/${sessionId}/subagents`, {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+            signal,
         }).catch(() => null);
         const pendingQueueRequest = fetch(`/api/sessions/${sessionId}/queue`, {
-            headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+            signal,
         }).catch(() => null);
         const pendingCheckpointsRequest = OSA.loadSessionCheckpoints(sessionId, {
             requestId,
             silent: true,
+            signal,
         });
 
         OSA.setCurrentSession(session);
         OSA.restoreContextState(session.id, session.context_state || null);
         OSA.setSessionQueue([]);
+        OSA.setSessionToolEvents([]);
+        OSA.setSessionSubagentTasks([]);
         
         document.querySelectorAll('.tool-card, .context-tool-group, .subagent-card, .parallel-group').forEach(el => el.remove());
         OSA.getActiveTools().clear();
@@ -659,9 +712,10 @@ OSA.selectSession = async function(sessionId) {
         OSA._contextGroupState = null;
         OSA.resetMessageChain();
         OSA.stopToolSync();
-        
-        OSA.connectEventSource(sessionId);
+        OSA.disconnectLiveSessionChannel();
+
         OSA.hideThinkingIndicator();
+        OSA.setTurnStartTime(null);
         OSA.resetStreamingMessage();
         
         const sessionName = OSA.getSessionDisplayName(session);
@@ -670,18 +724,12 @@ OSA.selectSession = async function(sessionId) {
         OSA.setHeaderTitleRenameable(true);
         
         const messagesDiv = document.getElementById('messages');
-        messagesDiv.innerHTML = '';
-        
+        OSA.resetTranscriptView();
+
         if (session.messages.length === 0) {
-            messagesDiv.innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-state-icon">+</div>
-                    <div class="empty-state-title">Start a conversation</div>
-                    <div class="empty-state-text">Type a message below</div>
-                </div>
-            `;
+            OSA.renderEmptyTranscript('Type a message below');
         } else {
-            OSA.renderMessages(session.messages);
+            OSA.renderMessages(session.messages, { reason: 'session-switch' });
             if (session.task_status === 'running') {
                 const adopted = OSA.adoptStreamingAssistantFromRenderedSession(session);
                 if (!adopted && OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
@@ -702,7 +750,6 @@ OSA.selectSession = async function(sessionId) {
 
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
         OSA.fetchAndRenderTodos();
-        OSA.loadSessions();
         OSA.loadSessionWorkspace();
         OSA.loadSessionPersona();
         OSA.loadSessionBreadcrumb(sessionId);
@@ -725,19 +772,26 @@ OSA.selectSession = async function(sessionId) {
         if (!isCurrentSelection()) return;
 
         OSA.setSessionQueue(queueItems);
-
-        if (tools.length > 0) {
-            OSA.restoreToolsAtPositions(tools);
-        }
-
-        if (subagentsData && subagentsData.subagents && subagentsData.subagents.length > 0) {
-            OSA.restoreSubagentCards(subagentsData.subagents);
-        }
+        OSA.setSessionToolEvents(tools);
+        OSA.setSessionSubagentTasks(subagentsData && Array.isArray(subagentsData.subagents) ? subagentsData.subagents : []);
+        OSA.restoreVisibleAnchoredArtifacts();
+        OSA.perfLog?.('selectSession:artifacts', {
+            sessionId,
+            requestId,
+            tools: tools.length,
+            subagents: Array.isArray(subagentsData?.subagents) ? subagentsData.subagents.length : 0,
+            queue: queueItems.length,
+            totalMs: Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart),
+        });
 
         OSA.renderQueuedMessages(queueItems);
 
         const subagentsRunning = !!(subagentsData && subagentsData.has_running);
         const isDirectlyRunning = sessionIsRunning && !subagentsRunning;
+
+        if (sessionIsRunning || subagentsRunning) {
+            OSA.connectEventSource(sessionId);
+        }
 
         if (sessionIsRunning || subagentsRunning) {
             OSA.setProcessing(true);
@@ -754,7 +808,19 @@ OSA.selectSession = async function(sessionId) {
 
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     } catch (error) {
+        if (error && error.name === 'AbortError') {
+            OSA.perfLog?.('selectSession:aborted', {
+                sessionId,
+                requestId,
+                elapsedMs: Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart),
+            });
+            return;
+        }
         console.error('Failed to load session:', error);
+    } finally {
+        if (OSA.getSessionSelectionAbortController?.() === selectionController) {
+            OSA.setSessionSelectionAbortController(null);
+        }
     }
 };
 
@@ -832,12 +898,31 @@ OSA.findToolInsertBefore = function(messagesDiv, messageIndex, fallbackTimestamp
     return allMessages[0] || null;
 };
 
+OSA.restoreVisibleAnchoredArtifacts = function() {
+    const toolEvents = typeof OSA.getSessionToolEvents === 'function' ? OSA.getSessionToolEvents() : [];
+    if (Array.isArray(toolEvents) && toolEvents.length > 0) {
+        OSA.restoreToolsAtPositions(toolEvents);
+    }
+
+    const subagentTasks = typeof OSA.getSessionSubagentTasks === 'function' ? OSA.getSessionSubagentTasks() : [];
+    if (Array.isArray(subagentTasks) && subagentTasks.length > 0) {
+        OSA.restoreSubagentCards(subagentTasks);
+    }
+};
+
 OSA.restoreToolsAtPositions = function(tools) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv || tools.length === 0) return;
 
+    const filteredTools = tools.filter(t => {
+        if (typeof OSA.isMessageIndexInRenderedWindow !== 'function') return true;
+        return OSA.isMessageIndexInRenderedWindow(t.message_index);
+    });
+
+    if (filteredTools.length === 0) return;
+
     if (messagesDiv.querySelectorAll('.message').length === 0) {
-        tools.forEach(t => {
+        filteredTools.forEach(t => {
             if (t.tool_name === 'subagent') return;
             OSA.restoreToolCard(t);
         });
@@ -852,7 +937,7 @@ OSA.restoreToolsAtPositions = function(tools) {
 
     const PARALLEL_WINDOW_MS = 3000;
 
-    const regularTools = tools
+    const regularTools = filteredTools
         .filter(t => t.tool_name !== 'subagent' && !OSA.isContextTool(t.tool_name))
         .sort((a, b) => {
             const messageDelta = toolMessageIndex(a) - toolMessageIndex(b);
@@ -860,7 +945,7 @@ OSA.restoreToolsAtPositions = function(tools) {
             return toolTs(a) - toolTs(b);
         });
 
-    const contextTools = tools.filter(t => OSA.isContextTool(t.tool_name));
+    const contextTools = filteredTools.filter(t => OSA.isContextTool(t.tool_name));
 
     const grouped = [];
     let currentGroup = null;
@@ -896,11 +981,7 @@ OSA.restoreToolsAtPositions = function(tools) {
                 </div>
             `;
 
-            if (insertBefore) {
-                messagesDiv.insertBefore(groupDiv, insertBefore);
-            } else {
-                messagesDiv.appendChild(groupDiv);
-            }
+            OSA.mountAnchoredNode(groupDiv, group.messageIndex, insertBefore);
 
             group.tools.forEach(t => {
                 OSA.restoreToolCard(t, null, groupDiv);
@@ -934,12 +1015,7 @@ OSA.restoreToolsAtPositions = function(tools) {
                 groupDiv.id = groupId;
                 groupDiv.className = 'tool-container context-inline-group';
                 groupDiv.dataset.messageIndex = mi;
-
-                if (insertBefore) {
-                    messagesDiv.insertBefore(groupDiv, insertBefore);
-                } else {
-                    messagesDiv.appendChild(groupDiv);
-                }
+                OSA.mountAnchoredNode(groupDiv, mi, insertBefore);
             }
 
             for (const t of groupTools) {
@@ -989,13 +1065,7 @@ OSA.clearSessions = async function() {
             ws.close();
             OSA.setWebSocket(null);
         }
-        document.getElementById('messages').innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">+</div>
-                <div class="empty-state-title">Start a conversation</div>
-                <div class="empty-state-text">Click "New chat" to begin</div>
-            </div>
-        `;
+        OSA.renderEmptyTranscript('Click "New chat" to begin');
         OSA.setHeaderBaseTitle('Select a session');
         document.getElementById('header-title').textContent = 'Select a session';
         OSA.setHeaderTitleRenameable(false);
@@ -1466,7 +1536,7 @@ OSA.SLASH_COMMANDS = [
     { cmd: '/settings', label: 'Settings', desc: 'Open settings panel', action: () => OSA.openSettings() },
     { cmd: '/workflow', label: 'Workflows', desc: 'Open workflow editor', action: () => OSA.openWorkflowEditor() },
     { cmd: '/compact', label: 'Compact', desc: 'Summarize and compact the conversation', action: () => { const i = document.getElementById('message-input'); if (i) { i.value = 'Summarize our conversation so far and continue'; OSA.sendMessage(); } } },
-    { cmd: '/clear', label: 'Clear screen', desc: 'Clear the message display', action: () => { document.getElementById('messages').innerHTML = ''; } },
+    { cmd: '/clear', label: 'Clear screen', desc: 'Clear the message display', action: () => { OSA.resetTranscriptView(); } },
     { cmd: '/reset', label: 'Reset session', desc: 'Clear messages and start fresh', action: () => OSA.createSession() },
     { cmd: '/help', label: 'Help', desc: 'Show available commands', action: () => {} },
 ];
@@ -1667,13 +1737,7 @@ OSA.deleteSession = async function(sessionId) {
                 ws.close();
                 OSA.setWebSocket(null);
             }
-            document.getElementById('messages').innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-state-icon">+</div>
-                    <div class="empty-state-title">Start a conversation</div>
-                    <div class="empty-state-text">Click "New chat" to begin</div>
-                </div>
-            `;
+            OSA.renderEmptyTranscript('Click "New chat" to begin');
         }
         OSA.loadSessions();
     } catch (error) {

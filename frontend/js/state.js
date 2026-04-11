@@ -31,6 +31,8 @@ OSA.cachedConfig = null;
 OSA.sessionTodos = [];
 OSA.sessionQueue = [];
 OSA.sessionCheckpoints = {};
+OSA.sessionToolEvents = [];
+OSA.sessionSubagentTasks = [];
 OSA.pendingQuestions = [];
 OSA.pendingQuestionId = '';
 OSA.currentQuestionIndex = 0;
@@ -46,7 +48,40 @@ OSA.parallelToolWindow = 500;
 OSA.pendingFormattedElements = new Set();
 OSA.pendingFormattedFrame = null;
 OSA.sessionSelectionRequestId = 0;
+OSA.sessionSelectionAbortController = null;
 OSA._toolSyncInterval = null;
+OSA.perfDebugEnabled = localStorage.getItem('osa-debug-perf') === '1'
+    || new URLSearchParams(window.location.search).get('debugPerf') === '1';
+OSA.transcriptView = {
+    initialized: false,
+    transcriptRoot: null,
+    topSpacer: null,
+    topSentinel: null,
+    listRoot: null,
+    bottomSentinel: null,
+    bottomSpacer: null,
+    floatingRoot: null,
+    ioTop: null,
+    ioBottom: null,
+    scrollHandlerAttached: false,
+    userPinnedToBottom: true,
+    isRendering: false,
+    avgMessageHeight: 132,
+    messageHeights: new Map(),
+    messageSignatures: new Map(),
+    windowNodesByKey: new Map(),
+    wrapperNodesByKey: new Map(),
+    anchoredNodesByIndex: new Map(),
+    descriptors: [],
+    lastDescriptorCount: 0,
+    renderedMessageIndices: new Set(),
+    windowStart: 0,
+    windowEnd: 0,
+    maxWindowSize: 180,
+    windowShiftSize: 48,
+    shiftInProgress: false,
+    lastShiftAt: 0,
+};
 
 OSA.getToken = () => OSA.token;
 OSA.setToken = t => { OSA.token = t; localStorage.setItem('token', t); };
@@ -104,6 +139,10 @@ OSA.getSessionTodos = () => OSA.sessionTodos;
 OSA.setSessionTodos = t => OSA.sessionTodos = t;
 OSA.getSessionQueue = () => OSA.sessionQueue;
 OSA.setSessionQueue = q => OSA.sessionQueue = Array.isArray(q) ? q : [];
+OSA.getSessionToolEvents = () => OSA.sessionToolEvents;
+OSA.setSessionToolEvents = tools => OSA.sessionToolEvents = Array.isArray(tools) ? tools : [];
+OSA.getSessionSubagentTasks = () => OSA.sessionSubagentTasks;
+OSA.setSessionSubagentTasks = tasks => OSA.sessionSubagentTasks = Array.isArray(tasks) ? tasks : [];
 OSA.getSessionCheckpoints = sessionId => {
     if (!sessionId) return [];
     const checkpoints = OSA.sessionCheckpoints[sessionId];
@@ -142,6 +181,19 @@ OSA.setEventReconnectTimer = t => OSA.eventReconnectTimer = t;
 OSA.getPendingFormattedElements = () => OSA.pendingFormattedElements;
 OSA.getPendingFormattedFrame = () => OSA.pendingFormattedFrame;
 OSA.setPendingFormattedFrame = f => OSA.pendingFormattedFrame = f;
+OSA.getPerfDebugEnabled = () => OSA.perfDebugEnabled;
+OSA.setPerfDebugEnabled = enabled => {
+    OSA.perfDebugEnabled = !!enabled;
+    localStorage.setItem('osa-debug-perf', enabled ? '1' : '0');
+};
+OSA.perfNow = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+OSA.perfLog = (label, data = {}) => {
+    if (!OSA.perfDebugEnabled) return;
+    console.log(`[OSA perf] ${label}`, data);
+};
+OSA.getSessionSelectionAbortController = () => OSA.sessionSelectionAbortController;
+OSA.setSessionSelectionAbortController = controller => OSA.sessionSelectionAbortController = controller;
+OSA.getTranscriptView = () => OSA.transcriptView;
 OSA.beginSessionSelection = () => ++OSA.sessionSelectionRequestId;
 OSA.isSessionSelectionCurrent = id => OSA.sessionSelectionRequestId === id;
 OSA.inspectorExpanded = false;

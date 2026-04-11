@@ -72,6 +72,7 @@ OSA.connectWebSocket = function(sessionId) {
 
     const existing = OSA.getWebSocket();
     if (existing) {
+        existing._osaSuppressReconnect = true;
         existing.close();
         OSA.setWebSocket(null);
     }
@@ -98,6 +99,11 @@ OSA.connectWebSocket = function(sessionId) {
     }
 
     ws.onopen = () => {
+        if (OSA.wsSessionId !== sessionId) {
+            ws._osaSuppressReconnect = true;
+            ws.close();
+            return;
+        }
         OSA.setWebSocket(ws);
         OSA.showConnectionStatus('connected', 'Connected');
         const chain = OSA.getMessageChain ? OSA.getMessageChain() : null;
@@ -115,6 +121,10 @@ OSA.connectWebSocket = function(sessionId) {
     };
 
     ws.onmessage = event => {
+        if (OSA.wsSessionId !== sessionId) {
+            return;
+        }
+
         let payload;
         try {
             payload = JSON.parse(event.data);
@@ -165,11 +175,21 @@ OSA.connectWebSocket = function(sessionId) {
     };
 
     ws.onerror = err => {
+        if (OSA.wsSessionId !== sessionId) {
+            return;
+        }
         console.error('WebSocket error:', err);
     };
 
     ws.onclose = () => {
-        OSA.setWebSocket(null);
+        if (OSA.getWebSocket() === ws) {
+            OSA.setWebSocket(null);
+        }
+
+        if (ws._osaSuppressReconnect || OSA.wsSessionId !== sessionId) {
+            return;
+        }
+
         OSA.showConnectionStatus('disconnected', 'Disconnected');
         if (OSA.wsSessionId && OSA.getCurrentSession() && OSA.getCurrentSession().id === OSA.wsSessionId) {
             const reconnectTimer = setTimeout(() => {

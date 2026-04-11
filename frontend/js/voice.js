@@ -1,5 +1,14 @@
 window.OSA = window.OSA || {};
 
+OSA.speechPlaybackGeneration = OSA.speechPlaybackGeneration || 0;
+OSA.bumpSpeechPlaybackGeneration = function() {
+    OSA.speechPlaybackGeneration = (OSA.speechPlaybackGeneration || 0) + 1;
+    return OSA.speechPlaybackGeneration;
+};
+OSA.getSpeechPlaybackGeneration = function() {
+    return OSA.speechPlaybackGeneration || 0;
+};
+
 OSA.normalizeSttProvider = function(provider) {
     if (provider === 'whisper') return 'whisper-local';
     if (provider === 'whisper-api') return 'browser';
@@ -532,6 +541,7 @@ OSA.updateTTSButton = function() {
 OSA.stopAudioPlayback = function() {
     const audio = OSA.getCurrentAudio();
     if (audio) {
+        audio.onended = null;
         audio.pause();
         OSA.setCurrentAudio(null);
     }
@@ -539,6 +549,15 @@ OSA.stopAudioPlayback = function() {
     if (url) {
         URL.revokeObjectURL(url);
         OSA.setCurrentAudioUrl(null);
+    }
+};
+
+OSA.cancelSpeechOutput = function() {
+    OSA.bumpSpeechPlaybackGeneration();
+    OSA.clearSpeechQueue();
+    OSA.stopAudioPlayback();
+    if (window.speechSynthesis && window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
     }
 };
 
@@ -703,6 +722,7 @@ OSA.speakText = function(text, options = {}) {
     }
     
     if (voiceConfig?.tts_provider === 'piper-local') {
+        const generation = OSA.getSpeechPlaybackGeneration();
         fetch('/api/tts/synthesize', {
             method: 'POST',
             headers: {
@@ -716,6 +736,9 @@ OSA.speakText = function(text, options = {}) {
             return res.blob();
         })
         .then(blob => {
+            if (generation !== OSA.getSpeechPlaybackGeneration()) {
+                return;
+            }
             OSA.stopAudioPlayback();
             const url = URL.createObjectURL(blob);
             OSA.setCurrentAudioUrl(url);
@@ -724,6 +747,9 @@ OSA.speakText = function(text, options = {}) {
             audio.playbackRate = voiceConfig?.voice_speed || 1.0;
             audio.play().catch(e => console.error('Audio play failed:', e));
             audio.onended = () => {
+                if (generation !== OSA.getSpeechPlaybackGeneration()) {
+                    return;
+                }
                 OSA.stopAudioPlayback();
                 OSA.processSpeechQueue();
             };

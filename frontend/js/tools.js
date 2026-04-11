@@ -609,10 +609,14 @@ OSA._renderInlineToolCard = function(toolEvent, insertBefore, parent) {
     const target = parent || messagesDiv;
     if (!target) return container;
 
-    if (insertBefore && !parent) {
-        target.insertBefore(container, insertBefore);
+    if (parent) {
+        if (insertBefore && insertBefore.parentNode === target) {
+            target.insertBefore(container, insertBefore);
+        } else {
+            target.appendChild(container);
+        }
     } else {
-        target.appendChild(container);
+        OSA.mountAnchoredNode(container, toolEvent.message_index !== undefined ? toolEvent.message_index : 0, insertBefore);
     }
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
@@ -702,11 +706,7 @@ OSA.restoreContextToolGroup = function(tools, insertBefore = null) {
         group.appendChild(item);
     });
 
-    if (insertBefore) {
-        messagesDiv.insertBefore(group, insertBefore);
-    } else {
-        messagesDiv.appendChild(group);
-    }
+    OSA.mountAnchoredNode(group, messageIndex, insertBefore);
 
     return group;
 };
@@ -723,30 +723,7 @@ OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = fal
         group.id = groupId;
         group.className = 'tool-container context-inline-group';
         group.dataset.messageIndex = messageIndex;
-
-        const anchor = messagesDiv.querySelector(`.message[data-message-index="${messageIndex}"]`);
-        if (anchor) {
-            let next = anchor.nextElementSibling;
-            while (next && !next.classList.contains('message')) {
-                next = next.nextElementSibling;
-            }
-            if (next) {
-                messagesDiv.insertBefore(group, next);
-            } else {
-                messagesDiv.appendChild(group);
-            }
-        } else {
-            const allMsgs = Array.from(messagesDiv.querySelectorAll('.message'));
-            const nextHigher = allMsgs.find(el => {
-                const elIdx = parseInt(el.dataset.messageIndex || '', 10);
-                return Number.isFinite(elIdx) && elIdx > messageIndex;
-            });
-            if (nextHigher) {
-                messagesDiv.insertBefore(group, nextHigher);
-            } else {
-                messagesDiv.appendChild(group);
-            }
-        }
+        OSA.mountAnchoredNode(group, messageIndex);
     }
 
     const toolName = event.tool_name;
@@ -805,7 +782,7 @@ OSA.ensureContextToolGroup = function() {
     const group = document.createElement('div');
     group.id = activeGroupId || `context-tool-group-${Date.now()}`;
     group.className = 'tool-container context-inline-group';
-    messagesDiv.appendChild(group);
+    OSA.mountFloatingNode(group);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
     OSA._contextGroupState = { expanded: false, allDone: false };
@@ -964,21 +941,23 @@ OSA.completeToolCard = function(event) {
         const firstContainer = firstToolData ? document.getElementById(firstToolData.domId) : null;
 
         if (firstContainer) {
-            const messagesDiv = document.getElementById('messages');
             const groupId = `parallel-group-${Date.now()}`;
             parallelGroup.groupId = groupId;
 
             const groupDiv = document.createElement('div');
             groupDiv.className = 'parallel-group';
             groupDiv.id = groupId;
+            groupDiv.dataset.messageIndex = firstContainer.dataset.messageIndex || '0';
             groupDiv.innerHTML = `
                 <div class="parallel-group-header">
                     <span class="parallel-count">${parallelGroup.count} tools running concurrently</span>
                 </div>
             `;
 
+            OSA.removeStoredAnchoredNode(firstContainer);
             firstContainer.parentNode.insertBefore(groupDiv, firstContainer);
             groupDiv.appendChild(firstContainer);
+            OSA.storeAnchoredNode(groupDiv, groupDiv.dataset.messageIndex || 0);
 
             for (let i = 1; i < parallelGroup.callIds.length; i++) {
                 const callId = parallelGroup.callIds[i];
@@ -986,6 +965,7 @@ OSA.completeToolCard = function(event) {
                 if (toolData) {
                     const container = document.getElementById(toolData.domId);
                     if (container && container.parentNode !== groupDiv) {
+                        OSA.removeStoredAnchoredNode(container);
                         groupDiv.appendChild(container);
                     }
                 }
@@ -1050,7 +1030,7 @@ OSA.renderTaskMessage = function(event) {
         <div class="message-role">Tasks</div>
         <div class="message-content">${OSA.formatMessage(content)}</div>
     `;
-    messagesDiv.appendChild(message);
+    OSA.mountFloatingNode(message);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 };
 
@@ -1065,12 +1045,13 @@ OSA.handleEventError = function(event) {
     OSA.hideThinkingIndicator();
 
     const messagesDiv = document.getElementById('messages');
-    messagesDiv.insertAdjacentHTML('beforeend', `
-        <div class="message error">
-            <div class="message-role">Error</div>
-            <div class="message-content">${OSA.escapeHtml(event.error)}</div>
-        </div>
-    `);
+    const message = document.createElement('div');
+    message.className = 'message error';
+    message.innerHTML = `
+        <div class="message-role">Error</div>
+        <div class="message-content">${OSA.escapeHtml(event.error)}</div>
+    `;
+    OSA.mountFloatingNode(message);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
@@ -1092,12 +1073,13 @@ OSA.handleEventCancelled = function(event) {
     }
 
     const messagesDiv = document.getElementById('messages');
-    messagesDiv.insertAdjacentHTML('beforeend', `
-        <div class="message cancelled">
-            <div class="message-role">Cancelled</div>
-            <div class="message-content">Operation stopped by user</div>
-        </div>
-    `);
+    const message = document.createElement('div');
+    message.className = 'message cancelled';
+    message.innerHTML = `
+        <div class="message-role">Cancelled</div>
+        <div class="message-content">Operation stopped by user</div>
+    `;
+    OSA.mountFloatingNode(message);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
@@ -1203,11 +1185,12 @@ OSA.restoreSubagentCards = function(subagentTasks) {
         return ta - tb;
     });
 
-    const allMessages = Array.from(messagesDiv.querySelectorAll('.message'));
-
-    const groupedByAnchor = new Map();
-
     sorted.forEach(task => {
+        const anchorIndex = OSA.findAnchorMessageIndexForTimestamp(task.created_at);
+        if (typeof OSA.isMessageIndexInRenderedWindow === 'function' && anchorIndex >= 0 && !OSA.isMessageIndexInRenderedWindow(anchorIndex)) {
+            return;
+        }
+
         const subagentId = task.session_id;
         const existingCard = document.getElementById(`subagent-${subagentId}`);
         if (existingCard) {
@@ -1254,20 +1237,7 @@ OSA.restoreSubagentCards = function(subagentTasks) {
             </div>
         `;
 
-        let anchorIdx = null;
-        if (allMessages.length > 0 && task.created_at) {
-            const subTs = new Date(task.created_at).getTime();
-            for (let i = allMessages.length - 1; i >= 0; i--) {
-                const msgTs = parseInt(allMessages[i].dataset.ts, 10) || 0;
-                if (msgTs <= subTs) {
-                    anchorIdx = i;
-                    break;
-                }
-            }
-        }
-        const key = anchorIdx !== null ? anchorIdx : -1;
-        if (!groupedByAnchor.has(key)) groupedByAnchor.set(key, []);
-        groupedByAnchor.get(key).push(container);
+        OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : 0);
 
         if (isRunning) {
             OSA._activeSubagents.set(subagentId, {
@@ -1280,30 +1250,6 @@ OSA.restoreSubagentCards = function(subagentTasks) {
         }
     });
 
-    const sortedKeys = Array.from(groupedByAnchor.keys()).sort((a, b) => a - b);
-    for (const key of sortedKeys) {
-        const cards = groupedByAnchor.get(key);
-        if (key === -1) {
-            for (const card of cards) {
-                messagesDiv.appendChild(card);
-            }
-        } else {
-            const anchor = allMessages[key];
-            let insertBefore = null;
-            let sibling = anchor.nextElementSibling;
-            while (sibling && !sibling.classList.contains('message')) {
-                sibling = sibling.nextElementSibling;
-            }
-            insertBefore = sibling;
-            for (const card of cards) {
-                if (insertBefore) {
-                    messagesDiv.insertBefore(card, insertBefore);
-                } else {
-                    messagesDiv.appendChild(card);
-                }
-            }
-        }
-    }
 };
 
 OSA.handleSubagentCreated = function(event) {
@@ -1344,7 +1290,8 @@ OSA.handleSubagentCreated = function(event) {
             </div>
         </div>
     `;
-    messagesDiv.appendChild(container);
+    const anchorIndex = OSA.findAnchorMessageIndexForTimestamp(event.timestamp);
+    OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : 0);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
     OSA._activeSubagents.set(subagentId, {
@@ -1472,7 +1419,7 @@ OSA.ensureWorkflowCard = function(runId, workflowName) {
         </div>
     `;
 
-    messagesDiv.appendChild(card);
+    OSA.mountFloatingNode(card);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     return card;
 };
@@ -1733,12 +1680,7 @@ OSA.handleCoordinatorPhase = function(event) {
         container = document.createElement('div');
         container.id = 'coordinator-status';
         container.className = 'coordinator-card';
-        const lastMsg = messagesDiv.querySelector('.message:last-child');
-        if (lastMsg) {
-            lastMsg.appendChild(container);
-        } else {
-            messagesDiv.appendChild(container);
-        }
+        OSA.mountFloatingNode(container);
     }
 
     if (phase === 'complete') {
@@ -1797,6 +1739,9 @@ OSA.syncToolsFromBackend = async function() {
 
         tools.forEach(t => {
             if (t.tool_name === 'subagent') return;
+            if (typeof OSA.isMessageIndexInRenderedWindow === 'function' && !OSA.isMessageIndexInRenderedWindow(t.message_index)) {
+                return;
+            }
             const callId = t.tool_call_id;
             if (OSA.isContextTool(t.tool_name)) {
                 if (!existingContextIds.has(`ctx-${callId}`)) {
