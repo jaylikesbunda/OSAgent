@@ -132,6 +132,7 @@ impl WorkflowExecutor {
         ));
         self.event_bus.emit(AgentEvent::WorkflowStarted {
             session_id: event_session_id.clone(),
+            sequence: 0,
             workflow_id: workflow_id.to_string(),
             workflow_name: workflow_name.to_string(),
             run_id: run_id.clone(),
@@ -154,6 +155,7 @@ impl WorkflowExecutor {
                 ));
                 self.event_bus.emit(AgentEvent::WorkflowFailed {
                     session_id: event_session_id,
+                    sequence: 0,
                     workflow_id: workflow_id.to_string(),
                     run_id: run_id.clone(),
                     error: e.to_string(),
@@ -257,6 +259,7 @@ impl WorkflowExecutor {
             ));
             self.event_bus.emit(AgentEvent::WorkflowNodeStarted {
                 session_id: event_session_id.clone(),
+                sequence: 0,
                 workflow_id: workflow_id.to_string(),
                 run_id: run_id.clone(),
                 node_id: node.id.clone(),
@@ -284,6 +287,7 @@ impl WorkflowExecutor {
                 ));
                 self.event_bus.emit(AgentEvent::WorkflowNodeCompleted {
                     session_id: event_session_id.clone(),
+                    sequence: 0,
                     workflow_id: workflow_id.to_string(),
                     run_id: run_id.clone(),
                     node_id: node.id.clone(),
@@ -349,6 +353,7 @@ impl WorkflowExecutor {
                     ));
                     self.event_bus.emit(AgentEvent::WorkflowNodeFailed {
                         session_id: event_session_id.clone(),
+                        sequence: 0,
                         workflow_id: workflow_id.to_string(),
                         run_id: run_id.clone(),
                         node_id: node.id.clone(),
@@ -367,6 +372,7 @@ impl WorkflowExecutor {
                     ));
                     self.event_bus.emit(AgentEvent::WorkflowFailed {
                         session_id: event_session_id,
+                        sequence: 0,
                         workflow_id: workflow_id.to_string(),
                         run_id: run_id.clone(),
                         error: e.to_string(),
@@ -410,6 +416,7 @@ impl WorkflowExecutor {
             ));
             self.event_bus.emit(AgentEvent::WorkflowNodeCompleted {
                 session_id: event_session_id.clone(),
+                sequence: 0,
                 workflow_id: workflow_id.to_string(),
                 run_id: run_id.clone(),
                 node_id: node.id.clone(),
@@ -430,6 +437,7 @@ impl WorkflowExecutor {
         ));
         self.event_bus.emit(AgentEvent::WorkflowCompleted {
             session_id: event_session_id,
+            sequence: 0,
             workflow_id: workflow_id.to_string(),
             run_id: run_id.clone(),
             output: Some(final_output.clone()),
@@ -947,6 +955,7 @@ You cannot spawn additional subagents."#
 
         self.event_bus.emit(AgentEvent::WorkflowApprovalRequested {
             session_id: event_session_id.to_string(),
+            sequence: 0,
             workflow_id: workflow_id.to_string(),
             run_id: run_id.to_string(),
             node_id: node.id.clone(),

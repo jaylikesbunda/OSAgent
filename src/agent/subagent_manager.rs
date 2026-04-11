@@ -232,6 +232,7 @@ impl SubagentManager {
 
         self.event_bus.emit(AgentEvent::SubagentCreated {
             session_id: parent_session_id.clone(),
+            sequence: 0,
             parent_session_id: parent_session_id.clone(),
             subagent_session_id: subagent_session.id.clone(),
             description: description.clone(),
@@ -304,6 +305,7 @@ impl SubagentManager {
 
                     event_bus.emit(AgentEvent::SubagentCompleted {
                         session_id: parent_session_id_for_async.clone(),
+                        sequence: 0,
                         parent_session_id: parent_session_id_for_async.clone(),
                         subagent_session_id: subagent_session_id.clone(),
                         status,
@@ -328,6 +330,7 @@ impl SubagentManager {
 
                     event_bus.emit(AgentEvent::SubagentCompleted {
                         session_id: parent_session_id_for_async.clone(),
+                        sequence: 0,
                         parent_session_id: parent_session_id_for_async.clone(),
                         subagent_session_id: subagent_session_id.clone(),
                         status: "failed".to_string(),
@@ -466,6 +469,7 @@ impl SubagentManager {
 
                     event_bus.emit(AgentEvent::SubagentProgress {
                         session_id: parent_session_id.clone(),
+                        sequence: 0,
                         parent_session_id: parent_session_id.clone(),
                         subagent_session_id: session_id.clone(),
                         tool_name: format!("iteration_{}", iteration + 1),
@@ -648,6 +652,7 @@ impl SubagentManager {
 
                 event_bus.emit(AgentEvent::SubagentProgress {
                     session_id: parent_session_id.clone(),
+                    sequence: 0,
                     parent_session_id: parent_session_id.clone(),
                     subagent_session_id: session_id.clone(),
                     tool_name: tool_call.name.clone(),
@@ -950,6 +955,7 @@ impl SubagentManager {
 
             event_bus.emit(AgentEvent::ContextUpdate {
                 session_id: session_id.to_string(),
+                sequence: 0,
                 context_window: window,
                 estimated_tokens,
                 budget_tokens: budget,

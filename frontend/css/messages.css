@@ -290,6 +290,10 @@
     border-color: var(--border-hover);
 }
 
+.msg-action-restore:hover {
+    border-color: var(--accent);
+}
+
 .turn-duration {
     font-size: 11px;
     color: var(--text-muted);

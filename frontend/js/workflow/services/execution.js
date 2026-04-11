@@ -8,6 +8,8 @@ class ExecutionManager {
     this.workflowSessionId = null;
     this.pollTimer = null;
     this.nodeStates = new Map();
+    this.wsListener = null;
+    this.wsSubscribedSessionId = null;
   }
 
   async startExecution(workflowId, runOptions = {}) {
@@ -183,6 +185,23 @@ class ExecutionManager {
       this.eventSource.close();
       this.eventSource = null;
     }
+
+    if (
+      this.wsSubscribedSessionId &&
+      window.OSA &&
+      typeof OSA.wsUnsubscribeSession === 'function' &&
+      OSA.getWebSocket &&
+      OSA.getWebSocket() &&
+      OSA.getWebSocket().readyState === WebSocket.OPEN
+    ) {
+      OSA.wsUnsubscribeSession(this.wsSubscribedSessionId).catch(() => {});
+    }
+    if (this.wsListener && window.OSA && typeof OSA.removeWsEventListener === 'function') {
+      OSA.removeWsEventListener(this.wsListener);
+      this.wsListener = null;
+    }
+    this.wsSubscribedSessionId = null;
+
     this.workflowSessionId = null;
   }
 
@@ -261,6 +280,41 @@ class ExecutionManager {
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;
+    }
+
+    if (this.wsListener && window.OSA && typeof OSA.removeWsEventListener === 'function') {
+      OSA.removeWsEventListener(this.wsListener);
+      this.wsListener = null;
+    }
+
+    const ws = (window.OSA && typeof OSA.getWebSocket === 'function') ? OSA.getWebSocket() : null;
+    if (
+      ws &&
+      ws.readyState === WebSocket.OPEN &&
+      window.OSA &&
+      typeof OSA.addWsEventListener === 'function' &&
+      typeof OSA.wsSubscribeSession === 'function'
+    ) {
+      this.wsSubscribedSessionId = sessionId;
+      this.wsListener = payload => {
+        if (payload && payload.method === 'ws.open') {
+          if (window.OSA && typeof OSA.wsSubscribeSession === 'function') {
+            OSA.wsSubscribeSession(sessionId, 0).catch(() => {});
+          }
+          return;
+        }
+        if (!payload || payload.method !== 'session.event') return;
+        if (payload.session_id !== sessionId) return;
+        if (!this.isWorkflowEvent(payload.event?.type)) return;
+        if (window.OSA && typeof OSA.handleAgentEvent === 'function') {
+          OSA.handleAgentEvent(payload.event);
+        }
+      };
+      OSA.addWsEventListener(this.wsListener);
+      OSA.wsSubscribeSession(sessionId, 0).catch(err => {
+        console.warn('Failed to subscribe workflow events over websocket, falling back to SSE:', err);
+      });
+      return;
     }
 
     const token = (window.OSA && typeof OSA.getToken === 'function') ? OSA.getToken() : '';

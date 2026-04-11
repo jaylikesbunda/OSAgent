@@ -1,4 +1,4 @@
-use super::scheduler;
+use super::{scheduler, ws};
 use crate::agent::memory::MemoryEntry;
 use crate::agent::persona::{ActivePersona, PersonaOption};
 use crate::agent::runtime::AgentRuntime;
@@ -20,8 +20,8 @@ use crate::workflow::db::WorkflowDb;
 use crate::workflow::executor::WorkflowExecutor;
 use axum::{
     extract::{Extension, Json, Path, Query},
-    http::StatusCode,
-    response::{sse::Event, Sse},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{sse::Event, IntoResponse, Response, Sse},
     routing::{delete, get, patch, post, put},
     Router,
 };
@@ -131,6 +131,12 @@ pub struct SendMessageResponse {
     pub queue_item: Option<QueuedMessage>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct SessionEventsQuery {
+    #[serde(default)]
+    last_seq: Option<u64>,
+}
+
 const MAX_ATTACHMENT_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ATTACHMENT_TEXT_CHARS: usize = 24_000;
 const MAX_TOTAL_ATTACHMENT_CONTEXT_CHARS: usize = 72_000;
@@ -229,6 +235,16 @@ fn build_attachment_context_section(
 #[derive(Debug, Deserialize)]
 pub struct RollbackRequest {
     pub checkpoint_id: String,
+    #[serde(default)]
+    pub restore_files: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreSessionResponse {
+    pub session: Session,
+    pub restored_files: bool,
+    pub reverted_snapshots: usize,
+    pub reverted_snapshot_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,6 +417,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/sessions/:id/send", post(send_message))
         .route("/api/sessions/:id/cancel", post(cancel_session))
         .route("/api/sessions/:id/events", get(session_events))
+        .route("/ws", get(ws::ws_upgrade))
         .route("/api/sessions/:id/history", get(session_history))
         .route("/api/sessions/:id/todos", get(session_todos))
         .route("/api/sessions/:id/snapshots", get(list_file_snapshots))
@@ -418,6 +435,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/sessions/:id/checkpoints",
             get(list_checkpoints).post(create_checkpoint),
         )
+        .route("/api/sessions/:id/restore", post(restore_session_state))
         .route("/api/sessions/:id/rollback", post(rollback))
         .route("/api/sessions/:id/children", get(get_child_sessions))
         .route("/api/sessions/:id/subagents", get(get_session_subagents))
@@ -2019,15 +2037,29 @@ async fn cancel_session(
 
 async fn session_events(
     Extension(agent): Extension<Arc<AgentRuntime>>,
+    Query(params): Query<SessionEventsQuery>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = agent.subscribe_to_events();
+) -> Response {
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let last_seq = params.last_seq.unwrap_or(0).max(last_event_id);
+
+    let (replay_events, rx) = match agent.subscribe_to_events_from(&session_id, last_seq) {
+        Ok((replay, rx)) => (replay, rx),
+        Err(_) => (Vec::new(), agent.subscribe_to_events()),
+    };
     let session_id_filter = session_id.clone();
+    let replay_session_id_filter = session_id.clone();
 
     let initial_event = if agent.is_session_busy(&session_id) {
         Some(Ok(Event::default().data(
             serde_json::to_string(&crate::agent::events::AgentEvent::Thinking {
                 session_id: session_id.clone(),
+                sequence: 0,
                 message: "Session is processing...".to_string(),
                 timestamp: std::time::SystemTime::now(),
             })
@@ -2044,7 +2076,7 @@ async fn session_events(
                 Ok(event) => {
                     if event.session_id() == session_id {
                         let json = serde_json::to_string(&event).unwrap_or_default();
-                        Some(Ok(Event::default().data(json)))
+                        Some(Ok(Event::default().id(event.sequence().to_string()).data(json)))
                     } else {
                         None
                     }
@@ -2054,16 +2086,36 @@ async fn session_events(
         },
     );
 
-    let stream = if let Some(initial) = initial_event {
-        let initial_stream = futures::stream::once(async move { initial });
-        Box::pin(initial_stream.chain(event_stream))
-            as std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>
-    } else {
-        Box::pin(event_stream)
-            as std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>
-    };
+    let replay_stream = futures::stream::iter(replay_events.into_iter().filter_map(
+        move |event| {
+            if event.session_id() == replay_session_id_filter && event.sequence() > last_seq {
+                let json = serde_json::to_string(&event).ok()?;
+                Some(Ok(Event::default().id(event.sequence().to_string()).data(json)))
+            } else {
+                None
+            }
+        },
+    ));
 
-    Sse::new(stream)
+    let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
+        match initial_event {
+            Some(initial) => {
+                let initial_stream = futures::stream::once(async move { initial });
+                Box::pin(initial_stream.chain(replay_stream).chain(event_stream))
+            }
+            None => Box::pin(replay_stream.chain(event_stream)),
+        };
+
+    let mut response = Sse::new(stream).into_response();
+    response.headers_mut().insert(
+        "deprecation",
+        HeaderValue::from_static("true"),
+    );
+    response.headers_mut().insert(
+        "warning",
+        HeaderValue::from_static("299 - \"SSE endpoint is deprecated; use /ws\""),
+    );
+    response
 }
 
 async fn session_history(
@@ -2157,12 +2209,130 @@ async fn create_checkpoint(
     Ok(StatusCode::OK)
 }
 
+async fn resolve_checkpoint_for_session(
+    agent: &Arc<AgentRuntime>,
+    session_id: &str,
+    checkpoint_id: &str,
+) -> Result<crate::storage::Checkpoint, (StatusCode, Json<ErrorResponse>)> {
+    let checkpoints = agent.list_checkpoints(session_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    checkpoints
+        .into_iter()
+        .find(|item| item.id == checkpoint_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Checkpoint '{}' not found for session '{}'",
+                        checkpoint_id, session_id
+                    ),
+                }),
+            )
+        })
+}
+
+async fn restore_session_state(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<RollbackRequest>,
+) -> Result<Json<RestoreSessionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if payload.checkpoint_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "checkpoint_id is required".to_string(),
+            }),
+        ));
+    }
+
+    let checkpoint =
+        resolve_checkpoint_for_session(&agent, &session_id, payload.checkpoint_id.as_str()).await?;
+    let checkpoint_ms = checkpoint.created_at.timestamp_millis();
+
+    let session = agent.rollback(payload.checkpoint_id.as_str()).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    let mut reverted_snapshot_ids = Vec::new();
+    if payload.restore_files {
+        let snapshots = agent.list_file_snapshots(&session_id).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+        for snapshot in snapshots {
+            let snapshot_ms = snapshot.created_at.timestamp_millis();
+            let same_moment_same_tool = snapshot_ms == checkpoint_ms
+                && checkpoint
+                    .tool_name
+                    .as_deref()
+                    .is_some_and(|tool_name| tool_name == snapshot.tool_name.as_str());
+            let should_revert = snapshot_ms > checkpoint_ms || same_moment_same_tool;
+            if !should_revert {
+                continue;
+            }
+
+            agent
+                .revert_file_snapshot(&session_id, &snapshot.snapshot_id)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "Session state restored, but snapshot '{}' failed to revert: {}",
+                                snapshot.snapshot_id, e
+                            ),
+                        }),
+                    )
+                })?;
+
+            reverted_snapshot_ids.push(snapshot.snapshot_id);
+        }
+    }
+
+    Ok(Json(RestoreSessionResponse {
+        session,
+        restored_files: payload.restore_files,
+        reverted_snapshots: reverted_snapshot_ids.len(),
+        reverted_snapshot_ids,
+    }))
+}
+
 async fn rollback(
     Extension(agent): Extension<Arc<AgentRuntime>>,
-    Path(_id): Path<String>,
+    Path(session_id): Path<String>,
     Json(payload): Json<RollbackRequest>,
 ) -> Result<Json<Session>, (StatusCode, Json<ErrorResponse>)> {
-    let session = agent.rollback(&payload.checkpoint_id).await.map_err(|e| {
+    if payload.checkpoint_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "checkpoint_id is required".to_string(),
+            }),
+        ));
+    }
+
+    resolve_checkpoint_for_session(&agent, &session_id, payload.checkpoint_id.as_str()).await?;
+
+    let session = agent.rollback(payload.checkpoint_id.as_str()).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

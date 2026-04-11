@@ -6,6 +6,15 @@ OSA.escapeHtml = function(text) {
     return div.innerHTML;
 };
 
+OSA.timestampToMs = function(value) {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return value > 1e12 ? value : value * 1000;
+    }
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+};
+
 OSA.formatRelativeDateTime = function(value) {
     if (!value) return 'unknown time';
     const date = new Date(value);

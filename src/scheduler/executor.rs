@@ -84,6 +84,7 @@ impl JobExecutor {
 
         self.event_bus.emit(AgentEvent::ScheduledJobFired {
             session_id: job.session_id.clone(),
+            sequence: 0,
             job_id: job.id.clone(),
             job_type: job.job_type.clone(),
             message,

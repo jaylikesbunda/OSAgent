@@ -2498,6 +2498,7 @@ impl EventHandler for Handler {
                         question_id,
                         session_id,
                         questions,
+                        ..
                     }) => {
                         let channel_id = {
                             let map = get_session_to_channel().read().await;

@@ -341,6 +341,7 @@ pub struct StoredSessionEvent {
     pub id: String,
     pub session_id: String,
     pub event_type: String,
+    pub sequence: u64,
     pub timestamp: DateTime<Utc>,
     pub data: serde_json::Value,
 }

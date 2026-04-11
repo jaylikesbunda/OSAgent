@@ -45,6 +45,10 @@ OSA.deleteJson = async function(url) {
 };
 
 OSA.cancelSession = async function(sessionId) {
+    const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
+    if (ws && ws.readyState === WebSocket.OPEN && OSA.wsRequest) {
+        return OSA.wsRequest('session.cancel', { session_id: sessionId });
+    }
     const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/cancel`, {
         method: 'POST'
     });

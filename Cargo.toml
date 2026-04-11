@@ -12,7 +12,7 @@ repository = "https://github.com/osagent/osagent"
 tokio = { version = "1.35", features = ["full"] }
 
 # Web framework
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["fs", "cors", "trace", "compression-br", "compression-gzip", "compression-deflate", "limit", "set-header"] }
 
@@ -51,6 +51,7 @@ thiserror = "1.0"
 async-trait = "0.1"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-tungstenite = "0.24"
 shellexpand = "3.1"
 tempfile = "3.9"
 regex = "1.10"

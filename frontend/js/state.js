@@ -30,6 +30,7 @@ OSA.workspaceState = { activeWorkspace: 'default', workspaces: [] };
 OSA.cachedConfig = null;
 OSA.sessionTodos = [];
 OSA.sessionQueue = [];
+OSA.sessionCheckpoints = {};
 OSA.pendingQuestions = [];
 OSA.pendingQuestionId = '';
 OSA.currentQuestionIndex = 0;
@@ -103,6 +104,20 @@ OSA.getSessionTodos = () => OSA.sessionTodos;
 OSA.setSessionTodos = t => OSA.sessionTodos = t;
 OSA.getSessionQueue = () => OSA.sessionQueue;
 OSA.setSessionQueue = q => OSA.sessionQueue = Array.isArray(q) ? q : [];
+OSA.getSessionCheckpoints = sessionId => {
+    if (!sessionId) return [];
+    const checkpoints = OSA.sessionCheckpoints[sessionId];
+    return Array.isArray(checkpoints) ? checkpoints : [];
+};
+OSA.setSessionCheckpoints = (sessionId, checkpoints) => {
+    if (!sessionId) return;
+    OSA.sessionCheckpoints[sessionId] = Array.isArray(checkpoints) ? checkpoints : [];
+};
+OSA.clearSessionCheckpoints = sessionId => {
+    if (!sessionId) return;
+    delete OSA.sessionCheckpoints[sessionId];
+};
+OSA.resetSessionCheckpoints = () => OSA.sessionCheckpoints = {};
 OSA.getPendingQuestions = () => OSA.pendingQuestions;
 OSA.setPendingQuestions = q => OSA.pendingQuestions = q;
 OSA.getPendingQuestionId = () => OSA.pendingQuestionId;

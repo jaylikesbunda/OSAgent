@@ -496,15 +496,211 @@ OSA.commitStreamingAssistantSegment = function() {
         return;
     }
 
-    const actionsEl = message.querySelector('.message-actions');
-    if (actionsEl && rawText) {
-        actionsEl.style.display = '';
-    }
+    const session = OSA.getCurrentSession();
+    const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
+    OSA.updateAssistantMessageActions(message, sourceMessage);
 
     const chain = OSA.getMessageChain();
     chain.lastAssistantDomId = domId;
 
     OSA.resetStreamingMessage();
+};
+
+OSA.describeCheckpointForUi = function(checkpoint) {
+    const timeLabel = checkpoint?.created_at
+        ? OSA.formatRelativeDateTime(checkpoint.created_at)
+        : 'unknown time';
+    const toolLabel = checkpoint?.tool_name ? ` via ${checkpoint.tool_name}` : '';
+    return `${timeLabel}${toolLabel}`;
+};
+
+OSA.findNearestCheckpointForMessage = function(messageTimestamp) {
+    const currentSession = OSA.getCurrentSession();
+    if (!currentSession || !currentSession.id || typeof OSA.getSessionCheckpoints !== 'function') return null;
+
+    const messageTsMs = OSA.timestampToMs(messageTimestamp);
+    if (messageTsMs === null) return null;
+
+    const checkpoints = OSA.getSessionCheckpoints(currentSession.id);
+    for (const checkpoint of checkpoints) {
+        const checkpointTs = OSA.timestampToMs(checkpoint?.created_at);
+        if (checkpointTs === null) continue;
+        if (checkpointTs <= messageTsMs) {
+            return checkpoint;
+        }
+    }
+
+    return null;
+};
+
+OSA.renderAssistantActionButtons = function(checkpoint) {
+    let html = '<button class="msg-action-btn msg-action-copy" onclick="OSA.copyAssistantMessageElement(this)" title="Copy">Copy</button>';
+
+    if (checkpoint && checkpoint.id) {
+        const label = OSA.describeCheckpointForUi(checkpoint);
+        html += '<button class="msg-action-btn msg-action-restore" data-checkpoint-id="'
+            + OSA.escapeHtml(checkpoint.id)
+            + '" onclick="OSA.restoreCheckpointFromButton(this)" title="'
+            + OSA.escapeHtml('Restore to checkpoint (' + label + ')')
+            + '">Restore</button>';
+    }
+
+    return html;
+};
+
+OSA.updateAssistantMessageActions = function(messageEl, sourceMessage) {
+    if (!messageEl) return;
+    const actionsEl = messageEl.querySelector('.message-actions');
+    if (!actionsEl) return;
+
+    const contentEl = messageEl.querySelector('.message-content');
+    const rawText = contentEl ? (contentEl.dataset.rawText || contentEl.textContent || '') : '';
+    if (!rawText.trim()) {
+        actionsEl.style.display = 'none';
+        return;
+    }
+
+    const durationEl = actionsEl.querySelector('.turn-duration');
+    const tpsEl = actionsEl.querySelector('.turn-tokens');
+
+    const sourceTimestamp = sourceMessage?.timestamp || messageEl.dataset.messageTimestamp || '';
+    if (sourceTimestamp) {
+        messageEl.dataset.messageTimestamp = sourceTimestamp;
+    }
+
+    const checkpoint = OSA.findNearestCheckpointForMessage(sourceTimestamp);
+    actionsEl.innerHTML = OSA.renderAssistantActionButtons(checkpoint);
+
+    const copyBtn = actionsEl.querySelector('.msg-action-copy');
+    if (tpsEl && copyBtn) {
+        copyBtn.after(tpsEl);
+    } else if (tpsEl) {
+        actionsEl.appendChild(tpsEl);
+    }
+    if (durationEl) {
+        actionsEl.appendChild(durationEl);
+    }
+
+    actionsEl.style.display = '';
+};
+
+OSA.updateAssistantRestoreButtons = function() {
+    const currentSession = OSA.getCurrentSession();
+    if (!currentSession || !Array.isArray(currentSession.messages)) return;
+
+    document.querySelectorAll('#messages .message.assistant').forEach(function(messageEl) {
+        const messageIndex = Number.parseInt(messageEl.dataset.messageIndex || '', 10);
+        const sourceMessage = Number.isInteger(messageIndex) ? currentSession.messages[messageIndex] : null;
+        OSA.updateAssistantMessageActions(messageEl, sourceMessage);
+    });
+};
+
+OSA.restoreCheckpointFromButton = function(button) {
+    const checkpointId = button?.dataset?.checkpointId || '';
+    if (!checkpointId) return;
+    OSA.restoreCheckpoint(checkpointId, button);
+};
+
+OSA.shouldSnapshotBeRestoredForCheckpoint = function(snapshot, checkpoint) {
+    if (!snapshot || !checkpoint) return false;
+
+    const snapshotMs = OSA.timestampToMs(snapshot.created_at);
+    const checkpointMs = OSA.timestampToMs(checkpoint.created_at);
+    if (snapshotMs === null || checkpointMs === null) return false;
+
+    if (snapshotMs > checkpointMs) {
+        return true;
+    }
+
+    if (snapshotMs === checkpointMs) {
+        const checkpointTool = checkpoint.tool_name || '';
+        return !!checkpointTool && checkpointTool === (snapshot.tool_name || '');
+    }
+
+    return false;
+};
+
+OSA.fetchRestorePlan = async function(sessionId, checkpoint) {
+    if (!sessionId || !checkpoint?.id) {
+        return { snapshots: [], count: 0 };
+    }
+
+    const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/snapshots`);
+    const data = await res.json().catch(() => []);
+    if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+    }
+
+    const snapshots = (Array.isArray(data) ? data : []).filter(function(snapshot) {
+        return OSA.shouldSnapshotBeRestoredForCheckpoint(snapshot, checkpoint);
+    });
+
+    return {
+        snapshots,
+        count: snapshots.length,
+    };
+};
+
+OSA.restoreCheckpoint = async function(checkpointId, button) {
+    const currentSession = OSA.getCurrentSession();
+    if (!currentSession || !currentSession.id) return;
+
+    const sessionId = currentSession.id;
+    const checkpoints = (typeof OSA.getSessionCheckpoints === 'function')
+        ? OSA.getSessionCheckpoints(sessionId)
+        : [];
+    const checkpoint = checkpoints.find(function(item) { return item.id === checkpointId; });
+    const checkpointLabel = checkpoint
+        ? OSA.describeCheckpointForUi(checkpoint)
+        : 'the selected checkpoint';
+
+    let plan = { snapshots: [], count: 0 };
+    try {
+        if (checkpoint) {
+            plan = await OSA.fetchRestorePlan(sessionId, checkpoint);
+        }
+    } catch (error) {
+        console.warn('Failed to fetch restore plan:', error);
+    }
+
+    const snapshotCount = plan.count || 0;
+    const confirmMessage = snapshotCount > 0
+        ? `Restore this session to ${checkpointLabel}? This will replace session state and revert ${snapshotCount} OSA file snapshot${snapshotCount === 1 ? '' : 's'} captured after that point.`
+        : `Restore this session to ${checkpointLabel}? This will replace the current session state. No matching OSA file snapshots were found to revert.`;
+    const confirmed = confirm(confirmMessage);
+    if (!confirmed) return;
+
+    const restoreButton = button || null;
+    const previousLabel = restoreButton ? restoreButton.textContent : '';
+    if (restoreButton) {
+        restoreButton.disabled = true;
+        restoreButton.textContent = 'Restoring...';
+    }
+
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/restore`, {
+            method: 'POST',
+            body: JSON.stringify({ checkpoint_id: checkpointId, restore_files: true }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+
+        if (typeof OSA.loadSessionCheckpoints === 'function') {
+            await OSA.loadSessionCheckpoints(sessionId, { silent: true });
+        }
+        await OSA.selectSession(sessionId);
+        const revertedCount = Number.isFinite(data?.reverted_snapshots) ? data.reverted_snapshots : snapshotCount;
+        alert(`Session restored to checkpoint. Reverted ${revertedCount} file snapshot${revertedCount === 1 ? '' : 's'}.`);
+    } catch (error) {
+        alert(`Failed to restore checkpoint: ${error.message || 'Unknown error'}`);
+    } finally {
+        if (restoreButton) {
+            restoreButton.disabled = false;
+            restoreButton.textContent = previousLabel || 'Restore';
+        }
+    }
 };
 
 OSA.createAssistantMessageShell = function() {
@@ -522,7 +718,7 @@ OSA.createAssistantMessageShell = function() {
         <div class="message-role">OSA</div>
         <div class="message-content"></div>
         <div class="message-actions" style="display:none">
-            <button class="msg-action-btn" onclick="OSA.copyAssistantMessage('${domId}')" title="Copy">Copy</button>
+            ${OSA.renderAssistantActionButtons(null)}
         </div>
     `;
     messagesDiv.appendChild(message);
@@ -699,8 +895,10 @@ OSA.completeAssistantResponse = function(usage) {
             OSA.updateTodoDock();
             return;
         }
+        const session = OSA.getCurrentSession();
+        const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
+        OSA.updateAssistantMessageActions(message, sourceMessage);
         const actionsEl = message.querySelector('.message-actions');
-        if (actionsEl && rawText) actionsEl.style.display = '';
 
         const startTime = OSA.getTurnStartTime();
         if (startTime) {
@@ -718,7 +916,7 @@ OSA.completeAssistantResponse = function(usage) {
                 if (!tpsEl) {
                     tpsEl = document.createElement('span');
                     tpsEl.className = 'turn-tokens';
-                    const copyBtn = actionsEl ? actionsEl.querySelector('.msg-action-btn') : null;
+                    const copyBtn = actionsEl ? actionsEl.querySelector('.msg-action-copy') : null;
                     if (copyBtn) {
                         copyBtn.after(tpsEl);
                     } else if (durationEl) {
@@ -744,6 +942,10 @@ OSA.completeAssistantResponse = function(usage) {
     OSA.setTurnStartTime(null);
     OSA.resetStreamingMessage();
     OSA.updateTodoDock();
+    const currentSession = OSA.getCurrentSession();
+    if (currentSession && currentSession.id && typeof OSA.loadSessionCheckpoints === 'function') {
+        OSA.loadSessionCheckpoints(currentSession.id, { silent: true });
+    }
 };
 
 OSA.pruneEmptyStreamingMessage = function() {
@@ -775,7 +977,7 @@ OSA.copyAssistantMessage = function(domId) {
     const text = contentEl ? (contentEl.dataset.rawText || contentEl.textContent) : '';
     if (!text) return;
     navigator.clipboard.writeText(text).then(() => {
-        const btn = message.querySelector('.msg-action-btn');
+        const btn = message.querySelector('.msg-action-copy');
         if (btn) { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 2000); }
     });
 };
@@ -818,7 +1020,7 @@ OSA.showErrorCard = function(errorMsg) {
 };
 
 OSA.formatMessage = function(text) {
-    const escaped = OSA.escapeHtml(text);
+    const escaped = OSA.escapeHtml((text || '').replace(/\n+$/, ''));
     const lines = escaped.split('\n');
     let html = '';
     let listItems = [];
@@ -1044,7 +1246,7 @@ OSA.renderMessages = function(messages) {
                 ? ''
                 : `<div class="message-content">${contentHtml}</div>`;
             const actionsHtml = (m.role === 'assistant' && (m.content || '').trim())
-                ? `<div class="message-actions"><button class="msg-action-btn" onclick="OSA.copyAssistantMessageElement(this)" title="Copy">Copy</button></div>`
+                ? `<div class="message-actions">${OSA.renderAssistantActionButtons(OSA.findNearestCheckpointForMessage(m.timestamp))}</div>`
                 : '';
             const attachmentItems = [];
             if (m.role === 'user' && Array.isArray(m.images)) {
@@ -1054,7 +1256,7 @@ OSA.renderMessages = function(messages) {
                 m.metadata.attachments.forEach(att => attachmentItems.push(att));
             }
             const attachmentsHtml = OSA.renderAttachmentMarkup(attachmentItems);
-            return `<div class="message ${m.role}" data-ts="${ts}" data-message-index="${originalIndex}">
+            return `<div class="message ${m.role}" data-ts="${ts}" data-message-index="${originalIndex}" data-message-timestamp="${OSA.escapeHtml(m.timestamp || '')}">
                 <div class="message-role">${m.role === 'user' ? 'You' : 'OSA'}</div>
                 ${thinkingHtml}
                 ${contentBlock}

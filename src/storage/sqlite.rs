@@ -241,6 +241,7 @@ impl SqliteStorage {
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
+                    sequence INTEGER NOT NULL DEFAULT 0,
                     timestamp INTEGER NOT NULL,
                     data BLOB NOT NULL,
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -349,6 +350,26 @@ impl SqliteStorage {
                 "#,
             )
             .map_err(OSAgentError::Storage)?;
+
+            let has_event_sequence: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('session_events') WHERE name='sequence'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !has_event_sequence {
+                conn.execute(
+                    "ALTER TABLE session_events ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_events_seq ON session_events(session_id, sequence)",
+                [],
+            )?;
             Ok(())
         })
     }
@@ -765,21 +786,33 @@ impl SqliteStorage {
         event_type: &str,
         data: serde_json::Value,
     ) -> Result<StoredSessionEvent> {
+        self.append_session_event_with_sequence(session_id, event_type, data, 0)
+    }
+
+    pub fn append_session_event_with_sequence(
+        &self,
+        session_id: &str,
+        event_type: &str,
+        data: serde_json::Value,
+        sequence: u64,
+    ) -> Result<StoredSessionEvent> {
         let event = StoredSessionEvent {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
             event_type: event_type.to_string(),
+            sequence,
             timestamp: Utc::now(),
             data,
         };
 
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO session_events (id, session_id, event_type, timestamp, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO session_events (id, session_id, event_type, sequence, timestamp, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     event.id,
                     event.session_id,
                     event.event_type,
+                    event.sequence,
                     event.timestamp.timestamp(),
                     serde_json::to_vec(&event.data).unwrap(),
                 ],
@@ -793,7 +826,7 @@ impl SqliteStorage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT id, session_id, event_type, timestamp, data FROM session_events WHERE session_id = ?1 ORDER BY timestamp ASC",
+                    "SELECT id, session_id, event_type, sequence, timestamp, data FROM session_events WHERE session_id = ?1 ORDER BY sequence ASC, timestamp ASC",
                 )
                 .map_err(OSAgentError::Storage)?;
 
@@ -803,9 +836,10 @@ impl SqliteStorage {
                         id: row.get(0)?,
                         session_id: row.get(1)?,
                         event_type: row.get(2)?,
-                        timestamp: chrono::DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
+                        sequence: row.get(3)?,
+                        timestamp: chrono::DateTime::from_timestamp(row.get::<_, i64>(4)?, 0)
                             .unwrap_or_else(Utc::now),
-                        data: serde_json::from_slice(&row.get::<_, Vec<u8>>(4)?)
+                        data: serde_json::from_slice(&row.get::<_, Vec<u8>>(5)?)
                             .unwrap_or_else(|_| serde_json::json!({})),
                     })
                 })
@@ -813,6 +847,51 @@ impl SqliteStorage {
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(OSAgentError::Storage)?;
             Ok(items)
+        })
+    }
+
+    pub fn list_session_events_from(
+        &self,
+        session_id: &str,
+        from_sequence: u64,
+    ) -> Result<Vec<StoredSessionEvent>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, session_id, event_type, sequence, timestamp, data FROM session_events WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence ASC, timestamp ASC",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let items = stmt
+                .query_map(params![session_id, from_sequence], |row| {
+                    Ok(StoredSessionEvent {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        event_type: row.get(2)?,
+                        sequence: row.get(3)?,
+                        timestamp: chrono::DateTime::from_timestamp(row.get::<_, i64>(4)?, 0)
+                            .unwrap_or_else(Utc::now),
+                        data: serde_json::from_slice(&row.get::<_, Vec<u8>>(5)?)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(items)
+        })
+    }
+
+    pub fn latest_session_event_sequence(&self, session_id: &str) -> Result<u64> {
+        self.with_conn(|conn| {
+            let max_seq: Option<u64> = conn
+                .query_row(
+                    "SELECT MAX(sequence) FROM session_events WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok(max_seq.unwrap_or(0))
         })
     }
 

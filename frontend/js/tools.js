@@ -80,7 +80,9 @@ OSA.handleAgentEvent = function(event) {
     }
 
     const chain = OSA.getMessageChain();
-    const seq = ++chain.eventSeqNumber;
+    const hasServerSeq = Number.isFinite(event.sequence);
+    const seq = hasServerSeq ? Number(event.sequence) : (chain.eventSeqNumber + 1);
+    chain.eventSeqNumber = Math.max(chain.eventSeqNumber, seq);
     const prevType = chain.lastEventType;
 
     switch (event.type) {

@@ -870,6 +870,7 @@ impl Coordinator {
     fn emit_phase(&self, session_id: &str, phase: &CoordinatorPhase, workers_spawned: usize) {
         self.event_bus.emit(AgentEvent::CoordinatorPhase {
             session_id: session_id.to_string(),
+            sequence: 0,
             parent_session_id: session_id.to_string(),
             phase: phase.to_string(),
             workers_spawned,

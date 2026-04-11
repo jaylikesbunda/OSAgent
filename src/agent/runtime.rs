@@ -332,7 +332,7 @@ impl AgentRuntime {
         }
         log_phase("plugin_init", &mut phase_start);
 
-        let event_bus = EventBus::new();
+        let event_bus = EventBus::new_with_storage(storage.clone());
 
         let skill_loader = if config.tools.skills.enabled {
             let skills_dir =
@@ -506,6 +506,14 @@ impl AgentRuntime {
 
     pub fn subscribe_to_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
         self.event_bus.subscribe()
+    }
+
+    pub fn subscribe_to_events_from(
+        &self,
+        session_id: &str,
+        from_sequence: u64,
+    ) -> Result<(Vec<AgentEvent>, tokio::sync::broadcast::Receiver<AgentEvent>)> {
+        self.event_bus.subscribe_from(session_id, from_sequence)
     }
 
     pub async fn answer_question(&self, question_id: &str, answers: Vec<Vec<String>>) -> bool {
@@ -807,6 +815,7 @@ impl AgentRuntime {
             }
             self.event_bus.emit(AgentEvent::QueuedMessageDispatched {
                 session_id: session_id.to_string(),
+                sequence: 0,
                 queue_entry_id: queue_entry_id.clone(),
                 client_message_id: queued_client_message_id
                     .clone()
@@ -823,6 +832,7 @@ impl AgentRuntime {
         // Emit thinking event
         self.event_bus.emit(AgentEvent::Thinking {
             session_id: session_id.to_string(),
+            sequence: 0,
             message: format!("Processing your request... started by {}", active_run.user),
             timestamp: SystemTime::now(),
         });
@@ -866,6 +876,7 @@ impl AgentRuntime {
             if pending_tool_followup {
                 self.event_bus.emit(AgentEvent::Thinking {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     message: format!("Processing tool results... iteration {}", iteration),
                     timestamp: SystemTime::now(),
                 });
@@ -878,6 +889,7 @@ impl AgentRuntime {
                     warn!("Operation cancelled for session {} at iteration {}", session_id, iteration);
                     self.event_bus.emit(AgentEvent::Cancelled {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
@@ -1024,6 +1036,7 @@ impl AgentRuntime {
                         )?;
                         self.event_bus.emit(AgentEvent::Compaction {
                             session_id: session_id.to_string(),
+                            sequence: 0,
                             pruned_messages: pruned,
                             compacted_messages: compacted,
                             replayed,
@@ -1092,6 +1105,7 @@ impl AgentRuntime {
 
                 self.event_bus.emit(AgentEvent::ContextUpdate {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     context_window: window,
                     estimated_tokens: if condensed { post_tokens } else { pre_tokens },
                     budget_tokens: budget,
@@ -1131,6 +1145,7 @@ impl AgentRuntime {
                     warn!("Operation cancelled for session {} during provider stream setup", session_id);
                     self.event_bus.emit(AgentEvent::Cancelled {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
@@ -1152,6 +1167,7 @@ impl AgentRuntime {
                             error!("Provider stream error in session {}: {}", session_id, e);
                             self.event_bus.emit(AgentEvent::Error {
                                 session_id: session_id.to_string(),
+                                sequence: 0,
                                 error: e.to_string(),
                                 recoverable: e.is_recoverable(),
                                 timestamp: SystemTime::now(),
@@ -1166,6 +1182,7 @@ impl AgentRuntime {
                             warn!("Operation cancelled for session {} during provider call", session_id);
                             self.event_bus.emit(AgentEvent::Cancelled {
                                 session_id: session_id.to_string(),
+                                sequence: 0,
                                 timestamp: SystemTime::now(),
                             });
                             return Err(OSAgentError::Session("Operation cancelled".to_string()));
@@ -1175,6 +1192,7 @@ impl AgentRuntime {
                                 error!("Provider error in session {}: {}", session_id, e);
                                 self.event_bus.emit(AgentEvent::Error {
                                     session_id: session_id.to_string(),
+                                    sequence: 0,
                                     error: e.to_string(),
                                     recoverable: e.is_recoverable(),
                                     timestamp: SystemTime::now(),
@@ -1192,6 +1210,7 @@ impl AgentRuntime {
                     );
                     self.event_bus.emit(AgentEvent::Error {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         error: error.to_string(),
                         recoverable: error.is_recoverable(),
                         timestamp: SystemTime::now(),
@@ -1215,6 +1234,7 @@ impl AgentRuntime {
                         warn!("Operation cancelled for session {} during provider fallback call", session_id);
                         self.event_bus.emit(AgentEvent::Cancelled {
                             session_id: session_id.to_string(),
+                            sequence: 0,
                             timestamp: SystemTime::now(),
                         });
                         return Err(OSAgentError::Session("Operation cancelled".to_string()));
@@ -1224,6 +1244,7 @@ impl AgentRuntime {
                             error!("Provider fallback error in session {}: {}", session_id, e);
                             self.event_bus.emit(AgentEvent::Error {
                                 session_id: session_id.to_string(),
+                                sequence: 0,
                                 error: e.to_string(),
                                 recoverable: e.is_recoverable(),
                                 timestamp: SystemTime::now(),
@@ -1276,6 +1297,7 @@ impl AgentRuntime {
                             if let Some(content) = fallback.content.as_deref() {
                                 self.event_bus.emit(AgentEvent::ResponseStart {
                                     session_id: session_id.to_string(),
+                                    sequence: 0,
                                     timestamp: SystemTime::now(),
                                 });
                                 self.emit_response_chunks(session_id, content);
@@ -1305,6 +1327,7 @@ impl AgentRuntime {
                 )?;
                 self.event_bus.emit(AgentEvent::Retry {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     scope: "provider".to_string(),
                     attempt_count: response.retry_count,
                     reason: if response.context_compressed {
@@ -1381,6 +1404,7 @@ impl AgentRuntime {
                 if !has_tool_calls {
                     self.event_bus.emit(AgentEvent::ResponseStart {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
 
@@ -1481,6 +1505,7 @@ impl AgentRuntime {
 
                         self.event_bus.emit(AgentEvent::ToolComplete {
                             session_id: session_id.to_string(),
+                            sequence: 0,
                             tool_call_id: tool_call.id.clone(),
                             tool_name: tool_call.name.clone(),
                             success,
@@ -1530,6 +1555,7 @@ impl AgentRuntime {
                             let message_index = (session.messages.len() as i32) - 1;
                             self.event_bus.emit(AgentEvent::ToolStart {
                                 session_id: session_id.to_string(),
+                                sequence: 0,
                                 tool_call_id: tool_call.id.clone(),
                                 tool_name: tool_call.name.clone(),
                                 arguments: tool_call.arguments.clone(),
@@ -1545,6 +1571,7 @@ impl AgentRuntime {
 
                             self.event_bus.emit(AgentEvent::ToolComplete {
                                 session_id: session_id.to_string(),
+                                sequence: 0,
                                 tool_call_id: tool_call.id.clone(),
                                 tool_name: tool_call.name.clone(),
                                 success: false,
@@ -1611,6 +1638,7 @@ impl AgentRuntime {
 
                             self.event_bus.emit(AgentEvent::ToolComplete {
                                 session_id: session_id.to_string(),
+                                sequence: 0,
                                 tool_call_id: tool_call.id.clone(),
                                 tool_name: tool_call.name.clone(),
                                 success: false,
@@ -1648,6 +1676,7 @@ impl AgentRuntime {
                         // Emit tool progress - preparing
                         self.event_bus.emit(AgentEvent::ToolProgress {
                             session_id: session_id.to_string(),
+                            sequence: 0,
                             tool_call_id: tool_call.id.clone(),
                             tool_name: tool_call.name.clone(),
                             status: ToolStatus::Preparing,
@@ -1659,6 +1688,7 @@ impl AgentRuntime {
                         // Emit tool progress - executing
                         self.event_bus.emit(AgentEvent::ToolProgress {
                             session_id: session_id.to_string(),
+                            sequence: 0,
                             tool_call_id: tool_call.id.clone(),
                             tool_name: tool_call.name.clone(),
                             status: ToolStatus::Executing,
@@ -1676,6 +1706,7 @@ impl AgentRuntime {
                                 warn!("Operation cancelled before tool execution for session {}", session_id);
                                 self.event_bus.emit(AgentEvent::ToolComplete {
                                     session_id: session_id.to_string(),
+                                    sequence: 0,
                                     tool_call_id: tool_call.id.clone(),
                                     tool_name: tool_call.name.clone(),
                                     success: false,
@@ -1691,6 +1722,7 @@ impl AgentRuntime {
                                 ));
                                 self.event_bus.emit(AgentEvent::Cancelled {
                                     session_id: session_id.to_string(),
+                                    sequence: 0,
                                     timestamp: SystemTime::now(),
                                 });
                                 return Err(OSAgentError::Session("Operation cancelled".to_string()));
@@ -1752,6 +1784,7 @@ impl AgentRuntime {
                         // Emit tool progress - finalizing
                         self.event_bus.emit(AgentEvent::ToolProgress {
                             session_id: session_id.to_string(),
+                            sequence: 0,
                             tool_call_id: tool_call.id.clone(),
                             tool_name: tool_call.name.clone(),
                             status: ToolStatus::Finalizing,
@@ -1840,6 +1873,7 @@ impl AgentRuntime {
                         if tool_call.name != "batch" {
                             self.event_bus.emit(AgentEvent::ToolComplete {
                                 session_id: session_id.to_string(),
+                                sequence: 0,
                                 tool_call_id: tool_call.id.clone(),
                                 tool_name: tool_call.name.clone(),
                                 success,
@@ -1904,6 +1938,7 @@ impl AgentRuntime {
                 )?;
                 self.event_bus.emit(AgentEvent::StepFinish {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     iteration,
                     tool_success_count,
                     tool_failure_count,
@@ -1966,6 +2001,7 @@ impl AgentRuntime {
                 )?;
                 self.event_bus.emit(AgentEvent::StepFinish {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     iteration,
                     tool_success_count,
                     tool_failure_count,
@@ -1974,6 +2010,7 @@ impl AgentRuntime {
                 });
                 self.event_bus.emit(AgentEvent::ResponseComplete {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     timestamp: SystemTime::now(),
                     usage: if total_tokens > 0 {
                         Some(EventTokenUsage {
@@ -2110,6 +2147,7 @@ impl AgentRuntime {
         if !response_complete_emitted {
             self.event_bus.emit(AgentEvent::ResponseComplete {
                 session_id: session_id.to_string(),
+                sequence: 0,
                 timestamp: SystemTime::now(),
                 usage: if total_tokens > 0 {
                     Some(EventTokenUsage {
@@ -2171,12 +2209,14 @@ impl AgentRuntime {
 
         self.event_bus.emit(AgentEvent::ThinkingStart {
             session_id: session_id.to_string(),
+            sequence: 0,
             timestamp: SystemTime::now(),
         });
 
         self.emit_chunked_text(thinking, CHUNK_SIZE, |content| {
             self.event_bus.emit(AgentEvent::ThinkingDelta {
                 session_id: session_id.to_string(),
+                sequence: 0,
                 content,
                 timestamp: SystemTime::now(),
             });
@@ -2184,6 +2224,7 @@ impl AgentRuntime {
 
         self.event_bus.emit(AgentEvent::ThinkingEnd {
             session_id: session_id.to_string(),
+            sequence: 0,
             timestamp: SystemTime::now(),
         });
     }
@@ -2194,6 +2235,7 @@ impl AgentRuntime {
         self.emit_chunked_text(content, CHUNK_SIZE, |chunk_text| {
             self.event_bus.emit(AgentEvent::ResponseChunk {
                 session_id: session_id.to_string(),
+                sequence: 0,
                 content: chunk_text,
                 timestamp: SystemTime::now(),
             });
@@ -2278,6 +2320,7 @@ impl AgentRuntime {
                 if !thinking_started {
                     self.event_bus.emit(AgentEvent::ThinkingStart {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
                     thinking_started = true;
@@ -2285,6 +2328,7 @@ impl AgentRuntime {
 
                 self.event_bus.emit(AgentEvent::ThinkingDelta {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     content: delta.clone(),
                     timestamp: SystemTime::now(),
                 });
@@ -2294,6 +2338,7 @@ impl AgentRuntime {
                 if thinking_started {
                     self.event_bus.emit(AgentEvent::ThinkingEnd {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
                     thinking_started = false;
@@ -2301,6 +2346,7 @@ impl AgentRuntime {
                 if !response_started {
                     self.event_bus.emit(AgentEvent::ResponseStart {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
                     response_started = true;
@@ -2312,6 +2358,7 @@ impl AgentRuntime {
 
                 self.event_bus.emit(AgentEvent::ResponseChunk {
                     session_id: session_id.to_string(),
+                    sequence: 0,
                     content: delta.clone(),
                     timestamp: SystemTime::now(),
                 });
@@ -2321,6 +2368,7 @@ impl AgentRuntime {
                 if thinking_started {
                     self.event_bus.emit(AgentEvent::ThinkingEnd {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
                     thinking_started = false;
@@ -2328,6 +2376,7 @@ impl AgentRuntime {
                 if !response_started {
                     self.event_bus.emit(AgentEvent::ResponseStart {
                         session_id: session_id.to_string(),
+                        sequence: 0,
                         timestamp: SystemTime::now(),
                     });
                     response_started = true;
@@ -2359,6 +2408,7 @@ impl AgentRuntime {
         if thinking_started {
             self.event_bus.emit(AgentEvent::ThinkingEnd {
                 session_id: session_id.to_string(),
+                sequence: 0,
                 timestamp: SystemTime::now(),
             });
         }
@@ -2669,6 +2719,7 @@ impl AgentRuntime {
     fn emit_reasoning_event(&self, session_id: &str, summary: impl Into<String>) {
         self.event_bus.emit(AgentEvent::Reasoning {
             session_id: session_id.to_string(),
+            sequence: 0,
             summary: summary.into(),
             timestamp: SystemTime::now(),
         });
@@ -2925,6 +2976,7 @@ impl AgentRuntime {
                     async move {
                         event_bus.emit(AgentEvent::ToolStart {
                             session_id: session_id.clone(),
+                            sequence: 0,
                             tool_call_id: internal_id.clone(),
                             tool_name: tool_name.clone(),
                             arguments: params.clone(),
@@ -2957,6 +3009,7 @@ impl AgentRuntime {
 
                         event_bus.emit(AgentEvent::ToolComplete {
                             session_id,
+                            sequence: 0,
                             tool_call_id: internal_id,
                             tool_name,
                             success,
@@ -3032,6 +3085,7 @@ impl AgentRuntime {
         for tool_call in tool_calls {
             self.event_bus.emit(AgentEvent::ToolStart {
                 session_id: session_id.clone(),
+                sequence: 0,
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 arguments: tool_call.arguments.clone(),
@@ -3047,6 +3101,7 @@ impl AgentRuntime {
                 for tool_call in tool_calls {
                     self.event_bus.emit(AgentEvent::ToolComplete {
                         session_id: session_id.clone(),
+                        sequence: 0,
                         tool_call_id: tool_call.id.clone(),
                         tool_name: tool_call.name.clone(),
                         success: false,
@@ -3208,6 +3263,7 @@ impl AgentRuntime {
     ) {
         event_bus.emit(AgentEvent::ToolProgress {
             session_id: session_id.to_string(),
+            sequence: 0,
             tool_call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
             status,
@@ -3229,6 +3285,7 @@ impl AgentRuntime {
         let metadata = Self::non_empty_tool_metadata(&result.metadata);
         event_bus.emit(AgentEvent::ToolComplete {
             session_id: session_id.to_string(),
+            sequence: 0,
             tool_call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
             success,

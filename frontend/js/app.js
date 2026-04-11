@@ -217,6 +217,7 @@ OSA.login = async function() {
 OSA.logout = function() {
     OSA.clearToken();
     OSA.setCurrentSession(null);
+    OSA.resetSessionCheckpoints();
     OSA.setSessionInspectorState({ history: [], snapshots: [] });
     
     const es = OSA.getEventSource();
@@ -228,6 +229,11 @@ OSA.logout = function() {
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         OSA.setEventReconnectTimer(null);
+    }
+    const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
+    if (ws) {
+        ws.close();
+        OSA.setWebSocket(null);
     }
     
     OSA.showLogin();
@@ -462,6 +468,7 @@ OSA.createSession = async function() {
         });
         const session = await res.json();
         OSA.setCurrentSession(session);
+        OSA.setSessionCheckpoints(session.id, []);
         OSA.getActiveTools().clear();
         OSA.parallelToolGroups = [];
         OSA.setSessionQueue([]);
@@ -499,6 +506,47 @@ OSA.refreshSessionQueue = async function(sessionId) {
         OSA.renderQueuedMessages(queue);
     }
     return queue;
+};
+
+OSA.loadSessionCheckpoints = async function(sessionId, options = {}) {
+    if (!sessionId) return [];
+
+    const requestId = options.requestId || 0;
+    const silent = !!options.silent;
+
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/checkpoints`);
+        if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return [];
+
+        const data = await res.json().catch(() => []);
+        if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return [];
+
+        if (!res.ok) {
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+
+        const checkpoints = Array.isArray(data) ? data : [];
+        checkpoints.sort(function(a, b) {
+            const left = OSA.timestampToMs(a?.created_at) || 0;
+            const right = OSA.timestampToMs(b?.created_at) || 0;
+            return right - left;
+        });
+
+        OSA.setSessionCheckpoints(sessionId, checkpoints);
+
+        const currentSession = OSA.getCurrentSession();
+        if (currentSession && currentSession.id === sessionId && typeof OSA.updateAssistantRestoreButtons === 'function') {
+            OSA.updateAssistantRestoreButtons();
+        }
+
+        return checkpoints;
+    } catch (error) {
+        OSA.setSessionCheckpoints(sessionId, []);
+        if (!silent) {
+            console.error('Failed to load session checkpoints:', error);
+        }
+        return [];
+    }
 };
 
 OSA.refreshCurrentSessionQueue = function() {
@@ -596,6 +644,10 @@ OSA.selectSession = async function(sessionId) {
         const pendingQueueRequest = fetch(`/api/sessions/${sessionId}/queue`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         }).catch(() => null);
+        const pendingCheckpointsRequest = OSA.loadSessionCheckpoints(sessionId, {
+            requestId,
+            silent: true,
+        });
 
         OSA.setCurrentSession(session);
         OSA.restoreContextState(session.id, session.context_state || null);
@@ -660,6 +712,9 @@ OSA.selectSession = async function(sessionId) {
             pendingSubagentsRequest,
             pendingQueueRequest
         ]);
+        if (!isCurrentSelection()) return;
+
+        await pendingCheckpointsRequest;
         if (!isCurrentSelection()) return;
 
         const tools = (toolStartsRes && toolStartsRes.ok) ? await toolStartsRes.json() : [];
@@ -923,10 +978,16 @@ OSA.clearSessions = async function() {
             throw new Error(data.error || `HTTP ${res.status}`);
         }
         OSA.setCurrentSession(null);
+        OSA.resetSessionCheckpoints();
         const es = OSA.getEventSource();
         if (es) {
             es.close();
             OSA.setEventSource(null);
+        }
+        const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
+        if (ws) {
+            ws.close();
+            OSA.setWebSocket(null);
         }
         document.getElementById('messages').innerHTML = `
             <div class="empty-state">
@@ -1006,18 +1067,30 @@ OSA.sendMessage = async function() {
 
     try {
         OSA.clearAttachmentStatus();
-        const res = await fetch(`/api/sessions/${currentSession.id}/send`, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OSA.getToken()}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ message, session_id: currentSession.id, client_message_id: clientMessageId, attachments: attachmentPayload })
-        });
-        const data = await res.json().catch(() => ({}));
-        
-        if (!res.ok) {
-            throw new Error(data.error || `HTTP ${res.status}`);
+        const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
+        const useWs = ws && ws.readyState === WebSocket.OPEN && attachmentPayload.length === 0 && OSA.wsRequest;
+
+        let data;
+        if (useWs) {
+            data = await OSA.wsRequest('session.send', {
+                session_id: currentSession.id,
+                content: message,
+                client_message_id: clientMessageId,
+            });
+        } else {
+            const res = await fetch(`/api/sessions/${currentSession.id}/send`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${OSA.getToken()}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ message, session_id: currentSession.id, client_message_id: clientMessageId, attachments: attachmentPayload })
+            });
+            data = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
         }
 
         if (data.queued) {
@@ -1147,6 +1220,15 @@ window.handleSendButtonClick = function() {
 };
 
 OSA.connectEventSource = function(sessionId) {
+    if (OSA.connectWebSocket && OSA.connectWebSocket(sessionId)) {
+        const existingES = OSA.getEventSource();
+        if (existingES) {
+            existingES.close();
+            OSA.setEventSource(null);
+        }
+        return;
+    }
+
     const existingES = OSA.getEventSource();
     if (existingES) {
         existingES.close();
@@ -1160,11 +1242,20 @@ OSA.connectEventSource = function(sessionId) {
     OSA.setEventSourceSessionId(sessionId);
 
     OSA.showConnectionStatus('connecting', 'Connecting...');
-    
+
+    const chain = OSA.getMessageChain ? OSA.getMessageChain() : null;
+    const lastSeq = chain && Number.isFinite(chain.eventSeqNumber)
+        ? chain.eventSeqNumber
+        : 0;
+
     const token = OSA.getToken ? OSA.getToken() : '';
+    const queryParts = [];
+    if (token) queryParts.push(`token=${encodeURIComponent(token)}`);
+    if (lastSeq > 0) queryParts.push(`last_seq=${encodeURIComponent(lastSeq)}`);
+    const query = queryParts.length ? `?${queryParts.join('&')}` : '';
     const sseUrl = token
-        ? `/api/sessions/${sessionId}/events?token=${encodeURIComponent(token)}`
-        : `/api/sessions/${sessionId}/events`;
+        ? `/api/sessions/${sessionId}/events${query}`
+        : `/api/sessions/${sessionId}/events${query}`;
     const es = new EventSource(sseUrl);
     
     es.onopen = () => {
@@ -1563,12 +1654,18 @@ OSA.deleteSession = async function(sessionId) {
             const data = await res.json().catch(() => ({}));
             throw new Error(data.error || `HTTP ${res.status}`);
         }
+        OSA.clearSessionCheckpoints(sessionId);
         if (OSA.getCurrentSession() && OSA.getCurrentSession().id === sessionId) {
             OSA.setCurrentSession(null);
             const es = OSA.getEventSource();
             if (es) {
                 es.close();
                 OSA.setEventSource(null);
+            }
+            const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
+            if (ws) {
+                ws.close();
+                OSA.setWebSocket(null);
             }
             document.getElementById('messages').innerHTML = `
                 <div class="empty-state">

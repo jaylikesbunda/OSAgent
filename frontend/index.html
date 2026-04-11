@@ -345,6 +345,7 @@
                         <option value="voice">Voice</option>
                     </optgroup>
                     <optgroup label="Advanced">
+                        <option value="doctor">Doctor</option>
                         <option value="memory">Memory</option>
                         <option value="skills">Skills</option>
                         <option value="security">Security</option>
@@ -382,6 +383,9 @@
                     </div>
                     <div class="settings-sidebar-section">
                         <div class="settings-sidebar-section-title">Advanced</div>
+                        <button class="settings-sidebar-item" data-tab="doctor" onclick="switchSettingsTab('doctor')">
+                            Doctor
+                        </button>
                         <button class="settings-sidebar-item" data-tab="memory" onclick="switchSettingsTab('memory')">
                             Memory
                         </button>
@@ -685,6 +689,22 @@
                         <div class="settings-group-title">Voice Models</div>
                         <div id="voice-models-browser" class="voice-models-browser">
                             <div class="loading-placeholder">Loading models...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-pane" id="pane-doctor">
+                    <div class="settings-pane-header">
+                        <h2>Doctor</h2>
+                        <p class="settings-pane-desc">Run quick health checks for auth, providers, voice, Discord, updates, and network configuration.</p>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title settings-group-title-inline">
+                            <span>System Health</span>
+                            <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.loadDoctorStatus()">Refresh</button>
+                        </div>
+                        <div id="doctor-status-grid" class="doctor-status-grid">
+                            <div class="doctor-status-empty">Loading health checks...</div>
                         </div>
                     </div>
                 </div>
@@ -1157,6 +1177,7 @@
     <script defer src="/static/js/providers.js"></script>
     <script defer src="/static/js/messages.js"></script>
     <script defer src="/static/js/tools.js"></script>
+    <script defer src="/static/js/ws.js"></script>
     <script defer src="/static/js/voice.js"></script>
     <script defer src="/static/js/workspace.js"></script>
     <script defer src="/static/js/persona.js"></script>

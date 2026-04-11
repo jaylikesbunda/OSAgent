@@ -249,6 +249,7 @@ OSA.loadSettings = async function() {
         await OSA.loadVoiceInstallStatus();
         await OSA.loadDiscordBotStatus();
         await OSA.renderSettingsProviders();
+        OSA.loadDoctorStatus();
     } catch (error) {
         console.error('Failed to load settings:', error);
     }
@@ -506,9 +507,220 @@ OSA.switchSettingsTab = async function(tabId) {
                 browser.innerHTML = `<div class="model-empty">Failed to load voice models: ${OSA.escapeHtml(error.message || 'Unknown error')}</div>`;
             }
         }
+    } else if (tabId === 'doctor') {
+        await OSA.loadDoctorStatus();
     } else if (tabId === 'skills') {
         await OSA.loadSkillsUI();
     }
+};
+
+OSA.fetchDoctorJson = async function(url) {
+    try {
+        const res = await OSA.fetchWithAuth(url);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        return { ok: true, data };
+    } catch (error) {
+        return { ok: false, error: error.message || 'Unknown error' };
+    }
+};
+
+OSA.renderDoctorStatus = function(checks) {
+    const grid = document.getElementById('doctor-status-grid');
+    if (!grid) return;
+
+    if (!Array.isArray(checks) || checks.length === 0) {
+        grid.innerHTML = '<div class="doctor-status-empty">No health checks available.</div>';
+        return;
+    }
+
+    grid.innerHTML = checks.map(function(check) {
+        const state = check.state || 'warn';
+        const badgeLabel = state === 'ok' ? 'OK' : (state === 'error' ? 'Error' : 'Warn');
+        const actions = Array.isArray(check.actions)
+            ? check.actions.map(function(action) {
+                return `<button type="button" class="btn-ghost btn-ghost-compact doctor-status-action" onclick="${action.onclick}">${OSA.escapeHtml(action.label)}</button>`;
+            }).join('')
+            : '';
+
+        return `
+            <div class="doctor-status-card ${OSA.escapeHtml(state)}">
+                <div class="doctor-status-header">
+                    <div class="doctor-status-title">${OSA.escapeHtml(check.title || 'Check')}</div>
+                    <span class="doctor-status-badge ${OSA.escapeHtml(state)}">${badgeLabel}</span>
+                </div>
+                <div class="doctor-status-detail">${OSA.escapeHtml(check.detail || '')}</div>
+                ${actions ? `<div class="doctor-status-actions">${actions}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+};
+
+OSA.loadDoctorStatus = async function() {
+    const grid = document.getElementById('doctor-status-grid');
+    if (!grid) return;
+
+    grid.innerHTML = '<div class="doctor-status-empty">Running health checks...</div>';
+
+    let config = OSA.getCachedConfig();
+    if (!config) {
+        const configResult = await OSA.fetchDoctorJson('/api/config');
+        if (configResult.ok) {
+            config = configResult.data;
+            OSA.setCachedConfig(config);
+        }
+    }
+
+    const [authResult, providersResult, voiceResult, discordResult, updateResult] = await Promise.all([
+        OSA.fetchDoctorJson('/api/auth/status'),
+        OSA.fetchDoctorJson('/api/providers'),
+        OSA.fetchDoctorJson('/api/voice/status'),
+        OSA.fetchDoctorJson('/api/discord/status'),
+        OSA.fetchDoctorJson('/api/update/status'),
+    ]);
+
+    const checks = [];
+
+    if (!authResult.ok) {
+        checks.push({
+            title: 'Auth',
+            state: 'error',
+            detail: `Failed to read auth status: ${authResult.error}`,
+            actions: [{ label: 'Security', onclick: "switchSettingsTab('security')" }],
+        });
+    } else {
+        const required = !!authResult.data.required;
+        checks.push({
+            title: 'Auth',
+            state: required ? 'ok' : 'warn',
+            detail: required
+                ? 'Password protection is enabled for the web UI.'
+                : 'Password protection is disabled for the web UI.',
+            actions: [{ label: 'Security', onclick: "switchSettingsTab('security')" }],
+        });
+    }
+
+    if (!providersResult.ok) {
+        checks.push({
+            title: 'Providers',
+            state: 'error',
+            detail: `Failed to read provider status: ${providersResult.error}`,
+            actions: [{ label: 'Models', onclick: "switchSettingsTab('models')" }],
+        });
+    } else {
+        const providers = Array.isArray(providersResult.data.providers) ? providersResult.data.providers : [];
+        if (providers.length === 0) {
+            checks.push({
+                title: 'Providers',
+                state: 'warn',
+                detail: 'No providers are configured yet.',
+                actions: [{ label: 'Connect Provider', onclick: "switchSettingsTab('models')" }],
+            });
+        } else {
+            const active = providers.find(function(provider) { return provider.is_default; }) || providers[0];
+            const activeModel = active.model || providersResult.data.default_model || 'provider default';
+            checks.push({
+                title: 'Providers',
+                state: 'ok',
+                detail: `${providers.length} configured. Active route: ${active.id} / ${activeModel}.`,
+                actions: [{ label: 'Manage Models', onclick: "switchSettingsTab('models')" }],
+            });
+        }
+    }
+
+    if (!voiceResult.ok) {
+        checks.push({
+            title: 'Voice',
+            state: 'error',
+            detail: `Failed to read voice status: ${voiceResult.error}`,
+            actions: [{ label: 'Voice Settings', onclick: "switchSettingsTab('voice')" }],
+        });
+    } else {
+        const voiceData = voiceResult.data || {};
+        const voiceEnabled = !!config?.voice?.enabled;
+        const whisperInstalled = !!voiceData.whisper_installed;
+        const piperInstalled = !!voiceData.piper_installed;
+        const state = (voiceEnabled && (whisperInstalled || piperInstalled)) ? 'ok' : 'warn';
+        const detailParts = [];
+        detailParts.push(voiceEnabled ? 'Voice features enabled.' : 'Voice features currently disabled.');
+        detailParts.push(`Whisper: ${whisperInstalled ? 'installed' : 'missing'}.`);
+        detailParts.push(`Piper: ${piperInstalled ? 'installed' : 'missing'}.`);
+        checks.push({
+            title: 'Voice',
+            state,
+            detail: detailParts.join(' '),
+            actions: [{ label: 'Voice Settings', onclick: "switchSettingsTab('voice')" }],
+        });
+    }
+
+    if (!discordResult.ok) {
+        checks.push({
+            title: 'Discord',
+            state: 'error',
+            detail: `Failed to read Discord status: ${discordResult.error}`,
+            actions: [{ label: 'Discord Settings', onclick: "switchSettingsTab('discord')" }],
+        });
+    } else {
+        const discord = discordResult.data || {};
+        let state = 'warn';
+        let detail = 'Discord integration is disabled.';
+        if (!discord.available) {
+            detail = 'Discord support is not available in this build.';
+        } else if (discord.running) {
+            state = 'ok';
+            detail = 'Discord bot is running.';
+        } else if (discord.enabled && discord.configured) {
+            detail = 'Discord bot is configured but not running.';
+        } else if (discord.enabled && !discord.configured) {
+            state = 'error';
+            detail = 'Discord bot is enabled but token is missing.';
+        }
+        checks.push({
+            title: 'Discord',
+            state,
+            detail,
+            actions: [{ label: 'Discord Settings', onclick: "switchSettingsTab('discord')" }],
+        });
+    }
+
+    if (!updateResult.ok) {
+        checks.push({
+            title: 'Updates',
+            state: 'error',
+            detail: `Failed to read update status: ${updateResult.error}`,
+            actions: [{ label: 'Updates', onclick: "switchSettingsTab('updates')" }],
+        });
+    } else {
+        const updateData = updateResult.data || {};
+        const isReady = updateData.status === 'ready';
+        checks.push({
+            title: 'Updates',
+            state: isReady ? 'warn' : 'ok',
+            detail: isReady
+                ? `Update ready to install${updateData.version ? ` (v${updateData.version})` : ''}.`
+                : 'No downloaded update pending installation.',
+            actions: [{ label: 'Updates', onclick: "switchSettingsTab('updates')" }],
+        });
+    }
+
+    const bind = config?.server?.bind || '127.0.0.1';
+    const port = config?.server?.port || 8765;
+    const passwordEnabled = !!config?.server?.password_enabled;
+    const networkOpen = bind === '0.0.0.0';
+    const networkState = networkOpen && !passwordEnabled ? 'error' : (networkOpen ? 'warn' : 'ok');
+    const networkDetail = networkOpen
+        ? `Listening on all interfaces (${bind}:${port}). ${passwordEnabled ? 'Password is enabled.' : 'Password is disabled.'}`
+        : `Listening on local interface (${bind}:${port}).`;
+    checks.push({
+        title: 'Network',
+        state: networkState,
+        detail: networkDetail,
+        actions: [{ label: 'Security', onclick: "switchSettingsTab('security')" }],
+    });
+
+    OSA.renderDoctorStatus(checks);
 };
 
 OSA.changePassword = async function() {
