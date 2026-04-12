@@ -1,0 +1,177 @@
+#app-view {
+    --preview-width: 420px;
+    position: relative;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    height: 100%;
+    overflow: hidden;
+}
+
+#app-view.with-preview {
+    grid-template-columns: auto minmax(0, 1fr) 6px minmax(280px, var(--preview-width));
+}
+
+#app-view > .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+}
+
+#app-view > .sidebar {
+    grid-column: 1;
+    min-height: 0;
+}
+
+#app-view > .main {
+    grid-column: 2;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+#app-view > .preview-resize-handle {
+    grid-column: 3;
+}
+
+#app-view > .file-preview-panel {
+    grid-column: 4;
+}
+
+.preview-resize-handle {
+    cursor: col-resize;
+    background: var(--border);
+    transition: background 0.15s ease;
+    min-height: 0;
+}
+
+.preview-resize-handle:hover {
+    background: var(--accent);
+}
+
+.file-preview-panel {
+    border-left: 1px solid var(--border);
+    background: var(--bg-secondary);
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.file-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+}
+
+.file-preview-path {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: inline-block;
+    max-width: 100%;
+}
+
+.file-preview-close {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
+.file-preview-body {
+    flex: 1;
+    overflow: auto;
+    padding: 8px 12px 12px;
+}
+
+.file-preview-body pre {
+    margin: 0;
+}
+
+.file-preview-body code {
+    font-family: 'JetBrains Mono', Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.file-preview-code {
+    margin: 0;
+}
+
+.file-preview-markdown {
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.7;
+}
+
+.file-preview-markdown h1,
+.file-preview-markdown h2,
+.file-preview-markdown h3,
+.file-preview-markdown h4,
+.file-preview-markdown h5,
+.file-preview-markdown h6 {
+    color: var(--text-primary);
+    margin: 0 0 12px;
+}
+
+.file-preview-markdown p,
+.file-preview-markdown ul,
+.file-preview-markdown ol,
+.file-preview-markdown pre,
+.file-preview-markdown table,
+.file-preview-markdown blockquote {
+    margin: 0 0 12px;
+}
+
+.file-preview-markdown ul,
+.file-preview-markdown ol {
+    padding-left: 20px;
+}
+
+.file-preview-markdown code {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 4px;
+}
+
+body.resizing-preview {
+    cursor: col-resize;
+    user-select: none;
+}
+
+@media (max-width: 900px) {
+    #app-view,
+    #app-view.with-preview {
+        grid-template-columns: 1fr;
+    }
+
+    #app-view > .main,
+    #app-view > .sidebar {
+        grid-column: 1;
+    }
+
+    .preview-resize-handle {
+        display: none !important;
+    }
+
+    .file-preview-panel {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 45vh;
+        z-index: 1100;
+        border-left: none;
+        border-top: 1px solid var(--border);
+    }
+}

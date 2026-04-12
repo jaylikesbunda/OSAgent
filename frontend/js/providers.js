@@ -232,28 +232,96 @@ OSA.renderModelDropdown = async function() {
 
     const { providers, all_models } = OSA.providerCatalog;
     let html = '';
+    const renderedModelKeys = new Set();
 
-    // Favourites group at top
+    if (OSA.currentModelId) {
+        const currentProvider = (providers || []).find(function(p) { return p.id === OSA.currentModelProviderId; });
+        const currentFromAll = (all_models || []).find(function(m) {
+            return m.id.toLowerCase() === OSA.currentModelId.toLowerCase()
+                && (!OSA.currentModelProviderId || m.provider_id === OSA.currentModelProviderId);
+        });
+        if (currentFromAll) {
+            html += '<div class="model-group-title" style="color:var(--accent)">Current</div>';
+            html += OSA.buildModelOptionHtml(currentFromAll, currentFromAll.provider_id, currentModel, { showProvider: true });
+            renderedModelKeys.add(currentFromAll.id + '|' + currentFromAll.provider_id);
+        } else if (currentProvider) {
+            html += '<div class="model-group-title" style="color:var(--accent)">Current</div>';
+            html += OSA.buildModelOptionHtml({
+                id: OSA.currentModelId,
+                name: OSA.currentModelId,
+                provider_id: OSA.currentModelProviderId || currentProvider.id,
+                provider_name: currentProvider.name,
+                context_window: 0,
+                supports_tools: false,
+                supports_vision: false,
+                category: '',
+            }, currentProvider.id, currentModel, { showProvider: true });
+            renderedModelKeys.add(OSA.currentModelId.toLowerCase() + '|' + OSA.currentModelProviderId);
+        }
+    }
+
     if (OSA.favourites.length > 0) {
         html += '<div class="model-group-title model-group-favs">★ Favourites</div>';
         for (const fav of OSA.favourites) {
+            const key = fav.id + '|' + fav.provider_id;
+            if (renderedModelKeys.has(key.toLowerCase())) continue;
             const full = (all_models || []).find(function(m) { return m.id === fav.id && m.provider_id === fav.provider_id; }) || {
                 id: fav.id, name: fav.name, provider_id: fav.provider_id,
                 provider_name: fav.provider_name, context_window: 0,
                 supports_tools: false, supports_vision: false, category: ''
             };
             html += OSA.buildModelOptionHtml(full, fav.provider_id, currentModel, { showProvider: true });
+            renderedModelKeys.add(key.toLowerCase());
         }
     }
 
     const sortedProviders = OSA.sortProvidersForDropdown(providers);
+    const providersById = Object.fromEntries((providers || []).map(function(p) { return [p.id, p]; }));
 
-    for (const provider of sortedProviders) {
-        const models = provider.models || [];
-        if (models.length === 0) continue;
-        html += '<div class="model-group-title">' + OSA.escapeHtml(provider.name) + '</div>';
-        for (const m of models) {
-            html += OSA.buildModelOptionHtml(m, provider.id, currentModel, {});
+    const connectedModels = (all_models || []).filter(function(m) {
+        var p = providersById[m.provider_id];
+        return p && p.connected;
+    });
+    const grouped = {};
+    for (var i = 0; i < connectedModels.length; i++) {
+        var m = connectedModels[i];
+        if (!grouped[m.provider_name || m.provider_id]) grouped[m.provider_name || m.provider_id] = [];
+        grouped[m.provider_name || m.provider_id].push(m);
+    }
+    var connectedGroupKeys = Object.keys(grouped).sort(function(a, b) {
+        var pa = providers.find(function(p) { return p.name === a; });
+        var pb = providers.find(function(p) { return p.name === b; });
+        return OSA.sortProvidersForDropdown([pa || { name: a, connected: true }, pb || { name: b, connected: true }])
+            .map(function(p) { return p.name; }).indexOf(a)
+            - OSA.sortProvidersForDropdown([pb || { name: b, connected: true }, pa || { name: a, connected: true }])
+            .map(function(p) { return p.name; }).indexOf(b);
+    });
+    for (var gi = 0; gi < connectedGroupKeys.length; gi++) {
+        var groupKey = connectedGroupKeys[gi];
+        var provider = providers.find(function(p) { return p.name === groupKey; });
+        html += '<div class="model-group-title">' + OSA.escapeHtml(groupKey) + '</div>';
+        var gModels = grouped[groupKey];
+        for (var mi = 0; mi < gModels.length; mi++) {
+            var gm = gModels[mi];
+            var gKey = gm.id + '|' + gm.provider_id;
+            if (renderedModelKeys.has(gKey.toLowerCase())) continue;
+            html += OSA.buildModelOptionHtml(gm, gm.provider_id, currentModel, {});
+            renderedModelKeys.add(gKey.toLowerCase());
+        }
+    }
+
+    for (var pi = 0; pi < sortedProviders.length; pi++) {
+        var provider2 = sortedProviders[pi];
+        if (provider2.connected) continue;
+        var pModels = provider2.models || [];
+        if (pModels.length === 0) continue;
+        html += '<div class="model-group-title">' + OSA.escapeHtml(provider2.name) + '</div>';
+        for (var mj = 0; mj < pModels.length; mj++) {
+            var pm = pModels[mj];
+            var pKey = pm.id + '|' + (pm.provider_id || provider2.id);
+            if (renderedModelKeys.has(pKey.toLowerCase())) continue;
+            html += OSA.buildModelOptionHtml(pm, provider2.id, currentModel, {});
+            renderedModelKeys.add(pKey.toLowerCase());
         }
     }
 

@@ -249,7 +249,7 @@ impl NewsTool {
             let time_str = article
                 .pub_date
                 .as_ref()
-                .map(|d| Self::format_time_ago(d))
+                .map(Self::format_time_ago)
                 .unwrap_or_else(|| "unknown".to_string());
             lines.push(format!("{}. [{}] {}", i + 1, article.source, article.title));
             if !article.link.is_empty() {

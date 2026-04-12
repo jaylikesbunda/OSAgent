@@ -3,6 +3,7 @@
     overflow-y: auto;
     padding: 24px;
     scroll-behavior: smooth;
+    min-height: 0;
 }
 
 .messages-virtual-spacer {

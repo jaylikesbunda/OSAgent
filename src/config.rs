@@ -172,7 +172,7 @@ pub struct VoiceConfig {
     pub piper_voice: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ToolsConfig {
     pub denied: Vec<String>,
@@ -561,21 +561,6 @@ impl Default for SearchConfig {
             max_parallel_backends: 5,
             searxng_instance_refresh_minutes: 30,
             searxng_max_instances: 2,
-        }
-    }
-}
-
-impl Default for ToolsConfig {
-    fn default() -> Self {
-        Self {
-            denied: vec![],
-            bash: BashToolConfig::default(),
-            code_python: CodeToolConfig::default(),
-            code_node: CodeToolConfig::default(),
-            code_bash: CodeToolConfig::default(),
-            grep: GrepToolConfig::default(),
-            glob: GrepToolConfig::default(),
-            skills: SkillsConfig::default(),
         }
     }
 }

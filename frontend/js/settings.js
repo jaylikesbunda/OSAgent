@@ -996,10 +996,6 @@ OSA.refreshWorkflowAvailability = async function() {
     }
 };
 
-OSA.getTheme = function() {
-    return localStorage.getItem('osagent-theme') || 'dark';
-};
-
 OSA.getChatAlignment = function() {
     return localStorage.getItem('osagent-chat-alignment') || 'split';
 };
@@ -1016,74 +1012,90 @@ OSA.applyChatAlignment = function(alignment) {
     document.documentElement.setAttribute('data-chat-alignment', alignment === 'left' ? 'left' : 'split');
 };
 
-OSA.setTheme = function(theme) {
-    localStorage.setItem('osagent-theme', theme);
-    OSA.applyTheme(theme);
-    const radio = document.querySelector(`input[name="theme"][value="${theme}"]`);
-    if (radio) radio.checked = true;
+OSA.PALETTE_CHOICES = ['charcoal-red', 'midnight-purple', 'ocean-blue', 'daylight'];
+
+OSA.FONT_PRESETS = {
+    'inter-playfair': {
+        sans: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        serif: "'Playfair Display', Georgia, 'Times New Roman', serif"
+    },
+    'manrope-lora': {
+        sans: "'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        serif: "'Lora', Georgia, 'Times New Roman', serif"
+    },
+    'plex-merriweather': {
+        sans: "'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        serif: "'Merriweather', Georgia, 'Times New Roman', serif"
+    },
+    'system-georgia': {
+        sans: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+        serif: "Georgia, 'Times New Roman', serif"
+    }
 };
 
-OSA.applyTheme = function(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
+OSA.getPalette = function() {
+    const saved = localStorage.getItem('osagent-palette');
+    if (saved && OSA.PALETTE_CHOICES.includes(saved)) return saved;
+
+    const legacyTheme = localStorage.getItem('osagent-theme');
+    if (legacyTheme === 'light') return 'daylight';
+    if (legacyTheme === 'blue') return 'ocean-blue';
+    if (legacyTheme === 'dark') return 'midnight-purple';
+
+    return 'charcoal-red';
 };
 
-// --- Accent color ---
-
-OSA._hexToRgb = function(hex) {
-    const h = hex.replace('#', '');
-    const r = parseInt(h.substring(0, 2), 16);
-    const g = parseInt(h.substring(2, 4), 16);
-    const b = parseInt(h.substring(4, 6), 16);
-    return { r, g, b };
+OSA.setPalette = function(palette) {
+    const next = OSA.PALETTE_CHOICES.includes(palette) ? palette : 'charcoal-red';
+    localStorage.setItem('osagent-palette', next);
+    OSA.applyPalette(next);
 };
 
-OSA.getAccent = function() {
-    return localStorage.getItem('osagent-accent') || '#7c7cff';
-};
-
-OSA.setAccent = function(hex) {
-    localStorage.setItem('osagent-accent', hex);
-    OSA.applyAccent(hex);
-    document.querySelectorAll('.accent-swatch[data-color]').forEach(el => {
-        el.classList.toggle('active', el.dataset.color.toLowerCase() === hex.toLowerCase());
+OSA.applyPalette = function(palette) {
+    const next = OSA.PALETTE_CHOICES.includes(palette) ? palette : 'charcoal-red';
+    document.documentElement.setAttribute('data-palette', next);
+    document.querySelectorAll('.palette-swatch[data-palette]').forEach(function(el) {
+        el.classList.toggle('active', el.dataset.palette === next);
     });
-    const picker = document.getElementById('accent-color-picker');
-    if (picker) picker.value = hex;
 };
 
-OSA.applyAccent = function(hex) {
-    const { r, g, b } = OSA._hexToRgb(hex);
-    // Darken by 35% for gradient end stop (replaces color-mix which doesn't update reactively with var())
-    const dr = Math.round(r * 0.65);
-    const dg = Math.round(g * 0.65);
-    const db = Math.round(b * 0.65);
-    const darkHex = '#' + [dr, dg, db].map(v => v.toString(16).padStart(2, '0')).join('');
+OSA.getFontPreset = function() {
+    const saved = localStorage.getItem('osagent-font-preset');
+    if (saved && OSA.FONT_PRESETS[saved]) return saved;
+    return 'inter-playfair';
+};
+
+OSA.setFontPreset = function(preset) {
+    const next = OSA.FONT_PRESETS[preset] ? preset : 'inter-playfair';
+    localStorage.setItem('osagent-font-preset', next);
+    OSA.applyFontPreset(next);
+    const select = document.getElementById('setting-font');
+    if (select) select.value = next;
+};
+
+OSA.applyFontPreset = function(preset) {
+    const next = OSA.FONT_PRESETS[preset] ? preset : 'inter-playfair';
     const root = document.documentElement;
-    root.style.setProperty('--accent', hex);
-    root.style.setProperty('--accent-dark', darkHex);
-    root.style.setProperty('--accent-dim', `rgba(${r}, ${g}, ${b}, 0.15)`);
-    root.style.setProperty('--accent-glow', `rgba(${r}, ${g}, ${b}, 0.35)`);
+    root.setAttribute('data-font', next);
+    root.style.setProperty('--font-sans', OSA.FONT_PRESETS[next].sans);
+    root.style.setProperty('--font-serif', OSA.FONT_PRESETS[next].serif);
+    root.style.setProperty('--sans', 'var(--font-sans)');
+    root.style.setProperty('--serif', 'var(--font-serif)');
 };
 
 OSA.initTheme = function() {
-    const theme = OSA.getTheme();
-    OSA.applyTheme(theme);
-    const radio = document.querySelector(`input[name="theme"][value="${theme}"]`);
-    if (radio) radio.checked = true;
+    const palette = OSA.getPalette();
+    OSA.applyPalette(palette);
+
+    const fontPreset = OSA.getFontPreset();
+    OSA.applyFontPreset(fontPreset);
+    const fontSelect = document.getElementById('setting-font');
+    if (fontSelect) fontSelect.value = fontPreset;
 
     const chatAlignment = OSA.getChatAlignment();
     OSA.applyChatAlignment(chatAlignment);
     const chatAlignmentSelect = document.getElementById('setting-chat-alignment');
     if (chatAlignmentSelect) chatAlignmentSelect.value = chatAlignment;
-
-    const accent = OSA.getAccent();
-    OSA.applyAccent(accent);
-    const picker = document.getElementById('accent-color-picker');
-    if (picker) picker.value = accent;
-    document.querySelectorAll('.accent-swatch[data-color]').forEach(el => {
-        el.classList.toggle('active', el.dataset.color.toLowerCase() === accent.toLowerCase());
-        el.addEventListener('click', () => OSA.setAccent(el.dataset.color));
-    });
 };
 
 OSA.onMemoryToggleChange = function() {

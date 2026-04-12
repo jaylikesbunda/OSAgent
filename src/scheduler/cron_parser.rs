@@ -1,9 +1,10 @@
 use chrono::{DateTime, Datelike, Duration, Utc};
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CronParser;
 
 impl CronParser {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }

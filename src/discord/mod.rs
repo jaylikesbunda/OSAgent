@@ -595,9 +595,10 @@ impl Handler {
                 changed
             }
             None => {
-                let mut dc = crate::config::DiscordConfig::default();
-                dc.last_channel_id = Some(channel_id);
-                cfg.discord = Some(dc);
+                cfg.discord = Some(crate::config::DiscordConfig {
+                    last_channel_id: Some(channel_id),
+                    ..Default::default()
+                });
                 true
             }
         };

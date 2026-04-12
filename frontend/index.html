@@ -12,6 +12,8 @@
     <link rel="stylesheet" href="/static/css/input.css">
     <link rel="stylesheet" href="/static/css/modal.css">
     <link rel="stylesheet" href="/static/css/tool.css">
+    <link rel="stylesheet" href="/static/css/diff.css">
+    <link rel="stylesheet" href="/static/css/split-pane.css">
     <link rel="stylesheet" href="/static/css/code.css">
     <link rel="stylesheet" href="/static/css/components.css">
     <link rel="stylesheet" href="/static/css/todo.css">
@@ -26,7 +28,7 @@
             <div class="login-card">
                 <h1 class="login-title">
                     <img class="logo-icon" src="images/thinking-indicator.png" alt="OSA">
-                    OSA
+                    <span class="logo-wordmark">OS<span class="logo-accent">Agent</span></span>
                 </h1>
                 <p class="login-subtitle">Enter your password to continue</p>
                 <div id="login-error" class="login-error hidden"></div>
@@ -41,7 +43,7 @@
                 <div class="sidebar-header">
                     <div class="logo">
                         <img class="logo-icon" src="images/thinking-indicator.png" alt="OSA">
-                        OSA
+                        <span class="logo-wordmark">OS<span class="logo-accent">Agent</span></span>
                     </div>
                     <button class="new-chat-btn" onclick="createSession()">
                         <span>+</span> New chat
@@ -111,6 +113,14 @@
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="12" cy="12" r="3"></circle>
                                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6c.26-.58.76-1 1.51-1H12a2 2 0 0 1 4 0v.09c0 .75.42 1.25 1 1.51a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.58.26 1 .76 1 1.51V12a2 2 0 0 1 0 4h-.09c-.75 0-1.25.42-1.51 1Z"></path>
+                            </svg>
+                        </button>
+                        <button class="settings-btn" onclick="OSA.toggleFilePreview()" title="Toggle file preview" aria-label="Toggle file preview">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M3 5h18"></path>
+                                <path d="M3 12h7"></path>
+                                <path d="M3 19h7"></path>
+                                <rect x="12" y="8" width="9" height="11" rx="1"></rect>
                             </svg>
                         </button>
                         <button class="workflow-btn hidden" id="workflow-btn" onclick="openWorkflowEditor()">Workflows</button>
@@ -232,6 +242,18 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+
+                <div id="preview-resize-handle" class="preview-resize-handle hidden" role="separator" aria-orientation="vertical"></div>
+                <div id="file-preview-panel" class="file-preview-panel hidden">
+                    <div class="file-preview-header">
+                        <div class="file-preview-title">
+                            <span id="file-preview-path" class="file-preview-path">No file selected</span>
+                        </div>
+                        <button class="file-preview-close" onclick="OSA.closeFilePreview()" title="Close preview">Close</button>
+                    </div>
+                    <div id="file-preview-body" class="file-preview-body"></div>
                 </div>
             </div>
         </div>
@@ -438,47 +460,26 @@
                         <p class="settings-pane-desc">Customize the appearance of the interface</p>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">Color Theme</div>
-                        <div class="theme-options">
-                            <label class="theme-option">
-                                <input type="radio" name="theme" value="dark" onchange="OSA.setTheme('dark')" />
-                                <div class="theme-preview theme-preview-dark">
-                                    <div class="theme-preview-header"></div>
-                                    <div class="theme-preview-content"></div>
-                                </div>
-                                <span class="theme-name">Dark</span>
-                            </label>
-                            <label class="theme-option">
-                                <input type="radio" name="theme" value="light" onchange="OSA.setTheme('light')" />
-                                <div class="theme-preview theme-preview-light">
-                                    <div class="theme-preview-header"></div>
-                                    <div class="theme-preview-content"></div>
-                                </div>
-                                <span class="theme-name">Light</span>
-                            </label>
-                            <label class="theme-option">
-                                <input type="radio" name="theme" value="blue" onchange="OSA.setTheme('blue')" />
-                                <div class="theme-preview theme-preview-blue">
-                                    <div class="theme-preview-header"></div>
-                                    <div class="theme-preview-content"></div>
-                                </div>
-                                <span class="theme-name">Blue</span>
-                            </label>
+                        <div class="settings-group-title">Color Palette</div>
+                        <div class="palette-presets" id="palette-presets">
+                            <button type="button" class="palette-swatch" data-palette="charcoal-red" title="Charcoal Red" onclick="OSA.setPalette('charcoal-red')"><span></span><span></span><span></span><span></span></button>
+                            <button type="button" class="palette-swatch" data-palette="midnight-purple" title="Midnight Purple" onclick="OSA.setPalette('midnight-purple')"><span></span><span></span><span></span><span></span></button>
+                            <button type="button" class="palette-swatch" data-palette="ocean-blue" title="Ocean Blue" onclick="OSA.setPalette('ocean-blue')"><span></span><span></span><span></span><span></span></button>
+                            <button type="button" class="palette-swatch" data-palette="daylight" title="Daylight" onclick="OSA.setPalette('daylight')"><span></span><span></span><span></span><span></span></button>
                         </div>
+                        <span class="settings-field-hint">Palettes control background, surfaces, and accent color together.</span>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">Accent Color</div>
-                        <div class="accent-presets">
-                            <button class="accent-swatch accent-swatch-purple" data-color="#7c7cff" title="Purple"></button>
-                            <button class="accent-swatch accent-swatch-blue" data-color="#4a9eff" title="Blue"></button>
-                            <button class="accent-swatch accent-swatch-cyan" data-color="#00d4ff" title="Cyan"></button>
-                            <button class="accent-swatch accent-swatch-green" data-color="#4ade80" title="Green"></button>
-                            <button class="accent-swatch accent-swatch-orange" data-color="#fb923c" title="Orange"></button>
-                            <button class="accent-swatch accent-swatch-pink" data-color="#f472b6" title="Pink"></button>
-                            <button class="accent-swatch accent-swatch-red" data-color="#ff6b6b" title="Red"></button>
-                            <label class="accent-swatch accent-swatch-custom" title="Custom color">
-                                <input type="color" id="accent-color-picker" oninput="OSA.setAccent(this.value)" />
-                            </label>
+                        <div class="settings-group-title">Typography</div>
+                        <div class="settings-field">
+                            <label for="setting-font">Font Pairing</label>
+                            <select id="setting-font" class="font-select" onchange="OSA.setFontPreset(this.value)">
+                                <option value="inter-playfair">Inter + Playfair Display</option>
+                                <option value="manrope-lora">Manrope + Lora</option>
+                                <option value="plex-merriweather">IBM Plex Sans + Merriweather</option>
+                                <option value="system-georgia">System UI + Georgia</option>
+                            </select>
+                            <span class="settings-field-hint">Applies to the full UI immediately.</span>
                         </div>
                     </div>
                     <div class="settings-group">
@@ -1174,6 +1175,8 @@
     <script defer src="/static/js/state.js"></script>
     <script defer src="/static/js/utils.js"></script>
     <script defer src="/static/js/api.js"></script>
+    <script defer src="/static/js/diff.js"></script>
+    <script defer src="/static/js/preview.js"></script>
     <script defer src="/static/js/providers.js"></script>
     <script defer src="/static/js/messages.js"></script>
     <script defer src="/static/js/tools.js"></script>

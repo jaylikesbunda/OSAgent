@@ -263,7 +263,7 @@ OSA.showLogin = function() {
 OSA.showApp = function() {
     document.getElementById('login-view').classList.add('hidden');
     document.getElementById('app-view').classList.remove('hidden');
-    document.getElementById('app-view').style.display = 'flex';
+    document.getElementById('app-view').style.display = 'grid';
     
     OSA.initSidebarState();
     OSA.initTheme();
@@ -592,6 +592,36 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
         if (!OSA.getCurrentSession() || OSA.getCurrentSession().id !== sessionId) return;
         OSA.setCurrentSession(session);
 
+        if (session.task_status !== 'running') {
+            OSA.syncRenderedMessages(session.messages || [], {
+                resetStreaming: false,
+                stickToBottom: false,
+                preferTail: true,
+                keepWindow: true,
+                preserveScroll: true,
+            });
+
+            if (OSA.getStreamingAssistantMessage()) {
+                OSA.completeAssistantResponse();
+            } else {
+                document.querySelectorAll('#messages .message.assistant.streaming').forEach(function(el) {
+                    el.classList.remove('streaming');
+                });
+                document.querySelectorAll('#messages .message-thinking.streaming').forEach(function(el) {
+                    el.classList.remove('streaming');
+                });
+            }
+
+            OSA.hideThinkingIndicator();
+            OSA.stopToolSync();
+            OSA.setProcessing(false);
+            OSA.setStopping(false);
+            OSA.resetSendButton();
+            OSA.refreshCurrentSessionQueue();
+            OSA.loadSessions();
+            return;
+        }
+
         const streamingMessage = OSA.getStreamingAssistantMessage();
         const latestAssistant = OSA.getActiveTurnAssistantMessage(session);
         if (!latestAssistant) {
@@ -741,7 +771,9 @@ OSA.selectSession = async function(sessionId) {
         const sessionIsRunning = session.task_status === 'running';
         if (sessionIsRunning) {
             OSA.setProcessing(true);
+            OSA.setStopping(false);
             OSA.setSendButtonStopMode(true);
+            OSA.startToolSync();
         } else {
             OSA.setProcessing(false);
             OSA.setStopping(false);
@@ -795,6 +827,7 @@ OSA.selectSession = async function(sessionId) {
 
         if (sessionIsRunning || subagentsRunning) {
             OSA.setProcessing(true);
+            OSA.setStopping(false);
             OSA.setSendButtonStopMode(true);
         } else {
             OSA.setProcessing(false);
@@ -992,53 +1025,12 @@ OSA.restoreToolsAtPositions = function(tools) {
     }
 
     if (contextTools.length > 0) {
-        const contextByIndex = new Map();
-        for (const t of contextTools) {
-            const mi = toolMessageIndex(t);
-            if (!contextByIndex.has(mi)) contextByIndex.set(mi, []);
-            contextByIndex.get(mi).push(t);
-        }
-
-        const sortedContextGroups = Array.from(contextByIndex.entries())
-            .sort(([a], [b]) => a - b);
-
-        for (const [mi, groupTools] of sortedContextGroups) {
-            groupTools.sort((a, b) => toolTs(a) - toolTs(b));
-
-            const firstTs = toolTs(groupTools[0]);
-            const insertBefore = OSA.findToolInsertBefore(messagesDiv, mi, firstTs);
-
-            const groupId = `context-tool-group-${mi}`;
-            let groupDiv = document.getElementById(groupId);
-            if (!groupDiv) {
-                groupDiv = document.createElement('div');
-                groupDiv.id = groupId;
-                groupDiv.className = 'tool-container context-inline-group';
-                groupDiv.dataset.messageIndex = mi;
-                OSA.mountAnchoredNode(groupDiv, mi, insertBefore);
-            }
-
-            for (const t of groupTools) {
-                const callId = t.tool_call_id;
-                if (groupDiv.querySelector(`#ctx-${callId}`)) continue;
-
-                const label = OSA.toolLabel(t.tool_name);
-                const detail = OSA.summarizeToolArgs(t.tool_name, t.arguments || {});
-                const isCompleted = t.completed === true;
-                const isSuccess = t.success === true;
-                const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
-
-                const item = document.createElement('div');
-                item.className = 'context-inline-item';
-                item.id = `ctx-${callId}`;
-                item.innerHTML = `
-                    <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
-                    <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
-                    <span class="context-inline-status${isCompleted ? (isSuccess ? ' done' : ' failed') : ' pending'}">${statusText}</span>
-                `;
-                groupDiv.appendChild(item);
-            }
-        }
+        contextTools
+            .sort((a, b) => toolTs(a) - toolTs(b))
+            .forEach(t => {
+                const mi = toolMessageIndex(t);
+                OSA.addContextToolToGroup(t, t.completed === true, t.success === true, mi);
+            });
     }
 };
 
@@ -1111,6 +1103,7 @@ OSA.sendMessage = async function() {
         OSA.setHasReceivedResponse(false);
         OSA.setSendButtonStopMode(true);
         if (currentSession) currentSession.task_status = 'running';
+        OSA.showThinkingIndicator();
     }
     const messagesDiv = document.getElementById('messages');
     
@@ -2128,4 +2121,5 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
+OSA.initTheme();
 OSA.checkAuthAndInit();

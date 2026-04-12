@@ -2,7 +2,20 @@ window.OSA = window.OSA || {};
 
 OSA.isHiddenSyntheticMessage = function(message) {
     if (!message || !message.metadata) return false;
-    return !!message.metadata.synthetic;
+    if (!message.metadata.synthetic) return false;
+
+    const syntheticKind = message.metadata.kind || '';
+    if (message.role === 'assistant' && syntheticKind === 'tool_prelude') {
+        const hasContent = !!(message.content || '').trim();
+        const hasVisibleThinking = OSA.getShowThinkingBlocks && OSA.getShowThinkingBlocks()
+            ? !!(message.thinking || '').trim()
+            : false;
+        if (hasContent || hasVisibleThinking) {
+            return false;
+        }
+    }
+
+    return true;
 };
 
 OSA.showThinkingIndicator = function() {
@@ -505,7 +518,7 @@ OSA.describeCheckpointForUi = function(checkpoint) {
     return `${timeLabel}${toolLabel}`;
 };
 
-OSA.findNearestCheckpointForMessage = function(messageTimestamp) {
+OSA.findNearestCheckpointForMessage = function(messageTimestamp, messageIndex = null) {
     const currentSession = OSA.getCurrentSession();
     if (!currentSession || !currentSession.id || typeof OSA.getSessionCheckpoints !== 'function') return null;
 
@@ -513,15 +526,41 @@ OSA.findNearestCheckpointForMessage = function(messageTimestamp) {
     if (messageTsMs === null) return null;
 
     const checkpoints = OSA.getSessionCheckpoints(currentSession.id);
-    for (const checkpoint of checkpoints) {
+    if (!Array.isArray(checkpoints) || checkpoints.length === 0) return null;
+
+    let nextAssistantTsMs = null;
+    if (Number.isInteger(messageIndex) && Array.isArray(currentSession.messages)) {
+        for (let idx = messageIndex + 1; idx < currentSession.messages.length; idx += 1) {
+            const candidate = currentSession.messages[idx];
+            if (!candidate || candidate.role !== 'assistant' || OSA.isHiddenSyntheticMessage(candidate)) continue;
+            nextAssistantTsMs = OSA.timestampToMs(candidate.timestamp);
+            if (nextAssistantTsMs !== null) break;
+        }
+    }
+
+    let fallbackCheckpoint = null;
+    // Assistant checkpoints are created after a turn completes, so match the first
+    // checkpoint that lands after this message and before the next assistant turn.
+    for (let idx = checkpoints.length - 1; idx >= 0; idx -= 1) {
+        const checkpoint = checkpoints[idx];
         const checkpointTs = OSA.timestampToMs(checkpoint?.created_at);
         if (checkpointTs === null) continue;
-        if (checkpointTs <= messageTsMs) {
+
+        if (checkpointTs < messageTsMs) {
+            fallbackCheckpoint = checkpoint;
+            continue;
+        }
+
+        if (nextAssistantTsMs !== null && checkpointTs >= nextAssistantTsMs) {
+            break;
+        }
+
+        if (checkpointTs >= messageTsMs) {
             return checkpoint;
         }
     }
 
-    return null;
+    return fallbackCheckpoint;
 };
 
 OSA.renderAssistantActionButtons = function(checkpoint) {
@@ -561,7 +600,11 @@ OSA.updateAssistantMessageActions = function(messageEl, sourceMessage) {
         messageEl.dataset.messageTimestamp = sourceTimestamp;
     }
 
-    const checkpoint = OSA.findNearestCheckpointForMessage(sourceTimestamp);
+    const messageIndex = Number.parseInt(messageEl.dataset.messageIndex || '', 10);
+    const checkpoint = OSA.findNearestCheckpointForMessage(
+        sourceTimestamp,
+        Number.isInteger(messageIndex) ? messageIndex : null,
+    );
     actionsEl.innerHTML = OSA.renderAssistantActionButtons(checkpoint);
 
     const copyBtn = actionsEl.querySelector('.msg-action-copy');
@@ -595,6 +638,143 @@ OSA.restoreCheckpointFromButton = function(button) {
     const checkpointId = button?.dataset?.checkpointId || '';
     if (!checkpointId) return;
     OSA.restoreCheckpoint(checkpointId, button);
+};
+
+OSA.showCheckpointRestoreDialog = function(checkpointLabel, snapshotCount, diffData) {
+    return new Promise(function(resolve) {
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.style.display = 'flex';
+
+        var TOOL_OUTPUT_PREFIX = '.osa_tool_outputs/';
+        var allDiffs = Array.isArray(diffData?.diffs) ? diffData.diffs : [];
+        var diffs = allDiffs.filter(function(d) {
+            return !(d.path || '').startsWith(TOOL_OUTPUT_PREFIX);
+        });
+        var allChangedFiles = Array.isArray(diffData?.changed_files) ? diffData.changed_files : [];
+        var changedFiles = allChangedFiles.filter(function(p) {
+            return !p.startsWith(TOOL_OUTPUT_PREFIX);
+        });
+
+        var subtitle = snapshotCount > 0
+            ? 'This will restore session state and revert ' + snapshotCount + ' captured file snapshot' + (snapshotCount === 1 ? '' : 's') + '.'
+            : 'This will restore session state.';
+
+        var selectedIdx = diffs.length > 0 ? 0 : -1;
+
+        modal.innerHTML = ''
+            + '<div class="modal-content" style="max-width:960px; width:92vw; max-height:85vh; display:flex; flex-direction:column;">'
+            + '  <div class="modal-header"><h3>Restore checkpoint</h3></div>'
+            + '  <div class="modal-body" style="padding:14px 16px; flex:1; overflow:auto;">'
+            + '    <p style="margin:0 0 8px 0; color:var(--text-secondary);">' + OSA.escapeHtml(checkpointLabel) + '</p>'
+            + '    <p style="margin:0 0 12px 0; color:var(--text-secondary);">' + OSA.escapeHtml(subtitle) + '</p>'
+            + '    <p style="margin:0 0 8px 0; color:var(--text-secondary);">Changed files: ' + changedFiles.length + '</p>'
+            + '    <div class="checkpoint-restore-layout" style="display:flex; gap:12px; min-height:120px;">'
+            + '      <div class="checkpoint-file-list" style="min-width:200px; max-width:280px; overflow-y:auto; max-height:360px; border:1px solid var(--border); border-radius:6px; padding:4px 0;"></div>'
+            + '      <div class="checkpoint-diff-preview" style="flex:1; overflow:auto; max-height:360px; border:1px solid var(--border); border-radius:6px; padding:8px;"></div>'
+            + '    </div>'
+            + '  </div>'
+            + '  <div class="modal-actions" style="display:flex; justify-content:flex-end; gap:8px; padding:12px 16px; border-top:1px solid var(--border);">'
+            + '    <button class="btn-ghost checkpoint-cancel">Cancel</button>'
+            + '    <button class="btn-action checkpoint-restore">Restore</button>'
+            + '  </div>'
+            + '</div>';
+
+        document.body.appendChild(modal);
+
+        var fileList = modal.querySelector('.checkpoint-file-list');
+        var diffHost = modal.querySelector('.checkpoint-diff-preview');
+
+        function renderFileList() {
+            fileList.innerHTML = '';
+            if (diffs.length === 0) {
+                fileList.innerHTML = '<div style="padding:8px 12px; color:var(--text-secondary); font-size:12px;">No file changes</div>';
+                return;
+            }
+            diffs.forEach(function(diff, idx) {
+                var item = document.createElement('button');
+                item.type = 'button';
+                item.style.cssText = 'display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; cursor:pointer; font-size:12px; font-family:inherit; color:var(--text-primary);';
+                if (idx === selectedIdx) {
+                    item.style.background = 'var(--bg-hover, rgba(255,255,255,0.06))';
+                }
+                item.addEventListener('mouseenter', function() { if (idx !== selectedIdx) item.style.background = 'var(--bg-hover, rgba(255,255,255,0.03))'; });
+                item.addEventListener('mouseleave', function() { if (idx !== selectedIdx) item.style.background = 'none'; });
+                item.addEventListener('click', function() {
+                    selectedIdx = idx;
+                    renderFileList();
+                    renderDiff();
+                });
+                var status = diff.status || 'modified';
+                var badge = status === 'added' ? '+' : status === 'deleted' ? '-' : '~';
+                var badgeColor = status === 'added' ? '#4caf50' : status === 'deleted' ? '#f44336' : 'var(--text-secondary)';
+                item.innerHTML = '<span style="color:' + badgeColor + '; margin-right:4px; font-weight:600;">' + OSA.escapeHtml(badge) + '</span> ' + OSA.escapeHtml(diff.path || '');
+                fileList.appendChild(item);
+            });
+        }
+
+        function renderDiff() {
+            diffHost.innerHTML = '';
+            if (selectedIdx < 0 || selectedIdx >= diffs.length) {
+                diffHost.innerHTML = '<div style="color:var(--text-secondary); font-size:12px; padding:8px;">Select a file to preview changes</div>';
+                return;
+            }
+            var diff = diffs[selectedIdx];
+            var path = document.createElement('div');
+            path.style.cssText = 'font-size:12px; color:var(--text-secondary); margin-bottom:6px; font-weight:600;';
+            path.textContent = diff.path || 'Diff preview';
+            diffHost.appendChild(path);
+            if (typeof OSA.renderDiffView === 'function') {
+                var oldContent = OSA.extractOldContentFromUnifiedDiff(diff.diff || '');
+                var newContent = OSA.extractNewContentFromUnifiedDiff(diff.diff || '');
+                diffHost.appendChild(OSA.renderDiffView(oldContent, newContent));
+            }
+        }
+
+        renderFileList();
+        renderDiff();
+
+        var close = function(value) {
+            modal.remove();
+            resolve(value);
+        };
+
+        modal.addEventListener('click', function(event) {
+            if (event.target === modal) close(false);
+        });
+        modal.querySelector('.checkpoint-cancel')?.addEventListener('click', function() { close(false); });
+        modal.querySelector('.checkpoint-restore')?.addEventListener('click', function() { close(true); });
+    });
+};
+
+OSA.extractOldContentFromUnifiedDiff = function(diffText) {
+    const lines = (diffText || '').split('\n');
+    const oldLines = [];
+    lines.forEach(function(line) {
+        if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) return;
+        if (line.startsWith('+')) return;
+        if (line.startsWith('-')) {
+            oldLines.push(line.slice(1));
+            return;
+        }
+        if (line.startsWith(' ')) oldLines.push(line.slice(1));
+    });
+    return oldLines.join('\n');
+};
+
+OSA.extractNewContentFromUnifiedDiff = function(diffText) {
+    const lines = (diffText || '').split('\n');
+    const newLines = [];
+    lines.forEach(function(line) {
+        if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) return;
+        if (line.startsWith('-')) return;
+        if (line.startsWith('+')) {
+            newLines.push(line.slice(1));
+            return;
+        }
+        if (line.startsWith(' ')) newLines.push(line.slice(1));
+    });
+    return newLines.join('\n');
 };
 
 OSA.shouldSnapshotBeRestoredForCheckpoint = function(snapshot, checkpoint) {
@@ -651,19 +831,20 @@ OSA.restoreCheckpoint = async function(checkpointId, button) {
         : 'the selected checkpoint';
 
     let plan = { snapshots: [], count: 0 };
+    let checkpointDiffData = null;
     try {
         if (checkpoint) {
             plan = await OSA.fetchRestorePlan(sessionId, checkpoint);
+            const diffRes = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/checkpoints/${checkpointId}/diff`);
+            const diffData = await diffRes.json().catch(() => ({}));
+            if (diffRes.ok) checkpointDiffData = diffData;
         }
     } catch (error) {
         console.warn('Failed to fetch restore plan:', error);
     }
 
     const snapshotCount = plan.count || 0;
-    const confirmMessage = snapshotCount > 0
-        ? `Restore this session to ${checkpointLabel}? This will replace session state and revert ${snapshotCount} OSA file snapshot${snapshotCount === 1 ? '' : 's'} captured after that point.`
-        : `Restore this session to ${checkpointLabel}? This will replace the current session state. No matching OSA file snapshots were found to revert.`;
-    const confirmed = confirm(confirmMessage);
+    const confirmed = await OSA.showCheckpointRestoreDialog(checkpointLabel, snapshotCount, checkpointDiffData);
     if (!confirmed) return;
 
     const restoreButton = button || null;
@@ -1240,6 +1421,28 @@ OSA.getTranscriptSlotForMessageIndex = function(messageIndex) {
     return wrapper ? wrapper.querySelector('.transcript-entry-extras') : null;
 };
 
+OSA.resolveTranscriptAnchorMessageIndex = function(messageIndex) {
+    const parsed = Number.parseInt(String(messageIndex), 10);
+    if (!Number.isInteger(parsed)) return null;
+
+    const view = OSA.getTranscriptView();
+    const descriptors = Array.isArray(view.descriptors) ? view.descriptors : [];
+    if (!descriptors.length) return parsed;
+
+    let anchor = null;
+    for (const item of descriptors) {
+        if (!item || !Number.isInteger(item.originalIndex)) continue;
+        if (item.originalIndex <= parsed) {
+            anchor = item.originalIndex;
+            continue;
+        }
+        break;
+    }
+
+    if (anchor !== null) return anchor;
+    return Number.isInteger(descriptors[0]?.originalIndex) ? descriptors[0].originalIndex : parsed;
+};
+
 OSA.storeAnchoredNode = function(node, messageIndex) {
     if (!node) return;
     const parsedIndex = Number.parseInt(String(messageIndex), 10);
@@ -1273,8 +1476,10 @@ OSA.removeStoredAnchoredNode = function(node) {
 };
 
 OSA.mountAnchoredNode = function(node, messageIndex, insertBefore = null) {
-    OSA.storeAnchoredNode(node, messageIndex);
-    const slot = OSA.getTranscriptSlotForMessageIndex(messageIndex);
+    const resolvedIndex = OSA.resolveTranscriptAnchorMessageIndex(messageIndex);
+    if (!Number.isInteger(resolvedIndex)) return node;
+    OSA.storeAnchoredNode(node, resolvedIndex);
+    const slot = OSA.getTranscriptSlotForMessageIndex(resolvedIndex);
     if (!slot) return node;
     if (insertBefore && insertBefore.parentNode === slot) {
         slot.insertBefore(node, insertBefore);
@@ -1502,7 +1707,7 @@ OSA.patchMessageElement = function(element, message, originalIndex, force = fals
         actionsEl.className = 'message-actions';
         const hasContent = !!(message.content || '').trim();
         actionsEl.style.display = hasContent ? '' : 'none';
-        actionsEl.innerHTML = OSA.renderAssistantActionButtons(OSA.findNearestCheckpointForMessage(message.timestamp));
+        actionsEl.innerHTML = OSA.renderAssistantActionButtons(OSA.findNearestCheckpointForMessage(message.timestamp, originalIndex));
         children.push(actionsEl);
     }
 
@@ -1562,10 +1767,10 @@ OSA.renderEmptyTranscript = function(text = 'Click "New chat" to begin') {
 };
 
 OSA.isMessageIndexInRenderedWindow = function(messageIndex) {
-    const parsed = Number.parseInt(String(messageIndex), 10);
-    if (!Number.isInteger(parsed)) return false;
+    const resolvedIndex = OSA.resolveTranscriptAnchorMessageIndex(messageIndex);
+    if (!Number.isInteger(resolvedIndex)) return false;
     const view = OSA.getTranscriptView();
-    return view.renderedMessageIndices.has(parsed);
+    return view.renderedMessageIndices.has(resolvedIndex);
 };
 
 OSA.estimateMessageRangeHeight = function(descriptors, start, end, view) {

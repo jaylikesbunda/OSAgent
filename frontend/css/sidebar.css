@@ -6,6 +6,7 @@
     flex-direction: column;
     flex-shrink: 0;
     transition: margin-left 0.2s ease, width 0.2s ease;
+    min-height: 0;
 }
 
 .sidebar.collapsed {
@@ -19,12 +20,24 @@
 }
 
 .logo {
+    font-family: var(--serif);
     font-size: 16px;
     font-weight: 600;
     letter-spacing: -0.02em;
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+.logo-accent {
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.logo-wordmark {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.06em;
 }
 
 .logo-icon {
@@ -77,6 +90,7 @@
     flex: 1;
     overflow-y: auto;
     padding: 8px;
+    min-height: 0;
 }
 
 .session-search {

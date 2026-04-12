@@ -111,6 +111,13 @@ OSA.connectWebSocket = function(sessionId) {
         OSA.wsSubscribeSession(sessionId, lastSeq).catch(err => {
             console.error('Failed to subscribe over websocket:', err);
         });
+        const session = OSA.getCurrentSession ? OSA.getCurrentSession() : null;
+        if (session && session.id === sessionId && session.task_status === 'running') {
+            if (!OSA.getStreamingAssistantMessage() && OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
+                OSA.showThinkingIndicator();
+            }
+            OSA.syncRunningSessionSnapshot(sessionId);
+        }
         OSA.wsEventListeners.forEach(listener => {
             try {
                 listener({ method: 'ws.open' });

@@ -209,6 +209,8 @@ impl SqliteStorage {
                     state BLOB NOT NULL,
                     tool_name TEXT,
                     tool_input TEXT,
+                    git_commit TEXT,
+                    workspace_path TEXT,
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
 
@@ -262,6 +264,17 @@ impl SqliteStorage {
                 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_file_snapshots_session ON file_snapshots(session_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_file_snapshots_snapshot ON file_snapshots(snapshot_id);
+
+                CREATE TABLE IF NOT EXISTS checkpoint_diffs (
+                    id TEXT PRIMARY KEY,
+                    checkpoint_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    diff TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    FOREIGN KEY (checkpoint_id) REFERENCES checkpoints(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_checkpoint_diffs_checkpoint ON checkpoint_diffs(checkpoint_id);
 
                 CREATE TABLE IF NOT EXISTS todo_items (
                     id TEXT PRIMARY KEY,
@@ -364,6 +377,28 @@ impl SqliteStorage {
                     "ALTER TABLE session_events ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0",
                     [],
                 )?;
+            }
+
+            let has_checkpoint_git_commit: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('checkpoints') WHERE name='git_commit'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !has_checkpoint_git_commit {
+                conn.execute("ALTER TABLE checkpoints ADD COLUMN git_commit TEXT", [])?;
+            }
+
+            let has_checkpoint_workspace_path: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('checkpoints') WHERE name='workspace_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !has_checkpoint_workspace_path {
+                conn.execute("ALTER TABLE checkpoints ADD COLUMN workspace_path TEXT", [])?;
             }
 
             conn.execute(
@@ -660,6 +695,8 @@ impl SqliteStorage {
         state: Vec<u8>,
         tool_name: Option<String>,
         tool_input: Option<String>,
+        git_commit: Option<String>,
+        workspace_path: Option<String>,
     ) -> Result<Checkpoint> {
         let checkpoint = Checkpoint {
             id: Uuid::new_v4().to_string(),
@@ -668,10 +705,12 @@ impl SqliteStorage {
             state,
             tool_name,
             tool_input,
+            git_commit,
+            workspace_path,
         };
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO checkpoints (id, session_id, created_at, state, tool_name, tool_input) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO checkpoints (id, session_id, created_at, state, tool_name, tool_input, git_commit, workspace_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     checkpoint.id,
                     checkpoint.session_id,
@@ -679,6 +718,8 @@ impl SqliteStorage {
                     checkpoint.state,
                     checkpoint.tool_name,
                     checkpoint.tool_input,
+                    checkpoint.git_commit,
+                    checkpoint.workspace_path,
                 ],
             )
             .map_err(OSAgentError::Storage)?;
@@ -689,7 +730,7 @@ impl SqliteStorage {
     pub fn get_checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, created_at, state, tool_name, tool_input FROM checkpoints WHERE id = ?1")
+                .prepare_cached("SELECT id, session_id, created_at, state, tool_name, tool_input, git_commit, workspace_path FROM checkpoints WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
             let result = stmt.query_row(params![id], |row| {
                 Ok(Checkpoint {
@@ -700,6 +741,8 @@ impl SqliteStorage {
                     state: row.get(3)?,
                     tool_name: row.get(4)?,
                     tool_input: row.get(5)?,
+                    git_commit: row.get(6)?,
+                    workspace_path: row.get(7)?,
                 })
             });
             match result {
@@ -713,7 +756,7 @@ impl SqliteStorage {
     pub fn list_checkpoints(&self, session_id: &str) -> Result<Vec<Checkpoint>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, created_at, state, tool_name, tool_input FROM checkpoints WHERE session_id = ?1 ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, session_id, created_at, state, tool_name, tool_input, git_commit, workspace_path FROM checkpoints WHERE session_id = ?1 ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let checkpoints = stmt
                 .query_map(params![session_id], |row| {
@@ -725,12 +768,66 @@ impl SqliteStorage {
                         state: row.get(3)?,
                         tool_name: row.get(4)?,
                         tool_input: row.get(5)?,
+                        git_commit: row.get(6)?,
+                        workspace_path: row.get(7)?,
                     })
                 })
                 .map_err(OSAgentError::Storage)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(OSAgentError::Storage)?;
             Ok(checkpoints)
+        })
+    }
+
+    pub fn replace_checkpoint_diffs(
+        &self,
+        checkpoint_id: &str,
+        diffs: &[CheckpointDiff],
+    ) -> Result<()> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+            tx.execute(
+                "DELETE FROM checkpoint_diffs WHERE checkpoint_id = ?1",
+                params![checkpoint_id],
+            )
+            .map_err(OSAgentError::Storage)?;
+
+            for diff in diffs {
+                tx.execute(
+                    "INSERT INTO checkpoint_diffs (id, checkpoint_id, path, diff, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![diff.id, diff.checkpoint_id, diff.path, diff.diff, diff.status],
+                )
+                .map_err(OSAgentError::Storage)?;
+            }
+
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    pub fn list_checkpoint_diffs(&self, checkpoint_id: &str) -> Result<Vec<CheckpointDiff>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, checkpoint_id, path, diff, status FROM checkpoint_diffs WHERE checkpoint_id = ?1 ORDER BY path ASC",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let diffs = stmt
+                .query_map(params![checkpoint_id], |row| {
+                    Ok(CheckpointDiff {
+                        id: row.get(0)?,
+                        checkpoint_id: row.get(1)?,
+                        path: row.get(2)?,
+                        diff: row.get(3)?,
+                        status: row.get(4)?,
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+
+            Ok(diffs)
         })
     }
 

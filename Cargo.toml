@@ -2,6 +2,7 @@
 name = "osagent"
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.78"
 authors = ["OSA Contributors"]
 license = "MIT"
 description = "Secure local AI agent with a web UI, workspace tools, and optional Discord integration"
@@ -20,7 +21,7 @@ tower-http = { version = "0.5", features = ["fs", "cors", "trace", "compression-
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "builder", "http"], optional = true }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 reqwest-eventsource = "0.6"
 
 # Serialization
@@ -30,7 +31,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 
 # Database
-rusqlite = { version = "0.30", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
@@ -60,13 +61,14 @@ scraper = "0.19"
 urlencoding = "2.1"
 dashmap = "5.5"
 walkdir = "2.5"
+gix = { version = "0.68", default-features = false, features = ["max-performance-safe"] }
 
 # Embed frontend
 rust-embed = "8.2"
 mime_guess = "2.0"
 
 # Process management
-sysinfo = "0.30"
+sysinfo = "0.32"
 
 # Base64 encoding
 base64 = "0.22"

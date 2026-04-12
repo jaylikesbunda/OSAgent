@@ -130,8 +130,6 @@
     max-width: calc(100vw - 40px);
     max-height: 420px;
     background: var(--bg-secondary);
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-xl);

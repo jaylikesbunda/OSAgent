@@ -1657,20 +1657,6 @@ impl AgentRuntime {
                             continue;
                         }
 
-                        if runtime_config.agent.checkpoint_enabled {
-                            let checkpoint_count =
-                                self.storage.list_checkpoints(&session.id)?.len();
-                            if checkpoint_count % runtime_config.agent.checkpoint_interval == 0 {
-                                self.checkpoint_manager
-                                    .create_checkpoint(
-                                        &session,
-                                        Some(tool_call.name.clone()),
-                                        Some(tool_call.arguments.to_string()),
-                                    )
-                                    .await?;
-                            }
-                        }
-
                         let start = Instant::now();
 
                         // Emit tool progress - preparing
@@ -1793,7 +1779,7 @@ impl AgentRuntime {
                             timestamp: SystemTime::now(),
                         });
 
-                        let (tool_result, audit_output, success) = match result {
+                        let (mut tool_result, audit_output, success) = match result {
                             Ok(tool_result) => {
                                 info!(
                                     "Tool {} executed successfully in {}ms",
@@ -1807,6 +1793,26 @@ impl AgentRuntime {
                                 (ToolResult::new(error_msg.clone()), error_msg, false)
                             }
                         };
+
+                        if success
+                            && ["write_file", "edit_file", "apply_patch"].contains(&tool_call.name.as_str())
+                        {
+                            if let Some(snapshot_id) = snapshot_id.as_deref() {
+                                if let Ok(file_diff_meta) = self.build_file_diff_metadata(
+                                    &session.id,
+                                    snapshot_id,
+                                    &active_workspace,
+                                ) {
+                                    if let Some(base) = tool_result.metadata.as_object_mut() {
+                                        if let Some(extra) = file_diff_meta.as_object() {
+                                            for (key, value) in extra {
+                                                base.insert(key.clone(), value.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         let output = tool_result.output.clone();
 
@@ -2032,6 +2038,21 @@ impl AgentRuntime {
 
         info!("process_message: Loop complete, finalizing session");
         self.session_manager.update_session(&session).await?;
+
+        if runtime_config.agent.checkpoint_enabled {
+            if let Err(error) = self
+                .checkpoint_manager
+                .create_checkpoint(
+                    &session,
+                    Some("assistant_turn_complete".to_string()),
+                    None,
+                    Some(active_workspace.resolved_path()),
+                )
+                .await
+            {
+                warn!("Failed to create end-of-turn checkpoint: {}", error);
+            }
+        }
 
         let last_assistant_message = session
             .messages
@@ -2781,6 +2802,59 @@ impl AgentRuntime {
         }
         let joined = std::path::Path::new(path);
         !path_touches_tool_outputs(joined)
+    }
+
+    fn truncate_diff_text(input: &str, limit_chars: usize) -> String {
+        if input.chars().count() <= limit_chars {
+            return input.to_string();
+        }
+        let mut out = String::new();
+        for ch in input.chars().take(limit_chars) {
+            out.push(ch);
+        }
+        out
+    }
+
+    fn build_file_diff_metadata(
+        &self,
+        session_id: &str,
+        snapshot_id: &str,
+        workspace: &WorkspaceConfig,
+    ) -> Result<serde_json::Value> {
+        let records = self
+            .storage
+            .list_file_snapshot_records(session_id, snapshot_id)?;
+        let root = Self::workspace_root(workspace);
+
+        let mut files = Vec::new();
+        for record in records {
+            let abs_path = root.join(&record.path);
+            let new_content_bytes = std::fs::read(&abs_path).ok();
+
+            let old_content = record.content.as_ref().map(|bytes| {
+                Self::truncate_diff_text(&String::from_utf8_lossy(bytes), 50_000)
+            });
+            let new_content = new_content_bytes
+                .as_ref()
+                .map(|bytes| Self::truncate_diff_text(&String::from_utf8_lossy(bytes), 50_000));
+
+            let status = if !record.existed && new_content.is_some() {
+                "added"
+            } else if record.existed && new_content.is_none() {
+                "deleted"
+            } else {
+                "modified"
+            };
+
+            files.push(serde_json::json!({
+                "path": record.path,
+                "status": status,
+                "old_content": old_content,
+                "new_content": new_content,
+            }));
+        }
+
+        Ok(serde_json::json!({ "diff_files": files }))
     }
 
     fn capture_file_snapshots(
@@ -4104,6 +4178,51 @@ impl AgentRuntime {
         session_id: &str,
     ) -> Result<Vec<crate::storage::Checkpoint>> {
         self.checkpoint_manager.list_checkpoints(session_id).await
+    }
+
+    pub async fn create_checkpoint(&self, session_id: &str) -> Result<crate::storage::Checkpoint> {
+        let session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| OSAgentError::Session("Session not found".to_string()))?;
+        let cfg = self.config.read().await;
+        let workspace = Self::resolve_workspace_for_session(&session, &cfg)
+            .unwrap_or_else(|| cfg.get_active_workspace());
+        drop(cfg);
+
+        self.checkpoint_manager
+            .create_checkpoint(
+                &session,
+                Some("manual".to_string()),
+                None,
+                Some(workspace.resolved_path()),
+            )
+            .await
+    }
+
+    pub async fn get_checkpoint_diffs(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Vec<crate::storage::CheckpointDiff>> {
+        self.checkpoint_manager.checkpoint_diffs(checkpoint_id).await
+    }
+
+    pub async fn list_checkpoint_changed_files(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        self.checkpoint_manager.list_changed_files(checkpoint_id).await
+    }
+
+    pub async fn compute_checkpoint_diff(
+        &self,
+        from_checkpoint_id: &str,
+        to_checkpoint_id: &str,
+    ) -> Result<String> {
+        self.checkpoint_manager
+            .compute_diff(from_checkpoint_id, to_checkpoint_id)
+            .await
     }
 
     pub async fn rollback(&self, checkpoint_id: &str) -> Result<Session> {

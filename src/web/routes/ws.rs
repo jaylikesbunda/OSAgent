@@ -83,7 +83,8 @@ pub enum ServerMessage {
     SessionEvent {
         session_id: String,
         sequence: u64,
-        event: AgentEvent,
+        #[serde(skip)]
+        event: Box<AgentEvent>,
     },
 }
 
@@ -353,7 +354,7 @@ async fn stream_session_events(
             .send(ServerMessage::SessionEvent {
                 session_id: session_id.clone(),
                 sequence: event.sequence(),
-                event,
+                event: Box::new(event),
             })
             .is_err()
         {
@@ -372,7 +373,7 @@ async fn stream_session_events(
                     .send(ServerMessage::SessionEvent {
                         session_id: session_id.clone(),
                         sequence: event.sequence(),
-                        event,
+                        event: Box::new(event),
                     })
                     .is_err()
                 {

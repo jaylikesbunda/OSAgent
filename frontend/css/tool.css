@@ -1,4 +1,5 @@
 .tool-container {
+    width: min(800px, 100%);
     max-width: 800px;
     margin: 0 auto 4px;
 }
@@ -27,6 +28,7 @@
 /* ---- Parallel tool group ---- */
 
 .parallel-group {
+    width: min(800px, 100%);
     max-width: 800px;
     margin: 0 auto 8px;
     position: relative;
@@ -92,6 +94,36 @@
     border-radius: 4px;
     transition: background 0.15s ease;
     cursor: pointer;
+}
+
+.tool-trigger-inline .tool-subtitle {
+    flex: 1;
+    min-width: 0;
+}
+
+.tool-preview-btn {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+}
+
+.tool-preview-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+    background: var(--bg-tertiary);
+}
+
+.tool-previewable .tool-trigger-inline:hover {
+    background: var(--bg-hover);
 }
 
 .tool-trigger-inline:hover {
@@ -218,6 +250,31 @@
 .tool-status-badge.failed {
     color: #ef4444;
     background: rgba(239, 68, 68, 0.1);
+}
+
+.tool-file-diff {
+    margin-top: 8px;
+}
+
+.tool-file-diff-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.tool-file-diff-path {
+    max-width: 80%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tool-file-diff-status {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 @keyframes badgePulse {
@@ -409,9 +466,19 @@
     align-items: center;
     gap: 8px;
     padding: 2px 4px;
+    border-radius: 4px;
     font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
     font-size: 11px;
     color: var(--text-muted);
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.context-inline-item.previewable {
+    cursor: pointer;
+}
+
+.context-inline-item:hover {
+    background: var(--bg-hover);
 }
 
 .context-inline-action {
@@ -433,9 +500,31 @@
     flex-shrink: 0;
 }
 
+.context-inline-preview-btn {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0;
+}
+
+.context-inline-preview-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+    background: var(--bg-tertiary);
+}
+
 /* ---- Subagent card ---- */
 
 .subagent-card {
+    width: min(800px, 100%);
     max-width: 800px;
     margin: 0 auto 12px;
     background: var(--bg-secondary);

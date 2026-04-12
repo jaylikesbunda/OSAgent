@@ -315,6 +315,19 @@ pub struct Checkpoint {
     pub state: Vec<u8>,
     pub tool_name: Option<String>,
     pub tool_input: Option<String>,
+    #[serde(default)]
+    pub git_commit: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointDiff {
+    pub id: String,
+    pub checkpoint_id: String,
+    pub path: String,
+    pub diff: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

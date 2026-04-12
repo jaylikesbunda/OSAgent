@@ -247,6 +247,13 @@ pub struct RestoreSessionResponse {
     pub reverted_snapshot_ids: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CheckpointDiffResponse {
+    pub checkpoint_id: String,
+    pub changed_files: Vec<String>,
+    pub diffs: Vec<crate::storage::CheckpointDiff>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SnapshotRevertRequest {
     pub snapshot_id: String,
@@ -434,6 +441,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route(
             "/api/sessions/:id/checkpoints",
             get(list_checkpoints).post(create_checkpoint),
+        )
+        .route(
+            "/api/sessions/:id/checkpoints/:checkpoint_id/diff",
+            get(get_checkpoint_diff),
         )
         .route("/api/sessions/:id/restore", post(restore_session_state))
         .route("/api/sessions/:id/rollback", post(rollback))
@@ -1685,12 +1696,16 @@ async fn get_session_tools(
         }
     }
 
+    let mut seen_call_ids = std::collections::HashSet::new();
     let tools: Vec<SessionToolEvent> = history
         .into_iter()
         .filter(|e| e.event_type == "tool_start")
         .filter_map(|e| {
             let data = e.data;
             let tool_call_id = data.get("tool_call_id")?.as_str()?.to_string();
+            if !seen_call_ids.insert(tool_call_id.clone()) {
+                return None;
+            }
             let tool_name = data.get("tool_name")?.as_str()?.to_string();
             let arguments = data.get("arguments")?.clone();
             let message_index = data
@@ -2203,10 +2218,56 @@ async fn list_checkpoints(
 }
 
 async fn create_checkpoint(
-    Extension(_agent): Extension<Arc<AgentRuntime>>,
-    Path(_id): Path<String>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    Ok(StatusCode::OK)
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::storage::Checkpoint>, (StatusCode, Json<ErrorResponse>)> {
+    let checkpoint = agent.create_checkpoint(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(checkpoint))
+}
+
+async fn get_checkpoint_diff(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path((session_id, checkpoint_id)): Path<(String, String)>,
+) -> Result<Json<CheckpointDiffResponse>, (StatusCode, Json<ErrorResponse>)> {
+    resolve_checkpoint_for_session(&agent, &session_id, &checkpoint_id).await?;
+
+    let changed_files = agent
+        .list_checkpoint_changed_files(&checkpoint_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    let diffs = agent.get_checkpoint_diffs(&checkpoint_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(CheckpointDiffResponse {
+        checkpoint_id,
+        changed_files,
+        diffs,
+    }))
 }
 
 async fn resolve_checkpoint_for_session(

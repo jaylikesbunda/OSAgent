@@ -482,6 +482,302 @@ OSA.parseDiffChanges = function(output) {
     return { additions, deletions };
 };
 
+OSA.getToolDiffFiles = function(toolEvent) {
+    const metadata = toolEvent && toolEvent.metadata && typeof toolEvent.metadata === 'object'
+        ? toolEvent.metadata
+        : null;
+    if (!metadata || !Array.isArray(metadata.diff_files)) return [];
+    return metadata.diff_files.filter(function(item) {
+        return item && typeof item.path === 'string';
+    });
+};
+
+OSA.renderToolDiff = function(outputEl, toolEvent) {
+    if (!outputEl || !toolEvent) return false;
+    const files = OSA.getToolDiffFiles(toolEvent);
+    if (!files.length || typeof OSA.renderDiffView !== 'function') return false;
+
+    outputEl.innerHTML = '';
+    files.slice(0, 3).forEach(function(fileDiff) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'tool-file-diff';
+
+        const header = document.createElement('div');
+        header.className = 'tool-file-diff-header';
+        header.innerHTML = '<span class="tool-file-diff-path">' + OSA.escapeHtml(fileDiff.path) + '</span>'
+            + '<span class="tool-file-diff-status">' + OSA.escapeHtml(fileDiff.status || 'modified') + '</span>';
+        wrapper.appendChild(header);
+
+        const diffView = OSA.renderDiffView(fileDiff.old_content || '', fileDiff.new_content || '');
+        wrapper.appendChild(diffView);
+        outputEl.appendChild(wrapper);
+    });
+
+    return true;
+};
+
+OSA.previewReadToolOutput = function(toolEvent) {
+    if (!toolEvent || toolEvent.tool_name !== 'read_file' || !toolEvent.success) return;
+    if (typeof OSA.openFilePreview !== 'function') return;
+    const payload = OSA.toolEventPreviewPayload(toolEvent);
+    if (!payload || !payload.path) return;
+    OSA.openFilePreview(payload.path, payload.content || '');
+};
+
+OSA.extractReadFileContent = function(rawOutput) {
+    const raw = typeof rawOutput === 'string' ? rawOutput : '';
+    if (!raw.trim()) return '';
+
+    const match = raw.match(/<content>\s*([\s\S]*?)\s*<\/content>/i);
+    let content = match ? match[1] : raw;
+    content = content.split(/<system-reminder>/i)[0];
+    let lines = content.replace(/\r\n/g, '\n').split('\n');
+
+    const numberedLines = lines.filter(function(line) {
+        return line.trim() !== '' && !/^\(End of file/i.test(line.trim());
+    });
+    const looksNumbered = numberedLines.length > 0 && numberedLines.every(function(line) {
+        return /^\d+:\s/.test(line);
+    });
+
+    if (looksNumbered) {
+        lines = lines
+            .filter(function(line) { return !/^\(End of file/i.test(line.trim()); })
+            .map(function(line) { return line.replace(/^\d+:\s?/, ''); });
+    }
+
+    return lines.join('\n').replace(/\n+$/, '');
+};
+
+OSA.extractReadFilePath = function(toolEvent) {
+    const args = toolEvent && toolEvent.arguments ? toolEvent.arguments : {};
+    const argPath = args.path || args.filePath || '';
+    if (argPath) return argPath;
+    const raw = typeof toolEvent?.output === 'string' ? toolEvent.output : '';
+    const match = raw.match(/<path>([\s\S]*?)<\/path>/i);
+    return match ? match[1].trim() : '';
+};
+
+OSA.ensureToolPreviewButton = function(card, domId) {
+    if (!card) return null;
+    let button = card.querySelector('.tool-preview-btn');
+    if (button) return button;
+
+    const trigger = card.querySelector('.tool-trigger-inline');
+    const status = card.querySelector('.tool-status-badge');
+    if (!trigger || !status) return null;
+
+    button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tool-preview-btn hidden';
+    button.title = 'Open in preview';
+    button.setAttribute('aria-label', 'Open in preview');
+    button.setAttribute('onclick', `OSA.openPreviewFromButton('${domId}', event)`);
+    button.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 5h18"></path>
+            <path d="M3 12h7"></path>
+            <path d="M3 19h7"></path>
+            <rect x="12" y="8" width="9" height="11" rx="1"></rect>
+        </svg>
+    `;
+    trigger.insertBefore(button, status);
+    return button;
+};
+
+OSA.ensureContextPreviewButton = function(item) {
+    if (!item) return null;
+    let button = item.querySelector('.context-inline-preview-btn');
+    if (button) return button;
+
+    const status = item.querySelector('.context-inline-status');
+    if (!status) return null;
+    button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'context-inline-preview-btn hidden';
+    button.title = 'Open in preview';
+    button.setAttribute('aria-label', 'Open in preview');
+    button.setAttribute('onclick', `OSA.openPreviewFromContextButton('${item.id}', event)`);
+    button.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 5h18"></path>
+            <path d="M3 12h7"></path>
+            <path d="M3 19h7"></path>
+            <rect x="12" y="8" width="9" height="11" rx="1"></rect>
+        </svg>
+    `;
+    item.insertBefore(button, status);
+    return button;
+};
+
+OSA.toolEventPreviewPayload = function(toolEvent) {
+    if (!toolEvent || toolEvent.success !== true) return null;
+
+    if (toolEvent.tool_name === 'read_file') {
+        const path = OSA.extractReadFilePath(toolEvent);
+        const output = OSA.extractReadFileContent(toolEvent.output);
+        if (!path || !output.trim()) return null;
+        return {
+            path,
+            content: output,
+        };
+    }
+
+    if (toolEvent.tool_name === 'list_files') {
+        const args = toolEvent.arguments || {};
+        const path = args.path || args.filePath || '.';
+        const content = OSA.formatToolOutput(toolEvent.tool_name, toolEvent.output || '');
+        if (!content.trim()) return null;
+        return { path, content };
+    }
+
+    if (toolEvent.tool_name === 'glob') {
+        const pattern = (toolEvent.arguments && toolEvent.arguments.pattern) || '*';
+        const content = OSA.formatToolOutput(toolEvent.tool_name, toolEvent.output || '');
+        if (!content.trim()) return null;
+        return {
+            path: `glob: ${pattern}`,
+            content,
+        };
+    }
+
+    if (toolEvent.tool_name === 'grep') {
+        const pattern = (toolEvent.arguments && toolEvent.arguments.pattern) || 'search';
+        const content = OSA.formatToolOutput(toolEvent.tool_name, toolEvent.output || '');
+        if (!content.trim()) return null;
+        return {
+            path: `grep: ${pattern}`,
+            content,
+        };
+    }
+
+    if (['write_file', 'edit_file', 'apply_patch'].includes(toolEvent.tool_name)) {
+        const files = OSA.getToolDiffFiles(toolEvent);
+        const first = files[0];
+        if (!first || !first.path) return null;
+        return {
+            path: first.path,
+            mode: 'diff',
+            content: typeof first.new_content === 'string'
+                ? first.new_content
+                : (typeof first.old_content === 'string' ? first.old_content : ''),
+            oldContent: typeof first.old_content === 'string' ? first.old_content : '',
+            newContent: typeof first.new_content === 'string'
+                ? first.new_content
+                : (typeof first.old_content === 'string' ? first.old_content : ''),
+        };
+    }
+
+    return null;
+};
+
+OSA.setToolCardPreviewData = function(domId, toolEvent) {
+    const card = document.getElementById(`card-${domId}`);
+    if (!card) return;
+    const btn = OSA.ensureToolPreviewButton(card, domId);
+    const payload = OSA.toolEventPreviewPayload(toolEvent);
+    if (!payload) {
+        delete card.dataset.previewPath;
+        delete card.dataset.previewMode;
+        delete card.dataset.previewContent;
+        delete card.dataset.previewOldContent;
+        delete card.dataset.previewNewContent;
+        card.classList.remove('tool-previewable');
+        if (btn) btn.classList.add('hidden');
+        return;
+    }
+
+    card.dataset.previewPath = payload.path;
+    card.dataset.previewMode = payload.mode || 'file';
+    card.dataset.previewContent = payload.content;
+    card.dataset.previewOldContent = payload.oldContent || '';
+    card.dataset.previewNewContent = payload.newContent || '';
+    card.classList.add('tool-previewable');
+    if (btn) btn.classList.remove('hidden');
+};
+
+OSA.openPreviewFromCard = function(domId) {
+    const card = document.getElementById(`card-${domId}`);
+    if (!card || typeof OSA.openFilePreview !== 'function') return false;
+    const path = card.dataset.previewPath || '';
+    const content = card.dataset.previewContent || '';
+    const mode = card.dataset.previewMode || 'file';
+    if (!path) return false;
+    OSA.openFilePreview(path, content, mode === 'diff'
+        ? {
+            mode: 'diff',
+            oldContent: card.dataset.previewOldContent || '',
+            newContent: card.dataset.previewNewContent || content,
+        }
+        : undefined);
+    return true;
+};
+
+OSA.handleToolCardClick = function(domId) {
+    OSA.toggleToolCard(domId);
+};
+
+OSA.openPreviewFromButton = function(domId, event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    OSA.openPreviewFromCard(domId);
+};
+
+OSA.setContextToolPreviewData = function(item, toolEvent) {
+    if (!item) return;
+    const payload = OSA.toolEventPreviewPayload(toolEvent);
+    const btn = OSA.ensureContextPreviewButton(item);
+    if (!payload) {
+        delete item.dataset.previewPath;
+        delete item.dataset.previewMode;
+        delete item.dataset.previewContent;
+        delete item.dataset.previewOldContent;
+        delete item.dataset.previewNewContent;
+        item.classList.remove('previewable');
+        if (btn) btn.classList.add('hidden');
+        return;
+    }
+
+    item.dataset.previewPath = payload.path;
+    item.dataset.previewMode = payload.mode || 'file';
+    item.dataset.previewContent = payload.content;
+    item.dataset.previewOldContent = payload.oldContent || '';
+    item.dataset.previewNewContent = payload.newContent || '';
+    item.classList.add('previewable');
+    if (btn) btn.classList.remove('hidden');
+};
+
+OSA.openPreviewFromContextItem = function(itemId) {
+    const item = document.getElementById(itemId);
+    if (!item || typeof OSA.openFilePreview !== 'function') return false;
+    const path = item.dataset.previewPath || '';
+    const content = item.dataset.previewContent || '';
+    const mode = item.dataset.previewMode || 'file';
+    if (!path) return false;
+    OSA.openFilePreview(path, content, mode === 'diff'
+        ? {
+            mode: 'diff',
+            oldContent: item.dataset.previewOldContent || '',
+            newContent: item.dataset.previewNewContent || content,
+        }
+        : undefined);
+    return true;
+};
+
+OSA.handleContextToolClick = function(itemId) {
+    OSA.openPreviewFromContextItem(itemId);
+};
+
+OSA.openPreviewFromContextButton = function(itemId, event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    OSA.openPreviewFromContextItem(itemId);
+};
+
 OSA.createToolCard = function(event, insertBefore = null) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return;
@@ -568,6 +864,7 @@ OSA._renderInlineToolCard = function(toolEvent, insertBefore, parent) {
                     outputEl.style.display = '';
                 }
             }
+            OSA.setToolCardPreviewData(domId, toolEvent);
         }
         return;
     }
@@ -588,10 +885,18 @@ OSA._renderInlineToolCard = function(toolEvent, insertBefore, parent) {
 
     let html = `
         <div class="tool-card tool-inline" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
-            <div class="tool-trigger tool-trigger-inline" onclick="OSA.toggleToolCard('${domId}')">
+            <div class="tool-trigger tool-trigger-inline" onclick="OSA.handleToolCardClick('${domId}')">
                 <span class="tool-icon">${icon}</span>
                 <span class="tool-title ${titleClass}" id="title-${domId}">${OSA.escapeHtml(label)}</span>
                 ${subtitle ? `<span class="tool-subtitle" id="subtitle-${domId}">${OSA.escapeHtml(subtitle)}</span>` : ''}
+                <button type="button" class="tool-preview-btn hidden" onclick="OSA.openPreviewFromButton('${domId}', event)" title="Open in preview" aria-label="Open in preview">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 5h18"></path>
+                        <path d="M3 12h7"></path>
+                        <path d="M3 19h7"></path>
+                        <rect x="12" y="8" width="9" height="11" rx="1"></rect>
+                    </svg>
+                </button>
                 <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
                 <span class="tool-chevron" id="chevron-${domId}" style="${chevronOpacity}">&#x25B6;</span>
             </div>
@@ -623,12 +928,18 @@ OSA._renderInlineToolCard = function(toolEvent, insertBefore, parent) {
     if (isCompleted && output) {
         const outputEl = document.getElementById(`output-${domId}`);
         if (outputEl) {
+            const renderedDiff = ['write_file', 'edit_file', 'apply_patch'].includes(toolName)
+                ? OSA.renderToolDiff(outputEl, toolEvent)
+                : false;
             const formatted = OSA.formatToolOutput(toolName, output);
-            if (formatted) {
+            if (!renderedDiff && formatted) {
                 outputEl.textContent = formatted;
+                outputEl.style.display = '';
+            } else if (renderedDiff) {
                 outputEl.style.display = '';
             }
         }
+        OSA.setToolCardPreviewData(domId, toolEvent);
 
         if (isSuccess && ['write_file', 'edit_file', 'apply_patch'].includes(toolName)) {
             const diff = OSA.parseDiffChanges(output);
@@ -698,11 +1009,21 @@ OSA.restoreContextToolGroup = function(tools, insertBefore = null) {
         const item = document.createElement('div');
         item.className = 'context-inline-item';
         item.id = `ctx-${t.tool_call_id || Math.random().toString(36).slice(2)}`;
+        item.setAttribute('onclick', `OSA.handleContextToolClick('${item.id}')`);
         item.innerHTML = `
             <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
             <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
+            <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton('${item.id}', event)" title="Open in preview" aria-label="Open in preview">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 5h18"></path>
+                    <path d="M3 12h7"></path>
+                    <path d="M3 19h7"></path>
+                    <rect x="12" y="8" width="9" height="11" rx="1"></rect>
+                </svg>
+            </button>
             <span class="context-inline-status">${statusText}</span>
         `;
+        OSA.setContextToolPreviewData(item, t);
         group.appendChild(item);
     });
 
@@ -736,6 +1057,7 @@ OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = fal
             statusEl.textContent = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
             statusEl.className = `context-inline-status${isCompleted ? (isSuccess ? ' done' : ' failed') : ' pending'}`;
         }
+        OSA.setContextToolPreviewData(existingItem, event);
         return;
     }
 
@@ -746,11 +1068,21 @@ OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = fal
     const item = document.createElement('div');
     item.className = 'context-inline-item';
     item.id = `ctx-${callId}`;
+    item.setAttribute('onclick', `OSA.handleContextToolClick('${item.id}')`);
     item.innerHTML = `
         <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
         <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
+        <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton('${item.id}', event)" title="Open in preview" aria-label="Open in preview">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 5h18"></path>
+                <path d="M3 12h7"></path>
+                <path d="M3 19h7"></path>
+                <rect x="12" y="8" width="9" height="11" rx="1"></rect>
+            </svg>
+        </button>
         <span class="context-inline-status">${statusText}</span>
     `;
+    OSA.setContextToolPreviewData(item, event);
     group.appendChild(item);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
@@ -852,7 +1184,9 @@ OSA.completeToolCard = function(event) {
                 if (event.success) state.classList.add('done');
                 else state.classList.add('failed');
             }
+            OSA.setContextToolPreviewData(item, event);
         }
+        OSA.previewReadToolOutput(event);
         activeTools.delete(event.tool_call_id);
         return;
     }
@@ -889,10 +1223,13 @@ OSA.completeToolCard = function(event) {
     }
 
     if (toolData.isPanel) {
-        const output = document.getElementById(`output-${toolData.domId}`);
-        if (output) {
+            const output = document.getElementById(`output-${toolData.domId}`);
+            if (output) {
+            const renderedDiff = ['write_file', 'edit_file', 'apply_patch'].includes(toolData.toolName)
+                ? OSA.renderToolDiff(output, event)
+                : false;
             const formatted = OSA.formatToolOutput(toolData.toolName, event.output || '');
-            if (formatted) {
+            if (!renderedDiff && formatted) {
                 if (toolData.toolName === 'subagent') {
                     const linkified = OSA.linkifySessionIds(OSA.escapeHtml(formatted));
                     output.innerHTML = linkified;
@@ -900,8 +1237,12 @@ OSA.completeToolCard = function(event) {
                     output.textContent = formatted;
                 }
                 output.style.display = '';
+            } else if (renderedDiff) {
+                output.style.display = '';
             }
         }
+
+        OSA.setToolCardPreviewData(toolData.domId, event);
 
         if (card && event.success && ['write_file', 'edit_file', 'apply_patch'].includes(toolData.toolName)) {
             const diff = OSA.parseDiffChanges(event.output || '');
@@ -983,6 +1324,8 @@ OSA.completeToolCard = function(event) {
 
     toolData.completed = true;
     activeTools.delete(event.tool_call_id);
+
+    OSA.previewReadToolOutput(event);
 };
 
 OSA.formatToolOutput = function(toolName, output) {
@@ -997,8 +1340,8 @@ OSA.formatToolOutput = function(toolName, output) {
     }
 
     if (['write_file', 'edit_file', 'apply_patch'].includes(toolName)) {
-        return output.length > 4000
-            ? output.slice(0, 4000) + '\n\u2026[truncated]'
+        return output.length > 1200
+            ? output.slice(0, 1200) + '\n\u2026[truncated]'
             : output;
     }
 
@@ -1720,39 +2063,44 @@ OSA.syncToolsFromBackend = async function() {
         const res = await fetch(`/api/sessions/${session.id}/tools`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         });
-        if (!res.ok) return;
-        const tools = await res.json();
-        if (!tools || tools.length === 0) return;
+        if (res.ok) {
+            const tools = await res.json();
+            if (Array.isArray(tools) && tools.length > 0) {
+                const messagesDiv = document.getElementById('messages');
+                if (messagesDiv) {
+                    // Build set of tool call IDs already in the DOM
+                    const existingContextIds = new Set();
+                    messagesDiv.querySelectorAll('.context-inline-item').forEach(el => {
+                        if (el.id && el.id.startsWith('ctx-')) existingContextIds.add(el.id);
+                    });
+                    const existingCardIds = new Set();
+                    messagesDiv.querySelectorAll('.tool-container:not(.context-inline-group)').forEach(el => {
+                        existingCardIds.add(el.id);
+                    });
 
-        const messagesDiv = document.getElementById('messages');
-        if (!messagesDiv) return;
-
-        // Build set of tool call IDs already in the DOM
-        const existingContextIds = new Set();
-        messagesDiv.querySelectorAll('.context-inline-item').forEach(el => {
-            if (el.id && el.id.startsWith('ctx-')) existingContextIds.add(el.id);
-        });
-        const existingCardIds = new Set();
-        messagesDiv.querySelectorAll('.tool-container:not(.context-inline-group)').forEach(el => {
-            existingCardIds.add(el.id);
-        });
-
-        tools.forEach(t => {
-            if (t.tool_name === 'subagent') return;
-            if (typeof OSA.isMessageIndexInRenderedWindow === 'function' && !OSA.isMessageIndexInRenderedWindow(t.message_index)) {
-                return;
-            }
-            const callId = t.tool_call_id;
-            if (OSA.isContextTool(t.tool_name)) {
-                if (!existingContextIds.has(`ctx-${callId}`)) {
-                    OSA.restoreToolCard(t);
+                    tools.forEach(t => {
+                        if (t.tool_name === 'subagent') return;
+                        if (typeof OSA.isMessageIndexInRenderedWindow === 'function' && !OSA.isMessageIndexInRenderedWindow(t.message_index)) {
+                            return;
+                        }
+                        const callId = t.tool_call_id;
+                        if (OSA.isContextTool(t.tool_name)) {
+                            if (!existingContextIds.has(`ctx-${callId}`)) {
+                                OSA.restoreToolCard(t);
+                            }
+                        } else {
+                            if (!existingCardIds.has(`tool-${callId}`)) {
+                                OSA.restoreToolCard(t);
+                            }
+                        }
+                    });
                 }
-            } else {
-                if (!existingCardIds.has(`tool-${callId}`)) {
-                    OSA.restoreToolCard(t);
-                }
             }
-        });
+        }
+
+        if (typeof OSA.syncRunningSessionSnapshot === 'function') {
+            OSA.syncRunningSessionSnapshot(session.id);
+        }
     } catch (e) {
         // swallow - will retry on next tick
     }
