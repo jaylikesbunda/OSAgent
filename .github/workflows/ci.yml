@@ -257,7 +257,9 @@ jobs:
           sudo apt-get install -y awscli
 
       - name: Upload release to Cloudflare R2
-        run: ./upload-to-r2.sh "$RELEASE_TAG" release-flat
+        run: |
+          chmod +x upload-to-r2.sh
+          ./upload-to-r2.sh "$RELEASE_TAG" release-flat
 
       - name: Upload release manifest artifact
         uses: actions/upload-artifact@v4
