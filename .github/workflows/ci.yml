@@ -127,10 +127,13 @@ jobs:
           export OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater"
           cd launcher && cargo tauri build --bundles deb --target x86_64-unknown-linux-gnu
           mkdir -p dist/linux-x86_64
-          cp launcher/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb dist/linux-x86_64/
+          DEB_FILE=$(find launcher/target/x86_64-unknown-linux-gnu/release/bundle/deb -name "*.deb" | head -1)
+          if [ -n "$DEB_FILE" ] && [ -f "$DEB_FILE" ]; then
+            dpkg -x "$DEB_FILE" dist/linux-x86_64
+          fi
           cp launcher/target/x86_64-unknown-linux-gnu/release/osagent-launcher dist/linux-x86_64/
-          cd dist/linux-x86_64 && ar -x *.deb data.tar.gz && tar xzf data.tar.gz && rm -f data.tar.gz control.tar.gz debian-binary _gpgbuilder *.deb
-          tar czf ../../osagent-linux-x86_64-setup.tar.gz *
+          chmod +x dist/linux-x86_64/osagent-launcher
+          tar czf osagent-linux-x86_64-setup.tar.gz -C dist/linux-x86_64 .
           sha256sum osagent-linux-x86_64-setup.tar.gz > osagent-linux-x86_64-setup.tar.gz.sha256
 
       - name: Upload Linux release artifacts
@@ -300,10 +303,12 @@ jobs:
           export OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater"
           cd launcher && cargo tauri build --bundles dmg --target aarch64-apple-darwin
           mkdir -p dist/macos-arm64
-          cp launcher/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg dist/macos-arm64/
-          hdiutil attach dist/macos-arm64/*.dmg -mountpoint /tmp/osagent-macos || true
-          cp -r /tmp/osagent-macos/* dist/macos-arm64/ 2>/dev/null || true
-          hdiutil detach /tmp/osagent-macos || true
+          DMG_FILE=$(find launcher/target/aarch64-apple-darwin/release/bundle/dmg -name "*.dmg" | head -1)
+          if [ -n "$DMG_FILE" ] && [ -f "$DMG_FILE" ]; then
+            hdiutil attach "$DMG_FILE" -mountpoint /tmp/osagent-macos
+            cp -r /tmp/osagent-macos/* dist/macos-arm64/ 2>/dev/null || true
+            hdiutil detach /tmp/osagent-macos || true
+          fi
           tar czf osagent-macos-arm64-setup.tar.gz -C dist/macos-arm64 .
           shasum -a 256 osagent-macos-arm64-setup.tar.gz > osagent-macos-arm64-setup.tar.gz.sha256
 
