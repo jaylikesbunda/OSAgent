@@ -130,12 +130,7 @@ impl CheckpointManager {
         Ok(Some(head.to_string()))
     }
 
-    fn run_shadow_git(
-        &self,
-        git_dir: &Path,
-        work_tree: &Path,
-        args: &[&str],
-    ) -> Result<String> {
+    fn run_shadow_git(&self, git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String> {
         let full_args = {
             let mut a = vec![
                 format!("--git-dir={}", git_dir.to_string_lossy()),
@@ -145,10 +140,9 @@ impl CheckpointManager {
             a
         };
 
-        let output = Command::new("git")
-            .args(&full_args)
-            .output()
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to run git command: {}", e)))?;
+        let output = Command::new("git").args(&full_args).output().map_err(|e| {
+            OSAgentError::ToolExecution(format!("Failed to run git command: {}", e))
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -171,7 +165,11 @@ impl CheckpointManager {
         let workspace = PathBuf::from(workspace_path);
         let git_dir = shadow_git_dir(&workspace);
 
-        let parent = self.run_shadow_git(&git_dir, &workspace, &["rev-parse", &format!("{}^", git_commit)]);
+        let parent = self.run_shadow_git(
+            &git_dir,
+            &workspace,
+            &["rev-parse", &format!("{}^", git_commit)],
+        );
         let base = match parent {
             Ok(value) if !value.trim().is_empty() => value,
             _ => "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(),
@@ -234,7 +232,10 @@ impl CheckpointManager {
 
     pub async fn list_changed_files(&self, checkpoint_id: &str) -> Result<Vec<PathBuf>> {
         let diffs = self.storage.list_checkpoint_diffs(checkpoint_id)?;
-        Ok(diffs.into_iter().map(|item| PathBuf::from(item.path)).collect())
+        Ok(diffs
+            .into_iter()
+            .map(|item| PathBuf::from(item.path))
+            .collect())
     }
 
     pub async fn checkpoint_diffs(&self, checkpoint_id: &str) -> Result<Vec<CheckpointDiff>> {
@@ -264,14 +265,12 @@ impl CheckpointManager {
         let workspace_path = Path::new(workspace);
         let git_dir = shadow_git_dir(workspace_path);
 
-        let from_commit = from
-            .git_commit
-            .as_ref()
-            .ok_or_else(|| OSAgentError::Session("Source checkpoint has no git commit".to_string()))?;
-        let to_commit = to
-            .git_commit
-            .as_ref()
-            .ok_or_else(|| OSAgentError::Session("Target checkpoint has no git commit".to_string()))?;
+        let from_commit = from.git_commit.as_ref().ok_or_else(|| {
+            OSAgentError::Session("Source checkpoint has no git commit".to_string())
+        })?;
+        let to_commit = to.git_commit.as_ref().ok_or_else(|| {
+            OSAgentError::Session("Target checkpoint has no git commit".to_string())
+        })?;
 
         self.run_shadow_git(
             &git_dir,

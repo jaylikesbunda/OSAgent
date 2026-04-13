@@ -732,6 +732,23 @@
                             <input type="text" id="setting-memory-file" placeholder="~/.osagent/memories.json" />
                             <span class="settings-field-hint">JSON file where memories are stored</span>
                         </div>
+                        <div class="settings-field">
+                            <label for="setting-learning-mode">Learning Mode</label>
+                            <select id="setting-learning-mode">
+                                <option value="manual">Manual (no automatic saves)</option>
+                                <option value="review">Review (queue suggestions)</option>
+                                <option value="auto">Auto (save automatically)</option>
+                            </select>
+                            <span class="settings-field-hint">Controls whether new memories/decisions are saved immediately or queued for review.</span>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-memory-capture-mode">Memory Capture Mode</label>
+                            <select id="setting-memory-capture-mode">
+                                <option value="off">Off</option>
+                                <option value="review">Review</option>
+                                <option value="auto">Auto</option>
+                            </select>
+                        </div>
                         <div class="toggle-field toggle-field-spaced">
                             <div class="toggle-info">
                                 <label class="toggle-label">Enable Approved Decision Memory</label>
@@ -746,6 +763,15 @@
                             <label for="setting-decision-memory-file">Decision Memory File</label>
                             <input type="text" id="setting-decision-memory-file" placeholder="~/.osagent/decision_memories.json" />
                             <span class="settings-field-hint">Store durable decisions with: Approved decision: &lt;key&gt;=&lt;value&gt; | optional rationale</span>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-decision-capture-mode">Decision Capture Mode</label>
+                            <select id="setting-decision-capture-mode">
+                                <option value="off">Off</option>
+                                <option value="review">Review</option>
+                                <option value="auto">Auto</option>
+                            </select>
+                            <span class="settings-field-hint">Natural-language decision detection behavior. Explicit "Approved decision:" always applies when enabled.</span>
                         </div>
                     </div>
 
@@ -763,6 +789,38 @@
                                 <button type="button" class="btn-action" onclick="OSA.addMemory()">Add Memory</button>
                             </div>
                         </div>
+                    </div>
+
+                    <div class="settings-group" id="memory-suggestions-group">
+                        <div class="settings-group-title settings-group-title-inline">
+                            <span>Memory Suggestions</span>
+                            <div style="display:flex;gap:8px;align-items:center">
+                                <select id="memory-suggestions-filter" class="settings-filter-select" onchange="OSA.loadMemorySuggestions()">
+                                    <option value="pending">Pending</option>
+                                    <option value="approved">Approved</option>
+                                    <option value="rejected">Rejected</option>
+                                    <option value="all">All</option>
+                                </select>
+                                <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.loadMemorySuggestions()">Refresh</button>
+                            </div>
+                        </div>
+                        <div id="memory-suggestions-list" class="decision-list">No pending memory suggestions.</div>
+                    </div>
+
+                    <div class="settings-group" id="decision-suggestions-group">
+                        <div class="settings-group-title settings-group-title-inline">
+                            <span>Decision Suggestions</span>
+                            <div style="display:flex;gap:8px;align-items:center">
+                                <select id="decision-suggestions-filter" class="settings-filter-select" onchange="OSA.loadDecisionSuggestions()">
+                                    <option value="pending">Pending</option>
+                                    <option value="approved">Approved</option>
+                                    <option value="rejected">Rejected</option>
+                                    <option value="all">All</option>
+                                </select>
+                                <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.loadDecisionSuggestions()">Refresh</button>
+                            </div>
+                        </div>
+                        <div id="decision-suggestions-list" class="decision-list">No pending decision suggestions.</div>
                     </div>
 
                 </div>

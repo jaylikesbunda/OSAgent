@@ -1,3 +1,4 @@
+use crate::config::{CaptureMode, LearningMode};
 use crate::error::{OSAgentError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -31,19 +32,53 @@ pub struct DecisionAuditEvent {
     pub details: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionSuggestionStatus {
+    #[default]
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionSuggestion {
+    pub id: String,
+    pub key: String,
+    pub value: String,
+    pub rationale: Option<String>,
+    pub source: String,
+    pub suggested_by: String,
+    pub status: DecisionSuggestionStatus,
+    pub suggested_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub resolved_by: Option<String>,
+    pub resolution_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub enum DecisionCaptureOutcome {
+    Ignored,
+    Recorded(DecisionEntry),
+    Suggested(DecisionSuggestion),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DecisionMemoryFile {
     pub version: u32,
     pub decisions: Vec<DecisionEntry>,
     pub audit: Vec<DecisionAuditEvent>,
+    #[serde(default)]
+    pub suggestions: Vec<DecisionSuggestion>,
 }
 
 impl Default for DecisionMemoryFile {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             decisions: Vec::new(),
             audit: Vec::new(),
+            suggestions: Vec::new(),
         }
     }
 }
@@ -52,16 +87,25 @@ impl Default for DecisionMemoryFile {
 pub struct DecisionMemoryStatus {
     pub enabled: bool,
     pub file_path: String,
+    pub learning_mode: LearningMode,
+    pub capture_mode: CaptureMode,
 }
 
 pub struct DecisionMemory {
     enabled: AtomicBool,
     file_path: RwLock<PathBuf>,
+    learning_mode: RwLock<LearningMode>,
+    capture_mode: RwLock<CaptureMode>,
     io_lock: Mutex<()>,
 }
 
 impl DecisionMemory {
-    pub fn new(enabled: bool, file_path: String) -> Result<Self> {
+    pub fn new(
+        enabled: bool,
+        file_path: String,
+        learning_mode: LearningMode,
+        capture_mode: CaptureMode,
+    ) -> Result<Self> {
         let expanded = shellexpand::tilde(&file_path).to_string();
         let file_path = PathBuf::from(expanded);
 
@@ -72,6 +116,8 @@ impl DecisionMemory {
         Ok(Self {
             enabled: AtomicBool::new(enabled),
             file_path: RwLock::new(file_path),
+            learning_mode: RwLock::new(learning_mode),
+            capture_mode: RwLock::new(capture_mode),
             io_lock: Mutex::new(()),
         })
     }
@@ -81,20 +127,46 @@ impl DecisionMemory {
         DecisionMemoryStatus {
             enabled: self.enabled.load(Ordering::Relaxed),
             file_path: file_path.to_string_lossy().to_string(),
+            learning_mode: *self.learning_mode.read().unwrap(),
+            capture_mode: *self.capture_mode.read().unwrap(),
         }
+    }
+
+    pub fn learning_mode(&self) -> LearningMode {
+        *self.learning_mode.read().unwrap()
+    }
+
+    pub fn capture_mode(&self) -> CaptureMode {
+        *self.capture_mode.read().unwrap()
     }
 
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    pub fn set_config(&self, enabled: bool, file_path: String) -> Result<()> {
+    pub fn set_config(
+        &self,
+        enabled: bool,
+        file_path: String,
+        learning_mode: LearningMode,
+        capture_mode: CaptureMode,
+    ) -> Result<()> {
         let expanded = shellexpand::tilde(&file_path).to_string();
         let file_path = PathBuf::from(expanded);
 
         {
             let mut current = self.file_path.write().unwrap();
             *current = file_path.clone();
+        }
+
+        {
+            let mut mode = self.learning_mode.write().unwrap();
+            *mode = learning_mode;
+        }
+
+        {
+            let mut capture = self.capture_mode.write().unwrap();
+            *capture = capture_mode;
         }
 
         self.enabled.store(enabled, Ordering::Relaxed);
@@ -146,15 +218,30 @@ impl DecisionMemory {
         let mut state = Self::read_state(&file_path)?;
         let now = Utc::now();
 
+        let decision = Self::upsert_in_state(&mut state, key, value, rationale, source, actor, now);
+
+        Self::write_state(&file_path, &state)?;
+        Ok(decision)
+    }
+
+    fn upsert_in_state(
+        state: &mut DecisionMemoryFile,
+        key: String,
+        value: String,
+        rationale: Option<String>,
+        source: String,
+        actor: String,
+        now: DateTime<Utc>,
+    ) -> DecisionEntry {
         let maybe_existing = state
             .decisions
             .iter_mut()
             .find(|d| d.key.eq_ignore_ascii_case(&key));
 
-        let decision = if let Some(existing) = maybe_existing {
+        if let Some(existing) = maybe_existing {
             existing.value = value.clone();
             existing.rationale = rationale.clone().map(|s| s.trim().to_string());
-            existing.source = source.clone();
+            existing.source = source;
             existing.approved_by = actor.clone();
             existing.updated_at = now;
 
@@ -174,7 +261,7 @@ impl DecisionMemory {
                 id: Uuid::new_v4().to_string(),
                 key: key.clone(),
                 value: value.clone(),
-                rationale: rationale.clone().map(|s| s.trim().to_string()),
+                rationale: rationale.map(|s| s.trim().to_string()),
                 source,
                 approved_by: actor.clone(),
                 approved_at: now,
@@ -193,10 +280,7 @@ impl DecisionMemory {
 
             state.decisions.push(created.clone());
             created
-        };
-
-        Self::write_state(&file_path, &state)?;
-        Ok(decision)
+        }
     }
 
     pub async fn delete(&self, decision_id: &str, actor: String) -> Result<bool> {
@@ -236,20 +320,168 @@ impl DecisionMemory {
         Ok(true)
     }
 
+    pub async fn suggest(
+        &self,
+        key: String,
+        value: String,
+        rationale: Option<String>,
+        source: String,
+        suggested_by: String,
+    ) -> Result<DecisionSuggestion> {
+        if !self.is_enabled() {
+            return Err(OSAgentError::ToolExecution(
+                "Decision memory is disabled".to_string(),
+            ));
+        }
+
+        let key = key.trim().to_string();
+        let value = value.trim().to_string();
+        if key.is_empty() || value.is_empty() {
+            return Err(OSAgentError::ToolExecution(
+                "Decision key and value are required".to_string(),
+            ));
+        }
+
+        let _guard = self.io_lock.lock().await;
+        let file_path = self.current_file_path();
+        let mut state = Self::read_state(&file_path)?;
+        let now = Utc::now();
+
+        let suggestion = DecisionSuggestion {
+            id: Uuid::new_v4().to_string(),
+            key,
+            value,
+            rationale,
+            source,
+            suggested_by,
+            status: DecisionSuggestionStatus::Pending,
+            suggested_at: now,
+            resolved_at: None,
+            resolved_by: None,
+            resolution_note: None,
+        };
+
+        state.suggestions.push(suggestion.clone());
+        Self::write_state(&file_path, &state)?;
+        Ok(suggestion)
+    }
+
+    pub async fn list_suggestions(&self) -> Result<Vec<DecisionSuggestion>> {
+        if !self.is_enabled() {
+            return Ok(vec![]);
+        }
+
+        let _guard = self.io_lock.lock().await;
+        let file_path = self.current_file_path();
+        let mut state = Self::read_state(&file_path)?;
+        state
+            .suggestions
+            .sort_by(|a, b| b.suggested_at.cmp(&a.suggested_at));
+        Ok(state.suggestions)
+    }
+
+    pub async fn approve_suggestion(
+        &self,
+        suggestion_id: &str,
+        actor: String,
+    ) -> Result<DecisionEntry> {
+        if !self.is_enabled() {
+            return Err(OSAgentError::ToolExecution(
+                "Decision memory is disabled".to_string(),
+            ));
+        }
+
+        let _guard = self.io_lock.lock().await;
+        let file_path = self.current_file_path();
+        let mut state = Self::read_state(&file_path)?;
+        let now = Utc::now();
+
+        let suggestion = state
+            .suggestions
+            .iter_mut()
+            .find(|s| s.id == suggestion_id)
+            .ok_or_else(|| {
+                OSAgentError::ToolExecution(format!(
+                    "Decision suggestion '{}' not found",
+                    suggestion_id
+                ))
+            })?;
+
+        if suggestion.status != DecisionSuggestionStatus::Pending {
+            return Err(OSAgentError::ToolExecution(
+                "Only pending suggestions can be approved".to_string(),
+            ));
+        }
+
+        suggestion.status = DecisionSuggestionStatus::Approved;
+        suggestion.resolved_at = Some(now);
+        suggestion.resolved_by = Some(actor.clone());
+
+        let suggested_key = suggestion.key.clone();
+        let suggested_value = suggestion.value.clone();
+        let suggested_rationale = suggestion.rationale.clone();
+        let suggested_source = suggestion.source.clone();
+
+        let decision = Self::upsert_in_state(
+            &mut state,
+            suggested_key,
+            suggested_value,
+            suggested_rationale,
+            format!("{}-approved", suggested_source),
+            actor,
+            now,
+        );
+
+        Self::write_state(&file_path, &state)?;
+        Ok(decision)
+    }
+
+    pub async fn reject_suggestion(
+        &self,
+        suggestion_id: &str,
+        actor: String,
+        note: Option<String>,
+    ) -> Result<bool> {
+        if !self.is_enabled() {
+            return Ok(false);
+        }
+
+        let _guard = self.io_lock.lock().await;
+        let file_path = self.current_file_path();
+        let mut state = Self::read_state(&file_path)?;
+        let now = Utc::now();
+
+        let Some(suggestion) = state.suggestions.iter_mut().find(|s| s.id == suggestion_id) else {
+            return Ok(false);
+        };
+
+        if suggestion.status != DecisionSuggestionStatus::Pending {
+            return Ok(false);
+        }
+
+        suggestion.status = DecisionSuggestionStatus::Rejected;
+        suggestion.resolved_at = Some(now);
+        suggestion.resolved_by = Some(actor);
+        suggestion.resolution_note = note.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+
+        Self::write_state(&file_path, &state)?;
+        Ok(true)
+    }
+
     pub async fn maybe_capture_from_user_message(
         &self,
         message: &str,
         actor: &str,
-    ) -> Result<Option<DecisionEntry>> {
+    ) -> Result<DecisionCaptureOutcome> {
         if !self.is_enabled() {
-            return Ok(None);
+            return Ok(DecisionCaptureOutcome::Ignored);
         }
 
         let trimmed = message.trim();
         let lower = trimmed.to_lowercase();
 
         if let Some(decision) = self.try_explicit_prefix(trimmed, &lower, actor).await? {
-            return Ok(Some(decision));
+            return Ok(DecisionCaptureOutcome::Recorded(decision));
         }
 
         self.try_natural_patterns(trimmed, &lower, actor).await
@@ -284,7 +516,12 @@ impl DecisionMemory {
         trimmed: &str,
         lower: &str,
         actor: &str,
-    ) -> Result<Option<DecisionEntry>> {
+    ) -> Result<DecisionCaptureOutcome> {
+        let capture_mode = self.capture_mode();
+        if capture_mode == CaptureMode::Off {
+            return Ok(DecisionCaptureOutcome::Ignored);
+        }
+
         let patterns: &[(&str, fn(&str, &str) -> Option<(String, String)>)] = &[
             ("always use ", Self::parse_always_use),
             ("from now on use ", Self::parse_from_now_on),
@@ -303,18 +540,36 @@ impl DecisionMemory {
         for (prefix, extractor) in patterns {
             if lower.starts_with(prefix) {
                 if let Some((key, value)) = extractor(trimmed, lower) {
-                    return self
-                        .parse_key_value_payload(
-                            &format!("{}={}", key, value),
-                            "chat-detected",
-                            actor,
+                    let rationale =
+                        Some("Captured from natural-language preference pattern".to_string());
+                    if capture_mode == CaptureMode::Auto {
+                        let decision = self
+                            .upsert_approved(
+                                key,
+                                value,
+                                rationale,
+                                "chat-detected".to_string(),
+                                actor.to_string(),
+                            )
+                            .await?;
+                        return Ok(DecisionCaptureOutcome::Recorded(decision));
+                    }
+
+                    let suggestion = self
+                        .suggest(
+                            key,
+                            value,
+                            rationale,
+                            "chat-detected".to_string(),
+                            actor.to_string(),
                         )
-                        .await;
+                        .await?;
+                    return Ok(DecisionCaptureOutcome::Suggested(suggestion));
                 }
             }
         }
 
-        Ok(None)
+        Ok(DecisionCaptureOutcome::Ignored)
     }
 
     fn parse_always_use(trimmed: &str, _lower: &str) -> Option<(String, String)> {
@@ -368,6 +623,24 @@ impl DecisionMemory {
         source: &str,
         actor: &str,
     ) -> Result<Option<DecisionEntry>> {
+        let Some((key, value, rationale)) = Self::parse_payload(payload) else {
+            return Ok(None);
+        };
+
+        let decision = self
+            .upsert_approved(
+                key.to_string(),
+                value.to_string(),
+                rationale,
+                source.to_string(),
+                actor.to_string(),
+            )
+            .await?;
+
+        Ok(Some(decision))
+    }
+
+    fn parse_payload(payload: &str) -> Option<(String, String, Option<String>)> {
         let mut rationale = None;
         let mut body = payload;
         if let Some((left, right)) = payload.split_once('|') {
@@ -388,21 +661,7 @@ impl DecisionMemory {
             None
         };
 
-        let Some((key, value)) = parsed else {
-            return Ok(None);
-        };
-
-        let decision = self
-            .upsert_approved(
-                key.to_string(),
-                value.to_string(),
-                rationale,
-                source.to_string(),
-                actor.to_string(),
-            )
-            .await?;
-
-        Ok(Some(decision))
+        parsed.map(|(k, v)| (k.to_string(), v.to_string(), rationale))
     }
 
     pub async fn prompt_block(&self) -> Result<Option<String>> {

@@ -391,12 +391,42 @@ impl ToolRegistry {
                 "record_memory".to_string(),
                 Arc::new(memory::RecordMemoryTool::new(ms.clone())),
             );
+            tools.insert(
+                "list_memory_suggestions".to_string(),
+                Arc::new(memory::ListMemorySuggestionsTool::new(ms.clone())),
+            );
+            tools.insert(
+                "approve_memory_suggestion".to_string(),
+                Arc::new(memory::ApproveMemorySuggestionTool::new(ms.clone())),
+            );
+            tools.insert(
+                "reject_memory_suggestion".to_string(),
+                Arc::new(memory::RejectMemorySuggestionTool::new(ms.clone())),
+            );
         }
 
         if let Some(ref dm) = decision_memory {
             tools.insert(
                 "record_decision".to_string(),
                 Arc::new(decision_memory::RecordDecisionTool::new(dm.clone())),
+            );
+            tools.insert(
+                "list_decision_suggestions".to_string(),
+                Arc::new(decision_memory::ListDecisionSuggestionsTool::new(
+                    dm.clone(),
+                )),
+            );
+            tools.insert(
+                "approve_decision_suggestion".to_string(),
+                Arc::new(decision_memory::ApproveDecisionSuggestionTool::new(
+                    dm.clone(),
+                )),
+            );
+            tools.insert(
+                "reject_decision_suggestion".to_string(),
+                Arc::new(decision_memory::RejectDecisionSuggestionTool::new(
+                    dm.clone(),
+                )),
             );
         }
 

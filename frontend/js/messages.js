@@ -1305,7 +1305,7 @@ OSA.renderAttachmentMarkup = function(attachments = []) {
     if (imageAttachments.length > 0) {
         html += '<div class="message-image-grid">';
         imageAttachments.forEach(att => {
-            const src = att.dataUrl || att.data_url || '';
+            const src = OSA.getAttachmentImageSrc(att);
             html += `<div class="message-image-thumb"><img class="expandable-image" data-image-src="${src}" src="${src}" alt="${OSA.escapeHtml(att.filename || '')}" /></div>`;
         });
         html += '</div>';
@@ -1320,6 +1320,10 @@ OSA.renderAttachmentMarkup = function(attachments = []) {
     }
 
     return html;
+};
+
+OSA.getAttachmentImageSrc = function(attachment) {
+    return attachment?.previewUrl || attachment?.preview_url || attachment?.dataUrl || attachment?.data_url || '';
 };
 
 OSA.ensureMessageLayers = function() {
@@ -2012,7 +2016,7 @@ OSA.appendUserMessageToChat = function(content, options = {}) {
                 tool_call_id: null,
                 metadata: clientMessageId ? { client_message_id: clientMessageId, attachments: attachments.filter(att => att.kind !== 'image').map(att => ({ filename: att.filename, mime: att.mime, kind: att.kind || 'document', size_bytes: att.sizeBytes || 0, truncated: !!att.truncated })) } : { attachments: attachments.filter(att => att.kind !== 'image').map(att => ({ filename: att.filename, mime: att.mime, kind: att.kind || 'document', size_bytes: att.sizeBytes || 0, truncated: !!att.truncated })) },
                 tokens: null,
-                images: attachments.filter(att => att.kind === 'image' || (att.mime || '').startsWith('image/')).map(img => ({ filename: img.filename, mime: img.mime, data_url: img.dataUrl || img.data_url })),
+                images: attachments.filter(att => att.kind === 'image' || (att.mime || '').startsWith('image/')).map(img => ({ filename: img.filename, mime: img.mime, preview_url: OSA.getAttachmentImageSrc(img) })),
             });
         }
     }

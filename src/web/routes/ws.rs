@@ -83,7 +83,6 @@ pub enum ServerMessage {
     SessionEvent {
         session_id: String,
         sequence: u64,
-        #[serde(skip)]
         event: Box<AgentEvent>,
     },
 }
@@ -151,14 +150,16 @@ async fn handle_socket(socket: WebSocket, agent: Arc<AgentRuntime>) {
                         content,
                         client_message_id,
                     } => {
-                        let message_id = client_message_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+                        let message_id =
+                            client_message_id.unwrap_or_else(|| Uuid::new_v4().to_string());
                         let result = agent
                             .enqueue_message(&session_id, &message_id, &content, &[], None, &[])
                             .await
                             .and_then(|(queue_item, created)| {
-                                let started = agent
-                                    .clone()
-                                    .spawn_next_queued_message_run(session_id.clone(), "websocket".to_string())?;
+                                let started = agent.clone().spawn_next_queued_message_run(
+                                    session_id.clone(),
+                                    "websocket".to_string(),
+                                )?;
                                 Ok((queue_item, created, started))
                             });
 
@@ -213,7 +214,8 @@ async fn handle_socket(socket: WebSocket, agent: Arc<AgentRuntime>) {
                         let agent_clone = agent.clone();
                         let stream_session_id = session_id.clone();
                         let task = tokio::spawn(async move {
-                            stream_session_events(agent_clone, session_id, since, out_tx_clone).await;
+                            stream_session_events(agent_clone, session_id, since, out_tx_clone)
+                                .await;
                         });
                         subscription_tasks.insert(stream_session_id.clone(), task);
                         let _ = out_tx.send(ServerMessage::RpcResult {
@@ -295,9 +297,7 @@ async fn handle_socket(socket: WebSocket, agent: Arc<AgentRuntime>) {
                     } => {
                         debug!(
                             "terminal.resize ignored for session {} ({}x{})",
-                            session_id,
-                            cols,
-                            rows
+                            session_id, cols, rows
                         );
                         let _ = out_tx.send(ServerMessage::RpcError {
                             request_id,

@@ -1,5 +1,6 @@
 use super::{scheduler, ws};
-use crate::agent::memory::MemoryEntry;
+use crate::agent::decision_memory::DecisionSuggestion;
+use crate::agent::memory::{MemoryCategory, MemoryEntry, MemorySuggestion};
 use crate::agent::persona::{ActivePersona, PersonaOption};
 use crate::agent::runtime::AgentRuntime;
 use crate::config::{Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission};
@@ -19,7 +20,7 @@ use crate::workflow::artifact_store::ArtifactStore;
 use crate::workflow::db::WorkflowDb;
 use crate::workflow::executor::WorkflowExecutor;
 use axum::{
-    extract::{Extension, Json, Path, Query},
+    extract::{DefaultBodyLimit, Extension, Json, Multipart, Path, Query},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{sse::Event, IntoResponse, Response, Sse},
     routing::{delete, get, patch, post, put},
@@ -206,6 +207,130 @@ fn parse_data_url(data_url: &str) -> Result<(String, Vec<u8>), String> {
     Ok((mime, bytes))
 }
 
+fn encode_data_url(mime: &str, bytes: &[u8]) -> String {
+    format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+fn bad_request(error: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+}
+
+struct PreparedAttachments {
+    images: Vec<crate::storage::MessageImage>,
+    attachment_summaries: Vec<crate::storage::MessageAttachment>,
+    attachment_context: Option<String>,
+}
+
+fn prepare_attachments(
+    raw_attachments: Vec<AttachmentRequest>,
+) -> Result<PreparedAttachments, (StatusCode, Json<ErrorResponse>)> {
+    let mut images = Vec::new();
+    let mut attachment_summaries = Vec::new();
+    let mut attachment_sections = Vec::new();
+
+    for attachment in raw_attachments {
+        let (decoded_mime, bytes) = parse_data_url(&attachment.data_url).map_err(bad_request)?;
+
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Attachment '{}' exceeds the {} MB limit",
+                        attachment.filename,
+                        MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                    ),
+                }),
+            ));
+        }
+
+        let mime = if attachment.mime.trim().is_empty() {
+            decoded_mime
+        } else {
+            attachment.mime.clone()
+        };
+
+        if mime.starts_with("image/") {
+            images.push(crate::storage::MessageImage {
+                filename: attachment.filename.clone(),
+                mime: mime.clone(),
+                data_url: attachment.data_url,
+            });
+            attachment_summaries.push(crate::storage::MessageAttachment {
+                filename: attachment.filename,
+                mime,
+                kind: "image".to_string(),
+                size_bytes: bytes.len(),
+                truncated: false,
+            });
+            continue;
+        }
+
+        let extracted_text = if is_pdf_attachment(&mime, &attachment.filename) {
+            pdf_extract::extract_text_from_mem(&bytes).map_err(|error| {
+                bad_request(format!(
+                    "Failed to extract text from '{}': {}",
+                    attachment.filename, error
+                ))
+            })?
+        } else if is_text_attachment(&mime, &attachment.filename) {
+            String::from_utf8_lossy(&bytes).into_owned()
+        } else {
+            return Err(bad_request(format!(
+                "Unsupported attachment type for '{}'. Supported: images, PDF, and text-like files.",
+                attachment.filename
+            )));
+        };
+
+        let (truncated_text, truncated) =
+            truncate_chars(&extracted_text, MAX_ATTACHMENT_TEXT_CHARS);
+        attachment_sections.push(build_attachment_context_section(
+            &attachment.filename,
+            &mime,
+            &truncated_text,
+            truncated,
+        ));
+        attachment_summaries.push(crate::storage::MessageAttachment {
+            filename: attachment.filename,
+            mime,
+            kind: "document".to_string(),
+            size_bytes: bytes.len(),
+            truncated,
+        });
+    }
+
+    let attachment_context = if attachment_sections.is_empty() {
+        None
+    } else {
+        let joined = attachment_sections.join("\n\n---\n\n");
+        let (truncated_joined, truncated) =
+            truncate_chars(&joined, MAX_TOTAL_ATTACHMENT_CONTEXT_CHARS);
+        Some(if truncated {
+            format!(
+                "{}\n\n[Some attachment context was truncated for total context limits.]",
+                truncated_joined
+            )
+        } else {
+            truncated_joined
+        })
+    };
+
+    Ok(PreparedAttachments {
+        images,
+        attachment_summaries,
+        attachment_context,
+    })
+}
+
 fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
     let char_count = value.chars().count();
     if char_count <= limit {
@@ -284,12 +409,24 @@ pub struct MemoryListResponse {
     pub memories: Vec<MemoryEntry>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct MemorySuggestionListResponse {
+    pub suggestions: Vec<MemorySuggestion>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DecisionSuggestionListResponse {
+    pub suggestions: Vec<DecisionSuggestion>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AddMemoryRequest {
     pub title: String,
     pub content: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    pub category: Option<MemoryCategory>,
+    pub confirmed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +434,13 @@ pub struct UpdateMemoryRequest {
     pub title: Option<String>,
     pub content: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub category: Option<MemoryCategory>,
+    pub confirmed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RejectSuggestionRequest {
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -400,6 +544,24 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/memories/:id",
             put(update_memory).delete(delete_memory),
         )
+        .route("/api/memories/suggestions", get(list_memory_suggestions))
+        .route(
+            "/api/memories/suggestions/:id/approve",
+            post(approve_memory_suggestion),
+        )
+        .route(
+            "/api/memories/suggestions/:id/reject",
+            post(reject_memory_suggestion),
+        )
+        .route("/api/decisions/suggestions", get(list_decision_suggestions))
+        .route(
+            "/api/decisions/suggestions/:id/approve",
+            post(approve_decision_suggestion),
+        )
+        .route(
+            "/api/decisions/suggestions/:id/reject",
+            post(reject_decision_suggestion),
+        )
         .route("/api/personas", get(list_personas))
         .route(
             "/api/sessions",
@@ -422,6 +584,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         )
         .route("/api/sessions/:id/queue", get(list_session_queue))
         .route("/api/sessions/:id/send", post(send_message))
+        .route(
+            "/api/sessions/:id/send-multipart",
+            post(send_message_multipart).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         .route("/api/sessions/:id/cancel", post(cancel_session))
         .route("/api/sessions/:id/events", get(session_events))
         .route("/ws", get(ws::ws_upgrade))
@@ -1336,6 +1502,8 @@ async fn add_memory(
             payload.title,
             payload.content,
             payload.tags,
+            payload.category,
+            payload.confirmed.unwrap_or(true),
             "user".to_string(),
         )
         .await
@@ -1356,7 +1524,14 @@ async fn update_memory(
     Json(payload): Json<UpdateMemoryRequest>,
 ) -> Result<Json<MemoryEntry>, (StatusCode, Json<ErrorResponse>)> {
     let entry = agent
-        .update_memory(&id, payload.title, payload.content, payload.tags)
+        .update_memory(
+            &id,
+            payload.title,
+            payload.content,
+            payload.tags,
+            payload.category,
+            payload.confirmed,
+        )
         .await
         .map_err(|e| {
             (
@@ -1389,6 +1564,128 @@ async fn delete_memory(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "Memory not found".to_string(),
+            }),
+        ))
+    }
+}
+
+async fn list_memory_suggestions(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<MemorySuggestionListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let suggestions = agent.list_memory_suggestions().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(MemorySuggestionListResponse { suggestions }))
+}
+
+async fn approve_memory_suggestion(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<Json<MemoryEntry>, (StatusCode, Json<ErrorResponse>)> {
+    let entry = agent
+        .approve_memory_suggestion(&id, "user".to_string())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(entry))
+}
+
+async fn reject_memory_suggestion(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    Json(payload): Json<RejectSuggestionRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let rejected = agent
+        .reject_memory_suggestion(&id, "user".to_string(), payload.reason)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    if rejected {
+        Ok(StatusCode::OK)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Memory suggestion not found".to_string(),
+            }),
+        ))
+    }
+}
+
+async fn list_decision_suggestions(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<DecisionSuggestionListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let suggestions = agent.list_decision_suggestions().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(DecisionSuggestionListResponse { suggestions }))
+}
+
+async fn approve_decision_suggestion(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    agent
+        .approve_decision_suggestion(&id, "user".to_string())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(StatusCode::OK)
+}
+
+async fn reject_decision_suggestion(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    Json(payload): Json<RejectSuggestionRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let rejected = agent
+        .reject_decision_suggestion(&id, "user".to_string(), payload.reason)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    if rejected {
+        Ok(StatusCode::OK)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Decision suggestion not found".to_string(),
             }),
         ))
     }
@@ -1822,122 +2119,138 @@ async fn send_message(
         payload.attachments
     };
 
-    let mut images = Vec::new();
-    let mut attachment_summaries = Vec::new();
-    let mut attachment_sections = Vec::new();
+    let prepared = prepare_attachments(raw_attachments)?;
 
-    for attachment in raw_attachments {
-        let (decoded_mime, bytes) = parse_data_url(&attachment.data_url)
-            .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    enqueue_send_message(
+        agent,
+        session_id,
+        client_message_id,
+        payload.message,
+        prepared.images,
+        prepared.attachment_context,
+        prepared.attachment_summaries,
+    )
+    .await
+}
 
-        if bytes.len() > MAX_ATTACHMENT_BYTES {
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Attachment '{}' exceeds the {} MB limit",
-                        attachment.filename,
-                        MAX_ATTACHMENT_BYTES / (1024 * 1024)
-                    ),
-                }),
-            ));
+async fn send_message_multipart(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<SendMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let session_id = id.clone();
+    let mut message = String::new();
+    let mut multipart_session_id: Option<String> = None;
+    let mut client_message_id: Option<String> = None;
+    let mut raw_attachments = Vec::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| bad_request(format!("Invalid multipart payload: {}", error)))?
+    {
+        let field_name = field.name().unwrap_or_default().to_string();
+
+        match field_name.as_str() {
+            "message" => {
+                message = field
+                    .text()
+                    .await
+                    .map_err(|error| bad_request(format!("Invalid message field: {}", error)))?;
+            }
+            "session_id" => {
+                multipart_session_id = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|error| bad_request(format!("Invalid session_id field: {}", error)))?,
+                );
+            }
+            "client_message_id" => {
+                client_message_id = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|error| {
+                            bad_request(format!("Invalid client_message_id field: {}", error))
+                        })?,
+                );
+            }
+            "attachment" | "attachments" | "image" | "images" => {
+                let filename = field
+                    .file_name()
+                    .map(|value| value.to_string())
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "attachment".to_string());
+                let mime = field
+                    .content_type()
+                    .map(|value| value.to_string())
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        mime_guess::from_path(&filename)
+                            .first_or_octet_stream()
+                            .essence_str()
+                            .to_string()
+                    });
+                let bytes = field.bytes().await.map_err(|error| {
+                    bad_request(format!("Failed to read attachment '{}': {}", filename, error))
+                })?;
+
+                raw_attachments.push(AttachmentRequest {
+                    filename,
+                    mime: mime.clone(),
+                    data_url: encode_data_url(&mime, &bytes),
+                });
+            }
+            _ => {}
         }
-
-        let mime = if attachment.mime.trim().is_empty() {
-            decoded_mime
-        } else {
-            attachment.mime.clone()
-        };
-
-        if mime.starts_with("image/") {
-            images.push(crate::storage::MessageImage {
-                filename: attachment.filename.clone(),
-                mime: mime.clone(),
-                data_url: attachment.data_url,
-            });
-            attachment_summaries.push(crate::storage::MessageAttachment {
-                filename: attachment.filename,
-                mime,
-                kind: "image".to_string(),
-                size_bytes: bytes.len(),
-                truncated: false,
-            });
-            continue;
-        }
-
-        let extracted_text = if is_pdf_attachment(&mime, &attachment.filename) {
-            pdf_extract::extract_text_from_mem(&bytes).map_err(|error| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "Failed to extract text from '{}': {}",
-                            attachment.filename, error
-                        ),
-                    }),
-                )
-            })?
-        } else if is_text_attachment(&mime, &attachment.filename) {
-            String::from_utf8_lossy(&bytes).into_owned()
-        } else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Unsupported attachment type for '{}'. Supported: images, PDF, and text-like files.",
-                        attachment.filename
-                    ),
-                }),
-            ));
-        };
-
-        let (truncated_text, truncated) =
-            truncate_chars(&extracted_text, MAX_ATTACHMENT_TEXT_CHARS);
-        attachment_sections.push(build_attachment_context_section(
-            &attachment.filename,
-            &mime,
-            &truncated_text,
-            truncated,
-        ));
-        attachment_summaries.push(crate::storage::MessageAttachment {
-            filename: attachment.filename,
-            mime,
-            kind: "document".to_string(),
-            size_bytes: bytes.len(),
-            truncated,
-        });
     }
 
-    let attachment_context = if attachment_sections.is_empty() {
-        None
-    } else {
-        let joined = attachment_sections.join("\n\n---\n\n");
-        let (truncated_joined, truncated) =
-            truncate_chars(&joined, MAX_TOTAL_ATTACHMENT_CONTEXT_CHARS);
-        Some(if truncated {
-            format!(
-                "{}\n\n[Some attachment context was truncated for total context limits.]",
-                truncated_joined
-            )
-        } else {
-            truncated_joined
-        })
-    };
+    if let Some(value) = multipart_session_id {
+        if value != session_id {
+            return Err(bad_request("session_id does not match request path"));
+        }
+    }
 
+    let prepared = prepare_attachments(raw_attachments)?;
+
+    enqueue_send_message(
+        agent,
+        session_id,
+        client_message_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        message,
+        prepared.images,
+        prepared.attachment_context,
+        prepared.attachment_summaries,
+    )
+    .await
+}
+
+async fn enqueue_send_message(
+    agent: Arc<AgentRuntime>,
+    session_id: String,
+    client_message_id: String,
+    message: String,
+    images: Vec<crate::storage::MessageImage>,
+    attachment_context: Option<String>,
+    attachment_summaries: Vec<crate::storage::MessageAttachment>,
+) -> Result<Json<SendMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
     tracing::info!(
         "send_message: session={} client_message_id={} images={} attachments={} text_chars={}",
         session_id,
         client_message_id,
         images.len(),
         attachment_summaries.len(),
-        payload.message.chars().count()
+        message.chars().count()
     );
 
     let (queue_item, created) = agent
         .enqueue_message(
             &session_id,
             &client_message_id,
-            &payload.message,
+            &message,
             &images,
             attachment_context.as_deref(),
             &attachment_summaries,
@@ -2091,7 +2404,9 @@ async fn session_events(
                 Ok(event) => {
                     if event.session_id() == session_id {
                         let json = serde_json::to_string(&event).unwrap_or_default();
-                        Some(Ok(Event::default().id(event.sequence().to_string()).data(json)))
+                        Some(Ok(Event::default()
+                            .id(event.sequence().to_string())
+                            .data(json)))
                     } else {
                         None
                     }
@@ -2101,16 +2416,16 @@ async fn session_events(
         },
     );
 
-    let replay_stream = futures::stream::iter(replay_events.into_iter().filter_map(
-        move |event| {
-            if event.session_id() == replay_session_id_filter && event.sequence() > last_seq {
-                let json = serde_json::to_string(&event).ok()?;
-                Some(Ok(Event::default().id(event.sequence().to_string()).data(json)))
-            } else {
-                None
-            }
-        },
-    ));
+    let replay_stream = futures::stream::iter(replay_events.into_iter().filter_map(move |event| {
+        if event.session_id() == replay_session_id_filter && event.sequence() > last_seq {
+            let json = serde_json::to_string(&event).ok()?;
+            Some(Ok(Event::default()
+                .id(event.sequence().to_string())
+                .data(json)))
+        } else {
+            None
+        }
+    }));
 
     let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         match initial_event {
@@ -2122,10 +2437,9 @@ async fn session_events(
         };
 
     let mut response = Sse::new(stream).into_response();
-    response.headers_mut().insert(
-        "deprecation",
-        HeaderValue::from_static("true"),
-    );
+    response
+        .headers_mut()
+        .insert("deprecation", HeaderValue::from_static("true"));
     response.headers_mut().insert(
         "warning",
         HeaderValue::from_static("299 - \"SSE endpoint is deprecated; use /ws\""),
@@ -2254,14 +2568,17 @@ async fn get_checkpoint_diff(
         .map(|path| path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
 
-    let diffs = agent.get_checkpoint_diffs(&checkpoint_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let diffs = agent
+        .get_checkpoint_diffs(&checkpoint_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
     Ok(Json(CheckpointDiffResponse {
         checkpoint_id,
@@ -2318,14 +2635,17 @@ async fn restore_session_state(
         resolve_checkpoint_for_session(&agent, &session_id, payload.checkpoint_id.as_str()).await?;
     let checkpoint_ms = checkpoint.created_at.timestamp_millis();
 
-    let session = agent.rollback(payload.checkpoint_id.as_str()).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let session = agent
+        .rollback(payload.checkpoint_id.as_str())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
     let mut reverted_snapshot_ids = Vec::new();
     if payload.restore_files {
@@ -2393,14 +2713,17 @@ async fn rollback(
 
     resolve_checkpoint_for_session(&agent, &session_id, payload.checkpoint_id.as_str()).await?;
 
-    let session = agent.rollback(payload.checkpoint_id.as_str()).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let session = agent
+        .rollback(payload.checkpoint_id.as_str())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
     Ok(Json(session))
 }

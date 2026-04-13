@@ -1,4 +1,5 @@
-use crate::agent::decision_memory::DecisionMemory;
+use crate::agent::decision_memory::{DecisionMemory, DecisionSuggestionStatus};
+use crate::config::LearningMode;
 use crate::error::Result;
 use crate::tools::registry::Tool;
 use async_trait::async_trait;
@@ -59,6 +60,23 @@ impl Tool for RecordDecisionTool {
             return Ok("Both 'key' and 'value' are required.".to_string());
         }
 
+        if self.store.learning_mode() == LearningMode::Review {
+            let suggestion = self
+                .store
+                .suggest(
+                    key.clone(),
+                    value,
+                    rationale,
+                    "tool".to_string(),
+                    "agent".to_string(),
+                )
+                .await?;
+            return Ok(format!(
+                "Decision suggestion queued for review: '{}' = '{}' (id: {})",
+                suggestion.key, suggestion.value, suggestion.id
+            ));
+        }
+
         let entry = self
             .store
             .upsert_approved(
@@ -73,5 +91,182 @@ impl Tool for RecordDecisionTool {
             "Decision recorded: '{}' = '{}' (id: {})",
             entry.key, entry.value, entry.id
         ))
+    }
+}
+
+pub struct ListDecisionSuggestionsTool {
+    store: Arc<DecisionMemory>,
+}
+
+impl ListDecisionSuggestionsTool {
+    pub fn new(store: Arc<DecisionMemory>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for ListDecisionSuggestionsTool {
+    fn name(&self) -> &str {
+        "list_decision_suggestions"
+    }
+
+    fn description(&self) -> &str {
+        "List pending or resolved decision suggestions for review"
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "approved", "rejected", "all"],
+                    "description": "Filter suggestion status (default: pending)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<String> {
+        let status_filter = args["status"]
+            .as_str()
+            .unwrap_or("pending")
+            .to_ascii_lowercase();
+        let suggestions = self.store.list_suggestions().await?;
+
+        let filtered = suggestions
+            .into_iter()
+            .filter(|s| match status_filter.as_str() {
+                "all" => true,
+                "approved" => s.status == DecisionSuggestionStatus::Approved,
+                "rejected" => s.status == DecisionSuggestionStatus::Rejected,
+                _ => s.status == DecisionSuggestionStatus::Pending,
+            })
+            .collect::<Vec<_>>();
+
+        if filtered.is_empty() {
+            return Ok("No decision suggestions found for the requested filter.".to_string());
+        }
+
+        let mut output = String::from("Decision suggestions:\n");
+        for suggestion in filtered {
+            output.push_str(&format!(
+                "- [{}] {} = {} (id: {})\n",
+                serde_json::to_string(&suggestion.status)
+                    .unwrap_or_else(|_| "\"pending\"".to_string())
+                    .trim_matches('"'),
+                suggestion.key,
+                suggestion.value,
+                suggestion.id
+            ));
+        }
+        Ok(output)
+    }
+}
+
+pub struct ApproveDecisionSuggestionTool {
+    store: Arc<DecisionMemory>,
+}
+
+impl ApproveDecisionSuggestionTool {
+    pub fn new(store: Arc<DecisionMemory>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for ApproveDecisionSuggestionTool {
+    fn name(&self) -> &str {
+        "approve_decision_suggestion"
+    }
+
+    fn description(&self) -> &str {
+        "Approve a pending decision suggestion and store it as approved decision memory"
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Suggestion id to approve"
+                }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<String> {
+        let id = args["id"].as_str().unwrap_or("").trim();
+        if id.is_empty() {
+            return Ok("Missing required field: id".to_string());
+        }
+
+        let decision = self
+            .store
+            .approve_suggestion(id, "agent".to_string())
+            .await?;
+        Ok(format!(
+            "Approved decision suggestion '{}' as '{}'='{}'",
+            id, decision.key, decision.value
+        ))
+    }
+}
+
+pub struct RejectDecisionSuggestionTool {
+    store: Arc<DecisionMemory>,
+}
+
+impl RejectDecisionSuggestionTool {
+    pub fn new(store: Arc<DecisionMemory>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for RejectDecisionSuggestionTool {
+    fn name(&self) -> &str {
+        "reject_decision_suggestion"
+    }
+
+    fn description(&self) -> &str {
+        "Reject a pending decision suggestion"
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Suggestion id to reject"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional rejection reason"
+                }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<String> {
+        let id = args["id"].as_str().unwrap_or("").trim();
+        if id.is_empty() {
+            return Ok("Missing required field: id".to_string());
+        }
+        let reason = args["reason"].as_str().map(|s| s.to_string());
+        let rejected = self
+            .store
+            .reject_suggestion(id, "agent".to_string(), reason)
+            .await?;
+        if !rejected {
+            return Ok(format!(
+                "No pending decision suggestion found for id '{}'.",
+                id
+            ));
+        }
+        Ok(format!("Rejected decision suggestion '{}'.", id))
     }
 }

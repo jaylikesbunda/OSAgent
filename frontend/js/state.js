@@ -238,9 +238,33 @@ OSA.messageChain = {
     lastToolStartSeq: 0,
 };
 OSA.getMessageChain = () => OSA.messageChain;
+OSA.revokeAttachmentPreviewUrl = attachment => {
+    const url = attachment && attachment.previewUrl;
+    if (!url || typeof url !== 'string' || !url.startsWith('blob:')) return;
+    try {
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        console.warn('Failed to revoke attachment preview URL:', error);
+    }
+};
 OSA.attachments = [];
 OSA.getAttachments = () => OSA.attachments;
 OSA.setAttachments = arr => OSA.attachments = arr;
 OSA.addAttachment = attachment => OSA.attachments.push(attachment);
-OSA.removeAttachment = id => { OSA.attachments = OSA.attachments.filter(a => a.id !== id); };
-OSA.clearAttachments = () => { OSA.attachments = []; };
+OSA.removeAttachment = id => {
+    const next = [];
+    OSA.attachments.forEach(attachment => {
+        if (attachment.id === id) {
+            OSA.revokeAttachmentPreviewUrl(attachment);
+        } else {
+            next.push(attachment);
+        }
+    });
+    OSA.attachments = next;
+};
+OSA.clearAttachments = (options = {}) => {
+    if (!options.preserveObjectUrls) {
+        OSA.attachments.forEach(attachment => OSA.revokeAttachmentPreviewUrl(attachment));
+    }
+    OSA.attachments = [];
+};

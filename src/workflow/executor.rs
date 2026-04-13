@@ -1561,7 +1561,9 @@ mod tests {
         let workflow_db = Arc::new(WorkflowDb::new(workflow_db_path));
         workflow_db.init_tables().expect("init workflow tables");
 
-        let artifact_store = Arc::new(ArtifactStore::new(temp_dir.path().join("workflow_artifacts")));
+        let artifact_store = Arc::new(ArtifactStore::new(
+            temp_dir.path().join("workflow_artifacts"),
+        ));
         artifact_store.init().expect("init artifact store");
 
         let event_bus = runtime.event_bus().clone();

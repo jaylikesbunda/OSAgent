@@ -78,14 +78,35 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     pub memory_enabled: bool,
     pub memory_file: String,
+    pub learning_mode: LearningMode,
+    pub memory_capture_mode: CaptureMode,
     pub decision_memory_enabled: bool,
     pub decision_memory_file: String,
+    pub decision_capture_mode: CaptureMode,
     #[serde(default)]
     pub permission_rules: Vec<PermissionRule>,
     #[serde(default)]
     pub custom_identity: Option<String>,
     #[serde(default)]
     pub custom_priorities: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningMode {
+    #[default]
+    Manual,
+    Review,
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMode {
+    Off,
+    #[default]
+    Review,
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -376,8 +397,11 @@ impl Default for AgentConfig {
             max_iterations: 50,
             memory_enabled: false,
             memory_file: default_memory_file(),
+            learning_mode: LearningMode::Manual,
+            memory_capture_mode: CaptureMode::Review,
             decision_memory_enabled: true,
             decision_memory_file: default_decision_memory_file(),
+            decision_capture_mode: CaptureMode::Review,
             permission_rules: vec![],
             custom_identity: None,
             custom_priorities: None,

@@ -200,11 +200,16 @@ OSA.loadSettings = async function() {
         const memEnabled = config.agent?.memory_enabled === true;
         document.getElementById('setting-memory-enabled').checked = memEnabled;
         document.getElementById('setting-memory-file').value = config.agent?.memory_file || '~/.osagent/memories.json';
+        document.getElementById('setting-learning-mode').value = config.agent?.learning_mode || 'manual';
+        document.getElementById('setting-memory-capture-mode').value = config.agent?.memory_capture_mode || 'review';
         document.getElementById('memory-file-field').classList.toggle('hidden', !memEnabled);
         document.getElementById('memory-add-form').classList.toggle('hidden', !memEnabled);
+        document.getElementById('memory-suggestions-group').classList.toggle('hidden', !memEnabled);
+        document.getElementById('decision-suggestions-group').classList.toggle('hidden', !memEnabled);
         const decisionMemEnabled = config.agent?.decision_memory_enabled !== false;
         document.getElementById('setting-decision-memory-enabled').checked = decisionMemEnabled;
         document.getElementById('setting-decision-memory-file').value = config.agent?.decision_memory_file || '~/.osagent/decision_memories.json';
+        document.getElementById('setting-decision-capture-mode').value = config.agent?.decision_capture_mode || 'review';
         document.getElementById('decision-memory-file-field').classList.toggle('hidden', !decisionMemEnabled);
         
         const voice = OSA.normalizeVoiceConfig(config.voice || {});
@@ -246,6 +251,8 @@ OSA.loadSettings = async function() {
         OSA.updateWorkflowButtonVisibility(experimental.workflows_enabled);
         
         await OSA.loadMemories();
+        await OSA.loadMemorySuggestions();
+        await OSA.loadDecisionSuggestions();
         await OSA.loadVoiceInstallStatus();
         await OSA.loadDiscordBotStatus();
         await OSA.renderSettingsProviders();
@@ -332,8 +339,11 @@ OSA.saveSettings = async function() {
         thinking_level: document.getElementById('setting-thinking-level').value || 'auto',
         memory_enabled: document.getElementById('setting-memory-enabled').checked,
         memory_file: document.getElementById('setting-memory-file').value || '~/.osagent/memories.json',
+        learning_mode: document.getElementById('setting-learning-mode').value || 'manual',
+        memory_capture_mode: document.getElementById('setting-memory-capture-mode').value || 'review',
         decision_memory_enabled: document.getElementById('setting-decision-memory-enabled').checked,
         decision_memory_file: document.getElementById('setting-decision-memory-file').value || '~/.osagent/decision_memories.json',
+        decision_capture_mode: document.getElementById('setting-decision-capture-mode').value || 'review',
         custom_identity: customIdentity || null,
         custom_priorities: useCustomPriorities && customPriorities.length > 0 ? customPriorities : null
     };
@@ -1102,7 +1112,13 @@ OSA.onMemoryToggleChange = function() {
     const enabled = document.getElementById('setting-memory-enabled').checked;
     document.getElementById('memory-file-field').classList.toggle('hidden', !enabled);
     document.getElementById('memory-add-form').classList.toggle('hidden', !enabled);
-    if (enabled) OSA.loadMemories();
+    document.getElementById('memory-suggestions-group').classList.toggle('hidden', !enabled);
+    document.getElementById('decision-suggestions-group').classList.toggle('hidden', !enabled);
+    if (enabled) {
+        OSA.loadMemories();
+        OSA.loadMemorySuggestions();
+        OSA.loadDecisionSuggestions();
+    }
 };
 
 OSA.onDecisionMemoryToggleChange = function() {
@@ -1127,6 +1143,10 @@ OSA.loadMemories = async function() {
         }
         list.innerHTML = data.memories.map(m => {
             const tagStr = m.tags && m.tags.length ? `<span class="decision-meta" style="margin-left:4px">[${OSA.escapeHtml(m.tags.join(', '))}]</span>` : '';
+            const category = m.category ? `<span class="decision-meta" style="margin-left:4px">${OSA.escapeHtml(m.category)}</span>` : '';
+            const confirmation = m.confirmed === false
+                ? '<span class="decision-meta" style="margin-left:4px;color:var(--warning-color,#d97706)">unconfirmed</span>'
+                : '';
             const sourceLabel = m.source === 'agent' ? 'Recorded by agent' : 'Added by user';
             const encodedTitle = encodeURIComponent(m.title || '').replace(/'/g, '%27');
             const encodedContent = encodeURIComponent(m.content || '').replace(/'/g, '%27');
@@ -1134,7 +1154,7 @@ OSA.loadMemories = async function() {
             return `
             <div class="decision-item">
                 <div class="decision-body">
-                    <div class="decision-key">${OSA.escapeHtml(m.title)}${tagStr}</div>
+                    <div class="decision-key">${OSA.escapeHtml(m.title)}${tagStr}${category}${confirmation}</div>
                     <div class="decision-value" style="white-space:pre-wrap">${OSA.escapeHtml(m.content)}</div>
                     <div class="decision-meta">${sourceLabel}</div>
                 </div>
@@ -1223,6 +1243,158 @@ OSA.saveMemoryEdit = async function() {
         await OSA.loadMemories();
     } catch (error) {
         alert(`Failed to save memory: ${error.message}`);
+    }
+};
+
+OSA.loadMemorySuggestions = async function() {
+    const list = document.getElementById('memory-suggestions-list');
+    if (!list) return;
+    try {
+        const res = await OSA.fetchWithAuth('/api/memories/suggestions');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        const statusFilter = (document.getElementById('memory-suggestions-filter')?.value || 'pending').toLowerCase();
+        const filtered = (data.suggestions || []).filter(s => statusFilter === 'all' ? true : (s.status || 'pending') === statusFilter);
+        if (filtered.length === 0) {
+            const label = statusFilter === 'all' ? 'memory suggestions' : `${statusFilter} memory suggestions`;
+            list.innerHTML = `<div class="decision-meta">No ${OSA.escapeHtml(label)}.</div>`;
+            return;
+        }
+
+        list.innerHTML = filtered.map(s => {
+            const tags = s.tags && s.tags.length
+                ? `<span class="decision-meta" style="margin-left:4px">[${OSA.escapeHtml(s.tags.join(', '))}]</span>`
+                : '';
+            const rationale = s.rationale
+                ? `<div class="decision-meta">Reason: ${OSA.escapeHtml(s.rationale)}</div>`
+                : '';
+            const statusBadge = `<span class="decision-meta" style="margin-left:6px">${OSA.escapeHtml(s.status || 'pending')}</span>`;
+            const resolution = s.resolved_by
+                ? `<div class="decision-meta">Resolved by ${OSA.escapeHtml(s.resolved_by)}${s.resolution_note ? `: ${OSA.escapeHtml(s.resolution_note)}` : ''}</div>`
+                : '';
+            const actions = (s.status || 'pending') === 'pending'
+                ? `<div style="display:flex;gap:6px;flex-shrink:0">
+                    <button type="button" class="btn-action" onclick="OSA.approveMemorySuggestion('${s.id}')">Approve</button>
+                    <button type="button" class="btn-danger" onclick="OSA.rejectMemorySuggestion('${s.id}')">Reject</button>
+                </div>`
+                : '';
+            return `
+            <div class="decision-item">
+                <div class="decision-body">
+                    <div class="decision-key">${OSA.escapeHtml(s.title)}${tags}${statusBadge}</div>
+                    <div class="decision-value" style="white-space:pre-wrap">${OSA.escapeHtml(s.content)}</div>
+                    ${rationale}
+                    ${resolution}
+                </div>
+                ${actions}
+            </div>`;
+        }).join('');
+    } catch (error) {
+        list.innerHTML = `<div class="decision-meta">Failed to load memory suggestions: ${OSA.escapeHtml(error.message)}</div>`;
+    }
+};
+
+OSA.approveMemorySuggestion = async function(id) {
+    try {
+        const res = await OSA.fetchWithAuth(`/api/memories/suggestions/${id}/approve`, {
+            method: 'POST'
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadMemorySuggestions();
+        await OSA.loadMemories();
+    } catch (error) {
+        alert(`Failed to approve memory suggestion: ${error.message}`);
+    }
+};
+
+OSA.rejectMemorySuggestion = async function(id) {
+    const reason = prompt('Optional rejection reason:') || '';
+    try {
+        const res = await OSA.fetchWithAuth(`/api/memories/suggestions/${id}/reject`, {
+            method: 'POST',
+            body: JSON.stringify({ reason })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadMemorySuggestions();
+    } catch (error) {
+        alert(`Failed to reject memory suggestion: ${error.message}`);
+    }
+};
+
+OSA.loadDecisionSuggestions = async function() {
+    const list = document.getElementById('decision-suggestions-list');
+    if (!list) return;
+    try {
+        const res = await OSA.fetchWithAuth('/api/decisions/suggestions');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        const statusFilter = (document.getElementById('decision-suggestions-filter')?.value || 'pending').toLowerCase();
+        const filtered = (data.suggestions || []).filter(s => statusFilter === 'all' ? true : (s.status || 'pending') === statusFilter);
+        if (filtered.length === 0) {
+            const label = statusFilter === 'all' ? 'decision suggestions' : `${statusFilter} decision suggestions`;
+            list.innerHTML = `<div class="decision-meta">No ${OSA.escapeHtml(label)}.</div>`;
+            return;
+        }
+
+        list.innerHTML = filtered.map(s => {
+            const rationale = s.rationale
+                ? `<div class="decision-meta">Reason: ${OSA.escapeHtml(s.rationale)}</div>`
+                : '';
+            const statusBadge = `<span class="decision-meta" style="margin-left:6px">${OSA.escapeHtml(s.status || 'pending')}</span>`;
+            const resolution = s.resolved_by
+                ? `<div class="decision-meta">Resolved by ${OSA.escapeHtml(s.resolved_by)}${s.resolution_note ? `: ${OSA.escapeHtml(s.resolution_note)}` : ''}</div>`
+                : '';
+            const actions = (s.status || 'pending') === 'pending'
+                ? `<div style="display:flex;gap:6px;flex-shrink:0">
+                    <button type="button" class="btn-action" onclick="OSA.approveDecisionSuggestion('${s.id}')">Approve</button>
+                    <button type="button" class="btn-danger" onclick="OSA.rejectDecisionSuggestion('${s.id}')">Reject</button>
+                </div>`
+                : '';
+            return `
+            <div class="decision-item">
+                <div class="decision-body">
+                    <div class="decision-key">${OSA.escapeHtml(s.key)}${statusBadge}</div>
+                    <div class="decision-value">${OSA.escapeHtml(s.value)}</div>
+                    ${rationale}
+                    ${resolution}
+                </div>
+                ${actions}
+            </div>`;
+        }).join('');
+    } catch (error) {
+        list.innerHTML = `<div class="decision-meta">Failed to load decision suggestions: ${OSA.escapeHtml(error.message)}</div>`;
+    }
+};
+
+OSA.approveDecisionSuggestion = async function(id) {
+    try {
+        const res = await OSA.fetchWithAuth(`/api/decisions/suggestions/${id}/approve`, {
+            method: 'POST'
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadDecisionSuggestions();
+    } catch (error) {
+        alert(`Failed to approve decision suggestion: ${error.message}`);
+    }
+};
+
+OSA.rejectDecisionSuggestion = async function(id) {
+    const reason = prompt('Optional rejection reason:') || '';
+    try {
+        const res = await OSA.fetchWithAuth(`/api/decisions/suggestions/${id}/reject`, {
+            method: 'POST',
+            body: JSON.stringify({ reason })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadDecisionSuggestions();
+    } catch (error) {
+        alert(`Failed to reject decision suggestion: ${error.message}`);
     }
 };
 

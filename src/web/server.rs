@@ -32,7 +32,11 @@ fn matches_if_none_match(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(',').any(|candidate| candidate.trim() == etag || candidate.trim() == "*"))
+        .map(|value| {
+            value
+                .split(',')
+                .any(|candidate| candidate.trim() == etag || candidate.trim() == "*")
+        })
         .unwrap_or(false)
 }
 

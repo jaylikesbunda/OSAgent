@@ -1,9 +1,11 @@
 use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::coordinator::Coordinator;
-use crate::agent::decision_memory::DecisionMemory;
+use crate::agent::decision_memory::{DecisionCaptureOutcome, DecisionMemory, DecisionSuggestion};
 use crate::agent::events::{AgentEvent, EventBus, EventTokenUsage, ToolStatus};
 use crate::agent::instruction::{format_system_reminder, workspace_instruction_blocks};
-use crate::agent::memory::{MemoryEntry, MemoryStatus, MemoryStore};
+use crate::agent::memory::{
+    MemoryCategory, MemoryEntry, MemoryStatus, MemoryStore, MemorySuggestion,
+};
 use crate::agent::model_catalog::ModelCatalog;
 use crate::agent::persona::{self, ActivePersona};
 use crate::agent::prompt::{self, PromptMode};
@@ -309,10 +311,13 @@ impl AgentRuntime {
         let memory_store = Arc::new(MemoryStore::new(
             config.agent.memory_enabled,
             config.agent.memory_file.clone(),
+            config.agent.learning_mode,
         )?);
         let decision_memory = Arc::new(DecisionMemory::new(
             config.agent.decision_memory_enabled,
             config.agent.decision_memory_file.clone(),
+            config.agent.learning_mode,
+            config.agent.decision_capture_mode,
         )?);
         log_phase("session_and_memory_init", &mut phase_start);
 
@@ -512,7 +517,10 @@ impl AgentRuntime {
         &self,
         session_id: &str,
         from_sequence: u64,
-    ) -> Result<(Vec<AgentEvent>, tokio::sync::broadcast::Receiver<AgentEvent>)> {
+    ) -> Result<(
+        Vec<AgentEvent>,
+        tokio::sync::broadcast::Receiver<AgentEvent>,
+    )> {
         self.event_bus.subscribe_from(session_id, from_sequence)
     }
 
@@ -793,12 +801,27 @@ impl AgentRuntime {
         }
         session.messages.push(message);
 
-        if let Err(error) = self
+        match self
             .decision_memory
             .maybe_capture_from_user_message(&user_message, &user)
             .await
         {
-            warn!("Failed to capture approved decision memory: {}", error);
+            Ok(DecisionCaptureOutcome::Ignored) => {}
+            Ok(DecisionCaptureOutcome::Recorded(entry)) => {
+                info!(
+                    "Captured approved decision from user message: {}",
+                    entry.key
+                );
+            }
+            Ok(DecisionCaptureOutcome::Suggested(suggestion)) => {
+                info!(
+                    "Captured decision suggestion from user message: {} (id: {})",
+                    suggestion.key, suggestion.id
+                );
+            }
+            Err(error) => {
+                warn!("Failed to capture approved decision memory: {}", error);
+            }
         }
 
         // Mark session as running so frontend can restore thinking indicator on switch
@@ -1795,7 +1818,8 @@ impl AgentRuntime {
                         };
 
                         if success
-                            && ["write_file", "edit_file", "apply_patch"].contains(&tool_call.name.as_str())
+                            && ["write_file", "edit_file", "apply_patch"]
+                                .contains(&tool_call.name.as_str())
                         {
                             if let Some(snapshot_id) = snapshot_id.as_deref() {
                                 if let Ok(file_diff_meta) = self.build_file_diff_metadata(
@@ -2831,9 +2855,10 @@ impl AgentRuntime {
             let abs_path = root.join(&record.path);
             let new_content_bytes = std::fs::read(&abs_path).ok();
 
-            let old_content = record.content.as_ref().map(|bytes| {
-                Self::truncate_diff_text(&String::from_utf8_lossy(bytes), 50_000)
-            });
+            let old_content = record
+                .content
+                .as_ref()
+                .map(|bytes| Self::truncate_diff_text(&String::from_utf8_lossy(bytes), 50_000));
             let new_content = new_content_bytes
                 .as_ref()
                 .map(|bytes| Self::truncate_diff_text(&String::from_utf8_lossy(bytes), 50_000));
@@ -4205,14 +4230,18 @@ impl AgentRuntime {
         &self,
         checkpoint_id: &str,
     ) -> Result<Vec<crate::storage::CheckpointDiff>> {
-        self.checkpoint_manager.checkpoint_diffs(checkpoint_id).await
+        self.checkpoint_manager
+            .checkpoint_diffs(checkpoint_id)
+            .await
     }
 
     pub async fn list_checkpoint_changed_files(
         &self,
         checkpoint_id: &str,
     ) -> Result<Vec<std::path::PathBuf>> {
-        self.checkpoint_manager.list_changed_files(checkpoint_id).await
+        self.checkpoint_manager
+            .list_changed_files(checkpoint_id)
+            .await
     }
 
     pub async fn compute_checkpoint_diff(
@@ -4306,15 +4335,18 @@ impl AgentRuntime {
         }
         let mut cfg = self.config.write().await;
         *cfg = config;
-        if let Err(e) = self
-            .memory_store
-            .set_config(cfg.agent.memory_enabled, cfg.agent.memory_file.clone())
-        {
+        if let Err(e) = self.memory_store.set_config(
+            cfg.agent.memory_enabled,
+            cfg.agent.memory_file.clone(),
+            cfg.agent.learning_mode,
+        ) {
             warn!("Failed to update memory state: {}", e);
         }
         if let Err(e) = self.decision_memory.set_config(
             cfg.agent.decision_memory_enabled,
             cfg.agent.decision_memory_file.clone(),
+            cfg.agent.learning_mode,
+            cfg.agent.decision_capture_mode,
         ) {
             warn!("Failed to update decision memory state: {}", e);
         }
@@ -4530,9 +4562,13 @@ impl AgentRuntime {
         title: String,
         content: String,
         tags: Vec<String>,
+        category: Option<MemoryCategory>,
+        confirmed: bool,
         source: String,
     ) -> Result<MemoryEntry> {
-        self.memory_store.add(title, content, tags, source).await
+        self.memory_store
+            .add(title, content, tags, category, confirmed, source)
+            .await
     }
 
     pub async fn update_memory(
@@ -4541,12 +4577,56 @@ impl AgentRuntime {
         title: Option<String>,
         content: Option<String>,
         tags: Option<Vec<String>>,
+        category: Option<MemoryCategory>,
+        confirmed: Option<bool>,
     ) -> Result<MemoryEntry> {
-        self.memory_store.update(id, title, content, tags).await
+        self.memory_store
+            .update(id, title, content, tags, category, confirmed)
+            .await
     }
 
     pub async fn delete_memory(&self, id: &str) -> Result<bool> {
         self.memory_store.delete(id).await
+    }
+
+    pub async fn list_memory_suggestions(&self) -> Result<Vec<MemorySuggestion>> {
+        self.memory_store.list_suggestions().await
+    }
+
+    pub async fn approve_memory_suggestion(&self, id: &str, actor: String) -> Result<MemoryEntry> {
+        self.memory_store.approve_suggestion(id, actor).await
+    }
+
+    pub async fn reject_memory_suggestion(
+        &self,
+        id: &str,
+        actor: String,
+        note: Option<String>,
+    ) -> Result<bool> {
+        self.memory_store.reject_suggestion(id, actor, note).await
+    }
+
+    pub async fn list_decision_suggestions(&self) -> Result<Vec<DecisionSuggestion>> {
+        self.decision_memory.list_suggestions().await
+    }
+
+    pub async fn approve_decision_suggestion(
+        &self,
+        id: &str,
+        actor: String,
+    ) -> Result<crate::agent::decision_memory::DecisionEntry> {
+        self.decision_memory.approve_suggestion(id, actor).await
+    }
+
+    pub async fn reject_decision_suggestion(
+        &self,
+        id: &str,
+        actor: String,
+        note: Option<String>,
+    ) -> Result<bool> {
+        self.decision_memory
+            .reject_suggestion(id, actor, note)
+            .await
     }
 
     pub async fn check_external_directory_permission(&self, path: &str) -> PermissionAction {

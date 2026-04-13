@@ -720,6 +720,10 @@ OSA.selectSession = async function(sessionId) {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
             signal,
         }).catch(() => null);
+        const pendingHistoryRequest = fetch(`/api/sessions/${sessionId}/history`, {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+            signal,
+        }).catch(() => null);
         const pendingQueueRequest = fetch(`/api/sessions/${sessionId}/queue`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
             signal,
@@ -786,9 +790,10 @@ OSA.selectSession = async function(sessionId) {
         OSA.loadSessionPersona();
         OSA.loadSessionBreadcrumb(sessionId);
 
-        const [toolStartsRes, subagentsRes, queueRes] = await Promise.all([
+        const [toolStartsRes, subagentsRes, historyRes, queueRes] = await Promise.all([
             pendingToolsRequest,
             pendingSubagentsRequest,
+            pendingHistoryRequest,
             pendingQueueRequest
         ]);
         if (!isCurrentSelection()) return;
@@ -800,8 +805,16 @@ OSA.selectSession = async function(sessionId) {
         if (!isCurrentSelection()) return;
         const subagentsData = (subagentsRes && subagentsRes.ok) ? await subagentsRes.json() : { subagents: [], has_running: false };
         if (!isCurrentSelection()) return;
+        const historyData = (historyRes && historyRes.ok) ? await historyRes.json() : [];
+        if (!isCurrentSelection()) return;
         const queueItems = (queueRes && queueRes.ok) ? await queueRes.json() : [];
         if (!isCurrentSelection()) return;
+
+        const latestEventSequence = Array.isArray(historyData) && historyData.length > 0
+            ? Number(historyData[historyData.length - 1]?.sequence || 0)
+            : 0;
+        const chain = OSA.getMessageChain();
+        chain.eventSeqNumber = Number.isFinite(latestEventSequence) ? latestEventSequence : 0;
 
         OSA.setSessionQueue(queueItems);
         OSA.setSessionToolEvents(tools);
@@ -821,9 +834,7 @@ OSA.selectSession = async function(sessionId) {
         const subagentsRunning = !!(subagentsData && subagentsData.has_running);
         const isDirectlyRunning = sessionIsRunning && !subagentsRunning;
 
-        if (sessionIsRunning || subagentsRunning) {
-            OSA.connectEventSource(sessionId);
-        }
+        OSA.connectEventSource(sessionId);
 
         if (sessionIsRunning || subagentsRunning) {
             OSA.setProcessing(true);
@@ -1090,7 +1101,7 @@ OSA.sendMessage = async function() {
 
     input.value = '';
     OSA.hideSlashMenu();
-    OSA.clearAttachments();
+    OSA.clearAttachments({ preserveObjectUrls: true });
     OSA.renderAttachmentPreviews();
     OSA.setInputHistoryIndex(-1);
     OSA.getInputHistory().push(message);
@@ -1122,16 +1133,12 @@ OSA.sendMessage = async function() {
         if (optimisticMessage) optimisticMessage.id = optimisticDomId;
     }
 
-    const attachmentPayload = attachments.map(att => ({
-        filename: att.filename,
-        mime: att.mime,
-        data_url: att.dataUrl,
-    }));
+    const hasAttachments = attachments.length > 0;
 
     try {
         OSA.clearAttachmentStatus();
         const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
-        const useWs = ws && ws.readyState === WebSocket.OPEN && attachmentPayload.length === 0 && OSA.wsRequest;
+        const useWs = ws && ws.readyState === WebSocket.OPEN && !hasAttachments && OSA.wsRequest;
 
         let data;
         if (useWs) {
@@ -1140,6 +1147,29 @@ OSA.sendMessage = async function() {
                 content: message,
                 client_message_id: clientMessageId,
             });
+        } else if (hasAttachments) {
+            const formData = new FormData();
+            formData.append('message', message);
+            formData.append('session_id', currentSession.id);
+            formData.append('client_message_id', clientMessageId);
+            attachments.forEach(att => {
+                if (att && att.file instanceof File) {
+                    formData.append('attachments', att.file, att.filename || att.file.name || 'attachment');
+                }
+            });
+
+            const res = await fetch(`/api/sessions/${currentSession.id}/send-multipart`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${OSA.getToken()}`,
+                },
+                body: formData,
+            });
+            data = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
         } else {
             const res = await fetch(`/api/sessions/${currentSession.id}/send`, {
                 method: 'POST',
@@ -1147,7 +1177,7 @@ OSA.sendMessage = async function() {
                     'Authorization': `Bearer ${OSA.getToken()}`,
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ message, session_id: currentSession.id, client_message_id: clientMessageId, attachments: attachmentPayload })
+                body: JSON.stringify({ message, session_id: currentSession.id, client_message_id: clientMessageId, attachments: [] })
             });
             data = await res.json().catch(() => ({}));
 
@@ -1184,6 +1214,15 @@ OSA.sendMessage = async function() {
             OSA.renderQueuedMessages(nextQueue);
         } else {
             OSA.refreshCurrentSessionQueue();
+        }
+
+        if (!shouldQueueLocally || !data.queued) {
+            const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
+            const es = OSA.getEventSource ? OSA.getEventSource() : null;
+            const esSessionId = OSA.getEventSourceSessionId ? OSA.getEventSourceSessionId() : null;
+            if ((!ws || ws.readyState !== WebSocket.OPEN) && (!es || esSessionId !== currentSession.id)) {
+                OSA.connectEventSource(currentSession.id);
+            }
         }
     } catch (error) {
         console.error('Failed to send message:', error);
@@ -1965,23 +2004,19 @@ OSA.handleAttachmentFile = async function(file) {
         );
         return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-        OSA.clearAttachmentStatus();
-        OSA.addAttachment({
-            kind: OSA.ACCEPTED_IMAGE_TYPES.includes(file.type) ? 'image' : 'document',
-            id: 'att-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
-            filename: file.name,
-            mime: file.type || 'application/octet-stream',
-            sizeBytes: file.size,
-            dataUrl: reader.result,
-        });
-        OSA.renderAttachmentPreviews();
-    };
-    reader.onerror = () => {
-        OSA.setAttachmentStatus(`Failed to read attachment: ${file.name}`, 'error');
-    };
-    reader.readAsDataURL(file);
+    OSA.clearAttachmentStatus();
+    OSA.addAttachment({
+        kind: OSA.ACCEPTED_IMAGE_TYPES.includes(file.type) ? 'image' : 'document',
+        id: 'att-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+        filename: file.name,
+        mime: file.type || 'application/octet-stream',
+        sizeBytes: file.size,
+        file,
+        previewUrl: (OSA.ACCEPTED_IMAGE_TYPES.includes(file.type) && typeof URL !== 'undefined' && URL.createObjectURL)
+            ? URL.createObjectURL(file)
+            : '',
+    });
+    OSA.renderAttachmentPreviews();
 };
 
 OSA.renderAttachmentPreviews = function() {
@@ -1999,8 +2034,9 @@ OSA.renderAttachmentPreviews = function() {
         const thumb = document.createElement('div');
         thumb.className = 'image-preview-thumb';
         if (att.kind === 'image') {
+            const src = OSA.getAttachmentImageSrc(att);
             thumb.innerHTML = `
-                <img class="expandable-image" data-image-src="${att.dataUrl}" src="${att.dataUrl}" alt="${OSA.escapeHtml(att.filename)}" />
+                <img class="expandable-image" data-image-src="${src}" src="${src}" alt="${OSA.escapeHtml(att.filename)}" />
                 <button class="image-preview-remove" onclick="OSA.handleRemoveAttachment('${att.id}')">&times;</button>
                 <div class="image-preview-filename">${OSA.escapeHtml(att.filename)}</div>
             `;
@@ -2018,8 +2054,7 @@ OSA.renderAttachmentPreviews = function() {
 };
 
 OSA.handleRemoveAttachment = function(id) {
-    const attachments = OSA.getAttachments();
-    OSA.setAttachments(attachments.filter(a => a.id !== id));
+    OSA.removeAttachment(id);
     OSA.renderAttachmentPreviews();
 };
 

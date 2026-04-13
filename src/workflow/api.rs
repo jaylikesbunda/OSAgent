@@ -196,9 +196,11 @@ async fn update_workflow(
                         .into_response();
                 }
 
-                let _ = state
-                    .artifact_store
-                    .store_workflow_version(&id, new_version, graph_json.as_bytes());
+                let _ = state.artifact_store.store_workflow_version(
+                    &id,
+                    new_version,
+                    graph_json.as_bytes(),
+                );
             }
 
             match state.db.get_workflow(&id) {
