@@ -2159,22 +2159,14 @@ async fn send_message_multipart(
                     .map_err(|error| bad_request(format!("Invalid message field: {}", error)))?;
             }
             "session_id" => {
-                multipart_session_id = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|error| bad_request(format!("Invalid session_id field: {}", error)))?,
-                );
+                multipart_session_id = Some(field.text().await.map_err(|error| {
+                    bad_request(format!("Invalid session_id field: {}", error))
+                })?);
             }
             "client_message_id" => {
-                client_message_id = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|error| {
-                            bad_request(format!("Invalid client_message_id field: {}", error))
-                        })?,
-                );
+                client_message_id = Some(field.text().await.map_err(|error| {
+                    bad_request(format!("Invalid client_message_id field: {}", error))
+                })?);
             }
             "attachment" | "attachments" | "image" | "images" => {
                 let filename = field
@@ -2193,7 +2185,10 @@ async fn send_message_multipart(
                             .to_string()
                     });
                 let bytes = field.bytes().await.map_err(|error| {
-                    bad_request(format!("Failed to read attachment '{}': {}", filename, error))
+                    bad_request(format!(
+                        "Failed to read attachment '{}': {}",
+                        filename, error
+                    ))
                 })?;
 
                 raw_attachments.push(AttachmentRequest {

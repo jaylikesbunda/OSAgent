@@ -301,6 +301,7 @@ fn sample_workflow() -> Workflow {
         id: Uuid::new_v4().to_string(),
         name: "bench workflow".to_string(),
         description: Some("workflow benchmark".to_string()),
+        default_workspace_id: None,
         current_version: 1,
         created_at: String::new(),
         updated_at: String::new(),
@@ -359,7 +360,7 @@ fn sample_node_log(run_id: &str, idx: usize) -> NodeLog {
         id: Uuid::new_v4().to_string(),
         run_id: run_id.to_string(),
         node_id: format!("node-{}", idx),
-        node_type: if idx.is_multiple_of(2) {
+        node_type: if idx % 2 == 0 {
             "agent"
         } else {
             "transform"

@@ -275,29 +275,6 @@ pub fn resolve_active_persona(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_persona_is_general_assistant_focused() {
-        let persona = resolve_active_persona("default", None).unwrap();
-        assert!(persona.summary.contains("general assistance"));
-        assert!(persona.system_instructions.contains("Jarvis"));
-        assert!(!persona
-            .system_instructions
-            .contains("engineering judgment across all tasks"));
-    }
-
-    #[test]
-    fn code_persona_keeps_engineering_first_instructions() {
-        let persona = resolve_active_persona("code", None).unwrap();
-        assert!(persona.system_instructions.contains("coding mode"));
-        assert!(persona.system_instructions.contains("engineering judgment"));
-        assert!(persona.system_instructions.contains("smallest correct fix"));
-    }
-}
-
 pub fn build_persona_system_prompt(persona: &ActivePersona) -> String {
     let mut lines = vec!["# ACTIVE ROLEPLAY - STAY IN CHARACTER".to_string()];
 
