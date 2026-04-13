@@ -114,25 +114,32 @@ jobs:
             libsoup-3.0-dev \
             libgtk-3-dev
 
+      - name: Install cargo-tauri CLI
+        run: cargo install tauri-cli --locked
+
       - name: Build Linux release artifacts
         run: |
           export OSAGENT_APP_VERSION="${RELEASE_TAG#v}"
+          perl -0pi -e 's/"version":\s*"[^"]+"/"version": "'"$OSAGENT_APP_VERSION"'"/' launcher/tauri.conf.json
           cargo build --release --features discord
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/updater/target" cargo build --manifest-path updater/Cargo.toml --release
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/launcher/target" OSAGENT_CORE_SOURCE="$GITHUB_WORKSPACE/target/release/osagent" OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater" cargo build --manifest-path launcher/Cargo.toml --release
+          export OSAGENT_CORE_SOURCE="$GITHUB_WORKSPACE/target/release/osagent"
+          export OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater"
+          cd launcher && cargo tauri build --bundles deb --target x86_64-unknown-linux-gnu
           mkdir -p dist/linux-x86_64
-          cp launcher/target/release/osagent-launcher dist/linux-x86_64/osagent-launcher
-          chmod +x dist/linux-x86_64/osagent-launcher
-          tar czf osagent-linux-x86_64.tar.gz -C dist/linux-x86_64 osagent-launcher
-          sha256sum osagent-linux-x86_64.tar.gz > osagent-linux-x86_64.tar.gz.sha256
+          cp launcher/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb dist/linux-x86_64/
+          cp launcher/target/x86_64-unknown-linux-gnu/release/osagent-launcher dist/linux-x86_64/
+          cd dist/linux-x86_64 && ar -x *.deb data.tar.gz && tar xzf data.tar.gz && rm -f data.tar.gz control.tar.gz debian-binary _gpgbuilder *.deb
+          tar czf ../../osagent-linux-x86_64-setup.tar.gz *
+          sha256sum osagent-linux-x86_64-setup.tar.gz > osagent-linux-x86_64-setup.tar.gz.sha256
 
       - name: Upload Linux release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
           path: |
-            osagent-linux-x86_64.tar.gz
-            osagent-linux-x86_64.tar.gz.sha256
+            osagent-linux-x86_64-setup.tar.gz
+            osagent-linux-x86_64-setup.tar.gz.sha256
 
   release-windows:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
@@ -257,12 +264,64 @@ jobs:
             osagent-windows-x86_64-setup.exe
             osagent-windows-x86_64-setup.exe.sha256
 
+  release-macos-arm64:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: validate-release-tag
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ inputs['release-tag'] }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            updater/target
+            launcher/target
+          key: macos-arm64-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Build macOS release artifacts
+        run: |
+          export OSAGENT_APP_VERSION="${RELEASE_TAG#v}"
+          sed -i '' 's/"version":\s*"[^"]*"/"version": "'"$OSAGENT_APP_VERSION"'"/' launcher/tauri.conf.json
+          cargo build --release --features discord
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/updater/target" cargo build --manifest-path updater/Cargo.toml --release
+          export OSAGENT_CORE_SOURCE="$GITHUB_WORKSPACE/target/release/osagent"
+          export OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater"
+          cd launcher && cargo tauri build --bundles dmg --target aarch64-apple-darwin
+          mkdir -p dist/macos-arm64
+          cp launcher/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg dist/macos-arm64/
+          hdiutil attach dist/macos-arm64/*.dmg -mountpoint /tmp/osagent-macos || true
+          cp -r /tmp/osagent-macos/* dist/macos-arm64/ 2>/dev/null || true
+          hdiutil detach /tmp/osagent-macos || true
+          tar czf osagent-macos-arm64-setup.tar.gz -C dist/macos-arm64 .
+          shasum -a 256 osagent-macos-arm64-setup.tar.gz > osagent-macos-arm64-setup.tar.gz.sha256
+
+      - name: Upload macOS release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            osagent-macos-arm64-setup.tar.gz
+            osagent-macos-arm64-setup.tar.gz.sha256
+
   publish-r2:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs:
       - release-linux
       - release-windows
       - release-windows-installer
+      - release-macos-arm64
     runs-on: ubuntu-22.04
     environment: release
     env:
@@ -316,13 +375,13 @@ jobs:
         run: |
           RELEASE_DIR_URL="${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/${RELEASE_TAG}"
           BODY=$(cat <<EOF
-          Launcher release for Windows and Linux. Auto-updates are served from Cloudflare R2 via ${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json.
+          Installer release for Windows, Linux, and macOS with bundled core and updater. Auto-updates are served from Cloudflare R2 via ${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json.
 
           Assets:
-          - [osagent-linux-x86_64.tar.gz](${RELEASE_DIR_URL}/osagent-linux-x86_64.tar.gz)
-          - [osagent-linux-x86_64.tar.gz.sha256](${RELEASE_DIR_URL}/osagent-linux-x86_64.tar.gz.sha256)
-          - [osagent-windows-x86_64.zip](${RELEASE_DIR_URL}/osagent-windows-x86_64.zip)
-          - [osagent-windows-x86_64.zip.sha256](${RELEASE_DIR_URL}/osagent-windows-x86_64.zip.sha256)
+          - [osagent-linux-x86_64-setup.tar.gz](${RELEASE_DIR_URL}/osagent-linux-x86_64-setup.tar.gz)
+          - [osagent-linux-x86_64-setup.tar.gz.sha256](${RELEASE_DIR_URL}/osagent-linux-x86_64-setup.tar.gz.sha256)
+          - [osagent-macos-arm64-setup.tar.gz](${RELEASE_DIR_URL}/osagent-macos-arm64-setup.tar.gz)
+          - [osagent-macos-arm64-setup.tar.gz.sha256](${RELEASE_DIR_URL}/osagent-macos-arm64-setup.tar.gz.sha256)
           - [osagent-windows-x86_64-setup.exe](${RELEASE_DIR_URL}/osagent-windows-x86_64-setup.exe)
           - [osagent-windows-x86_64-setup.exe.sha256](${RELEASE_DIR_URL}/osagent-windows-x86_64-setup.exe.sha256)
           - [release-manifest.json](${RELEASE_DIR_URL}/release-manifest.json)
