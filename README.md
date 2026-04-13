@@ -49,7 +49,7 @@ cargo run --release --bin osagent-bench -- --profiles release --iterations 10
 
 ### Download
 
-Download the latest release for your platform from [GitLab Releases](https://gitlab.com/fyoudeki/osagent/releases):
+Download the latest release for your platform from [GitHub Releases](https://github.com/jaylikesbunda/OSAgent/releases):
 
 | Platform | Asset |
 |---|---|
@@ -118,7 +118,7 @@ See `examples/skills/` for examples.
 ## Building from Source
 
 ```powershell
-git clone https://gitlab.com/fyoudeki/osagent.git
+git clone https://github.com/jaylikesbunda/OSAgent.git
 cd osagent
 .\build-launcher.ps1 -Checks
 ```
