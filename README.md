@@ -4,53 +4,62 @@
 
 <h1 align="center">OSAgent</h1>
 
-<p align="center"><strong>Your open source agent. Rust-powered, with zero runtime deps.</strong></p>
+<p align="center"><strong>Open source local-first AI agent. Rust-powered, zero runtime deps.</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square" alt="Rust"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square" alt="Platform">
+  <a href="https://opensourceagent.net"><img src="https://img.shields.io/badge/website-opensourceagent.net-blue?style=flat-square" alt="Website"></a>
 </p>
 
 ---
 
-## Why OSAgent?
-
-| | OSAgent |
-|---|---|
-| **Runtime** | Single binary, zero deps |
-| **Cold start** | ~3ms |
-| **Memory** | ~50MB |
-| **Discord bot** | Built-in |
-| **OAuth providers** | GitHub Copilot, Codex |
-| **Workflow editor** | Visual node-based |
+An AI agent that belongs on your desktop, not in the cloud. Single binary, zero runtime dependencies, built with Rust for performance and reliability.
 
 ## Features
 
-- **200+ models** — OpenRouter, OpenAI, Anthropic, Google AI, GitHub Copilot, OpenAI Codex, Ollama, Groq, DeepSeek, xAI, AWS Bedrock, Azure, and more
-- **OAuth authentication** — Sign in with GitHub Copilot, Google, or OpenAI Codex (no API keys needed)
-- **Discord bot** — Slash commands, per-channel sessions, thinking indicators, tool execution feedback
+- **100+ LLM providers** — OpenRouter, OpenAI, Anthropic, Google AI, GitHub Copilot, OpenAI Codex, Ollama, Groq, DeepSeek, xAI, AWS Bedrock, Azure, and more
+- **OAuth login** — Sign in with GitHub Copilot, Google, or OpenAI Codex (no API keys needed)
+- **Discord bot** — Slash commands, per-channel/per-user sessions, real-time tool progress, thinking indicators
 - **Web UI** — Modern chat interface at `localhost:8765`
-- **24 tools** — File ops, code execution (Python/Node/Bash), grep/glob, web fetch, LSP, and more
+- **30+ built-in tools** — File ops, code execution (Python/Node/Bash), grep/glob, web fetch, LSP, and more
 - **Voice I/O** — Whisper STT + Piper TTS with browser fallback
-- **Visual workflow editor** — Node-based drag-and-drop automation (experimental)
+- **Visual workflow editor** — Node-based drag-and-drop automation with conditions, loops, and branching logic
 - **Skills system** — Installable `.oskill` bundles for custom integrations
+- **Jobs scheduling** — Cron-based reminders, recurring tasks, and daily briefings
+
+## Benchmarks
+
+Measured with in-repo runtime benchmarks (release, provider-free workloads, 10 runs on 2026-04-08):
+
+| Metric | OSAgent |
+|---|---|
+| Startup to ready | ~543ms |
+| Ready RSS | ~13.68MB |
+| Idle RSS | ~22.66MB |
+| Install size | ~50MB single binary |
+| Runtime deps | Zero |
+
+```bash
+cargo run --release --bin osagent-bench -- --profiles release --iterations 10
+```
 
 ## Quick Start
 
 ### Download
 
-Download the latest launcher from GitLab Releases for your platform:
+Download the latest release for your platform from [GitLab Releases](https://gitlab.com/fyoudeki/osagent/releases):
 
-```
-# Windows
-osagent-launcher.exe
+| Platform | Asset |
+|---|---|
+| Windows | `osagent-windows-x86_64-setup.exe` or `.zip` |
+| Linux (x86_64) | `osagent-linux-x86_64.tar.gz` |
+| Linux (ARM64) | `osagent-linux-arm64.tar.gz` |
+| macOS (Apple Silicon) | `osagent-macos-arm64.tar.gz` |
+| macOS (Intel) | `osagent-macos-x86_64.tar.gz` |
 
-# Linux
-./osagent-launcher
-```
-
-Windows and Linux releases are published on GitLab. Auto-updates are served from Cloudflare R2 via `https://osa.fuckyourcdn.com/releases/latest.json`.
+Auto-updates are served via `https://osa.fuckyourcdn.com/releases/latest.json`.
 
 ### Setup Wizard
 
@@ -62,14 +71,8 @@ Windows and Linux releases are published on GitLab. Auto-updates are served from
 ### CLI
 
 ```bash
-# Start with default config
-osagent start
-
-# Start with a specific workspace
-osagent start -w /path/to/project
-
-# Install as system service (Linux/macOS)
-osagent service install
+osagent start                    # Start with default config
+osagent start -w /path/to/project  # Start with a specific workspace
 ```
 
 ## Configuration
@@ -93,21 +96,11 @@ max_tokens = 4096
 
 [tools]
 allowed = ["bash", "read_file", "write_file", "grep", "glob", "code_python"]
-```
 
-## Discord Bot
-
-1. Create a bot at [Discord Developer Portal](https://discord.com/developers/applications)
-2. Add token to config:
-
-```toml
 [discord]
 token = "your-bot-token"
 allowed_users = ["1234567890"]
 ```
-
-3. Invite bot to server with `applications.commands` scope
-4. Use `/help` to see available commands
 
 ## Skills
 
@@ -124,49 +117,25 @@ See `examples/skills/` for examples.
 
 ## Building from Source
 
-On Windows, use the launcher-first build flow:
-
 ```powershell
-git clone https://gitlab.com/<your-namespace>/OSAgent.git
-cd OSAgent
+git clone https://gitlab.com/fyoudeki/osagent.git
+cd osagent
 .\build-launcher.ps1 -Checks
 ```
 
-That builds the core, updater, and launcher in the same order used by the release pipeline.
-
-Release artifacts are the launcher binaries:
-
+Release artifacts:
 - Windows: `launcher/target/release/osagent-launcher.exe`
 - Linux: `launcher/target/release/osagent-launcher`
 
-See `RELEASING.md` for the GitLab + Cloudflare R2 release flow.
+See `RELEASING.md` for the full release flow.
 
-## Runtime Benchmarks
+## FAQ
 
-OSA includes an in-repo, reproducible runtime benchmark harness that compares `debug` vs `release` for:
+**What do I need to get started?** Bring your own model. Use GitHub Copilot or OpenAI Codex via OAuth, any OpenRouter/Anthropic API key, or Ollama for fully local models. Download the binary, run it, open `localhost:8765`.
 
-- Startup to first ready API response (`/api/auth/status`)
-- RSS at ready and idle RSS after a fixed settle window
-- Provider-free common workloads:
-  - `health_ping_20x`
-  - `frontend_assets`
-  - `frontend_boot_api`
-  - `session_crud`
+**Can I run it fully offline?** Yes. Point at a local Ollama instance and you're off-grid.
 
-Run the full suite:
-
-```bash
-cargo run --release --bin osagent-bench -- --profiles debug,release --iterations 10
-```
-
-Quick wrappers:
-
-```bash
-./bench.sh
-./quick-bench.sh
-```
-
-Outputs are written under `benchmark_results/` as both JSON and Markdown.
+**How does Discord integration work?** Add your bot token to config. OSAgent becomes a Discord bot with per-channel sessions, slash commands, and real-time tool progress. Same binary as the web UI.
 
 ## License
 
