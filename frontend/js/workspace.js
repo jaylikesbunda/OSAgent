@@ -52,6 +52,11 @@ OSA.toggleWorkspaceMenu = function() {
     OSA.closePersonaMenu();
     menu.classList.toggle('hidden');
     trigger.classList.toggle('open');
+    if (!menu.classList.contains('hidden')) {
+        document.addEventListener('click', OSA._workspaceMenuOutsideClick);
+    } else {
+        document.removeEventListener('click', OSA._workspaceMenuOutsideClick);
+    }
 };
 
 OSA.closeWorkspaceMenu = function() {
@@ -59,6 +64,7 @@ OSA.closeWorkspaceMenu = function() {
     const trigger = document.getElementById('workspace-trigger');
     if (menu) menu.classList.add('hidden');
     if (trigger) trigger.classList.remove('open');
+    document.removeEventListener('click', OSA._workspaceMenuOutsideClick);
 };
 
 OSA.togglePersonaMenu = function() {
@@ -71,6 +77,11 @@ OSA.togglePersonaMenu = function() {
     }
     menu.classList.toggle('hidden');
     trigger.classList.toggle('open');
+    if (!menu.classList.contains('hidden')) {
+        document.addEventListener('click', OSA._personaMenuOutsideClick);
+    } else {
+        document.removeEventListener('click', OSA._personaMenuOutsideClick);
+    }
 };
 
 OSA.closePersonaMenu = function() {
@@ -78,6 +89,23 @@ OSA.closePersonaMenu = function() {
     const trigger = document.getElementById('persona-trigger');
     if (menu) menu.classList.add('hidden');
     if (trigger) trigger.classList.remove('open');
+    document.removeEventListener('click', OSA._personaMenuOutsideClick);
+};
+
+OSA._workspaceMenuOutsideClick = function(e) {
+    const menu = document.getElementById('workspace-menu');
+    const trigger = document.getElementById('workspace-trigger');
+    if (menu && !menu.contains(e.target) && trigger && !trigger.contains(e.target)) {
+        OSA.closeWorkspaceMenu();
+    }
+};
+
+OSA._personaMenuOutsideClick = function(e) {
+    const menu = document.getElementById('persona-menu');
+    const trigger = document.getElementById('persona-trigger');
+    if (menu && !menu.contains(e.target) && trigger && !trigger.contains(e.target)) {
+        OSA.closePersonaMenu();
+    }
 };
 
 OSA.setWorkspaceInlineStatus = function(message, isError = false) {

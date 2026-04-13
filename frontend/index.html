@@ -116,12 +116,7 @@
                             </svg>
                         </button>
                         <button class="settings-btn" onclick="OSA.toggleFilePreview()" title="Toggle file preview" aria-label="Toggle file preview">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M3 5h18"></path>
-                                <path d="M3 12h7"></path>
-                                <path d="M3 19h7"></path>
-                                <rect x="12" y="8" width="9" height="11" rx="1"></rect>
-                            </svg>
+                            <img src="images/preview-svgrepo-com.svg" width="16" height="16" alt="Preview" />
                         </button>
                         <button class="workflow-btn hidden" id="workflow-btn" onclick="openWorkflowEditor()">Workflows</button>
                         <button class="logout-btn" onclick="logout()" title="Logout" aria-label="Logout">
@@ -351,7 +346,7 @@
         </div>
     </div>
 
-    <div id="settings-modal" class="modal hidden">
+    <div id="settings-modal" class="modal hidden" onclick="if(event.target===this)OSA.closeSettings()">
         <div class="settings-modal-content">
             <div class="settings-modal-header">
                 <h2>Settings</h2>
@@ -438,20 +433,6 @@
                     <div class="settings-group">
                         <div class="settings-group-title">Connected Providers</div>
                         <div id="provider-routing-list" class="provider-routing-list">Loading...</div>
-                    </div>
-                    <div class="settings-group">
-                        <div class="settings-group-title">Compatibility Fallback</div>
-                        <div class="settings-field-hint settings-field-hint-spaced">These legacy fields remain available for older flows, but the main provider/model experience now lives in the Models tab.</div>
-                        <div class="settings-field">
-                            <label for="setting-base-url">Base URL</label>
-                            <input type="text" id="setting-base-url" placeholder="https://api.openai.com/v1" />
-                            <span class="settings-field-hint">Legacy OpenAI-compatible endpoint fallback</span>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-model">Default Model</label>
-                            <input type="text" id="setting-model" placeholder="gpt-4.1" />
-                            <span class="settings-field-hint">Legacy fallback model when no connected-provider route is selected</span>
-                        </div>
                     </div>
                 </div>
                 <div class="settings-pane" id="pane-theme">
@@ -716,7 +697,7 @@
                     </div>
 
                     <div class="settings-group">
-                        <div class="settings-group-title">Agent Memory</div>
+                        <div class="settings-group-title">General</div>
                         <div class="toggle-field">
                             <div class="toggle-info">
                                 <label class="toggle-label">Enable Memory</label>
@@ -741,18 +722,35 @@
                             </select>
                             <span class="settings-field-hint">Controls whether new memories/decisions are saved immediately or queued for review.</span>
                         </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title">Capture</div>
                         <div class="settings-field">
-                            <label for="setting-memory-capture-mode">Memory Capture Mode</label>
+                            <label for="setting-memory-capture-mode">Memory Capture</label>
                             <select id="setting-memory-capture-mode">
                                 <option value="off">Off</option>
                                 <option value="review">Review</option>
                                 <option value="auto">Auto</option>
                             </select>
                         </div>
-                        <div class="toggle-field toggle-field-spaced">
+                        <div class="settings-field">
+                            <label for="setting-decision-capture-mode">Decision Capture</label>
+                            <select id="setting-decision-capture-mode">
+                                <option value="off">Off</option>
+                                <option value="review">Review</option>
+                                <option value="auto">Auto</option>
+                            </select>
+                            <span class="settings-field-hint">Natural-language decision detection. "Approved decision:" syntax always applies when enabled.</span>
+                        </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title">Decisions</div>
+                        <div class="toggle-field">
                             <div class="toggle-info">
-                                <label class="toggle-label">Enable Approved Decision Memory</label>
-                                <span class="toggle-desc">Capture explicit durable choices like "Approved decision: key=value" and enforce them across sessions</span>
+                                <label class="toggle-label">Enable Decision Memory</label>
+                                <span class="toggle-desc">Capture durable choices like "Approved decision: key=value" and enforce them across sessions</span>
                             </div>
                             <label class="toggle-switch">
                                 <input type="checkbox" id="setting-decision-memory-enabled" onchange="OSA.onDecisionMemoryToggleChange()" />
@@ -760,18 +758,9 @@
                             </label>
                         </div>
                         <div class="settings-field hidden" id="decision-memory-file-field">
-                            <label for="setting-decision-memory-file">Decision Memory File</label>
+                            <label for="setting-decision-memory-file">Decision File</label>
                             <input type="text" id="setting-decision-memory-file" placeholder="~/.osagent/decision_memories.json" />
-                            <span class="settings-field-hint">Store durable decisions with: Approved decision: &lt;key&gt;=&lt;value&gt; | optional rationale</span>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-decision-capture-mode">Decision Capture Mode</label>
-                            <select id="setting-decision-capture-mode">
-                                <option value="off">Off</option>
-                                <option value="review">Review</option>
-                                <option value="auto">Auto</option>
-                            </select>
-                            <span class="settings-field-hint">Natural-language decision detection behavior. Explicit "Approved decision:" always applies when enabled.</span>
+                            <span class="settings-field-hint">JSON file for durable decisions</span>
                         </div>
                     </div>
 
