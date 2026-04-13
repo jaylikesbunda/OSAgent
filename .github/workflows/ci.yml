@@ -85,6 +85,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            updater/target
+            launcher/target
+          key: linux-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -134,6 +145,17 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            updater/target
+            launcher/target
+          key: win-cross-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Linux dependencies
         run: |
@@ -200,6 +222,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            updater/target
+            launcher/target
+          key: win-installer-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install cargo-tauri CLI
         run: cargo install tauri-cli --locked
