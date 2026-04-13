@@ -201,6 +201,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install cargo-tauri CLI
+        run: cargo install tauri-cli --locked
+
       - name: Build Windows installer artifacts
         shell: pwsh
         run: |
