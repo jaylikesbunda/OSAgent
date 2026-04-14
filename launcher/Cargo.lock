@@ -2716,7 +2716,7 @@ dependencies = [
  "chrono",
  "dirs-next",
  "open",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.11.27",
  "rfd",
  "serde",
