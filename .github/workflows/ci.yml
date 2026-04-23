@@ -193,7 +193,7 @@ jobs:
   release-macos-arm64:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: validate-release-tag
-    runs-on: macos-latest
+    runs-on: macos-14
     env:
       RELEASE_TAG: ${{ inputs['release-tag'] }}
     steps:
