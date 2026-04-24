@@ -570,7 +570,7 @@ impl ToolRegistry {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let top_count = 12.min(scored.len());
         let mut result: Vec<ToolDefinition> = Vec::with_capacity(top_count + 5);

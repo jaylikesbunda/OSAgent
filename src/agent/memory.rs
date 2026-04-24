@@ -183,7 +183,7 @@ impl MemoryStore {
         let mut state = Self::read_state(&file_path)?;
         state
             .memories
-            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            .sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         Ok(state.memories)
     }
 
@@ -367,7 +367,7 @@ impl MemoryStore {
         let mut state = Self::read_state(&file_path)?;
         state
             .suggestions
-            .sort_by(|a, b| b.suggested_at.cmp(&a.suggested_at));
+            .sort_by_key(|b| std::cmp::Reverse(b.suggested_at));
         Ok(state.suggestions)
     }
 

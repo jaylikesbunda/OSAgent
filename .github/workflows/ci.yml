@@ -274,6 +274,18 @@ jobs:
             exit 1
           fi
           echo "==> .app is ad-hoc signed (CI build - notarization not required)"
+          echo "==> Validating binary runtime integrity..."
+          BIN="$APP_BUNDLE/Contents/MacOS/osagent-launcher"
+          echo "--- Mach-O type/arch ---"
+          file "$BIN"
+          echo "--- Linked libraries ---"
+          otool -L "$BIN"
+          echo "--- Info.plist keys ---"
+          /usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$APP_BUNDLE/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_BUNDLE/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$APP_BUNDLE/Contents/Info.plist"
+          echo "--- Gatekeeper assessment ---"
+          spctl -a -t exec -vv "$APP_BUNDLE" 2>&1 || echo "(expected: notarization not available in CI)"
           hdiutil detach /tmp/osagent-dmg-mount
           echo "==> DMG verification passed"
 

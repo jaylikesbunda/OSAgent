@@ -5020,7 +5020,7 @@ async fn fetch_live_ollama_models(
         }
     }
 
-    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    models.sort_by_key(|a| a.name.to_lowercase());
     models
 }
 
