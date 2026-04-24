@@ -233,6 +233,31 @@ jobs:
           cp "$DMG_FILE" "$GITHUB_WORKSPACE/osagent-macos-arm64.dmg"
           (cd "$GITHUB_WORKSPACE" && shasum -a 256 osagent-macos-arm64.dmg > osagent-macos-arm64.dmg.sha256)
 
+      - name: Verify DMG
+        run: |
+          DMG_PATH="$GITHUB_WORKSPACE/osagent-macos-arm64.dmg"
+          echo "==> Verifying DMG integrity..."
+          hdiutil verify "$DMG_PATH"
+          echo "==> Checking DMG contents..."
+          hdiutil imageinfo "$DMG_PATH"
+          echo "==> Attempting attach (read-only, no browse)..."
+          hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint /tmp/osagent-dmg-mount
+          ls -laR /tmp/osagent-dmg-mount/
+          APP_BUNDLE=$(find /tmp/osagent-dmg-mount -name "*.app" -type d -maxdepth 3 | head -1)
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "ERROR: No .app bundle found in DMG"
+            hdiutil detach /tmp/osagent-dmg-mount 2>/dev/null || true
+            exit 1
+          fi
+          echo "==> .app bundle found: $APP_BUNDLE"
+          echo "==> Checking .app structure..."
+          ls -la "$APP_BUNDLE/Contents/"
+          if ! codesign -dv "$APP_BUNDLE" 2>/dev/null; then
+            echo "==> Unnotarized/unsigned (expected for CI build)"
+          fi
+          hdiutil detach /tmp/osagent-dmg-mount
+          echo "==> DMG verification passed"
+
       - name: Upload macOS release artifacts
         uses: actions/upload-artifact@v4
         with:
