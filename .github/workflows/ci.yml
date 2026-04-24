@@ -224,13 +224,28 @@ jobs:
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/updater/target" cargo build --manifest-path updater/Cargo.toml --release
           export OSAGENT_CORE_SOURCE="$GITHUB_WORKSPACE/target/release/osagent"
           export OSAGENT_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater/target/release/osagent-updater"
-          (cd launcher && cargo tauri build --bundles dmg --target aarch64-apple-darwin)
-          DMG_FILE=$(find "$GITHUB_WORKSPACE/launcher/target/aarch64-apple-darwin/release/bundle/dmg" -name "*.dmg" | head -1)
-          if [ -z "$DMG_FILE" ] || [ ! -f "$DMG_FILE" ]; then
-            echo "macOS .dmg bundle not found"
+          (cd launcher && cargo tauri build --bundles app --target aarch64-apple-darwin)
+          APP_BUNDLE=$(find "$GITHUB_WORKSPACE/launcher/target/aarch64-apple-darwin/release/bundle/macos" -name "*.app" -maxdepth 1 -type d | head -1)
+          if [ -z "$APP_BUNDLE" ] || [ ! -d "$APP_BUNDLE" ]; then
+            echo "macOS .app bundle not found"
             exit 1
           fi
-          cp "$DMG_FILE" "$GITHUB_WORKSPACE/osagent-macos-arm64.dmg"
+          echo "==> Ad-hoc signing app bundle..."
+          codesign --force --deep --sign - "$APP_BUNDLE"
+          codesign -dv "$APP_BUNDLE"
+          echo "==> Creating DMG from signed .app..."
+          DMG_STAGING="$GITHUB_WORKSPACE/dmg-staging"
+          rm -rf "$DMG_STAGING"
+          mkdir -p "$DMG_STAGING"
+          cp -R "$APP_BUNDLE" "$DMG_STAGING/"
+          ln -s /Applications "$DMG_STAGING/Applications"
+          DMG_FILE="$GITHUB_WORKSPACE/osagent-macos-arm64.dmg"
+          hdiutil create -volname "OSAgent Launcher" -srcfolder "$DMG_STAGING" -format UDZO -ov "$DMG_FILE"
+          echo "==> DMG created: $DMG_FILE"
+          if [ ! -f "$DMG_FILE" ]; then
+            echo "DMG creation failed"
+            exit 1
+          fi
           (cd "$GITHUB_WORKSPACE" && shasum -a 256 osagent-macos-arm64.dmg > osagent-macos-arm64.dmg.sha256)
 
       - name: Verify DMG
@@ -252,9 +267,13 @@ jobs:
           echo "==> .app bundle found: $APP_BUNDLE"
           echo "==> Checking .app structure..."
           ls -la "$APP_BUNDLE/Contents/"
-          if ! codesign -dv "$APP_BUNDLE" 2>/dev/null; then
-            echo "==> Unnotarized/unsigned (expected for CI build)"
+          echo "==> Checking code signature..."
+          if ! codesign -dv "$APP_BUNDLE"; then
+            echo "ERROR: App bundle is not code-signed"
+            hdiutil detach /tmp/osagent-dmg-mount 2>/dev/null || true
+            exit 1
           fi
+          echo "==> .app is ad-hoc signed (CI build - notarization not required)"
           hdiutil detach /tmp/osagent-dmg-mount
           echo "==> DMG verification passed"
 
