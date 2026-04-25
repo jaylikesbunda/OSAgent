@@ -126,6 +126,12 @@ max_tokens = 4096
 temperature = 0.7
 checkpoint_enabled = true
 checkpoint_interval = 5
+# Enable prompt caching to reuse stable system prompt prefixes across turns.
+# Reduces token usage and latency when using Claude models via OpenRouter.
+# Works with OpenRouter (Anthropic models), OpenAI, and other providers that
+# support automatic prompt caching. Set to false to rebuild the full prompt
+# every turn.
+prompt_cache_enabled = true
 
 # Discord Bot (optional; requires building with `--features discord`)
 # [discord]

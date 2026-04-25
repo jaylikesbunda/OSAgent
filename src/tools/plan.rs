@@ -31,6 +31,17 @@ impl Tool for PlanExitTool {
         "Use when the plan is complete and you want to start implementing"
     }
 
+    fn when_not_to_use(&self) -> &str {
+        "Do not use while still gathering information, exploring the codebase, or when the plan has unresolved questions"
+    }
+
+    fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
+        vec![crate::tools::registry::ToolExample {
+            description: "Exit plan mode to begin implementation".to_string(),
+            input: json!({}),
+        }]
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",

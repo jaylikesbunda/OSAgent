@@ -1,9 +1,188 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PromptMode {
     Full,
     Minimal,
     Explore,
     Verify,
+}
+
+/// A versioned system prompt cache that separates static sections (reusable
+/// across turns when the tool set or config hasn't changed) from dynamic
+/// sections (date/time, which change daily or per-request).
+///
+/// The static prefix is suitable for LLM prompt caching (e.g. Anthropic's
+/// cache_control or OpenAI's automatic caching) because it remains identical
+/// across many API calls within a session.
+#[derive(Debug, Clone)]
+pub struct PromptCache {
+    /// The full assembled system prompt text
+    pub prompt: String,
+    /// Byte offset of the dynamic boundary — everything before this offset
+    /// is the static prefix that never changes per session
+    pub dynamic_offset: usize,
+    /// Mode this cache was built for
+    pub mode: PromptMode,
+    /// Hash of inputs that determine cache validity
+    pub cache_version: u64,
+}
+
+impl PromptCache {
+    /// Build a fresh prompt cache for the given parameters.
+    /// The static prefix goes up to (and including) the Tools section.
+    /// The dynamic suffix starts after the Tools section.
+    pub fn build(
+        allowed_tools: &[String],
+        mode: PromptMode,
+        custom_identity: Option<&str>,
+        custom_priorities: Option<&[String]>,
+    ) -> Self {
+        let mut sorted_tools = allowed_tools.to_vec();
+        sorted_tools.sort();
+
+        let mut hasher = DefaultHasher::new();
+        mode.hash(&mut hasher);
+        for tool in &sorted_tools {
+            tool.hash(&mut hasher);
+        }
+        if let Some(id) = custom_identity {
+            id.hash(&mut hasher);
+        }
+        if let Some(prios) = custom_priorities {
+            for p in prios {
+                p.hash(&mut hasher);
+            }
+        }
+        let cache_version = hasher.finish();
+
+        // Build full prompt from sections, tracking the static prefix
+        let mut sections = Vec::new();
+
+        if mode == PromptMode::Verify {
+            let verify_sections = build_verify_sections(allowed_tools);
+            sections = verify_sections;
+            let prompt = sections.join("\n");
+            return Self {
+                prompt: prompt.clone(),
+                dynamic_offset: prompt.len(),
+                mode,
+                cache_version,
+            };
+        }
+
+        if mode == PromptMode::Explore {
+            let explore_sections = build_explore_sections(allowed_tools);
+            sections = explore_sections;
+            let prompt = sections.join("\n");
+            return Self {
+                prompt: prompt.clone(),
+                dynamic_offset: prompt.len(),
+                mode,
+                cache_version,
+            };
+        }
+
+        // Static prefix accumulates here
+        sections.extend(build_priorities_section(mode, custom_priorities));
+        sections.push(String::new());
+        sections.extend(build_validation_section(mode));
+        sections.push(String::new());
+        sections.extend(build_tool_selection_section(allowed_tools, mode));
+        sections.push(String::new());
+
+        if mode == PromptMode::Full {
+            sections.extend(build_editing_rules_section());
+            sections.push(String::new());
+            sections.extend(build_constraints_section());
+            sections.push(String::new());
+        }
+
+        sections.extend(build_workflow_section(mode));
+        sections.push(String::new());
+        sections.extend(build_safety_section(mode));
+        sections.push(String::new());
+
+        // Mark dynamic boundary here — everything after is dynamic
+        let static_prefix = sections.join("\n");
+        let dynamic_offset = static_prefix.len();
+
+        // Dynamic suffix
+        sections.extend(build_datetime_section());
+        sections.push(String::new());
+        sections.extend(build_identity_section(mode, custom_identity));
+        sections.push(String::new());
+        sections.extend(build_communication_section(mode));
+
+        let prompt = sections.join("\n");
+
+        Self {
+            prompt,
+            dynamic_offset,
+            mode,
+            cache_version,
+        }
+    }
+
+    /// Returns the static prefix (cacheable portion) of the system prompt.
+    /// This is safe to use with Anthropic cache_control breakpoints.
+    pub fn static_prefix(&self) -> &str {
+        &self.prompt[..self.dynamic_offset.min(self.prompt.len())]
+    }
+
+    /// Returns the dynamic suffix (non-cacheable portion) of the system prompt.
+    pub fn dynamic_suffix(&self) -> &str {
+        &self.prompt[self.dynamic_offset.min(self.prompt.len())..]
+    }
+
+    /// Check whether the cache is still valid given current parameters.
+    pub fn is_valid(
+        &self,
+        allowed_tools: &[String],
+        mode: PromptMode,
+        custom_identity: Option<&str>,
+        custom_priorities: Option<&[String]>,
+    ) -> bool {
+        if mode != self.mode {
+            return false;
+        }
+
+        let mut sorted_tools = allowed_tools.to_vec();
+        sorted_tools.sort();
+
+        let mut hasher = DefaultHasher::new();
+        mode.hash(&mut hasher);
+        for tool in &sorted_tools {
+            tool.hash(&mut hasher);
+        }
+        if let Some(id) = custom_identity {
+            id.hash(&mut hasher);
+        }
+        if let Some(prios) = custom_priorities {
+            for p in prios {
+                p.hash(&mut hasher);
+            }
+        }
+
+        hasher.finish() == self.cache_version
+    }
+
+    /// Rebuild only the dynamic portion (date/time, etc.) on top of the
+    /// cached static prefix. Returns the updated full prompt.
+    pub fn refresh_dynamic(&mut self, custom_identity: Option<&str>) {
+        let mut dynamic = Vec::new();
+        dynamic.extend(build_datetime_section());
+        dynamic.push(String::new());
+        dynamic.extend(build_identity_section(self.mode, custom_identity));
+        dynamic.push(String::new());
+        dynamic.extend(build_communication_section(self.mode));
+
+        let new_prefix = self.static_prefix().to_string();
+        let new_suffix = dynamic.join("\n");
+        self.prompt = format!("{}\n{}", new_prefix, new_suffix);
+        self.dynamic_offset = new_prefix.len();
+    }
 }
 
 pub fn build_system_prompt(
@@ -252,42 +431,154 @@ fn build_editing_rules_section() -> Vec<String> {
 }
 
 fn tool_line(name: &str) -> Option<&'static str> {
+    // Rich tool descriptions with usage guidance, following the pattern:
+    // - tool_name: brief summary. Use for X. Prefer over Y when Z. Avoid for A.
     match name {
-        "glob" => Some("- glob: find files by path or name patterns"),
-        "grep" => Some("- grep: search file contents"),
-        "codesearch" => Some("- codesearch: semantic code search"),
-        "list_files" => Some("- list_files: inspect directories quickly"),
-        "read_file" => Some("- read_file: read a file or directory with paging"),
-        "edit_file" => Some("- edit_file: smart text replacement"),
-        "write_file" => Some("- write_file: create or rewrite a file"),
-        "delete_file" => Some("- delete_file: remove files"),
-        "apply_patch" => Some("- apply_patch: precise multi-hunk edits"),
-        "batch" => Some("- batch: run multiple calls in parallel"),
-        "bash" => Some("- bash: run commands (build, test, etc)"),
-        "process" => Some("- process: inspect or kill processes"),
-        "calendar" => Some("- calendar: manage calendar events"),
-        "schedule" => Some("- schedule: set reminders or recurring tasks"),
-        "weather" => Some("- weather: fetch weather forecast"),
-        "system_status" => Some("- system_status: machine OS, CPU, memory, disk"),
-        "code_python" => Some("- code_python: run Python code"),
-        "code_node" => Some("- code_node: run JavaScript/TypeScript"),
-        "code_bash" => Some("- code_bash: shell transformations"),
-        "web_fetch" => Some("- web_fetch: fetch a URL"),
-        "web_search" => Some("- web_search: search the web"),
-        "task" => Some("- task: track multi-step work"),
-        "todowrite" => Some("- todowrite: manage todo list"),
-        "todoread" => Some("- todoread: read todo list"),
-        "persona" => Some("- persona: change assistant style"),
-        "record_memory" => Some("- record_memory: save persistent facts"),
-        "record_decision" => Some("- record_decision: store durable approved decisions"),
-        "question" => Some("- question: ask user for clarification"),
-        "skill" => Some("- skill: inspect loaded skill metadata"),
-        "skill_list" => Some("- skill_list: list available skills"),
-        "skill_action" => Some("- skill_action: execute skill action"),
-        "lsp" => Some("- lsp: query language server"),
-        "subagent" => Some("- subagent: delegate to worker"),
-        "coordinator" => Some("- coordinator: complex task delegation"),
-        "plan_exit" => Some("- plan_exit: signal planning complete"),
+        // ── File discovery & search ──
+        "glob" => Some(
+            "- glob: find files by name patterns (e.g. `**/*.rs`, `src/**/*.ts`). Use to locate files by path; prefer over grep when you know the filename pattern. Results sorted by modification time.",
+        ),
+        "grep" => Some(
+            "- grep: search file contents with regex patterns. Use to find symbols, function definitions, or error messages. Supports include filters (e.g. `*.rs`). Performs exact regex matching.",
+        ),
+        "codesearch" => Some(
+            "- codesearch: semantic code search via MeiliSearch index. Use when grep is too literal and you need meaning-based results. Requires the codebase to be indexed.",
+        ),
+        "list_files" => Some(
+            "- list_files: list directory contents. Use to inspect project structure quickly. Skips common noise directories like node_modules by default.",
+        ),
+
+        // ── Reading & inspection ──
+        "read_file" => Some(
+            "- read_file: read a file or directory with offset/limit paging. Use to inspect file contents line-by-line. Supports reading images, PDFs, and binary files. Paths are cached for fast subsequent access. Always read before editing.",
+        ),
+
+        // ── File modification ──
+        "edit_file" => Some(
+            "- edit_file: exact string replacement in files. Use for targeted inline changes. Requires the old string to match exactly in the file — copy from read_file output to ensure precision. For multi-hunk changes across a file, prefer apply_patch.",
+        ),
+        "write_file" => Some(
+            "- write_file: create or completely overwrite a file. Use for new files or full rewrites. Will overwrite existing content without warning — prefer edit_file or apply_patch for partial changes.",
+        ),
+        "delete_file" => Some(
+            "- delete_file: remove files from the workspace. Irreversible — confirm before using.",
+        ),
+        "apply_patch" => Some(
+            "- apply_patch: apply unified diff patches for precise multi-hunk edits. Use when you need to change multiple locations in a file atomically. Preferred over edit_file for complex changes spanning several sections. Produces minimal diff output.",
+        ),
+
+        // ── Execution ──
+        "bash" => Some(
+            "- bash: execute shell commands with optional timeout. Use for builds, tests, linting, git operations (staging, diff, log — never push), package management, file operations (mkdir, cp, mv), and system queries. Commands are workspace-scoped. Avoid for simple file reads (use read_file) or content searches (use grep/glob).",
+        ),
+        "batch" => Some(
+            "- batch: run multiple independent tool calls in a single step. Use to parallelize independent reads, searches, or status checks. Do NOT use for operations that depend on each other's results.",
+        ),
+        "code_python" => Some(
+            "- code_python: execute Python scripts in an isolated runtime. Use for data processing, file transformations, or quick calculations. Has a configurable timeout.",
+        ),
+        "code_node" => Some(
+            "- code_node: execute JavaScript/TypeScript scripts. Use for Node.js ecosystem tasks, JSON processing, or quick scripting in workspace context.",
+        ),
+        "code_bash" => Some(
+            "- code_bash: execute shell scripts in the workspace. Use for multi-step shell transformations that are cleaner as a script than as individual bash calls.",
+        ),
+
+        // ── Web ──
+        "web_fetch" => Some(
+            "- web_fetch: fetch and parse a URL into text, markdown, or HTML. Use for reading documentation, API references, or issue trackers. Not for arbitrary browsing — fetch specific URLs with clear intent.",
+        ),
+        "web_search" => Some(
+            "- web_search: search the web for current information. Use for finding documentation, examples, or answers beyond your training data. Prefer when grep/glob/codesearch don't have the answer.",
+        ),
+
+        // ── Task planning & tracking ──
+        "task" => Some(
+            "- task: launch a sub-agent for complex multi-step work. Use to delegate focused research, large-scale refactoring, or exploration that would bloat the main context. Sub-agents return a final summary. Prefer over coordinator for single-focus delegation.",
+        ),
+        "todowrite" => Some(
+            "- todowrite: create or update a structured task list for the current session. Use for multi-step work that is easy to lose track of. Mark items in_progress before working on them, completed when done. Helps maintain focus across iterations.",
+        ),
+        "todoread" => Some(
+            "- todoread: read the current todo list state. Use to review progress before continuing work.",
+        ),
+        "plan_exit" => Some(
+            "- plan_exit: signal that planning is complete and execution should begin. Use at the end of a planning phase to transition to implementation.",
+        ),
+
+        // ── Delegation & coordination ──
+        "subagent" => Some(
+            "- subagent: delegate a self-contained task to a specialized worker sub-agent. Use for parallel exploration, independent research threads, or tasks that need a fresh context window. Returns a concise result summary.",
+        ),
+        "coordinator" => Some(
+            "- coordinator: delegate complex multi-file work with planning and verification. Use when a task requires changes across many files with interdependent steps. The coordinator plans, executes, and verifies each step.",
+        ),
+
+        // ── System & OS control ──
+        "process" => Some(
+            "- process: list or manage running OS processes. Use to find PIDs, check resource usage, or terminate hung processes. Read-only listing is safe; killing requires confirmation.",
+        ),
+        "system_status" => Some(
+            "- system_status: query machine OS, CPU usage, memory consumption, disk space, and uptime. Use for diagnostics, capacity checks, or environment verification.",
+        ),
+        "calendar" => Some(
+            "- calendar: manage calendar events. Use to create, list, or modify scheduled events. Integrates with system calendar where configured.",
+        ),
+        "schedule" => Some(
+            "- schedule: set reminders or recurring tasks. Use to schedule background jobs or future notifications.",
+        ),
+        "weather" => Some(
+            "- weather: fetch current weather or forecast for a location. Use for environment-aware planning or informational queries.",
+        ),
+
+        // ── Interaction & state ──
+        "question" => Some(
+            "- question: ask the user clarifying questions with structured multiple-choice or free-text options. Use when requirements are ambiguous, when you need to choose between approaches, or when a decision has security/safety implications.",
+        ),
+        "persona" => Some(
+            "- persona: change the assistant's behavior style. Use to switch between coding, teaching, or roleplay modes.",
+        ),
+        "record_memory" => Some(
+            "- record_memory: save persistent facts, preferences, or project context for future sessions. Use to remember user preferences, project conventions, or important discoveries. Stored across sessions.",
+        ),
+        "record_decision" => Some(
+            "- record_decision: store durable approved decisions that must be applied consistently. Use when the user explicitly approves a specific approach or constraint. Enforced across future turns and sessions.",
+        ),
+
+        // ── Skills & LSP ──
+        "skill" => Some(
+            "- skill: inspect metadata for a loaded skill. Use to understand what a skill provides before invoking it.",
+        ),
+        "skill_list" => Some(
+            "- skill_list: list all available skills with their descriptions. Use to discover what capabilities are available through the skills system.",
+        ),
+        "skill_action" => Some(
+            "- skill_action: execute a named action within a loaded skill. Use to invoke specific skill capabilities like API calls or script executions.",
+        ),
+        "lsp" => Some(
+            "- lsp: query a Language Server Protocol server for code intelligence. Use for go-to-definition, find-references, hover info, or document symbols. Requires an LSP server to be running for the file's language.",
+        ),
+
+        // ── Memory management tools (internal, for review workflows) ──
+        "list_memory_suggestions" => Some(
+            "- list_memory_suggestions: review pending memory suggestions from the learning system. Use during review workflows.",
+        ),
+        "approve_memory_suggestion" => Some(
+            "- approve_memory_suggestion: approve a pending memory suggestion. Use to confirm learned facts or preferences.",
+        ),
+        "reject_memory_suggestion" => Some(
+            "- reject_memory_suggestion: reject a pending memory suggestion that is incorrect or unwanted.",
+        ),
+        "list_decision_suggestions" => Some(
+            "- list_decision_suggestions: review pending decision suggestions.",
+        ),
+        "approve_decision_suggestion" => Some(
+            "- approve_decision_suggestion: approve a pending decision suggestion for consistent enforcement.",
+        ),
+        "reject_decision_suggestion" => Some(
+            "- reject_decision_suggestion: reject a pending decision suggestion.",
+        ),
+
         _ => None,
     }
 }

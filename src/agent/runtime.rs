@@ -79,7 +79,8 @@ pub struct AgentRuntime {
     subagent_manager: Arc<SubagentManager>,
     coordinator: Arc<Coordinator>,
     indexer: Option<Arc<CodeIndexer>>,
-    system_prompt: String,
+    prompt_cache: Arc<std::sync::RwLock<prompt::PromptCache>>,
+    last_prompt_refresh: Arc<std::sync::Mutex<chrono::NaiveDate>>,
     event_bus: EventBus,
     session_locks: DashMap<String, Arc<Mutex<()>>>,
     session_cancellation: DashMap<String, Arc<Notify>>,
@@ -434,12 +435,30 @@ impl AgentRuntime {
 
         let custom_identity = config.agent.custom_identity.as_deref();
         let custom_priorities = config.agent.custom_priorities.as_deref();
+        let use_cache = config.agent.prompt_cache_enabled;
         let system_prompt = prompt::build_system_prompt(
             &config.tools.denied,
             PromptMode::Full,
             custom_identity,
             custom_priorities,
         );
+        let prompt_cache = if use_cache {
+            prompt::PromptCache::build(
+                &config.tools.denied,
+                PromptMode::Full,
+                custom_identity,
+                custom_priorities,
+            )
+        } else {
+            // Fallback: wrap the plain prompt, entire content is treated as dynamic
+            prompt::PromptCache {
+                prompt: system_prompt.clone(),
+                dynamic_offset: 0,
+                mode: PromptMode::Full,
+                cache_version: 0,
+            }
+        };
+        let today = chrono::Local::now().date_naive();
         log_phase("system_prompt_build", &mut phase_start);
 
         if startup_profile {
@@ -467,7 +486,8 @@ impl AgentRuntime {
             subagent_manager,
             coordinator,
             indexer,
-            system_prompt,
+            prompt_cache: Arc::new(std::sync::RwLock::new(prompt_cache)),
+            last_prompt_refresh: Arc::new(std::sync::Mutex::new(today)),
             event_bus,
             session_locks: DashMap::new(),
             session_cancellation: DashMap::new(),
@@ -955,7 +975,25 @@ impl AgentRuntime {
             let mut api_messages = if is_roleplay {
                 vec![]
             } else {
-                vec![Message::system(self.system_prompt.clone())]
+                // Refresh dynamic prompt portions if the date has rolled over
+                let today = chrono::Local::now().date_naive();
+                let needs_refresh = {
+                    let last_refresh = self.last_prompt_refresh.lock().unwrap();
+                    *last_refresh != today
+                };
+                if needs_refresh {
+                    let custom_id = self.config.read().await.agent.custom_identity.clone();
+                    if let Ok(mut cache) = self.prompt_cache.write() {
+                        cache.refresh_dynamic(custom_id.as_deref());
+                    }
+                    let mut last_refresh = self.last_prompt_refresh.lock().unwrap();
+                    *last_refresh = today;
+                }
+                let prompt_text = {
+                    let cache = self.prompt_cache.read().unwrap();
+                    cache.prompt.clone()
+                };
+                vec![Message::system(prompt_text)]
             };
 
             if !is_roleplay {

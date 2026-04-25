@@ -915,14 +915,15 @@ fn default_workspace_path() -> PathBuf {
         .join("OSA Workspace")
 }
 
-const OPENROUTER_MODELS: [(&str, &str); 10] = [
+const OPENROUTER_MODELS: [(&str, &str); 11] = [
     ("anthropic/claude-sonnet-4", "Claude Sonnet 4"),
     ("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet"),
     ("openai/gpt-4.1", "GPT-4.1"),
     ("openai/gpt-4o", "GPT-4o"),
     ("openai/o3", "o3"),
     ("google/gemini-2.5-pro", "Gemini 2.5 Pro"),
-    ("deepseek/deepseek-r1", "DeepSeek R1"),
+    ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro"),
+    ("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash"),
     ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B"),
     ("mistralai/mistral-large", "Mistral Large"),
     ("qwen/qwen3-235b-a22b", "Qwen3 235B"),
@@ -973,7 +974,9 @@ const GROQ_MODELS: [(&str, &str); 3] = [
     ("mixtral-8x7b-32768", "Mixtral 8x7B"),
 ];
 
-const DEEPSEEK_MODELS: [(&str, &str); 2] = [
+const DEEPSEEK_MODELS: [(&str, &str); 4] = [
+    ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+    ("deepseek-v4-flash", "DeepSeek V4 Flash"),
     ("deepseek-r1", "DeepSeek R1"),
     ("deepseek-chat", "DeepSeek V3"),
 ];
@@ -1138,12 +1141,12 @@ fn provider_presets() -> Vec<ProviderPreset> {
             id: "deepseek".to_string(),
             name: "DeepSeek".to_string(),
             description: "DeepSeek API direct access".to_string(),
-            base_url: "https://api.deepseek.com/v1".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
             key_label: "DeepSeek API Key".to_string(),
             key_placeholder: "sk-...".to_string(),
             key_help: "Required for DeepSeek. This stays in your local config file.".to_string(),
             api_key_required: true,
-            default_model: "deepseek-r1".to_string(),
+            default_model: "deepseek-v4-flash".to_string(),
             models: map_models(&DEEPSEEK_MODELS),
             oauth_flow_type: None,
             oauth_client_id: None,

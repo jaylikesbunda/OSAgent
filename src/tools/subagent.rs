@@ -42,6 +42,31 @@ impl Tool for SubagentTool {
         "Use this tool when you need to delegate work to a specialized agent. The subagent will run autonomously with its own tools, and you will receive its final response. You should summarize the result for the user. The result returned by the agent is not visible to the user."
     }
 
+    fn when_not_to_use(&self) -> &str {
+        "Do not use for trivial single-step operations (use read_file, grep, or bash directly). Do not use for simple todo tracking (use todowrite). Do not nest subagent calls inside subagents."
+    }
+
+    fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
+        vec![
+            crate::tools::registry::ToolExample {
+                description: "Explore codebase structure".to_string(),
+                input: json!({
+                    "description": "Explore project layout",
+                    "prompt": "Find all API endpoint definitions and report their paths and handlers. Return file paths and line numbers.",
+                    "subagent_type": "explore"
+                }),
+            },
+            crate::tools::registry::ToolExample {
+                description: "General research task".to_string(),
+                input: json!({
+                    "description": "Research error handling",
+                    "prompt": "Search the codebase for all error types defined. For each, note the file, line number, and what scenarios trigger it. Return a structured summary.",
+                    "subagent_type": "general"
+                }),
+            },
+        ]
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",

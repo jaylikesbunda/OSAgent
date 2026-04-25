@@ -89,6 +89,12 @@ pub struct AgentConfig {
     pub custom_identity: Option<String>,
     #[serde(default)]
     pub custom_priorities: Option<Vec<String>>,
+    #[serde(default = "default_prompt_cache_enabled")]
+    pub prompt_cache_enabled: bool,
+}
+
+fn default_prompt_cache_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -405,6 +411,7 @@ impl Default for AgentConfig {
             permission_rules: vec![],
             custom_identity: None,
             custom_priorities: None,
+            prompt_cache_enabled: default_prompt_cache_enabled(),
         }
     }
 }
