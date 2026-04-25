@@ -1216,7 +1216,7 @@ impl AgentRuntime {
 
             let (mut response, used_streaming) = match stream_attempt {
                 Ok(stream) => {
-                    let response = self
+                    match self
                         .consume_provider_stream(
                             session_id,
                             &mut session,
@@ -1224,7 +1224,46 @@ impl AgentRuntime {
                             cancel_notify.clone(),
                         )
                         .await
-                        .map_err(|e| {
+                    {
+                        Ok(response) => (response, true),
+                        Err(e) if Self::is_streaming_fallback_error(&e) => {
+                            warn!(
+                                "Stream consumption failed with fallback-eligible error in session {}: {}. Falling back to non-streaming.",
+                                session_id, e
+                            );
+                            // Remove the empty assistant message pushed by consume_provider_stream
+                            if let Some(last) = session.messages.last() {
+                                if last.role == "assistant" && last.content.is_empty() && last.tool_calls.is_none() {
+                                    session.messages.pop();
+                                }
+                            }
+                            let response = tokio::select! {
+                                _ = cancel_notify.notified() => {
+                                    warn!("Operation cancelled for session {} during provider fallback", session_id);
+                                    self.event_bus.emit(AgentEvent::Cancelled {
+                                        session_id: session_id.to_string(),
+                                        sequence: 0,
+                                        timestamp: SystemTime::now(),
+                                    });
+                                    return Err(OSAgentError::Session("Operation cancelled".to_string()));
+                                }
+                                result = provider.complete(&api_messages, &tools) => {
+                                    result.map_err(|e| {
+                                        error!("Provider error in session {}: {}", session_id, e);
+                                        self.event_bus.emit(AgentEvent::Error {
+                                            session_id: session_id.to_string(),
+                                            sequence: 0,
+                                            error: e.to_string(),
+                                            recoverable: e.is_recoverable(),
+                                            timestamp: SystemTime::now(),
+                                        });
+                                        e
+                                    })?
+                                }
+                            };
+                            (response, false)
+                        }
+                        Err(e) => {
                             error!("Provider stream error in session {}: {}", session_id, e);
                             self.event_bus.emit(AgentEvent::Error {
                                 session_id: session_id.to_string(),
@@ -1233,9 +1272,9 @@ impl AgentRuntime {
                                 recoverable: e.is_recoverable(),
                                 timestamp: SystemTime::now(),
                             });
-                            e
-                        })?;
-                    (response, true)
+                            return Err(e);
+                        }
+                    }
                 }
                 Err(error) if Self::is_streaming_fallback_error(&error) => {
                     let response = tokio::select! {
@@ -2326,7 +2365,11 @@ impl AgentRuntime {
     }
 
     fn is_streaming_fallback_error(error: &OSAgentError) -> bool {
-        matches!(error, OSAgentError::Provider(message) if message.contains("Streaming currently supports only"))
+        matches!(error, OSAgentError::Provider(message) if {
+            message.contains("Streaming currently supports only")
+                || message.contains("Invalid status code: 4")
+                || message.contains("Invalid status code: 5")
+        })
     }
 
     async fn maybe_persist_streaming_message(

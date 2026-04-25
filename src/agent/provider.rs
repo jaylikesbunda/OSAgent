@@ -244,7 +244,14 @@ impl OpenAICompatibleProvider {
                             .collect();
                         value["tool_calls"] = serde_json::json!(formatted_calls);
                     }
-                    value["content"] = serde_json::json!(msg.content);
+                    if provider_type == "deepseek" && !msg.thinking.as_deref().unwrap_or("").is_empty() {
+                        value["reasoning_content"] = serde_json::json!(msg.thinking);
+                    }
+                    if msg.content.is_empty() && msg.tool_calls.as_ref().is_some_and(|c| !c.is_empty()) {
+                        value["content"] = serde_json::Value::Null;
+                    } else {
+                        value["content"] = serde_json::json!(msg.content);
+                    }
                 } else if !msg.images.is_empty() {
                     let mut content_parts: Vec<serde_json::Value> = Vec::new();
                     if !msg.content.is_empty() {
