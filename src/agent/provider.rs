@@ -19,7 +19,7 @@ use super::reasoning;
 
 const MAX_RETRIES: u32 = 4;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
-const MAX_TOOL_SCHEMA_TOKENS: usize = 8_000;
+const MAX_TOOL_SCHEMA_TOKENS: usize = 16_000;
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 #[async_trait]
@@ -1293,6 +1293,40 @@ impl OpenAICompatibleProvider {
         Self::estimated_tools_tokens(tools) > MAX_TOOL_SCHEMA_TOKENS
     }
 
+    fn trim_tools_to_fit(tools: &[ToolDefinition], max_tokens: usize) -> Vec<ToolDefinition> {
+        if tools.is_empty() {
+            return tools.to_vec();
+        }
+        let essential_names = [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "bash",
+            "grep",
+            "glob",
+            "list_files",
+        ];
+        let mut result: Vec<ToolDefinition> = Vec::new();
+        for tool in tools {
+            if essential_names.contains(&tool.function.name.as_str()) {
+                result.push(tool.clone());
+            }
+        }
+        let mut token_count = Self::estimated_tools_tokens(&result);
+        for tool in tools {
+            if result.iter().any(|t| t.function.name == tool.function.name) {
+                continue;
+            }
+            let tool_tokens = Self::estimated_tools_tokens(std::slice::from_ref(tool));
+            if token_count + tool_tokens > max_tokens {
+                break;
+            }
+            result.push(tool.clone());
+            token_count += tool_tokens;
+        }
+        result
+    }
+
     fn retry_delay_for_attempt(attempt: u32, error: &OSAgentError) -> Duration {
         if error.is_rate_limited() {
             Duration::from_secs(8 * attempt as u64)
@@ -1648,8 +1682,31 @@ impl OpenAICompatibleProvider {
 
         let transformed_messages = self.adapter.transform_messages(messages, &config);
         let transformed_tools = self.transform_tools_for_request(tools, &config.model);
-        let include_tools = Self::should_send_tools(&transformed_messages, tools)
-            && !Self::should_trim_tools(&transformed_messages, tools);
+        let should_send = Self::should_send_tools(&transformed_messages, tools);
+        let include_tools = if should_send && Self::should_trim_tools(&transformed_messages, tools) {
+            info!(
+                "Trimming tool schema to fit context (estimated {} tokens > {} limit)",
+                Self::estimated_tools_tokens(tools),
+                MAX_TOOL_SCHEMA_TOKENS
+            );
+            false
+        } else {
+            should_send
+        };
+        let final_tools = if should_send && !include_tools {
+            let trimmed = Self::trim_tools_to_fit(&transformed_tools, MAX_TOOL_SCHEMA_TOKENS);
+            if trimmed.is_empty() {
+                info!("Could not fit any tools within token budget");
+                None
+            } else {
+                info!("Trimmed tools to {} (from {})", trimmed.len(), tools.len());
+                Some(trimmed)
+            }
+        } else if include_tools {
+            Some(transformed_tools)
+        } else {
+            None
+        };
         let provider_options = self
             .adapter
             .default_options(&config.provider_type, &config.model);
@@ -1672,14 +1729,9 @@ impl OpenAICompatibleProvider {
             &generation_settings,
             reasoning_meta.as_ref(),
         );
-        if include_tools {
-            request_body["tools"] = serde_json::to_value(&transformed_tools).unwrap();
+        if let Some(ref tools_to_send) = final_tools {
+            request_body["tools"] = serde_json::to_value(tools_to_send).unwrap();
             request_body["tool_choice"] = serde_json::json!("auto");
-        } else if !tools.is_empty() {
-            info!(
-                "Skipping tool schema in streaming provider request to reduce context size (estimated {} tokens)",
-                Self::estimated_tools_tokens(tools)
-            );
         }
 
         let mut req = self
@@ -1843,12 +1895,26 @@ impl OpenAICompatibleProvider {
             }
         }
 
-        let include_tools = Self::should_send_tools(&transformed_messages, tools)
-            && !Self::should_trim_tools(&transformed_messages, tools);
-        if include_tools {
+        let should_send = Self::should_send_tools(&transformed_messages, tools);
+        let include_all_tools = should_send && !Self::should_trim_tools(&transformed_messages, tools);
+        let final_tools = if should_send && !include_all_tools {
+            let trimmed = Self::trim_tools_to_fit(&transformed_tools, MAX_TOOL_SCHEMA_TOKENS);
+            if trimmed.is_empty() {
+                info!("Could not fit any tools within token budget");
+                None
+            } else {
+                info!("Trimmed tools to {} (from {})", trimmed.len(), tools.len());
+                Some(trimmed)
+            }
+        } else if include_all_tools {
+            Some(transformed_tools)
+        } else {
+            None
+        };
+        if let Some(ref tools_to_send) = final_tools {
             let tool_payload = match mode {
                 RequestMode::Responses => serde_json::to_value(
-                    transformed_tools
+                    tools_to_send
                         .iter()
                         .map(|tool| {
                             serde_json::json!({
@@ -1861,16 +1927,11 @@ impl OpenAICompatibleProvider {
                         .collect::<Vec<_>>(),
                 )
                 .unwrap(),
-                _ => serde_json::to_value(&transformed_tools).unwrap(),
+                _ => serde_json::to_value(tools_to_send).unwrap(),
             };
 
             request_body["tools"] = tool_payload;
             request_body["tool_choice"] = serde_json::json!("auto");
-        } else if !tools.is_empty() {
-            info!(
-                "Skipping tool schema in provider request to reduce context size (estimated {} tokens)",
-                Self::estimated_tools_tokens(tools)
-            );
         }
 
         tracing::debug!(

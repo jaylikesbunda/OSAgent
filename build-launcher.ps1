@@ -6,7 +6,9 @@ param(
 
     [switch]$Installer,
 
-    [switch]$Fast
+    [switch]$Fast,
+
+    [switch]$NoFrontendBundle
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,16 +35,26 @@ function Invoke-CargoStep {
     }
 }
 
-$CoreFeatureArgs = @()
+$BundleFrontend = -not $NoFrontendBundle
+
+$Features = @()
 if (-not $NoDiscord) {
-    $CoreFeatureArgs += @("--features", "discord")
+    $Features += "discord"
+}
+if ($BundleFrontend) {
+    $Features += "production-frontend"
+}
+$CoreFeatureArgs = @()
+if ($Features.Count -gt 0) {
+    $CoreFeatureArgs += @("--features", ($Features -join ","))
 }
 
 Write-Host "OSAgent launcher build" -ForegroundColor Green
-Write-Host "Checks   : $Checks"
-Write-Host "Discord  : $(-not $NoDiscord)"
-Write-Host "Installer: $Installer"
-Write-Host "Fast     : $Fast"
+Write-Host "Checks     : $Checks"
+Write-Host "Discord    : $(-not $NoDiscord)"
+Write-Host "Installer  : $Installer"
+Write-Host "Fast       : $Fast"
+Write-Host "Frontend   : $BundleFrontend"
 
 if ($Fast -and $Checks) {
     Write-Host "Note: -Fast skips slow checks (clippy, fmt). Tests still run." -ForegroundColor Yellow
@@ -58,6 +70,20 @@ if ($Checks) {
         Invoke-CargoStep -Label "Check launcher formatting" -Args @("fmt", "--manifest-path", "launcher/Cargo.toml", "--all", "--", "--check")
         Invoke-CargoStep -Label "Run launcher clippy" -Args @("clippy", "--manifest-path", "launcher/Cargo.toml", "--all-targets", "--all-features", "--", "-D", "warnings")
     }
+}
+
+if ($BundleFrontend) {
+    Write-Host ""
+    Write-Host "==> Bundle frontend (esbuild)" -ForegroundColor Cyan
+    $FrontendDir = Join-Path $ScriptRoot "frontend"
+    if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
+        Write-Host "npm install" -ForegroundColor DarkGray
+        & npm install --prefix $FrontendDir
+        if ($LASTEXITCODE -ne 0) { throw "Step failed: npm install" }
+    }
+    Write-Host "npm run build" -ForegroundColor DarkGray
+    & npm run build --prefix $FrontendDir
+    if ($LASTEXITCODE -ne 0) { throw "Step failed: npm run build" }
 }
 
 $Profile = if ($Fast) { "dev-release" } else { "release" }

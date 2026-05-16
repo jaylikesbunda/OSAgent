@@ -122,7 +122,7 @@ active_workspace = "default"
 workspaces = [
   { id = "default", name = "Default Workspace", path = "~/.osagent/workspace", description = "Default working directory", created_at = "2026-01-01T00:00:00Z", last_used = "2026-01-01T00:00:00Z" }
 ]
-max_tokens = 4096
+max_tokens = 16384
 temperature = 0.7
 checkpoint_enabled = true
 checkpoint_interval = 5

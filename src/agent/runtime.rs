@@ -896,6 +896,7 @@ impl AgentRuntime {
         let max_iterations = agent_settings.max_iterations;
         drop(agent_settings);
         let mut pending_tool_followup = false;
+        let mut response_truncated = false;
         let mut max_iterations_reached = false;
         let mut response_complete_emitted = false;
         let mut tool_success_count = 0usize;
@@ -948,22 +949,13 @@ impl AgentRuntime {
                 break;
             }
 
-            let tools = if iteration == 1 {
-                let filtered = self
-                    .tool_registry
-                    .get_tool_definitions_for_message(&user_message);
-                info!(
-                    "process_message: Using {} filtered tools (from {} total) based on user message",
-                    filtered.len(),
-                    self.tool_registry.get_tool_definitions().len()
-                );
-                filtered
-            } else {
-                self.tool_registry.get_tool_definitions()
-            };
+            let tools = self
+                .tool_registry
+                .get_tool_definitions_for_message(&user_message);
             info!(
-                "process_message: Calling provider with {} tools",
-                tools.len()
+                "process_message: Calling provider with {} tools (filtered from {} total)",
+                tools.len(),
+                self.tool_registry.get_tool_definitions().len()
             );
 
             let active_persona = Self::active_persona_from_session(&session);
@@ -1030,6 +1022,12 @@ impl AgentRuntime {
                 api_messages.push(Message::user(
                     "The last tool calls completed. If the user's request is fully addressed, give a concise final summary and stop. Do NOT start new tangential work, explore unrelated files, or add unsolicited improvements. Only continue with tools if there is a concrete remaining step directly related to the original request.".to_string(),
                 ));
+            }
+            if response_truncated && !is_roleplay {
+                api_messages.push(Message::user(
+                    "Your previous response was cut off due to length. Continue exactly from where you left off. Do not repeat what you already said.".to_string(),
+                ));
+                response_truncated = false;
             }
 
             // Roleplay continuity enforcer
@@ -1581,7 +1579,7 @@ impl AgentRuntime {
                             }
                         }
 
-                        let context_window_tokens = runtime_config.agent.max_tokens * 4;
+                        let context_window_tokens = std::cmp::max(runtime_config.agent.max_tokens * 4, 131_072);
                         let truncated_output = truncation::maybe_truncate_tool_result(
                             &output,
                             context_window_tokens,
@@ -1917,7 +1915,7 @@ impl AgentRuntime {
 
                         let output = tool_result.output.clone();
 
-                        let context_window_tokens = runtime_config.agent.max_tokens * 4;
+                        let context_window_tokens = std::cmp::max(runtime_config.agent.max_tokens * 4, 131_072);
                         let truncated_output = truncation::maybe_truncate_tool_result(
                             &output,
                             context_window_tokens,
@@ -2056,13 +2054,30 @@ impl AgentRuntime {
                 let finish = response.finish_reason.to_lowercase();
                 let looks_like_completion =
                     finish == "stop" || finish == "end_turn" || finish == "completed";
-                if !looks_like_completion {
+                let is_truncated = finish == "length";
+                if !looks_like_completion && !is_truncated {
+                    pending_tool_followup = true;
+                } else if is_truncated {
+                    warn!(
+                        "Response with tool calls truncated (finish_reason=length) for session {} - treating as pending continuation",
+                        session_id
+                    );
                     pending_tool_followup = true;
                 } else {
                     info!("process_message: Model stopped naturally (finish_reason={}), not forcing continuation", finish);
                 }
             } else {
                 info!("process_message: No tool calls, response complete");
+
+                let finish = response.finish_reason.to_lowercase();
+                if finish == "length" && iteration < max_iterations {
+                    warn!(
+                        "Response truncated (finish_reason=length) for session {} - requesting continuation",
+                        session_id
+                    );
+                    response_truncated = true;
+                    continue;
+                }
 
                 if pending_tool_followup
                     && last_iteration_only_meta_tools

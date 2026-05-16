@@ -16,6 +16,12 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
 
+#[cfg(feature = "production-frontend")]
+#[derive(RustEmbed)]
+#[folder = "frontend/dist/"]
+struct FrontendAssets;
+
+#[cfg(not(feature = "production-frontend"))]
 #[derive(RustEmbed)]
 #[folder = "frontend/"]
 struct FrontendAssets;

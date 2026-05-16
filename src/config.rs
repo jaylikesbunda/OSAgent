@@ -395,7 +395,7 @@ impl Default for AgentConfig {
             workspace: default_workspace_path(),
             workspaces: vec![],
             active_workspace: None,
-            max_tokens: 4096,
+            max_tokens: 16384,
             temperature: 0.7,
             thinking_level: "auto".to_string(),
             checkpoint_enabled: true,
@@ -692,7 +692,8 @@ impl Config {
         let mutated = cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();
         cfg.migrate_tool_defaults();
-        if mutated {
+        let migrated_max_tokens = cfg.migrate_max_tokens();
+        if mutated || migrated_max_tokens {
             cfg.save(path_ref)?;
         }
         Ok(cfg)
@@ -755,6 +756,14 @@ impl Config {
     }
 
     pub fn migrate_tool_defaults(&mut self) {}
+
+    pub fn migrate_max_tokens(&mut self) -> bool {
+        if self.agent.max_tokens <= 4096 {
+            self.agent.max_tokens = 16384;
+            return true;
+        }
+        false
+    }
 
     pub fn migrate_workspace_paths(&mut self) {
         for ws in &mut self.agent.workspaces {

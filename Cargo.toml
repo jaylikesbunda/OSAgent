@@ -131,6 +131,7 @@ path = "src/bin/osagent-bench.rs"
 [features]
 default = []
 discord = ["serenity"]
+production-frontend = []
 
 [profile.release]
 opt-level = 3
