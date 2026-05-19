@@ -16,14 +16,9 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
 
-#[cfg(feature = "production-frontend")]
 #[derive(RustEmbed)]
-#[folder = "frontend/dist/"]
-struct FrontendAssets;
-
-#[cfg(not(feature = "production-frontend"))]
-#[derive(RustEmbed)]
-#[folder = "frontend/"]
+#[cfg_attr(feature = "production-frontend", folder = "frontend/dist/")]
+#[cfg_attr(not(feature = "production-frontend"), folder = "frontend/")]
 struct FrontendAssets;
 
 static INDEX_HTML: &str = "index.html";

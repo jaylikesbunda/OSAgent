@@ -15,7 +15,7 @@
 
 ---
 
-An AI agent that belongs on your desktop, not in the cloud. Single binary, zero runtime dependencies, built with Rust for performance and reliability.
+An AI agent that belongs on your desktop, not in the cloud. Single distributable, built with Rust for performance and reliability.
 
 ## Features
 
@@ -38,8 +38,7 @@ Measured with in-repo runtime benchmarks (release, provider-free workloads, 10 r
 | Startup to ready | ~543ms |
 | Ready RSS | ~13.68MB |
 | Idle RSS | ~22.66MB |
-| Install size | ~50MB single binary |
-| Runtime deps | Zero |
+| Install size | ~50MB (deb/dmg) |
 
 ```bash
 cargo run --release --bin osagent-bench -- --profiles release --iterations 10
@@ -53,11 +52,9 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 | Platform | Asset |
 |---|---|
-| Windows | `osagent-windows-x86_64-setup.exe` or `.zip` |
-| Linux (x86_64) | `osagent-linux-x86_64.tar.gz` |
-| Linux (ARM64) | `osagent-linux-arm64.tar.gz` |
-| macOS (Apple Silicon) | `osagent-macos-arm64.tar.gz` |
-| macOS (Intel) | `osagent-macos-x86_64.tar.gz` |
+| Windows | `osagent-windows-x86_64-setup.exe` |
+| Linux (x86_64) | `osagent-linux-x86_64.deb` |
+| macOS (Apple Silicon) | `osagent-macos-arm64.dmg` |
 
 Auto-updates are served via `https://osa.fuckyourcdn.com/releases/latest.json`.
 
@@ -119,13 +116,14 @@ See `examples/skills/` for examples.
 
 ```powershell
 git clone https://github.com/jaylikesbunda/OSAgent.git
-cd osagent
-.\build-launcher.ps1 -Checks
+cd OSAgent
+.\build-launcher.ps1 -Installer
 ```
 
 Release artifacts:
-- Windows: `launcher/target/release/osagent-launcher.exe`
-- Linux: `launcher/target/release/osagent-launcher`
+- Windows: `launcher/target/release/bundle/nsis/*.exe` (installer)
+- Linux: `launcher/target/release/bundle/deb/*.deb`
+- macOS: `launcher/target/release/bundle/macos/*.app`
 
 See `RELEASING.md` for the full release flow.
 
