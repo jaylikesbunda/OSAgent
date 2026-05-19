@@ -1231,7 +1231,10 @@ impl AgentRuntime {
                             );
                             // Remove the empty assistant message pushed by consume_provider_stream
                             if let Some(last) = session.messages.last() {
-                                if last.role == "assistant" && last.content.is_empty() && last.tool_calls.is_none() {
+                                if last.role == "assistant"
+                                    && last.content.is_empty()
+                                    && last.tool_calls.is_none()
+                                {
                                     session.messages.pop();
                                 }
                             }
@@ -1579,7 +1582,8 @@ impl AgentRuntime {
                             }
                         }
 
-                        let context_window_tokens = std::cmp::max(runtime_config.agent.max_tokens * 4, 131_072);
+                        let context_window_tokens =
+                            std::cmp::max(runtime_config.agent.max_tokens * 4, 131_072);
                         let truncated_output = truncation::maybe_truncate_tool_result(
                             &output,
                             context_window_tokens,
@@ -1915,7 +1919,8 @@ impl AgentRuntime {
 
                         let output = tool_result.output.clone();
 
-                        let context_window_tokens = std::cmp::max(runtime_config.agent.max_tokens * 4, 131_072);
+                        let context_window_tokens =
+                            std::cmp::max(runtime_config.agent.max_tokens * 4, 131_072);
                         let truncated_output = truncation::maybe_truncate_tool_result(
                             &output,
                             context_window_tokens,

@@ -1683,7 +1683,8 @@ impl OpenAICompatibleProvider {
         let transformed_messages = self.adapter.transform_messages(messages, &config);
         let transformed_tools = self.transform_tools_for_request(tools, &config.model);
         let should_send = Self::should_send_tools(&transformed_messages, tools);
-        let include_tools = if should_send && Self::should_trim_tools(&transformed_messages, tools) {
+        let include_tools = if should_send && Self::should_trim_tools(&transformed_messages, tools)
+        {
             info!(
                 "Trimming tool schema to fit context (estimated {} tokens > {} limit)",
                 Self::estimated_tools_tokens(tools),
@@ -1896,7 +1897,8 @@ impl OpenAICompatibleProvider {
         }
 
         let should_send = Self::should_send_tools(&transformed_messages, tools);
-        let include_all_tools = should_send && !Self::should_trim_tools(&transformed_messages, tools);
+        let include_all_tools =
+            should_send && !Self::should_trim_tools(&transformed_messages, tools);
         let final_tools = if should_send && !include_all_tools {
             let trimmed = Self::trim_tools_to_fit(&transformed_tools, MAX_TOOL_SCHEMA_TOKENS);
             if trimmed.is_empty() {
