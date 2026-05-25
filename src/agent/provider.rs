@@ -514,9 +514,11 @@ impl OpenAICompatibleProvider {
                 function: ToolFunction {
                     name: tool.function.name.clone(),
                     description: tool.function.description.clone(),
-                    parameters: self
-                        .adapter
-                        .transform_schema(tool.function.parameters.clone(), provider_type, model),
+                    parameters: self.adapter.transform_schema(
+                        tool.function.parameters.clone(),
+                        provider_type,
+                        model,
+                    ),
                 },
             })
             .collect::<Vec<_>>()
@@ -1682,7 +1684,8 @@ impl OpenAICompatibleProvider {
         }
 
         let transformed_messages = self.adapter.transform_messages(messages, &config);
-        let transformed_tools = self.transform_tools_for_request(tools, &config.provider_type, &config.model);
+        let transformed_tools =
+            self.transform_tools_for_request(tools, &config.provider_type, &config.model);
 
         let should_send = Self::should_send_tools(&transformed_messages, tools);
         let include_tools = if should_send && Self::should_trim_tools(&transformed_messages, tools)
@@ -1853,7 +1856,8 @@ impl OpenAICompatibleProvider {
         let reasoning_meta = self.catalog.as_ref().and_then(|catalog| {
             catalog.lookup_reasoning_metadata(&config.provider_type, &config.model)
         });
-        let transformed_tools = self.transform_tools_for_request(tools, &config.provider_type, &config.model);
+        let transformed_tools =
+            self.transform_tools_for_request(tools, &config.provider_type, &config.model);
         let non_system_messages = Self::non_system_messages(&transformed_messages);
 
         let mut request_body = match mode {

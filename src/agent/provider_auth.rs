@@ -101,15 +101,19 @@ impl ProviderAuth {
             .unwrap_or_else(|_| "us-central1".to_string());
 
         // Check for GCP access token (ADC support)
-        let gcp_token = std::env::var("GCLOUD_ACCESS_TOKEN").ok()
+        let gcp_token = std::env::var("GCLOUD_ACCESS_TOKEN")
+            .ok()
             .filter(|t| !t.is_empty());
 
         // Check for service account JSON file path
-        let sa_file = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()
+        let sa_file = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+            .ok()
             .filter(|p| !p.is_empty());
 
-        let has_creds = !project.is_empty() || !config.api_key.is_empty()
-            || gcp_token.is_some() || sa_file.is_some();
+        let has_creds = !project.is_empty()
+            || !config.api_key.is_empty()
+            || gcp_token.is_some()
+            || sa_file.is_some();
 
         let base_url = if !project.is_empty() {
             let endpoint = if location == "global" {
@@ -250,8 +254,8 @@ impl ProviderAuth {
             if !ak.is_empty() && !sk.is_empty() {
                 (ak, sk, st)
             } else {
-                let profile = std::env::var("AWS_PROFILE")
-                    .unwrap_or_else(|_| "default".to_string());
+                let profile =
+                    std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
                 if let Some((ak, sk, st)) = Self::load_aws_profile(&profile) {
                     (ak, sk, st)
                 } else {
@@ -260,13 +264,15 @@ impl ProviderAuth {
             }
         };
 
-        let has_creds = !access_key.is_empty() && !secret_key.is_empty()
-            || !config.api_key.is_empty();
+        let has_creds =
+            !access_key.is_empty() && !secret_key.is_empty() || !config.api_key.is_empty();
 
         // Support cross-region inference prefix
         let base_url = if config.base_url.contains("{{") {
-            let endpoint = if region.starts_with("us.") || region.starts_with("eu.")
-                || region.starts_with("apac.") || region.starts_with("au.")
+            let endpoint = if region.starts_with("us.")
+                || region.starts_with("eu.")
+                || region.starts_with("apac.")
+                || region.starts_with("au.")
                 || region.starts_with("jp.")
             {
                 format!("bedrock-runtime.{}.amazonaws.com", region)

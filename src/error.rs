@@ -185,9 +185,7 @@ impl OSAgentError {
         match self {
             Self::Provider(message) => {
                 let lower = message.to_lowercase();
-                lower.contains("status code 404")
-                    || lower.contains("(404")
-                    || self.is_retryable()
+                lower.contains("status code 404") || lower.contains("(404") || self.is_retryable()
             }
             _ => self.is_retryable(),
         }

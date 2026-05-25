@@ -224,7 +224,11 @@ impl ProviderTransforms {
                 }
                 Value::Object(result)
             }
-            Value::Array(arr) => Value::Array(arr.into_iter().map(Self::transform_schema_moonshot).collect()),
+            Value::Array(arr) => Value::Array(
+                arr.into_iter()
+                    .map(Self::transform_schema_moonshot)
+                    .collect(),
+            ),
             _ => schema,
         }
     }
@@ -243,9 +247,20 @@ impl ProviderTransforms {
                 return true;
             }
             [
-                "type", "properties", "items", "prefixItems", "enum", "const",
-                "$ref", "additionalProperties", "patternProperties", "required",
-                "not", "if", "then", "else",
+                "type",
+                "properties",
+                "items",
+                "prefixItems",
+                "enum",
+                "const",
+                "$ref",
+                "additionalProperties",
+                "patternProperties",
+                "required",
+                "not",
+                "if",
+                "then",
+                "else",
             ]
             .iter()
             .any(|k| obj.contains_key(*k))
@@ -281,15 +296,19 @@ impl ProviderTransforms {
                     if result.contains_key("enum") {
                         if let Some(Value::String(t)) = result.get("type") {
                             if t == "integer" || t == "number" {
-                                result.insert("type".to_string(), Value::String("string".to_string()));
+                                result.insert(
+                                    "type".to_string(),
+                                    Value::String("string".to_string()),
+                                );
                             }
                         }
                     }
 
                     // Filter required array to only include fields that exist in properties
-                    if let (Some(Value::Object(props)), Some(Value::Array(required))) =
-                        (result.get("properties").cloned(), result.get("required").cloned())
-                    {
+                    if let (Some(Value::Object(props)), Some(Value::Array(required))) = (
+                        result.get("properties").cloned(),
+                        result.get("required").cloned(),
+                    ) {
                         let filtered: Vec<Value> = required
                             .iter()
                             .filter(|r| r.as_str().map_or(false, |f| props.contains_key(f)))
@@ -305,7 +324,9 @@ impl ProviderTransforms {
                             && !result.contains_key("oneOf")
                             && !result.contains_key("allOf")
                         {
-                            if !result.contains_key("items") || result.get("items") == Some(&Value::Null) {
+                            if !result.contains_key("items")
+                                || result.get("items") == Some(&Value::Null)
+                            {
                                 result.insert("items".to_string(), Value::Object(Map::new()));
                             }
                             if let Some(Value::Object(items)) = result.get("items").cloned() {
@@ -405,6 +426,10 @@ pub fn get_provider_specific_options(provider_type: &str, model: &str) -> serde_
     ProviderTransforms::get_provider_specific_options(provider_type, model)
 }
 
-pub fn transform_schema(schema: serde_json::Value, provider_type: &str, model: &str) -> serde_json::Value {
+pub fn transform_schema(
+    schema: serde_json::Value,
+    provider_type: &str,
+    model: &str,
+) -> serde_json::Value {
     ProviderTransforms::transform_schema(schema, provider_type, model)
 }
