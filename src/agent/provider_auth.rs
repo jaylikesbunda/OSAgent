@@ -269,17 +269,7 @@ impl ProviderAuth {
 
         // Support cross-region inference prefix
         let base_url = if config.base_url.contains("{{") {
-            let endpoint = if region.starts_with("us.")
-                || region.starts_with("eu.")
-                || region.starts_with("apac.")
-                || region.starts_with("au.")
-                || region.starts_with("jp.")
-            {
-                format!("bedrock-runtime.{}.amazonaws.com", region)
-            } else {
-                format!("bedrock-runtime.{}.amazonaws.com", region)
-            };
-            Some(format!("https://{}", endpoint))
+            Some(format!("https://bedrock-runtime.{}.amazonaws.com", region))
         } else if !config.base_url.is_empty() {
             Some(config.base_url.clone())
         } else {

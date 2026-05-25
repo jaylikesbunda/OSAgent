@@ -311,7 +311,7 @@ impl ProviderTransforms {
                     ) {
                         let filtered: Vec<Value> = required
                             .iter()
-                            .filter(|r| r.as_str().map_or(false, |f| props.contains_key(f)))
+                            .filter(|r| r.as_str().is_some_and(|f| props.contains_key(f)))
                             .cloned()
                             .collect();
                         result.insert("required".to_string(), Value::Array(filtered));
