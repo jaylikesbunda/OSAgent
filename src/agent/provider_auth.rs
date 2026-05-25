@@ -100,7 +100,16 @@ impl ProviderAuth {
             .or_else(|_| std::env::var("VERTEX_LOCATION"))
             .unwrap_or_else(|_| "us-central1".to_string());
 
-        let autoload = !project.is_empty() || !config.api_key.is_empty();
+        // Check for GCP access token (ADC support)
+        let gcp_token = std::env::var("GCLOUD_ACCESS_TOKEN").ok()
+            .filter(|t| !t.is_empty());
+
+        // Check for service account JSON file path
+        let sa_file = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()
+            .filter(|p| !p.is_empty());
+
+        let has_creds = !project.is_empty() || !config.api_key.is_empty()
+            || gcp_token.is_some() || sa_file.is_some();
 
         let base_url = if !project.is_empty() {
             let endpoint = if location == "global" {
@@ -118,9 +127,14 @@ impl ProviderAuth {
             None
         };
 
+        let mut headers: Vec<(String, String)> = Vec::new();
+        if let Some(token) = gcp_token {
+            headers.push(("Authorization".to_string(), format!("Bearer {}", token)));
+        }
+
         ProviderAuthResult {
-            autoload,
-            extra_headers: vec![],
+            autoload: has_creds,
+            extra_headers: headers,
             extra_options: json!({}),
             api_key_override: None,
             base_url_override: base_url,
@@ -129,16 +143,19 @@ impl ProviderAuth {
 
     fn azure(config: &ProviderConfig) -> ProviderAuthResult {
         let key = if config.api_key.is_empty() {
-            std::env::var("AZURE_OPENAI_KEY").unwrap_or_default()
+            std::env::var("AZURE_OPENAI_KEY")
+                .or_else(|_| std::env::var("AZURE_OPENAI_API_KEY"))
+                .unwrap_or_default()
         } else {
             config.api_key.clone()
         };
 
-        let base_url = if config.base_url.contains("{{") {
+        let base_url = if config.base_url.contains("{{") || config.base_url.is_empty() {
             if let Ok(endpoint) = std::env::var("AZURE_OPENAI_ENDPOINT") {
                 Some(endpoint.trim_end_matches('/').to_string())
             } else {
                 let resource = std::env::var("AZURE_OPENAI_RESOURCE")
+                    .or_else(|_| std::env::var("AZURE_RESOURCE_NAME"))
                     .unwrap_or_else(|_| "resource".to_string());
                 let deployment = std::env::var("AZURE_OPENAI_DEPLOYMENT")
                     .unwrap_or_else(|_| "gpt-4o".to_string());
@@ -185,21 +202,78 @@ impl ProviderAuth {
         }
     }
 
+    fn load_aws_profile(profile: &str) -> Option<(String, String, Option<String>)> {
+        let aws_dir = dirs_next::home_dir().map(|d| d.join(".aws"));
+        let cred_path = aws_dir.as_ref()?.join("credentials");
+        let content = std::fs::read_to_string(cred_path).ok()?;
+        let mut in_profile = false;
+        let mut access_key = String::new();
+        let mut secret_key = String::new();
+        let mut session_token: Option<String> = None;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with('[') && line.ends_with(']') {
+                let name = &line[1..line.len() - 1];
+                in_profile = name == profile;
+                continue;
+            }
+            if in_profile {
+                if let Some(val) = line.strip_prefix("aws_access_key_id =") {
+                    access_key = val.trim().to_string();
+                } else if let Some(val) = line.strip_prefix("aws_secret_access_key =") {
+                    secret_key = val.trim().to_string();
+                } else if let Some(val) = line.strip_prefix("aws_session_token =") {
+                    session_token = Some(val.trim().to_string());
+                }
+            }
+        }
+
+        if !access_key.is_empty() && !secret_key.is_empty() {
+            Some((access_key, secret_key, session_token))
+        } else {
+            None
+        }
+    }
+
     fn amazon_bedrock(config: &ProviderConfig) -> ProviderAuthResult {
-        let access_key = std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default();
-        let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default();
-        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
         let region = std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".to_string());
 
-        let autoload = !access_key.is_empty()
-            || !secret_key.is_empty()
-            || !config.api_key.is_empty()
-            || session_token.is_some();
+        // Try credential chain: env vars > profile > config api_key
+        let (access_key, secret_key, session_token) = {
+            let ak = std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default();
+            let sk = std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default();
+            let st = std::env::var("AWS_SESSION_TOKEN").ok();
 
+            if !ak.is_empty() && !sk.is_empty() {
+                (ak, sk, st)
+            } else {
+                let profile = std::env::var("AWS_PROFILE")
+                    .unwrap_or_else(|_| "default".to_string());
+                if let Some((ak, sk, st)) = Self::load_aws_profile(&profile) {
+                    (ak, sk, st)
+                } else {
+                    (String::new(), String::new(), None)
+                }
+            }
+        };
+
+        let has_creds = !access_key.is_empty() && !secret_key.is_empty()
+            || !config.api_key.is_empty();
+
+        // Support cross-region inference prefix
         let base_url = if config.base_url.contains("{{") {
-            Some(format!("https://bedrock-runtime.{}.amazonaws.com", region))
+            let endpoint = if region.starts_with("us.") || region.starts_with("eu.")
+                || region.starts_with("apac.") || region.starts_with("au.")
+                || region.starts_with("jp.")
+            {
+                format!("bedrock-runtime.{}.amazonaws.com", region)
+            } else {
+                format!("bedrock-runtime.{}.amazonaws.com", region)
+            };
+            Some(format!("https://{}", endpoint))
         } else if !config.base_url.is_empty() {
             Some(config.base_url.clone())
         } else {
@@ -207,7 +281,7 @@ impl ProviderAuth {
         };
 
         ProviderAuthResult {
-            autoload,
+            autoload: has_creds,
             extra_headers: vec![],
             extra_options: json!({}),
             api_key_override: None,

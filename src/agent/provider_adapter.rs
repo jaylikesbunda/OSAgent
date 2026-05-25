@@ -48,8 +48,8 @@ pub trait ProviderAdapter: Send + Sync {
         crate::agent::provider_transforms::transform_messages(messages, config)
     }
 
-    fn transform_schema(&self, schema: serde_json::Value, _model: &str) -> serde_json::Value {
-        schema
+    fn transform_schema(&self, schema: serde_json::Value, provider_type: &str, model: &str) -> serde_json::Value {
+        crate::agent::provider_transforms::transform_schema(schema, provider_type, model)
     }
 
     fn default_options(&self, provider_type: &str, model: &str) -> serde_json::Value {

@@ -96,20 +96,47 @@ impl OSAgentError {
 
     pub fn is_context_limit(&self) -> bool {
         match self {
-            Self::Provider(message) => contains_any(
-                &message.to_lowercase(),
-                &[
-                    "maximum context length",
-                    "max context length",
-                    "context window",
-                    "requested about",
-                    "reduce the length",
-                    "prompt is too long",
-                    "too many input tokens",
-                    "context_length_exceeded",
-                    "middle-out",
-                ],
-            ),
+            Self::Provider(message) => {
+                let lower = message.to_lowercase();
+                contains_any(
+                    &lower,
+                    &[
+                        "maximum context length",
+                        "max context length",
+                        "context window",
+                        "requested about",
+                        "reduce the length",
+                        "prompt is too long",
+                        "too many input tokens",
+                        "context_length_exceeded",
+                        "middle-out",
+                        // Bedrock
+                        "input is too long for",
+                        // xAI/Grok
+                        "maximum prompt length is",
+                        // GitHub Copilot
+                        "exceeds the limit",
+                        // llama.cpp
+                        "exceeds the available context",
+                        // LM Studio
+                        "greater than the context",
+                        // MiniMax
+                        "context window exceeds",
+                        // Kimi/Moonshot
+                        "exceeded model token limit",
+                        // HTTP 413
+                        "request entity too large",
+                        // vLLM
+                        "context length is only",
+                        // Mistral
+                        "too large for model",
+                        // z.ai
+                        "model_context_window_exceeded",
+                    ],
+                ) || (lower.contains("input length")
+                    && lower.contains("exceeds")
+                    && lower.contains("context length"))
+            }
             _ => false,
         }
     }
@@ -150,6 +177,19 @@ impl OSAgentError {
                     )
             }
             _ => false,
+        }
+    }
+
+    /// OpenAI may return 404 for models that are actually available.
+    pub fn is_openai_retryable(&self) -> bool {
+        match self {
+            Self::Provider(message) => {
+                let lower = message.to_lowercase();
+                lower.contains("status code 404")
+                    || lower.contains("(404")
+                    || self.is_retryable()
+            }
+            _ => self.is_retryable(),
         }
     }
 
