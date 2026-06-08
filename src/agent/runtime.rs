@@ -1395,13 +1395,11 @@ impl AgentRuntime {
                             .map(|calls| !calls.is_empty())
                             .unwrap_or(false);
                         if !had_content && !fallback_has_tool_calls {
-                            if let Some(content) = fallback.content.as_deref() {
-                                self.event_bus.emit(AgentEvent::ResponseStart {
-                                    session_id: session_id.to_string(),
-                                    sequence: 0,
-                                    timestamp: SystemTime::now(),
-                                });
-                                self.emit_response_chunks(session_id, content);
+                            if let Some(_content) = fallback.content.as_deref() {
+                                // Don't emit ResponseStart/ResponseChunk here.
+                                // The non-streaming path below (lines 1505-1514)
+                                // handles event emission uniformly to avoid
+                                // duplicating events already sent by consume_provider_stream.
                             }
                         }
                     }

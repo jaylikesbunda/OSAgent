@@ -168,12 +168,14 @@ OSA.clearPendingFormattedRenders = function() {
         cancelAnimationFrame(frame);
         OSA.setPendingFormattedFrame(null);
     }
+    OSA.getPendingFormattedElements().forEach(el => { if (el) delete el._onRendered; });
     OSA.getPendingFormattedElements().clear();
 };
 
-OSA.scheduleFormattedRender = function(element, rawText) {
+OSA.scheduleFormattedRender = function(element, rawText, onRendered) {
     if (!element) return;
     element.dataset.rawText = rawText;
+    if (onRendered) element._onRendered = onRendered;
     OSA.getPendingFormattedElements().add(element);
 
     if (OSA.getPendingFormattedFrame()) {
@@ -184,9 +186,18 @@ OSA.scheduleFormattedRender = function(element, rawText) {
         OSA.setPendingFormattedFrame(null);
         const pending = Array.from(OSA.getPendingFormattedElements());
         OSA.getPendingFormattedElements().clear();
+        let didUpdate = false;
         pending.forEach(el => {
             if (!el || !el.isConnected) return;
-            el.innerHTML = OSA.formatMessage(el.dataset.rawText || '');
+            const rawText = el.dataset.rawText || '';
+            if (el.dataset.renderedText === rawText) return;
+            el.innerHTML = OSA.formatMessage(rawText);
+            el.dataset.renderedText = rawText;
+            didUpdate = true;
+            if (el._onRendered) {
+                el._onRendered();
+                delete el._onRendered;
+            }
         });
     }));
 };
@@ -294,6 +305,16 @@ OSA.appendCurrentSessionAssistantContent = function(content) {
     const message = OSA.ensureCurrentSessionAssistantMessage();
     if (!message) return;
     message.content = (message.content || '') + content;
+};
+
+OSA.resetCurrentSessionAssistantContent = function() {
+    const session = OSA.getCurrentSession();
+    if (!session || !Array.isArray(session.messages) || session.messages.length === 0) return;
+    const last = session.messages[session.messages.length - 1];
+    if (last && last.role === 'assistant') {
+        last.content = '';
+        last.thinking = null;
+    }
 };
 
 OSA.insertCurrentSessionToolBoundary = function(event) {
@@ -486,10 +507,33 @@ OSA.commitStreamingAssistantSegment = function() {
     message.classList.remove('streaming');
     OSA.completeThinkingDisplay();
 
+    const session = OSA.getCurrentSession();
+    const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
+
     const contentEl = message.querySelector('.message-content');
-    const rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
+    let rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
     const thinkingEl = message.querySelector('.thinking-body');
-    const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
+    let thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
+
+    if (sourceMessage) {
+        const sessionContent = sourceMessage.content || '';
+        const sessionThinking = sourceMessage.thinking || '';
+        if (!rawText && sessionContent) {
+            rawText = sessionContent;
+            if (contentEl) {
+                contentEl.dataset.rawText = rawText;
+                contentEl.innerHTML = rawText.trim() ? OSA.formatMessage(rawText) : '';
+            }
+        }
+        if (!thinkingText && sessionThinking) {
+            thinkingText = sessionThinking;
+            if (thinkingEl) {
+                thinkingEl.dataset.rawText = thinkingText;
+                thinkingEl.innerHTML = OSA.formatMessage(thinkingText);
+            }
+        }
+    }
+
     if (!rawText && !thinkingText) {
         message.remove();
         const chain = OSA.getMessageChain();
@@ -500,8 +544,6 @@ OSA.commitStreamingAssistantSegment = function() {
         return;
     }
 
-    const session = OSA.getCurrentSession();
-    const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
     OSA.updateAssistantMessageActions(message, sourceMessage);
 
     const chain = OSA.getMessageChain();
@@ -942,9 +984,35 @@ OSA.ensureStreamingAssistantMessage = function() {
 };
 
 OSA.beginAssistantResponse = function() {
+    const existingStreamingId = OSA.getStreamingAssistantDomId();
+    if (existingStreamingId) {
+        OSA.resetCurrentSessionAssistantContent();
+    }
     OSA.ensureCurrentSessionAssistantMessage();
     OSA.hideThinkingIndicator();
-    return OSA.ensureStreamingAssistantMessage();
+    const message = OSA.ensureStreamingAssistantMessage();
+    if (message) {
+        const contentEl = message.querySelector('.message-content');
+        if (contentEl && contentEl.dataset.rawText) {
+            delete contentEl.dataset.rawText;
+            delete contentEl.dataset.renderedText;
+            contentEl.innerHTML = '';
+        }
+        const thinkingEl = message.querySelector('.thinking-body');
+        if (thinkingEl && thinkingEl.dataset.rawText) {
+            delete thinkingEl.dataset.rawText;
+            delete thinkingEl.dataset.renderedText;
+            thinkingEl.innerHTML = '';
+        }
+        const thinkingWrap = message.querySelector('.message-thinking');
+        if (thinkingWrap) {
+            thinkingWrap.classList.remove('streaming', 'expanded');
+            delete thinkingWrap.dataset.userToggled;
+            const preview = thinkingWrap.querySelector('.thinking-preview');
+            if (preview) { preview.textContent = ''; preview.style.display = 'none'; }
+        }
+    }
+    return message;
 };
 
 OSA.beginThinkingDisplay = function() {
@@ -1005,16 +1073,16 @@ OSA.appendThinkingChunk = function(content) {
     if (!body) return;
 
     const nextText = (body.dataset.rawText || '') + content;
-    OSA.scheduleFormattedRender(body, nextText);
-    OSA.setThinkingPreview(container, nextText);
-
     const messagesDiv = document.getElementById('messages');
-    if (messagesDiv) {
-        const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 140;
-        if (nearBottom) {
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.scheduleFormattedRender(body, nextText, () => {
+        OSA.setThinkingPreview(container, nextText);
+        if (messagesDiv) {
+            const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 140;
+            if (nearBottom) {
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }
         }
-    }
+    });
 };
 
 OSA.completeThinkingDisplay = function() {
@@ -1028,9 +1096,6 @@ OSA.completeThinkingDisplay = function() {
     const rawText = body ? (body.dataset.rawText || '').trim() : '';
     if (rawText) {
         OSA.setThinkingPreview(container, rawText);
-        if (!container.dataset.userToggled) {
-            container.classList.remove('expanded');
-        }
     }
 };
 
@@ -1041,15 +1106,15 @@ OSA.appendAssistantChunk = function(content) {
     if (!message) return;
     const contentEl = message.querySelector('.message-content');
     const nextText = (contentEl.dataset.rawText || '') + content;
-    OSA.scheduleFormattedRender(contentEl, nextText);
-
     const messagesDiv = document.getElementById('messages');
-    if (messagesDiv) {
-        const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 140;
-        if (nearBottom) {
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.scheduleFormattedRender(contentEl, nextText, () => {
+        if (messagesDiv) {
+            const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 140;
+            if (nearBottom) {
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }
         }
-    }
+    });
 };
 
 OSA.completeAssistantResponse = function(usage) {
@@ -1059,10 +1124,34 @@ OSA.completeAssistantResponse = function(usage) {
     if (message) {
         message.classList.remove('streaming');
         OSA.completeThinkingDisplay();
+
+        const session = OSA.getCurrentSession();
+        const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
+
         const contentEl = message.querySelector('.message-content');
-        const rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
+        let rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
         const thinkingEl = message.querySelector('.thinking-body');
-        const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
+        let thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
+
+        if (sourceMessage) {
+            const sessionContent = sourceMessage.content || '';
+            const sessionThinking = sourceMessage.thinking || '';
+            if (!rawText && sessionContent) {
+                rawText = sessionContent;
+                if (contentEl) {
+                    contentEl.dataset.rawText = rawText;
+                    contentEl.innerHTML = rawText.trim() ? OSA.formatMessage(rawText) : '';
+                }
+            }
+            if (!thinkingText && sessionThinking) {
+                thinkingText = sessionThinking;
+                if (thinkingEl) {
+                    thinkingEl.dataset.rawText = thinkingText;
+                    thinkingEl.innerHTML = OSA.formatMessage(thinkingText);
+                }
+            }
+        }
+
         if (!rawText && !thinkingText) {
             message.remove();
             OSA.setTurnStartTime(null);
@@ -1070,8 +1159,6 @@ OSA.completeAssistantResponse = function(usage) {
             OSA.updateTodoDock();
             return;
         }
-        const session = OSA.getCurrentSession();
-        const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
         OSA.updateAssistantMessageActions(message, sourceMessage);
         const actionsEl = message.querySelector('.message-actions');
 
@@ -1663,7 +1750,9 @@ OSA.patchMessageElement = function(element, message, originalIndex, force = fals
     }
 
     const ts = message.timestamp ? new Date(message.timestamp).getTime() : 0;
+    const wasStreaming = element.classList.contains('streaming');
     element.className = `message ${message.role}`;
+    if (wasStreaming) element.classList.add('streaming');
     element.dataset.ts = String(ts);
     element.dataset.messageIndex = String(originalIndex);
     element.dataset.messageTimestamp = message.timestamp || '';
@@ -1676,20 +1765,43 @@ OSA.patchMessageElement = function(element, message, originalIndex, force = fals
 
     const children = [roleEl];
 
+    const existingThinkingContainer = element.querySelector('.message-thinking');
+    const existingThinkingBody = existingThinkingContainer ? existingThinkingContainer.querySelector('.thinking-body') : null;
+    const existingThinkingRaw = existingThinkingBody ? (existingThinkingBody.dataset.rawText || '') : '';
+    const thinkingWasStreaming = existingThinkingContainer ? existingThinkingContainer.classList.contains('streaming') : false;
+    const thinkingWasExpanded = existingThinkingContainer ? existingThinkingContainer.classList.contains('expanded') : false;
+    const thinkingUserToggled = existingThinkingContainer ? existingThinkingContainer.dataset.userToggled : '';
+
     if (message.role === 'assistant') {
-        const thinkingHtml = OSA.renderThinkingSection(message.thinking || '', false);
+        const thinkingData = message.thinking || '';
+        const bestThinking = existingThinkingRaw.length > thinkingData.length ? existingThinkingRaw : thinkingData;
+        const thinkingHtml = OSA.renderThinkingSection(bestThinking, false);
         if (thinkingHtml) {
             const thinkingWrap = OSA.createNodeFromHtml(thinkingHtml, 'message-thinking-wrap');
-            if (thinkingWrap.firstElementChild) children.push(thinkingWrap.firstElementChild);
+            const newThinkingEl = thinkingWrap.firstElementChild;
+            if (newThinkingEl) {
+                const newThinkingBody = newThinkingEl.querySelector('.thinking-body');
+                if (newThinkingBody) {
+                    newThinkingBody.dataset.rawText = bestThinking;
+                }
+                if (thinkingWasStreaming) newThinkingEl.classList.add('streaming');
+                if (thinkingWasExpanded) newThinkingEl.classList.add('expanded');
+                if (thinkingUserToggled) newThinkingEl.dataset.userToggled = thinkingUserToggled;
+            }
+            if (newThinkingEl) children.push(newThinkingEl);
         }
     }
+
+    const existingContentEl = element.querySelector('.message-content');
+    const existingContentRaw = existingContentEl ? (existingContentEl.dataset.rawText || '') : '';
 
     const contentEl = document.createElement('div');
     contentEl.className = 'message-content';
     if (message.role === 'assistant') {
         const rawContent = message.content || '';
-        contentEl.innerHTML = rawContent.trim() ? OSA.formatMessage(rawContent) : '';
-        contentEl.dataset.rawText = rawContent;
+        const bestContent = existingContentRaw.length > rawContent.length ? existingContentRaw : rawContent;
+        contentEl.innerHTML = bestContent.trim() ? OSA.formatMessage(bestContent) : '';
+        contentEl.dataset.rawText = bestContent;
     } else {
         contentEl.textContent = message.content || '';
     }
