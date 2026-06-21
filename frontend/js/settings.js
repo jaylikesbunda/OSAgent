@@ -172,9 +172,7 @@ OSA.loadSettings = async function() {
         if (!res.ok) throw new Error(config.error || `HTTP ${res.status}`);
         OSA.setCachedConfig(config);
         await OSA.loadWorkspaces();
-        
-        document.getElementById('setting-base-url').value = config.provider?.base_url || '';
-        document.getElementById('setting-model').value = config.provider?.model || '';
+
         const discord = config.discord || {};
         document.getElementById('setting-discord-enabled').value = discord.enabled ? 'true' : 'false';
         document.getElementById('setting-discord-token').value = discord.token || '';
@@ -310,9 +308,7 @@ OSA.saveSettings = async function() {
         cors_allowed_origins: corsAllowedOrigins
     };
     newConfig.provider = {
-        ...newConfig.provider,
-        base_url: document.getElementById('setting-base-url').value,
-        model: document.getElementById('setting-model').value
+        ...(newConfig.provider || {})
     };
     newConfig.discord = {
         ...(newConfig.discord || {}),
@@ -374,14 +370,20 @@ OSA.saveSettings = async function() {
             throw new Error(data.error || `HTTP ${res.status}`);
         }
         OSA.setCachedConfig(newConfig);
-        OSA.updateWorkflowButtonVisibility(!!newConfig.experimental?.workflows_enabled);
-        await OSA.refreshThinkingOptions(undefined, undefined, newConfig.agent.thinking_level);
-        OSA.setVoiceConfig(newConfig.voice);
-        OSA.updateVoiceButtons();
         OSA.closeSettings();
     } catch (error) {
         errorDiv.textContent = error.message;
         errorDiv.classList.remove('hidden');
+        return;
+    }
+
+    try {
+        OSA.updateWorkflowButtonVisibility(!!newConfig.experimental?.workflows_enabled);
+        await OSA.refreshThinkingOptions(undefined, undefined, newConfig.agent.thinking_level);
+        OSA.setVoiceConfig(newConfig.voice);
+        OSA.updateVoiceButtons();
+    } catch (refreshError) {
+        console.error('Post-save refresh failed:', refreshError);
     }
 };
 

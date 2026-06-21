@@ -2,12 +2,26 @@ window.OSA = window.OSA || {};
 
 OSA.updateWorkspaceChip = function(workspaceId, workspacePath) {
     const label = document.getElementById('workspace-trigger-label');
+    const badge = document.getElementById('workspace-trigger-badge');
     const ws = OSA.getWorkspaceState();
     const workspace = ws.workspaces.find(w => w.id === (workspaceId || 'default'));
     const effectivePath = workspacePath || OSA.primaryWorkspacePath(workspace);
     if (label) {
         label.textContent = workspace?.name || workspaceId || 'default';
         label.title = effectivePath || workspace?.name || workspaceId || 'default';
+    }
+    if (badge) {
+        const perm = OSA.workspacePaths(workspace)[0]?.permission;
+        if (perm === 'read_only') {
+            badge.textContent = 'ro';
+            badge.className = 'input-tab-badge ro';
+        } else if (perm === 'read_write') {
+            badge.textContent = 'rw';
+            badge.className = 'input-tab-badge rw';
+        } else {
+            badge.textContent = '';
+            badge.className = 'input-tab-badge';
+        }
     }
 };
 
@@ -45,6 +59,45 @@ OSA.workspacePathSummary = function(workspace) {
         : paths[0].path;
 };
 
+OSA.positionMenuForTrigger = function(menuEl, triggerEl) {
+    if (!menuEl || !triggerEl) return;
+    const host = menuEl.offsetParent || menuEl.parentElement;
+    if (!host) return;
+
+    const hostRect = host.getBoundingClientRect();
+    const triggerRect = triggerEl.getBoundingClientRect();
+
+    const wasHidden = menuEl.classList.contains('hidden');
+    if (wasHidden) menuEl.classList.remove('hidden');
+    const menuRect = menuEl.getBoundingClientRect();
+    if (wasHidden) menuEl.classList.add('hidden');
+
+    const gap = 6;
+    let left = triggerRect.left - hostRect.left;
+    const bottom = hostRect.bottom - triggerRect.top + gap;
+
+    const maxLeft = hostRect.width - menuRect.width - 8;
+    if (left > maxLeft) left = Math.max(8, maxLeft);
+    if (left < 8) left = 8;
+
+    menuEl.style.left = left + 'px';
+    menuEl.style.right = 'auto';
+    menuEl.style.bottom = bottom + 'px';
+};
+
+OSA._repositionOpenMenus = function() {
+    const wsMenu = document.getElementById('workspace-menu');
+    const wsTrigger = document.getElementById('workspace-trigger');
+    if (wsMenu && wsTrigger && !wsMenu.classList.contains('hidden')) {
+        OSA.positionMenuForTrigger(wsMenu, wsTrigger);
+    }
+    const pMenu = document.getElementById('persona-menu');
+    const pTrigger = document.getElementById('persona-trigger');
+    if (pMenu && pTrigger && !pMenu.classList.contains('hidden')) {
+        OSA.positionMenuForTrigger(pMenu, pTrigger);
+    }
+};
+
 OSA.toggleWorkspaceMenu = function() {
     const menu = document.getElementById('workspace-menu');
     const trigger = document.getElementById('workspace-trigger');
@@ -53,6 +106,7 @@ OSA.toggleWorkspaceMenu = function() {
     menu.classList.toggle('hidden');
     trigger.classList.toggle('open');
     if (!menu.classList.contains('hidden')) {
+        OSA.positionMenuForTrigger(menu, trigger);
         document.addEventListener('click', OSA._workspaceMenuOutsideClick);
     } else {
         document.removeEventListener('click', OSA._workspaceMenuOutsideClick);
@@ -62,7 +116,12 @@ OSA.toggleWorkspaceMenu = function() {
 OSA.closeWorkspaceMenu = function() {
     const menu = document.getElementById('workspace-menu');
     const trigger = document.getElementById('workspace-trigger');
-    if (menu) menu.classList.add('hidden');
+    if (menu) {
+        menu.classList.add('hidden');
+        menu.style.left = '';
+        menu.style.right = '';
+        menu.style.bottom = '';
+    }
     if (trigger) trigger.classList.remove('open');
     document.removeEventListener('click', OSA._workspaceMenuOutsideClick);
 };
@@ -78,6 +137,7 @@ OSA.togglePersonaMenu = function() {
     menu.classList.toggle('hidden');
     trigger.classList.toggle('open');
     if (!menu.classList.contains('hidden')) {
+        OSA.positionMenuForTrigger(menu, trigger);
         document.addEventListener('click', OSA._personaMenuOutsideClick);
     } else {
         document.removeEventListener('click', OSA._personaMenuOutsideClick);
@@ -89,6 +149,11 @@ OSA.closePersonaMenu = function() {
     const trigger = document.getElementById('persona-trigger');
     if (menu) menu.classList.add('hidden');
     if (trigger) trigger.classList.remove('open');
+    if (menu) {
+        menu.style.left = '';
+        menu.style.right = '';
+        menu.style.bottom = '';
+    }
     document.removeEventListener('click', OSA._personaMenuOutsideClick);
 };
 
@@ -131,24 +196,36 @@ OSA.renderWorkspaceMenu = function() {
     if (!list) return;
     const ws = OSA.getWorkspaceState();
     if (!ws.workspaces.length) {
-        list.innerHTML = '<div class="workspace-inline-status">No workspaces yet.</div>';
+        list.innerHTML = `
+            <div class="menu-empty">
+                <div class="menu-empty-title">No workspaces yet</div>
+                <div class="menu-empty-text">Add a folder to scope what the agent can read and write.</div>
+                <button class="control-btn primary menu-empty-cta" type="button" onclick="openWorkspaceEditorForCreate()">+ Add workspace</button>
+            </div>
+        `;
         return;
     }
+    const activeId = OSA.selectedWorkspaceId();
     list.innerHTML = ws.workspaces.map(w => {
-        const isActive = OSA.selectedWorkspaceId() === w.id;
+        const isActive = activeId === w.id;
         const paths = OSA.workspacePaths(w);
         const primaryPath = paths[0]?.path || w.id;
         const pathCount = paths.length;
+        const perm = paths[0]?.permission === 'read_only' ? 'ro' : 'rw';
+        const permClass = paths[0]?.permission === 'read_only' ? 'ro' : 'rw';
         return `
             <div class="menu-row ${isActive ? 'active' : ''}">
                 <button class="menu-row-main" type="button" onclick="OSA.selectWorkspaceFromMenu('${OSA.escapeHtml(w.id)}')">
+                    <span class="menu-row-check" aria-hidden="true">${isActive ? '&#10003;' : ''}</span>
                     <span class="menu-row-copy">
                         <span class="menu-row-title">${OSA.escapeHtml(w.name || w.id)}</span>
                         <span class="menu-row-meta" title="${paths.map(p => p.path).join('\n')}">${OSA.escapeHtml(primaryPath)}${pathCount > 1 ? ` (+${pathCount - 1} more)` : ''}</span>
                     </span>
+                    <span class="menu-row-badge ${permClass}">${perm}</span>
                 </button>
-                <span class="workspace-perm-subtext">${paths[0]?.permission === 'read_only' ? 'ro' : 'rw'}</span>
-                <button class="menu-icon-btn" type="button" onclick="event.stopPropagation(); OSA.openWorkspaceEditorForEdit('${OSA.escapeHtml(w.id)}')">Edit</button>
+                <button class="menu-icon-btn" type="button" title="Edit workspace" onclick="event.stopPropagation(); OSA.openWorkspaceEditorForEdit('${OSA.escapeHtml(w.id)}')">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                </button>
             </div>
         `;
     }).join('');
@@ -612,3 +689,7 @@ window.setActiveWorkspaceFromSettings = OSA.setActiveWorkspaceFromSettings;
 window.upsertWorkspaceFromForm = OSA.upsertWorkspaceFromForm;
 window.deleteWorkspace = OSA.deleteWorkspace;
 window.editWorkspaceInForm = OSA.editWorkspaceInForm;
+
+window.addEventListener('resize', () => {
+    OSA.debounce('repositionMenus', OSA._repositionOpenMenus, 100);
+});

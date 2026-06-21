@@ -1083,6 +1083,19 @@ OSA.clearSessions = async function() {
 };
 
 OSA.sendMessage = async function() {
+    const inputEl = document.getElementById('message-input');
+    const draftMessage = inputEl ? inputEl.value.trim() : '';
+
+    if (draftMessage && OSA.getAttachments().length === 0) {
+        const match = OSA.SLASH_COMMANDS.find(c => c.cmd === draftMessage.toLowerCase());
+        if (match) {
+            if (inputEl) inputEl.value = '';
+            OSA.hideSlashMenu();
+            match.action();
+            return;
+        }
+    }
+
     let currentSession = OSA.getCurrentSession();
     if (!currentSession) {
         await OSA.createSession();
@@ -1489,14 +1502,6 @@ OSA.initSidebarState = function() {
 };
 
 document.addEventListener('click', (event) => {
-    const workspaceDropdown = document.querySelector('.workspace-dropdown');
-    const personaDropdown = document.querySelector('.persona-dropdown');
-    if (workspaceDropdown && !workspaceDropdown.contains(event.target)) {
-        OSA.closeWorkspaceMenu();
-    }
-    if (personaDropdown && !personaDropdown.contains(event.target)) {
-        OSA.closePersonaMenu();
-    }
     if (!event.target.closest('.slash-menu')) {
         OSA.hideSlashMenu();
     }
@@ -1512,6 +1517,26 @@ document.addEventListener('keydown', (event) => {
         const questionModal = document.getElementById('question-modal');
         if (questionModal && !questionModal.classList.contains('hidden')) {
             questionModal.classList.add('hidden');
+            return;
+        }
+        const contextModal = document.getElementById('context-modal');
+        if (contextModal && !contextModal.classList.contains('hidden')) {
+            contextModal.classList.add('hidden');
+            return;
+        }
+        const memoryModal = document.getElementById('memory-edit-modal');
+        if (memoryModal && !memoryModal.classList.contains('hidden')) {
+            OSA.closeMemoryEdit();
+            return;
+        }
+        const providerModal = document.getElementById('add-provider-modal');
+        if (providerModal && !providerModal.classList.contains('hidden')) {
+            providerModal.classList.add('hidden');
+            return;
+        }
+        const jobsModal = document.getElementById('jobs-modal');
+        if (jobsModal && !jobsModal.classList.contains('hidden')) {
+            jobsModal.classList.add('hidden');
             return;
         }
         OSA.hideSlashMenu();
@@ -1587,7 +1612,7 @@ OSA.handleSlashInput = function() {
     const query = value.toLowerCase();
     const matches = OSA.SLASH_COMMANDS.filter(c => c.cmd.startsWith(query));
 
-    if (matches.length === 0 || value === '/') {
+    if (matches.length === 0) {
         OSA.hideSlashMenu();
         return;
     }
@@ -1595,8 +1620,10 @@ OSA.handleSlashInput = function() {
     if (!menu) {
         const menuEl = document.createElement('div');
         menuEl.id = 'slash-menu';
-        menuEl.className = 'slash-menu';
-        document.querySelector('.input-wrapper').appendChild(menuEl);
+        menuEl.className = 'slash-menu hidden';
+        const host = document.querySelector('.composer-card') || document.querySelector('.input-area');
+        if (!host) return;
+        host.appendChild(menuEl);
     }
 
     const menuEl = document.getElementById('slash-menu');

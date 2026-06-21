@@ -2,8 +2,11 @@
     flex: 1;
     overflow-y: auto;
     padding: 24px;
+    padding-bottom: 110px;
     scroll-behavior: smooth;
     min-height: 0;
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent 100%);
 }
 
 .messages-virtual-spacer {

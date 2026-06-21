@@ -71,7 +71,9 @@ struct CdnManifest {
 
 #[derive(Debug, Clone, Deserialize)]
 struct CdnAssetEntry {
+    #[serde(default)]
     archive: String,
+    #[serde(default)]
     url: String,
     #[serde(default)]
     installer: Option<String>,

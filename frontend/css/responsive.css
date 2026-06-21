@@ -111,7 +111,7 @@
     }
 
     .messages {
-        padding: 12px 12px;
+        padding: 12px 12px 80px;
     }
 
     .session-inspector {
@@ -151,15 +151,15 @@
     }
 
     .input-area {
-        padding: 12px 8px 12px;
+        padding: 0 8px 10px;
     }
 
     .input-wrapper {
         max-width: none;
     }
 
-    .composer-shell {
-        padding: 10px;
+    .composer-card {
+        padding: 8px 10px;
         border-radius: 14px;
     }
 
@@ -202,17 +202,19 @@
     }
 
     .context-menu {
+        left: 8px;
+        right: 8px;
         min-width: 0;
-        left: 0;
-        right: 0;
+        max-width: none;
         width: auto;
-        max-width: calc(100vw - 20px);
-        max-height: min(350px, calc(100vh - 220px));
-        padding: 8px;
+        max-height: min(360px, calc(100vh - 160px));
+        padding: 12px;
+        border-radius: var(--radius-lg);
     }
 
-    .persona-dropdown .context-menu {
-        max-height: min(280px, calc(100vh - 260px));
+    .persona-menu.context-menu {
+        left: 8px;
+        right: 8px;
     }
 
     .context-menu-header {
@@ -221,14 +223,13 @@
     }
 
     .menu-action-btn {
-        padding: 5px 8px;
+        padding: 6px 10px;
         font-size: 11px;
     }
 
     .menu-icon-btn {
-        width: 28px;
-        height: 28px;
-        font-size: 11px;
+        width: 32px;
+        height: 32px;
     }
 
     .menu-row-main {

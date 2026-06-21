@@ -1,3 +1,17 @@
+v0.2.0 changes:
+
+* Redesigned chat composer into a rounded floating card with glass background that sits on top of the conversation, with a gradient fade on messages so content scrolls under the card
+* Reworked workspace and persona popups with better breathing room, alignment, and visual hierarchy
+* Improved workspace selection: active workspace now marked with a checkmark indicator, trigger chip shows the workspace name with a ro/rw permission badge, and an empty state shows a clear "Add workspace" CTA
+* Workspace menu rows now show rounded permission pill and a dedicated icon-style edit button
+* Typing a bare slash command (e.g. /settings) now runs that command instead of sending it to the agent, and the slash menu now lists all commands as soon as you type /
+* Settings modal now closes reliably on Save Changes (post-save refreshes no longer block the close)
+* Fixed settings load/save crash from removed provider fields (base_url/model) that left most settings form fields blank and blocked saving
+* Update checker no longer fails on manifests with platform entries that omit archive/url (e.g. windows-x86_64 using only an installer URL)
+* File preview panel now renders beside the chat as a side pane instead of stacking underneath it
+* Launcher voice downloads now report progress for chunked/no-content-length downloads and show visible errors instead of sitting at 0%
+
+
 v0.1.1 changes:
 
 * Added missing context overflow detection patterns (Mistral, Ollama, z.ai, vLLM, llama.cpp, LM Studio, MiniMax, Kimi, Copilot, Bedrock, HTTP 413)

@@ -2159,12 +2159,16 @@ async fn stream_download(
 
     let total = response.content_length().unwrap_or(0);
     let mut bytes_received: u64 = 0;
-    let mut last_pct: i32 = -1;
-    let mut collected: Vec<u8> = if total > 0 {
-        Vec::with_capacity(total as usize)
-    } else {
-        Vec::new()
-    };
+    let mut last_pct: i32 = -5;
+    let mut last_bytes_reported: u64 = 0;
+    use std::io::Write;
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create download directory: {}", e))?;
+    }
+    let mut file = std::fs::File::create(dest)
+        .map_err(|e| format!("Failed to create download file: {}", e))?;
 
     let mut response = response;
     while let Some(chunk) = response
@@ -2173,10 +2177,11 @@ async fn stream_download(
         .map_err(|e| format!("Read error: {}", e))?
     {
         bytes_received += chunk.len() as u64;
-        collected.extend_from_slice(&chunk);
+        file.write_all(&chunk)
+            .map_err(|e| format!("Failed to write download: {}", e))?;
         if total > 0 {
             let pct = ((bytes_received as f32 / total as f32) * 100.0) as i32;
-            if pct != last_pct && pct % 5 == 0 {
+            if pct >= last_pct + 2 || pct >= 100 {
                 last_pct = pct;
                 let p = progress_offset + (bytes_received as f32 / total as f32) * progress_range;
                 let _ = window.emit(
@@ -2189,10 +2194,25 @@ async fn stream_download(
                     },
                 );
             }
+        } else if bytes_received.saturating_sub(last_bytes_reported) >= 1_048_576 {
+            last_bytes_reported = bytes_received;
+            let mb = bytes_received as f32 / 1_048_576.0;
+            let soft_progress = (bytes_received as f32 / (200.0 * 1_048_576.0)).min(0.9);
+            let p = progress_offset + soft_progress * progress_range;
+            let _ = window.emit(
+                "voice-progress",
+                VoiceProgress {
+                    model_id: model_id.to_string(),
+                    stage: stage.to_string(),
+                    progress: p,
+                    message: format!("{} {:.1} MB downloaded", stage, mb),
+                },
+            );
         }
     }
 
-    std::fs::write(dest, &collected).map_err(|e| format!("Failed to save file: {}", e))?;
+    file.flush()
+        .map_err(|e| format!("Failed to finish download: {}", e))?;
     Ok(())
 }
 
@@ -2253,6 +2273,20 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
         }
     }
     Ok(())
+}
+
+fn find_file_recursive(dir: &std::path::Path, file_name: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file_recursive(&path, file_name) {
+                return Some(found);
+            }
+        } else if entry.file_name().to_string_lossy().eq_ignore_ascii_case(file_name) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 // --- Tauri Commands ---
@@ -3567,25 +3601,28 @@ async fn install_voice(
                 std::fs::create_dir_all(&extract_dir).ok();
                 extract_zip_powershell(&archive, &extract_dir)?;
 
-                let piper_inner = extract_dir.join("piper");
-                let binary_src = piper_inner.join("piper.exe");
+                let binary_src = find_file_recursive(&extract_dir, "piper.exe")
+                    .ok_or_else(|| "Piper archive did not contain piper.exe".to_string())?;
+                let piper_inner = binary_src
+                    .parent()
+                    .ok_or_else(|| "Could not determine Piper extraction directory".to_string())?;
                 let binary_dest = dir.join("piper.exe");
-                if binary_src.exists() {
-                    std::fs::copy(&binary_src, &binary_dest).ok();
-                    // Copy DLLs and espeak-ng-data
-                    if let Ok(entries) = std::fs::read_dir(&piper_inner) {
-                        for entry in entries.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if name.ends_with(".dll") || name == "libtashkeel_model.ort" {
-                                let _ = std::fs::copy(entry.path(), dir.join(&name));
-                            }
+                std::fs::copy(&binary_src, &binary_dest)
+                    .map_err(|e| format!("Failed to install piper.exe: {}", e))?;
+                // Copy DLLs and espeak-ng-data
+                if let Ok(entries) = std::fs::read_dir(piper_inner) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.ends_with(".dll") || name == "libtashkeel_model.ort" {
+                            let _ = std::fs::copy(entry.path(), dir.join(&name));
                         }
                     }
-                    let espeak_src = piper_inner.join("espeak-ng-data");
-                    let espeak_dst = dir.join("espeak-ng-data");
-                    if espeak_src.exists() {
-                        let _ = copy_dir_recursive(&espeak_src, &espeak_dst);
-                    }
+                }
+                let espeak_src = piper_inner.join("espeak-ng-data");
+                let espeak_dst = dir.join("espeak-ng-data");
+                if espeak_src.exists() {
+                    copy_dir_recursive(&espeak_src, &espeak_dst)
+                        .map_err(|e| format!("Failed to install Piper voice data: {}", e))?;
                 }
                 let _ = std::fs::remove_file(&archive);
                 let _ = std::fs::remove_dir_all(&extract_dir);
@@ -3614,24 +3651,27 @@ async fn install_voice(
                 std::fs::create_dir_all(&extract_dir).ok();
                 extract_tar_gz(&archive, &extract_dir)?;
 
-                let piper_inner = extract_dir.join("piper");
-                let binary_src = piper_inner.join("piper");
+                let binary_src = find_file_recursive(&extract_dir, "piper")
+                    .ok_or_else(|| "Piper archive did not contain piper".to_string())?;
+                let piper_inner = binary_src
+                    .parent()
+                    .ok_or_else(|| "Could not determine Piper extraction directory".to_string())?;
                 let binary_dest = dir.join("piper");
-                if binary_src.exists() {
-                    std::fs::copy(&binary_src, &binary_dest).ok();
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
-                            &binary_dest,
-                            std::fs::Permissions::from_mode(0o755),
-                        );
-                    }
-                    let espeak_src = piper_inner.join("espeak-ng-data");
-                    let espeak_dst = dir.join("espeak-ng-data");
-                    if espeak_src.exists() {
-                        let _ = copy_dir_recursive(&espeak_src, &espeak_dst);
-                    }
+                std::fs::copy(&binary_src, &binary_dest)
+                    .map_err(|e| format!("Failed to install piper: {}", e))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &binary_dest,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
+                let espeak_src = piper_inner.join("espeak-ng-data");
+                let espeak_dst = dir.join("espeak-ng-data");
+                if espeak_src.exists() {
+                    copy_dir_recursive(&espeak_src, &espeak_dst)
+                        .map_err(|e| format!("Failed to install Piper voice data: {}", e))?;
                 }
                 let _ = std::fs::remove_file(&archive);
                 let _ = std::fs::remove_dir_all(&extract_dir);
@@ -3695,6 +3735,12 @@ async fn install_voice(
 
     let (whisper_installed, whisper_model) = check_whisper_installed();
     let (piper_installed, piper_voice) = check_piper_installed();
+    if payload.install_whisper && !whisper_installed {
+        return Err("Whisper installation did not complete".to_string());
+    }
+    if payload.install_piper && !piper_installed {
+        return Err("Piper installation did not complete".to_string());
+    }
     Ok(VoiceStatus {
         whisper_installed,
         piper_installed,

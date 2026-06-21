@@ -137,53 +137,21 @@
                             <div class="empty-state-text">Click "New chat" to begin</div>
                         </div>
                     </div>
-                    <div id="todo-dock" class="todo-dock hidden" onclick="OSA.toggleTodoDock()">
-                        <div class="dock-header">
-                            <div class="dock-copy">
-                                <div class="dock-counter"></div>
-                                <div class="dock-active-task"></div>
-                            </div>
-                            <div class="dock-chevron">&#9662;</div>
-                        </div>
-                        <div class="dock-list hidden"></div>
-                    </div>
                     <div class="input-area">
-                         <div id="image-preview-container" class="image-preview-container hidden"></div>
-                         <div class="input-bar-wrap">
-                             <div class="input-left-controls">
-                                 <button id="workspace-trigger" class="input-tab" type="button" onclick="toggleWorkspaceMenu()">
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
-                                    <span id="workspace-trigger-label">Workspace</span>
-                                </button>
-                                <button id="persona-trigger" class="input-tab" type="button" onclick="togglePersonaMenu()">
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                                    <span id="persona-trigger-label">Default</span>
-                                </button>
+                        <div id="todo-dock" class="todo-dock hidden" onclick="OSA.toggleTodoDock()">
+                            <div class="dock-header">
+                                <div class="dock-copy">
+                                    <div class="dock-counter"></div>
+                                    <div class="dock-active-task"></div>
+                                </div>
+                                <div class="dock-chevron">&#9662;</div>
                             </div>
-                            <div class="input-right-bar">
-                                <input type="text" id="message-input" placeholder="Type a message... ( / for commands)" onkeypress="if(event.key==='Enter')sendMessage()" oninput="OSA.handleSlashInput()" />
-                                <input type="file" id="image-upload" class="hidden" accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.js,.jsx,.ts,.tsx,.rs,.py,.html,.css,.toml,.yaml,.yml,.xml,.sql,.sh,.ps1,.bat,.ini,.log" multiple />
-                                <button id="attach-btn" class="input-icon-btn" type="button" onclick="document.getElementById('image-upload').click()" title="Attach file">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                </button>
-                                <button id="mic-btn" class="input-icon-btn" onclick="toggleRecording()" title="Voice input" aria-pressed="false">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>
-                                </button>
-                                <button id="tts-btn" class="input-icon-btn" onclick="toggleTTS()" title="Text-to-speech" aria-pressed="false">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
-                                </button>
-                                 <button id="send-btn" onclick="handleSendButtonClick()">
-                                     <svg id="send-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                                     <svg id="stop-icon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
-                                 </button>
-                             </div>
-                         </div>
-                         <div id="voice-status" class="voice-status hidden" aria-live="polite"></div>
-                         <div id="attachment-status" class="attachment-status hidden" aria-live="polite"></div>
-                         <div id="workspace-menu" class="context-menu hidden">
-                             <div class="context-menu-header">
-                                 <span>Workspace</span>
-                                <button class="menu-action-btn" type="button" onclick="openWorkspaceEditorForCreate()">Add</button>
+                            <div class="dock-list hidden"></div>
+                        </div>
+                        <div id="workspace-menu" class="context-menu hidden">
+                            <div class="context-menu-header">
+                                <span>Workspace</span>
+                                <button class="menu-action-btn" type="button" onclick="openWorkspaceEditorForCreate()">+ New</button>
                             </div>
                             <div id="workspace-menu-list" class="context-menu-list"></div>
                             <div id="workspace-inline-editor" class="workspace-compact-editor hidden">
@@ -236,10 +204,45 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="composer-card">
+                            <div id="image-preview-container" class="image-preview-container hidden"></div>
+                            <div class="input-bar-wrap">
+                                <div class="input-left-controls">
+                                    <button id="workspace-trigger" class="input-tab" type="button" onclick="toggleWorkspaceMenu()" title="Workspace">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                                        <span class="input-tab-label" id="workspace-trigger-label">Workspace</span>
+                                        <span class="input-tab-badge" id="workspace-trigger-badge" aria-hidden="true"></span>
+                                    </button>
+                                    <button id="persona-trigger" class="input-tab" type="button" onclick="togglePersonaMenu()" title="Persona">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                                        <span class="input-tab-label" id="persona-trigger-label">Default</span>
+                                    </button>
+                                </div>
+                                <div class="input-right-bar">
+                                    <input type="text" id="message-input" placeholder="Type a message... ( / for commands)" onkeypress="if(event.key==='Enter')sendMessage()" oninput="OSA.handleSlashInput()" />
+                                    <input type="file" id="image-upload" class="hidden" accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.js,.jsx,.ts,.tsx,.rs,.py,.html,.css,.toml,.yaml,.yml,.xml,.sql,.sh,.ps1,.bat,.ini,.log" multiple />
+                                    <button id="attach-btn" class="input-icon-btn" type="button" onclick="document.getElementById('image-upload').click()" title="Attach file">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                                    </button>
+                                    <button id="mic-btn" class="input-icon-btn" onclick="toggleRecording()" title="Voice input" aria-pressed="false">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>
+                                    </button>
+                                    <button id="tts-btn" class="input-icon-btn" onclick="toggleTTS()" title="Text-to-speech" aria-pressed="false">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                                    </button>
+                                     <button id="send-btn" onclick="handleSendButtonClick()">
+                                         <svg id="send-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                                         <svg id="stop-icon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+                                     </button>
+                                 </div>
+                             </div>
+                             <div id="voice-status" class="voice-status hidden" aria-live="polite"></div>
+                             <div id="attachment-status" class="attachment-status hidden" aria-live="polite"></div>
                     </div>
-                </div>
+                 </div>
+             </div>
             </div>
-
+ 
                 <div id="preview-resize-handle" class="preview-resize-handle hidden" role="separator" aria-orientation="vertical"></div>
                 <div id="file-preview-panel" class="file-preview-panel hidden">
                     <div class="file-preview-header">
@@ -250,7 +253,6 @@
                     </div>
                     <div id="file-preview-body" class="file-preview-body"></div>
                 </div>
-            </div>
         </div>
     </div>
 

@@ -1295,10 +1295,11 @@
       state.voiceUnlisten = await listen('voice-progress', (event) => {
         const p = event.payload;
         if (!p) return;
-        const pct = Math.round((p.progress || 0) * 100);
-        if (progressLabel) progressLabel.textContent = (p.model_id || '') + ' — ' + (p.stage || '');
+        const pct = Math.max(0, Math.min(100, Math.round((p.progress || 0) * 100)));
+        const message = p.message || ((p.model_id || '') + ' - ' + (p.stage || ''));
+        if (progressLabel) progressLabel.textContent = p.message || ((p.model_id || '') + ' — ' + (p.stage || ''));
         if (progressFill) progressFill.style.width = pct + '%';
-        if (progressText) progressText.textContent = pct + '%';
+        if (progressText) progressText.textContent = / MB downloaded$/.test(message) ? message : pct + '%';
 
         if (p.stage === 'complete') {
           if (state.voiceUnlisten) { state.voiceUnlisten(); state.voiceUnlisten = null; }
@@ -1322,7 +1323,11 @@
       });
       await checkVoiceStatus();
     } catch (e) {
-      if (progressLabel) progressLabel.textContent = 'Error: ' + String(e);
+      const message = String(e && (e.message || e));
+      console.error('Voice install failed:', e);
+      if (progressLabel) progressLabel.textContent = 'Voice install failed';
+      if (progressText) progressText.textContent = message;
+      if (progressFill) progressFill.style.width = '0%';
     } finally {
       if (downloadBtn) downloadBtn.disabled = false;
     }
