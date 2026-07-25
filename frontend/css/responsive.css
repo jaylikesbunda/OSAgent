@@ -44,10 +44,23 @@
         display: none !important;
     }
 
-    /* Workspace/persona are in the input tabs — redundant in header on mobile */
-    .mobile-workspace-btn,
-    .mobile-persona-btn {
-        display: none;
+    /* Context button in header on mobile for easy access */
+    .mobile-workspace-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 6px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        color: var(--text-secondary);
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+
+    .mobile-workspace-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
     }
 
     /* Thinking level is a secondary control — accessible in settings */
@@ -73,26 +86,16 @@
         width: 100%;
     }
 
-    .model-selector-input-wrap .model-input {
+    .model-trigger {
         width: 100%;
         font-size: 12px;
         padding: 6px 10px;
         border-radius: var(--radius-md);
-        border-right: 1px solid var(--border);
     }
 
-    .model-dropdown-btn {
-        display: none;
-    }
-
-    .model-dropdown {
-        position: fixed;
-        top: 52px;
-        left: 8px;
-        right: 8px;
-        width: auto;
-        max-width: none;
-        z-index: 1100;
+    #model-dropdown.model-picker-popover {
+        max-width: calc(100vw - 16px);
+        max-height: calc(100dvh - 16px);
     }
 
     .input-left-controls {

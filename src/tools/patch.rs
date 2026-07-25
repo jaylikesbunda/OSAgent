@@ -90,13 +90,8 @@ impl ApplyPatchTool {
             ));
         }
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let full_path = self.workspace.join(path);
+        let full_path = full_path.canonicalize().unwrap_or(full_path);
         if full_path.starts_with(&self.workspace) {
             Ok(full_path)
         } else {

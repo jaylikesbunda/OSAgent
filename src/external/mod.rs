@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +66,7 @@ pub struct ExternalDirectoryManager {
     whitelist_matchers: Vec<(GlobMatcher, PermissionAction)>,
     pending_prompts: Arc<RwLock<HashMap<String, PermissionPrompt>>>,
     granted_permissions: Arc<RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
+    pending_responses: Arc<RwLock<HashMap<String, oneshot::Sender<bool>>>>,
 }
 
 impl ExternalDirectoryManager {
@@ -95,6 +97,7 @@ impl ExternalDirectoryManager {
             whitelist_matchers,
             pending_prompts: Arc::new(RwLock::new(HashMap::new())),
             granted_permissions: Arc::new(RwLock::new(HashMap::new())),
+            pending_responses: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -163,6 +166,34 @@ impl ExternalDirectoryManager {
         prompt
     }
 
+    pub async fn create_waiting_prompt(
+        &self,
+        session_id: String,
+        source: String,
+        path: String,
+        path_type: String,
+        patterns: Vec<String>,
+    ) -> (PermissionPrompt, oneshot::Receiver<bool>) {
+        let prompt = self
+            .create_prompt(session_id, source, path, path_type, patterns)
+            .await;
+        let (sender, receiver) = oneshot::channel();
+        self.pending_responses
+            .write()
+            .await
+            .insert(prompt.id.clone(), sender);
+        (prompt, receiver)
+    }
+
+    pub fn prompt_timeout_seconds(&self) -> u64 {
+        self.config.prompt_timeout_seconds
+    }
+
+    pub async fn expire_prompt(&self, prompt_id: &str) {
+        self.pending_prompts.write().await.remove(prompt_id);
+        self.pending_responses.write().await.remove(prompt_id);
+    }
+
     pub async fn respond_to_prompt(
         &self,
         prompt_id: &str,
@@ -177,12 +208,18 @@ impl ExternalDirectoryManager {
             permissions.insert(prompt.path.clone(), chrono::Utc::now());
         }
 
+        if let Some(sender) = self.pending_responses.write().await.remove(prompt_id) {
+            let _ = sender.send(allowed);
+        }
+
         Some(prompt)
     }
 
     pub async fn get_pending_prompts(&self) -> Vec<PermissionPrompt> {
         let prompts = self.pending_prompts.read().await;
-        prompts.values().cloned().collect()
+        let mut prompts = prompts.values().cloned().collect::<Vec<_>>();
+        prompts.sort_by_key(|prompt| prompt.timestamp);
+        prompts
     }
 
     pub async fn get_session_prompts(&self, session_id: &str) -> Vec<PermissionPrompt> {
@@ -221,5 +258,54 @@ impl ExternalDirectoryManager {
 impl Default for ExternalDirectoryManager {
     fn default() -> Self {
         Self::new(ExternalPermissionConfig::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn waiting_prompt_resumes_with_user_response() {
+        let manager = ExternalDirectoryManager::default();
+        let (prompt, response) = manager
+            .create_waiting_prompt(
+                "session".to_string(),
+                "read_file:call".to_string(),
+                "/outside/file.txt".to_string(),
+                "read".to_string(),
+                vec!["/outside/**".to_string()],
+            )
+            .await;
+
+        assert_eq!(manager.get_pending_prompts().await.len(), 1);
+        manager
+            .respond_to_prompt(&prompt.id, true, false)
+            .await
+            .expect("pending prompt");
+
+        assert!(response.await.expect("permission response"));
+        assert!(manager.get_pending_prompts().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn always_response_remembers_exact_path() {
+        let manager = ExternalDirectoryManager::default();
+        let (prompt, _response) = manager
+            .create_waiting_prompt(
+                "session".to_string(),
+                "write_file:call".to_string(),
+                "/outside/file.txt".to_string(),
+                "write".to_string(),
+                Vec::new(),
+            )
+            .await;
+
+        manager
+            .respond_to_prompt(&prompt.id, true, true)
+            .await
+            .expect("pending prompt");
+
+        assert!(manager.has_granted_permission("/outside/file.txt").await);
     }
 }

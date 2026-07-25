@@ -617,6 +617,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/sessions/:id/children", get(get_child_sessions))
         .route("/api/sessions/:id/subagents", get(get_session_subagents))
         .route("/api/sessions/:id/parent", get(get_parent_session))
+        .route("/api/sessions/:id/auto-name", post(auto_name_session))
         .route(
             "/api/subagents/:id",
             get(get_subagent_status).delete(cancel_subagent),
@@ -5137,6 +5138,101 @@ async fn get_parent_session(
         Ok(session) => Ok(Json(ParentSessionResponse { session })),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+async fn auto_name_session(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let session = agent
+        .get_session(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Session not found".to_string(),
+            }),
+        ))?;
+
+    if session
+        .metadata
+        .get("name")
+        .and_then(|v| v.as_str())
+        .is_some()
+    {
+        return Ok(Json(
+            serde_json::json!({ "name": session.metadata["name"] }),
+        ));
+    }
+
+    let user_msg = session
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
+    let assistant_msg = session
+        .messages
+        .iter()
+        .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+        .map(|m| {
+            let c = m.content.trim();
+            if c.len() > 300 {
+                &c[..300]
+            } else {
+                c
+            }
+        })
+        .unwrap_or("");
+
+    if user_msg.is_empty() {
+        return Ok(Json(serde_json::json!({ "name": null })));
+    }
+
+    let prompt_text = format!(
+        "Generate a short session title (max 6 words, no quotes, no punctuation at end) for this exchange.\nUser: {}\nAssistant: {}",
+        user_msg.chars().take(200).collect::<String>(),
+        assistant_msg
+    );
+
+    let provider = agent.active_provider().await;
+    let messages = vec![crate::storage::Message::user(prompt_text)];
+    let title = match provider.complete(&messages, &[]).await {
+        Ok(resp) => {
+            let raw = resp.content.unwrap_or_default();
+            let clean = raw.trim().trim_matches('"').trim_matches('\'');
+            let words: Vec<&str> = clean.split_whitespace().take(6).collect();
+            words.join(" ")
+        }
+        Err(_) => return Ok(Json(serde_json::json!({ "name": null }))),
+    };
+
+    if title.is_empty() || title.len() < 2 {
+        return Ok(Json(serde_json::json!({ "name": null })));
+    }
+
+    let mut updated = session;
+    updated.metadata["name"] = serde_json::json!(title);
+    agent.update_session(&updated).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(
+        serde_json::json!({ "name": updated.metadata["name"] }),
+    ))
 }
 
 #[derive(Debug, Serialize)]

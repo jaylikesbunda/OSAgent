@@ -320,7 +320,7 @@ fn build_safety_section(mode: PromptMode) -> Vec<String> {
     match mode {
         PromptMode::Full => vec![
             "# Safety".to_string(),
-            "- NEVER access anything outside the workspace".to_string(),
+            "- Stay inside the workspace by default; when an explicit outside path is necessary, use the relevant tool so the user can approve or deny access".to_string(),
             "- NEVER expose any secrets, credentials, tokens, or keys".to_string(),
             "- NEVER run destructive commands (rm -rf, drop table, etc.)".to_string(),
             "- ALWAYS confirm before any write operation".to_string(),
@@ -330,7 +330,7 @@ fn build_safety_section(mode: PromptMode) -> Vec<String> {
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Safety".to_string(),
-            "- Stay inside the workspace".to_string(),
+            "- Stay inside the workspace unless the task requires an explicit path that the user approves".to_string(),
             "- Never expose secrets or credentials".to_string(),
             "- Refuse destructive or policy-violating requests".to_string(),
         ],
@@ -355,14 +355,14 @@ fn build_workflow_section(mode: PromptMode) -> Vec<String> {
     }
 }
 
-fn build_tool_selection_section(allowed_tools: &[String], mode: PromptMode) -> Vec<String> {
-    let mut lines = vec!["# Tools".to_string()];
-
-    for tool in allowed_tools {
-        if let Some(desc) = tool_line(tool) {
-            lines.push(desc.to_string());
-        }
-    }
+fn build_tool_selection_section(_allowed_tools: &[String], mode: PromptMode) -> Vec<String> {
+    let mut lines = vec![
+        "# Tool Use".to_string(),
+        "- The provider tool schemas are the authoritative list of tools available this turn"
+            .to_string(),
+        "- Follow each tool description and parameter schema exactly".to_string(),
+        "- Do not invent or call tools that were not supplied".to_string(),
+    ];
 
     if mode == PromptMode::Minimal || mode == PromptMode::Explore {
         lines.push("- Do not spawn additional subagents".to_string());
@@ -430,6 +430,7 @@ fn build_editing_rules_section() -> Vec<String> {
     ]
 }
 
+#[allow(dead_code)]
 fn tool_line(name: &str) -> Option<&'static str> {
     // Rich tool descriptions with usage guidance, following the pattern:
     // - tool_name: brief summary. Use for X. Prefer over Y when Z. Avoid for A.
@@ -583,7 +584,7 @@ fn tool_line(name: &str) -> Option<&'static str> {
     }
 }
 
-fn build_verify_sections(allowed_tools: &[String]) -> Vec<String> {
+fn build_verify_sections(_allowed_tools: &[String]) -> Vec<String> {
     vec![
         "# Identity".to_string(),
         "You are a verification agent. Try to BREAK the implementation.".to_string(),
@@ -592,14 +593,11 @@ fn build_verify_sections(allowed_tools: &[String]) -> Vec<String> {
         "- Be adversarial: look for bugs and edge cases".to_string(),
         "- Do not modify any files".to_string(),
         String::new(),
-        "# Tools".to_string(),
+        "# Tool Use".to_string(),
+        "Use only the provider tools supplied with this turn and follow their schemas exactly."
+            .to_string(),
     ]
     .into_iter()
-    .chain(
-        allowed_tools
-            .iter()
-            .filter_map(|tool| tool_line(tool).map(String::from)),
-    )
     .chain(vec![
         String::new(),
         "# Output".to_string(),
@@ -608,7 +606,7 @@ fn build_verify_sections(allowed_tools: &[String]) -> Vec<String> {
     .collect()
 }
 
-fn build_explore_sections(allowed_tools: &[String]) -> Vec<String> {
+fn build_explore_sections(_allowed_tools: &[String]) -> Vec<String> {
     let mut sections = vec![
         "# Identity".to_string(),
         "You are a codebase exploration specialist. You excel at rapidly navigating codebases, finding relevant files, understanding architecture, and synthesizing findings into clear reports.".to_string(),
@@ -626,12 +624,11 @@ fn build_explore_sections(allowed_tools: &[String]) -> Vec<String> {
     sections.extend(build_validation_section(PromptMode::Minimal));
     sections.push(String::new());
 
-    sections.push("# Tools".to_string());
-    for tool in allowed_tools {
-        if let Some(desc) = tool_line(tool) {
-            sections.push(desc.to_string());
-        }
-    }
+    sections.push("# Tool Use".to_string());
+    sections.push(
+        "Use only the provider tools supplied with this turn and follow their schemas exactly."
+            .to_string(),
+    );
     sections.push("- Do not spawn additional subagents".to_string());
     sections.push(String::new());
 

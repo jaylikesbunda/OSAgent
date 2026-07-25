@@ -117,34 +117,24 @@ impl BashTool {
 
         ensure_relative_path_not_backups(workdir)?;
 
-        if workdir.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "workdir cannot contain '..'".to_string(),
-            ));
-        }
-
         let resolved = default_ws.join(workdir);
-        if !self.workspaces.iter().any(|ws| resolved.starts_with(ws)) {
-            return Err(OSAgentError::ToolExecution(
-                "workdir must stay inside the workspace".to_string(),
-            ));
-        }
+        let canonical = resolved.canonicalize().unwrap_or(resolved.clone());
 
-        if !resolved.exists() {
+        if !canonical.exists() {
             return Err(OSAgentError::ToolExecution(format!(
                 "workdir does not exist: {}",
                 workdir
             )));
         }
 
-        if !resolved.is_dir() {
+        if !canonical.is_dir() {
             return Err(OSAgentError::ToolExecution(format!(
                 "workdir is not a directory: {}",
                 workdir
             )));
         }
 
-        Ok(resolved)
+        Ok(canonical)
     }
 
     fn first_token(segment: &str) -> Option<String> {

@@ -18,19 +18,7 @@ OSA.loadPersonaCatalog = async function() {
     }
 };
 
-OSA.updatePersonaTrigger = function(active) {
-    const label = document.getElementById('persona-trigger-label');
-    if (!label) return;
-    if (!active) {
-        label.textContent = 'Default';
-        label.title = 'Default';
-        return;
-    }
-    const personas = OSA.getAvailablePersonas();
-    const name = active.id === 'default' ? 'Default' : (personas.find(p => p.id === active.id)?.name || active.id);
-    label.textContent = name;
-    label.title = name;
-};
+OSA.updatePersonaTrigger = function(active) {};
 
 OSA.renderPersonaMenu = function() {
     const list = document.getElementById('persona-menu-list');
@@ -42,7 +30,7 @@ OSA.renderPersonaMenu = function() {
         const isActive = selectedId === p.id;
         return `
             <div class="menu-row ${isActive ? 'active' : ''}">
-                <button class="menu-row-main" type="button" onclick="OSA.selectPersonaFromMenu('${OSA.escapeHtml(p.id)}')">
+                <button class="menu-row-main" type="button" onclick="event.stopPropagation(); OSA.selectPersonaFromMenu('${OSA.escapeHtml(p.id)}')">
                     <span class="menu-row-copy">
                         <span class="menu-row-title">${OSA.escapeHtml(p.name || p.id)}</span>
                     </span>
@@ -72,6 +60,11 @@ OSA.selectPersonaFromMenu = function(personaId) {
     if (OSA.getSelectedPersonaId() !== 'custom') {
         OSA.applyPersona();
         OSA.closePersonaMenu();
+    } else {
+        const menu = document.getElementById('persona-menu');
+        const trigger = document.getElementById('persona-trigger');
+        if (menu && trigger) OSA.positionMenuForTrigger(menu, trigger);
+        window.setTimeout(() => document.getElementById('persona-character')?.focus(), 0);
     }
 };
 

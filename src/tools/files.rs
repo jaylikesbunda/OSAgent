@@ -79,14 +79,8 @@ impl ReadFileTool {
         ensure_relative_path_not_backups(path)?;
         ensure_workspace(&self.workspaces)?;
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let full_path = self.workspaces[0].join(path);
-        let full_path_str = full_path.to_string_lossy().to_string();
+        let full_path = full_path.canonicalize().unwrap_or(full_path);
 
         if !full_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(
@@ -102,7 +96,7 @@ impl ReadFileTool {
         }
 
         if self.workspaces.iter().any(|ws| full_path.starts_with(ws))
-            || path_is_in_workspace(&full_path_str, &self.config)
+            || path_is_in_workspace(&full_path.to_string_lossy(), &self.config)
         {
             Ok(full_path)
         } else {
@@ -342,11 +336,16 @@ impl ReadFileTool {
             ));
         }
 
+        let instruction_root = self
+            .workspaces
+            .iter()
+            .filter(|workspace| file_path.starts_with(workspace))
+            .max_by_key(|workspace| workspace.components().count())
+            .unwrap_or(&self.workspaces[0]);
         if let Some(reminder) =
-            format_system_reminder(&nearby_instruction_blocks(&self.workspaces[0], file_path))
+            format_system_reminder(&nearby_instruction_blocks(instruction_root, file_path))
         {
-            output.push_str("\n\n");
-            output.push_str(&reminder);
+            output = format!("{}\n\n{}", reminder, output);
         }
 
         Ok(ToolResult {
@@ -542,13 +541,8 @@ impl WriteFileTool {
         ensure_relative_path_not_backups(path)?;
         ensure_workspace(&self.workspaces)?;
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let full_path = self.workspaces[0].join(path);
+        let full_path = full_path.canonicalize().unwrap_or(full_path);
 
         if let Some(parent) = full_path.parent() {
             if !parent.exists() {
@@ -706,13 +700,8 @@ impl EditFileTool {
         ensure_relative_path_not_backups(path)?;
         ensure_workspace(&self.workspaces)?;
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let full_path = self.workspaces[0].join(path);
+        let full_path = full_path.canonicalize().unwrap_or(full_path);
 
         if !full_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(
@@ -937,16 +926,11 @@ impl ListFilesTool {
         ensure_relative_path_not_backups(path)?;
         ensure_workspace(&self.workspaces)?;
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let full_path = if path.is_empty() || path == "." {
             self.workspaces[0].clone()
         } else {
-            self.workspaces[0].join(path)
+            let joined = self.workspaces[0].join(path);
+            joined.canonicalize().unwrap_or(joined)
         };
 
         if self.workspaces.iter().any(|ws| full_path.starts_with(ws))
@@ -1119,13 +1103,8 @@ impl DeleteFileTool {
         ensure_relative_path_not_backups(path)?;
         ensure_workspace(&self.workspaces)?;
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let full_path = self.workspaces[0].join(path);
+        let full_path = full_path.canonicalize().unwrap_or(full_path);
 
         if !full_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(

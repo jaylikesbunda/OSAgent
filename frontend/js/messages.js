@@ -1291,17 +1291,37 @@ OSA.formatMessage = function(text) {
     let listItems = [];
     let codeBlock = null;
     let codeLines = [];
+    let tableRows = [];
+    let tableHasHeader = false;
 
-    const formatInlineMarkdown = (line) => line
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>');
+    const formatInlineMarkdown = (line) => {
+        let s = line
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>');
+        s = s.replace(/(^|[^"=])(https?:\/\/[^\s<>"')\]]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+        return s;
+    };
 
     const flushList = () => {
         if (listItems.length) {
             html += `<ul>${listItems.join('')}</ul>`;
             listItems = [];
         }
+    };
+
+    const flushTable = () => {
+        if (!tableRows.length) return;
+        let tableHtml = '<table>';
+        tableRows.forEach((row, i) => {
+            const tag = (i === 0 && tableHasHeader) ? 'th' : 'td';
+            tableHtml += '<tr>' + row.map(c => `<${tag}>${formatInlineMarkdown(c.trim())}</${tag}>`).join('') + '</tr>';
+        });
+        tableHtml += '</table>';
+        html += tableHtml;
+        tableRows = [];
+        tableHasHeader = false;
     };
 
     const flushCodeBlock = () => {
@@ -1313,6 +1333,18 @@ OSA.formatMessage = function(text) {
             codeBlock = null;
             codeLines = [];
         }
+    };
+
+    const isTableRow = (line) => {
+        const t = line.trim();
+        return t.startsWith('|') && t.endsWith('|') && t.length > 2;
+    };
+
+    const isTableSeparator = (line) => /^\|[\s\-:|]+\|$/.test(line.trim());
+
+    const parseTableCells = (line) => {
+        const t = line.trim();
+        return t.slice(1, -1).split('|');
     };
 
     const isHeader = (line) => /^#+\s/.test(line);
@@ -1327,6 +1359,17 @@ OSA.formatMessage = function(text) {
             if (trimmed === '```') { flushCodeBlock(); } else { codeLines.push(line); }
             continue;
         }
+        if (isTableRow(trimmed)) {
+            if (isTableSeparator(trimmed)) {
+                tableHasHeader = true;
+                continue;
+            }
+            flushList();
+            tableRows.push(parseTableCells(trimmed));
+            continue;
+        } else if (tableRows.length) {
+            flushTable();
+        }
         if (isHeader(trimmed)) {
             flushList();
             const level = headerLevel(trimmed);
@@ -1337,11 +1380,14 @@ OSA.formatMessage = function(text) {
         const codeBlockMatch = trimmed.match(/^```(\w+)?$/);
         if (codeBlockMatch) { flushList(); codeBlock = { lang: codeBlockMatch[1] || null }; continue; }
         if (trimmed.startsWith('- ')) { listItems.push(`<li>${formatInlineMarkdown(trimmed.slice(2))}</li>`); continue; }
+        const numberedMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
+        if (numberedMatch) { listItems.push(`<li>${formatInlineMarkdown(numberedMatch[2])}</li>`); continue; }
         flushList();
         if (trimmed.length === 0) { html += '<br>'; } else { html += `<p>${formatInlineMarkdown(line)}</p>`; }
     }
 
     flushList();
+    flushTable();
     flushCodeBlock();
     return html;
 };
@@ -2159,7 +2205,16 @@ OSA.appendUserMessageToChat = function(content, options = {}) {
 OSA.handleQueuedMessageDispatched = function(event) {
     const currentSession = OSA.getCurrentSession();
     if (currentSession) currentSession.task_status = 'running';
-    const queue = (OSA.getSessionQueue() || []).filter(item => item.id !== event.queue_entry_id);
+    OSA.setProcessing(true);
+    OSA.setStopping(false);
+    OSA.setSendButtonStopMode(true);
+    const dispatchedId = event.queue_entry_id || '';
+    const dispatchedClientId = event.client_message_id || '';
+    const queue = (OSA.getSessionQueue() || []).filter(item => {
+        if (dispatchedId && item.id === dispatchedId) return false;
+        if (dispatchedClientId && item.client_message_id === dispatchedClientId) return false;
+        return true;
+    });
     OSA.setSessionQueue(queue);
     OSA.removeQueuedMessageElements();
     const dispatchedAttachments = [];

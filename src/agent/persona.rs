@@ -177,7 +177,7 @@ pub fn persona_presets() -> Vec<PersonaPreset> {
         },
         PersonaPreset {
             id: "custom",
-            name: "Custom Roleplay",
+            name: "Custom",
             summary: "Full first-person character immersion. Stay 100% in voice.",
             instructions: r#"You are now embodying a custom roleplay character. Stay in strict first-person character at all times.
 

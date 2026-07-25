@@ -146,18 +146,13 @@ impl GrepTool {
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         ensure_relative_path_not_backups(path)?;
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let default_ws = self.default_workspace()?;
         let full_path = if path.is_empty() || path == "." {
             default_ws.clone()
         } else {
             default_ws.join(path)
         };
+        let full_path = full_path.canonicalize().unwrap_or(full_path);
 
         if self.workspaces.iter().any(|ws| full_path.starts_with(ws)) {
             Ok(full_path)
@@ -544,18 +539,13 @@ impl GlobTool {
     fn validate_path(&self, path: &str) -> Result<PathBuf> {
         ensure_relative_path_not_backups(path)?;
 
-        if path.contains("..") {
-            return Err(OSAgentError::ToolExecution(
-                "Path cannot contain '..'".to_string(),
-            ));
-        }
-
         let default_ws = self.default_workspace()?;
         let full_path = if path.is_empty() || path == "." {
             default_ws.clone()
         } else {
             default_ws.join(path)
         };
+        let full_path = full_path.canonicalize().unwrap_or(full_path);
 
         if self.workspaces.iter().any(|ws| full_path.starts_with(ws)) {
             Ok(full_path)

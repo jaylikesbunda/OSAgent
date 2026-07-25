@@ -86,22 +86,21 @@
                         <span id="connection-text">Connecting...</span>
                     </div>
                     <div class="header-controls">
-                        <button class="mobile-workspace-btn" onclick="toggleWorkspaceMenu()" title="Workspace">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
-                        </button>
-                        <button class="mobile-persona-btn" onclick="togglePersonaMenu()" title="Persona">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        <button class="mobile-workspace-btn" onclick="toggleContextMenu()" title="Context">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                         </button>
                         <div class="model-selector">
                             <div class="model-selector-input-wrap">
-                                <input class="model-input" id="model-input" placeholder="Model id" onfocus="toggleModelDropdown()" onkeydown="handleModelInputKeydown(event)" title="Click or type to search models" readonly />
-                                <button class="model-dropdown-btn" onclick="toggleModelDropdown()" title="Browse or search models">&#9662;</button>
+                                <button class="model-trigger" id="model-input" type="button" onclick="toggleModelDropdown()" onkeydown="handleModelInputKeydown(event)" title="Browse models" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-dropdown">
+                                    <span class="model-trigger-label" id="model-input-label">Select model</span>
+                                    <span class="model-trigger-chevron" aria-hidden="true">&#9662;</span>
+                                </button>
                             </div>
-                            <div id="model-dropdown" class="model-dropdown hidden">
+                            <div id="model-dropdown" class="model-picker-popover hidden" role="dialog" aria-label="Choose a model">
                                 <div class="model-dropdown-search">
-                                    <input type="text" id="model-search" placeholder="Search models..." oninput="OSA.debounce('modelSearch', () => handleModelSearch(event), 200)" onkeydown="handleModelDropdownKeydown(event)" />
+                                    <input type="text" id="model-search" placeholder="Search models..." autocomplete="off" oninput="handleModelSearch(event)" onkeydown="handleModelDropdownKeydown(event)" />
                                 </div>
-                                <div class="model-dropdown-list"></div>
+                                <div class="model-dropdown-list" role="listbox" aria-label="Models"></div>
                             </div>
                         </div>
                         <div class="header-thinking-control">
@@ -148,59 +147,79 @@
                             </div>
                             <div class="dock-list hidden"></div>
                         </div>
-                        <div id="workspace-menu" class="context-menu hidden">
-                            <div class="context-menu-header">
-                                <span>Workspace</span>
-                                <button class="menu-action-btn" type="button" onclick="openWorkspaceEditorForCreate()">+ New</button>
+                        <div id="context-menu" class="context-menu hidden">
+                            <div class="ctx-tabs">
+                                <button type="button" class="ctx-tab active" data-tab="workspace" onclick="OSA.switchContextTab('workspace')">Workspace</button>
+                                <button type="button" class="ctx-tab" data-tab="persona" onclick="OSA.switchContextTab('persona')">Persona</button>
                             </div>
-                            <div id="workspace-menu-list" class="context-menu-list"></div>
-                            <div id="workspace-inline-editor" class="workspace-compact-editor hidden">
-                                <div class="workspace-editor-grid">
-                                    <div class="workspace-field">
-                                        <label for="workspace-inline-id">Workspace ID</label>
-                                        <input type="text" id="workspace-inline-id" placeholder="e.g. app-main" />
-                                    </div>
-                                    <div class="workspace-field">
-                                        <label for="workspace-inline-name">Display Name</label>
-                                        <input type="text" id="workspace-inline-name" placeholder="My App Workspace" />
-                                    </div>
-                                    <div class="workspace-field full">
-                                        <label>Paths <span class="workspace-path-hint">(click + to add)</span></label>
-                                        <div id="workspace-paths-container" class="workspace-paths-container">
+                            <div id="ctx-tab-workspace" class="ctx-tab-panel">
+                                <div class="context-menu-header">
+                                    <span id="ctx-ws-active-label">-</span>
+                                    <button class="menu-action-btn" type="button" onclick="openWorkspaceEditorForCreate()">+ New</button>
+                                </div>
+                                <div id="workspace-menu-list" class="context-menu-list"></div>
+                                <div id="workspace-inline-editor" class="workspace-compact-editor hidden">
+                                    <div class="ws-editor-simple">
+                                        <div class="ws-editor-path-row">
+                                            <input type="text" id="workspace-inline-path" placeholder="Folder path" />
+                                            <button class="ws-browse-btn" type="button" onclick="OSA.browseWorkspaceSimple()" title="Browse">&#8230;</button>
+                                        </div>
+                                        <div class="ws-editor-perm-row">
+                                            <button type="button" class="ws-perm-btn active" id="ws-perm-rw" onclick="OSA.setWorkspacePerm('read_write')">Read + Write</button>
+                                            <button type="button" class="ws-perm-btn" id="ws-perm-ro" onclick="OSA.setWorkspacePerm('read_only')">Read only</button>
                                         </div>
                                     </div>
+                                    <input type="hidden" id="workspace-inline-id" />
+                                    <input type="hidden" id="workspace-inline-name" />
+                                    <div class="workspace-editor-actions">
+                                        <div class="action-group">
+                                            <button class="control-btn primary" type="button" onclick="saveWorkspaceInline()">Save</button>
+                                            <button class="control-btn" type="button" onclick="applyInlineWorkspaceToSession()">Save + use</button>
+                                        </div>
+                                        <div class="action-group">
+                                            <button class="control-btn" type="button" onclick="closeWorkspaceEditor()">Cancel</button>
+                                        </div>
+                                    </div>
+                                    <div id="workspace-inline-status" class="workspace-inline-status hidden"></div>
+                                </div>
+                            </div>
+                            <div id="ctx-tab-persona" class="ctx-tab-panel hidden">
+                                <div class="context-menu-header">
+                                    <span>Persona</span>
+                                </div>
+                                <div id="persona-menu-list" class="context-menu-list"></div>
+                                <div id="persona-custom-wrap" class="workspace-compact-editor hidden">
                                     <div class="workspace-field">
-                                        <label for="workspace-inline-description">Description</label>
-                                        <input type="text" id="workspace-inline-description" placeholder="Optional" />
+                                        <label for="persona-character">Character description</label>
+                                        <input id="persona-character" class="persona-input" placeholder="e.g. a grumpy senior dev who hates JavaScript" />
+                                    </div>
+                                    <div class="workspace-editor-actions">
+                                        <div class="action-group">
+                                            <button class="control-btn primary" type="button" onclick="applyPersona()">Apply</button>
+                                            <button class="control-btn" type="button" onclick="resetPersona()">Reset</button>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="workspace-editor-actions">
-                                    <div class="action-group">
-                                        <button class="control-btn primary" type="button" onclick="saveWorkspaceInline()">Save</button>
-                                        <button class="control-btn" type="button" onclick="applyInlineWorkspaceToSession()">Save + use</button>
-                                    </div>
-                                    <div class="action-group">
-                                        <button class="control-btn" type="button" onclick="closeWorkspaceEditor()">Cancel</button>
-                                    </div>
-                                </div>
-                                <div id="workspace-inline-status" class="workspace-inline-status hidden"></div>
                             </div>
                         </div>
-                        <div id="persona-menu" class="context-menu persona-menu hidden">
-                            <div class="context-menu-header">
-                                <span>Persona</span>
-                            </div>
-                            <div id="persona-menu-list" class="context-menu-list"></div>
-                            <div id="persona-custom-wrap" class="workspace-compact-editor hidden">
-                                <div class="workspace-field">
-                                    <label for="persona-character">Character description</label>
-                                    <input id="persona-character" class="persona-input" placeholder="e.g. a grumpy senior dev who hates JavaScript" />
+                        <div id="permission-modal" class="permission-modal hidden" role="dialog" aria-modal="true" aria-labelledby="permission-title">
+                            <div class="permission-dock">
+                                <div class="permission-dock-icon">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                                 </div>
-                                <div class="workspace-editor-actions">
-                                    <div class="action-group">
-                                        <button class="control-btn primary" type="button" onclick="applyPersona()">Apply</button>
-                                        <button class="control-btn" type="button" onclick="resetPersona()">Reset</button>
+                                <div class="permission-dock-body">
+                                    <div class="permission-dock-title" id="permission-title">Allow access outside workspace?</div>
+                                    <div class="permission-dock-detail">
+                                        <span class="permission-dock-tool" id="permission-tool">-</span>
+                                        <span class="permission-dock-sep">&middot;</span>
+                                        <span class="permission-dock-op" id="permission-operation">-</span>
                                     </div>
+                                    <div class="permission-dock-path" id="permission-path">-</div>
+                                </div>
+                                <div class="permission-dock-actions">
+                                    <button type="button" class="perm-btn perm-deny" id="permission-deny" onclick="OSA.respondToPermission(false, false)">Deny</button>
+                                    <button type="button" class="perm-btn perm-once" id="permission-once" onclick="OSA.respondToPermission(true, false)">Allow once</button>
+                                    <button type="button" class="perm-btn perm-always" id="permission-always" onclick="OSA.respondToPermission(true, true)">Always allow</button>
                                 </div>
                             </div>
                         </div>
@@ -208,14 +227,9 @@
                             <div id="image-preview-container" class="image-preview-container hidden"></div>
                             <div class="input-bar-wrap">
                                 <div class="input-left-controls">
-                                    <button id="workspace-trigger" class="input-tab" type="button" onclick="toggleWorkspaceMenu()" title="Workspace">
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
-                                        <span class="input-tab-label" id="workspace-trigger-label">Workspace</span>
-                                        <span class="input-tab-badge" id="workspace-trigger-badge" aria-hidden="true"></span>
-                                    </button>
-                                    <button id="persona-trigger" class="input-tab" type="button" onclick="togglePersonaMenu()" title="Persona">
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                                        <span class="input-tab-label" id="persona-trigger-label">Default</span>
+                                    <button id="context-trigger" class="input-tab" type="button" onclick="OSA.toggleContextMenu()" title="Workspace &amp; Persona">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                                        <span class="input-tab-label" id="context-trigger-label">Context</span>
                                     </button>
                                 </div>
                                 <div class="input-right-bar">
@@ -303,6 +317,10 @@
                     <div class="context-detail-row hidden" id="ctx-cache-row">
                         <span class="context-detail-label">Cache</span>
                         <span class="context-detail-value" id="ctx-cache">-</span>
+                    </div>
+                    <div class="context-detail-row hidden" id="ctx-tools-row">
+                        <span class="context-detail-label">Tool schemas</span>
+                        <span class="context-detail-value" id="ctx-tools">-</span>
                     </div>
                 </div>
             </div>

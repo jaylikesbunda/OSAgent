@@ -478,6 +478,41 @@
     gap: 2px;
 }
 
+.ctx-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
+    padding: 0 4px;
+}
+
+.ctx-tab {
+    flex: 1;
+    padding: 8px 0;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease;
+    text-align: center;
+}
+
+.ctx-tab:hover {
+    color: var(--text-secondary);
+}
+
+.ctx-tab.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--accent);
+}
+
+.ctx-tab-panel {
+    min-height: 0;
+}
+
 .menu-row {
     display: flex;
     align-items: stretch;
@@ -622,6 +657,89 @@
 
 .workspace-compact-editor.hidden {
     display: none;
+}
+
+.ws-editor-simple {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.ws-editor-path-row {
+    display: flex;
+    gap: 6px;
+}
+
+.ws-editor-path-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 9px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.ws-editor-path-row input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.ws-browse-btn {
+    padding: 9px 14px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    line-height: 1;
+}
+
+.ws-browse-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.ws-editor-perm-row {
+    display: flex;
+    gap: 0;
+}
+
+.ws-perm-btn {
+    flex: 1;
+    padding: 8px 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.12s ease;
+}
+
+.ws-perm-btn:first-child {
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+    border-right: none;
+}
+
+.ws-perm-btn:last-child {
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.ws-perm-btn.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.ws-perm-btn:hover:not(.active) {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
 }
 
 .workspace-editor-grid {

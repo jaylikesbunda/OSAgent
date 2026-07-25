@@ -4,11 +4,13 @@ use crate::permission::{PermissionAction, PermissionRule};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    #[serde(skip)]
+    config_path: Option<PathBuf>,
     pub server: ServerConfig,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
@@ -651,6 +653,7 @@ impl Default for Config {
 impl Config {
     pub fn default_config() -> Self {
         let mut cfg = Self {
+            config_path: None,
             server: ServerConfig::default(),
             providers: vec![],
             default_provider: String::new(),
@@ -681,7 +684,8 @@ impl Config {
         let path_ref = Path::new(&expanded);
 
         if !path_ref.exists() {
-            let cfg = Self::default_config();
+            let mut cfg = Self::default_config();
+            cfg.config_path = Some(path_ref.to_path_buf());
             cfg.save(path_ref)?;
             return Ok(cfg);
         }
@@ -689,6 +693,7 @@ impl Config {
         let raw = fs::read_to_string(path_ref).map_err(OSAgentError::Io)?;
         let mut cfg: Config = toml::from_str(&raw)
             .map_err(|e| OSAgentError::Config(format!("Failed to parse config TOML: {}", e)))?;
+        cfg.config_path = Some(path_ref.to_path_buf());
         let mutated = cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();
         cfg.migrate_tool_defaults();
@@ -697,6 +702,20 @@ impl Config {
             cfg.save(path_ref)?;
         }
         Ok(cfg)
+    }
+
+    pub fn config_dir(&self) -> PathBuf {
+        self.config_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(shellexpand::tilde("~/.osagent").to_string()))
+    }
+
+    pub(crate) fn inherit_config_path(&mut self, existing: &Self) {
+        if self.config_path.is_none() {
+            self.config_path = existing.config_path.clone();
+        }
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
@@ -1428,6 +1447,7 @@ password_enabled = false
 
         let first = Config::load(config_path.to_str().unwrap()).unwrap();
         assert!(!first.server.jwt_secret.is_empty());
+        assert_eq!(first.config_dir(), temp_dir.path());
 
         let second = Config::load(config_path.to_str().unwrap()).unwrap();
         assert_eq!(first.server.jwt_secret, second.server.jwt_secret);

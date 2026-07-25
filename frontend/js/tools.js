@@ -89,6 +89,8 @@ OSA.handleAgentEvent = function(event) {
         case 'thinking':
             OSA.setHasReceivedResponse(false);
             if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'running';
+            OSA.setProcessing(true);
+            OSA.setStopping(false);
             OSA.showThinkingIndicator();
             OSA.setSendButtonStopMode(true);
             OSA.startToolSync();
@@ -170,11 +172,19 @@ OSA.handleAgentEvent = function(event) {
             OSA.completeAssistantResponse(event.usage || null);
             OSA.hideThinkingIndicator();
             OSA.stopToolSync();
-            OSA.setProcessing(false);
-            OSA.setStopping(false);
-            OSA.resetSendButton();
+            if (OSA._stopTimeout) { clearTimeout(OSA._stopTimeout); OSA._stopTimeout = null; }
+            var queueStillHasItems = (OSA.getSessionQueue() || []).length > 0;
+            if (!queueStillHasItems) {
+                OSA.setProcessing(false);
+                OSA.setStopping(false);
+                OSA.resetSendButton();
+            } else {
+                OSA.setStopping(false);
+                OSA.setSendButtonStopMode(true);
+            }
             OSA.scheduleSessionInspectorRefresh();
             if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
+            OSA.maybeAutoNameSession();
             break;
 
         case 'queued_message_dispatched':
@@ -202,9 +212,17 @@ OSA.handleAgentEvent = function(event) {
 
         case 'error':
             chain.pendingToolCallIds = [];
+            OSA.stopToolSync();
+            if (OSA._stopTimeout) { clearTimeout(OSA._stopTimeout); OSA._stopTimeout = null; }
             OSA.handleEventError(event);
             OSA.setStopping(false);
-            OSA.setSendButtonStopMode(false);
+            var errorQueueStillHasItems = (OSA.getSessionQueue() || []).length > 0;
+            if (!errorQueueStillHasItems) {
+                OSA.setProcessing(false);
+                OSA.resetSendButton();
+            } else {
+                OSA.setSendButtonStopMode(true);
+            }
             break;
 
         case 'cancelled':
@@ -383,6 +401,14 @@ OSA._updateContextModalContent = function() {
     const actualRow = document.getElementById('ctx-actual-row');
     const outputRow = document.getElementById('ctx-output-row');
     const cacheRow = document.getElementById('ctx-cache-row');
+    const toolsRow = document.getElementById('ctx-tools-row');
+
+    if ((state.tool_schema_tokens || 0) > 0) {
+        toolsRow.classList.remove('hidden');
+        document.getElementById('ctx-tools').textContent = formatTokens(state.tool_schema_tokens);
+    } else {
+        toolsRow.classList.add('hidden');
+    }
     
     if (actualUsage && (actualUsage.input > 0 || actualUsage.total > 0)) {
         actualRow.classList.remove('hidden');
@@ -1380,8 +1406,6 @@ OSA.renderTaskMessage = function(event) {
 OSA.handleEventError = function(event) {
     console.error('Agent error:', event.error);
     if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
-    OSA.setProcessing(false);
-    OSA.resetSendButton();
     OSA.completeThinkingDisplay();
     OSA.pruneEmptyStreamingMessage();
     OSA.completeAssistantResponse();
@@ -2055,8 +2079,18 @@ OSA.stopToolSync = function() {
 
 OSA.syncToolsFromBackend = async function() {
     const session = OSA.getCurrentSession();
-    if (!session || !session.id || session.task_status !== 'running') {
-        OSA.stopToolSync();
+    if (!session || !session.id) return;
+    if (session.task_status !== 'running') {
+        if (OSA.isAgentProcessing()) {
+            OSA.setProcessing(false);
+            OSA.setStopping(false);
+            OSA.resetSendButton();
+            OSA.hideThinkingIndicator();
+            OSA.stopToolSync();
+            OSA.refreshCurrentSessionQueue();
+        } else {
+            OSA.stopToolSync();
+        }
         return;
     }
     try {

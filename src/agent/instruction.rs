@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::process::Command;
 
 const INSTRUCTION_FILES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
 const MAX_TOTAL_CHARS: usize = 2_000;
@@ -55,6 +57,47 @@ pub fn workspace_instruction_blocks(workspace: &Path) -> Vec<String> {
     }
 
     truncate_blocks(blocks)
+}
+
+pub fn global_instruction_blocks(config_dir: &Path) -> Vec<String> {
+    workspace_instruction_blocks(config_dir)
+}
+
+async fn git_output(workspace: &Path, args: &[&str]) -> Option<String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+pub async fn git_workspace_context(workspace: &Path) -> Option<String> {
+    let root = git_output(workspace, &["rev-parse", "--show-toplevel"]).await?;
+    let status = git_output(
+        workspace,
+        &["status", "--short", "--branch", "--untracked-files=normal"],
+    )
+    .await
+    .unwrap_or_else(|| "status unavailable".to_string());
+    let mut lines = status.lines().take(21).collect::<Vec<_>>();
+    if status.lines().count() > lines.len() {
+        lines.push("... additional changes omitted");
+    }
+    Some(format!(
+        "# Git Context\n- Worktree: {}\n- Status:\n{}",
+        root,
+        lines.join("\n")
+    ))
 }
 
 fn push_unique_block(path: &Path, seen: &mut HashSet<PathBuf>, found: &mut Vec<String>) {
@@ -120,4 +163,38 @@ pub fn format_system_reminder(blocks: &[String]) -> Option<String> {
         "<system-reminder>\n{}\n</system-reminder>",
         blocks.join("\n\n")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_instructions_use_the_config_directory() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        fs::write(temp.path().join("AGENTS.md"), "Always run focused tests.")
+            .expect("write instructions");
+
+        let blocks = global_instruction_blocks(temp.path());
+
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].contains("Always run focused tests."));
+    }
+
+    #[test]
+    fn nearby_instructions_are_ordered_root_to_nested() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let nested = temp.path().join("src").join("feature");
+        fs::create_dir_all(&nested).expect("nested directory");
+        fs::write(temp.path().join("AGENTS.md"), "Root rule").expect("root instructions");
+        fs::write(nested.join("AGENTS.md"), "Feature rule").expect("nested instructions");
+        let target = nested.join("mod.rs");
+        fs::write(&target, "fn feature() {}").expect("target file");
+
+        let blocks = nearby_instruction_blocks(temp.path(), &target);
+
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].contains("Root rule"));
+        assert!(blocks[1].contains("Feature rule"));
+    }
 }

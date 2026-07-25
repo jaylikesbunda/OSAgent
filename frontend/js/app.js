@@ -129,6 +129,28 @@ OSA.getSessionDisplayName = function(session) {
     return 'Session';
 };
 
+OSA._autoNamedSessions = new Set();
+
+OSA.maybeAutoNameSession = function() {
+    const session = OSA.getCurrentSession();
+    if (!session?.id) return;
+    if (session.metadata?.name) return;
+    if (OSA._autoNamedSessions.has(session.id)) return;
+    OSA._autoNamedSessions.add(session.id);
+    OSA.fetchWithAuth('/api/sessions/' + encodeURIComponent(session.id) + '/auto-name', { method: 'POST' })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data?.name) {
+                if (session.metadata) session.metadata.name = data.name;
+                document.getElementById('header-title').textContent = data.name;
+                OSA.setHeaderBaseTitle(data.name);
+                OSA.setHeaderTitleRenameable(true);
+                OSA.loadSessions();
+            }
+        })
+        .catch(function() {});
+};
+
 OSA.getSessionSourceKey = function(session) {
     const source = (session && session.metadata && typeof session.metadata.source === 'string')
         ? session.metadata.source.trim().toLowerCase()
@@ -270,6 +292,7 @@ OSA.showApp = function() {
     OSA.loadSessions();
     OSA.loadWorkspaces();
     OSA.loadModel();
+    OSA.startPermissionPolling();
     OSA.queueDeferredStartupTasks();
 };
 
@@ -286,9 +309,7 @@ OSA.loadModel = async function() {
         if (input) {
             OSA.currentModelId = data.model || '';
             OSA.currentModelProviderId = data.provider_id || '';
-            const provider = (OSA.providerCatalog.providers || []).find(function(item) { return item.id === data.provider_id; });
-            input.value = provider ? provider.name + ' · ' + (data.model || '') : (data.model || '');
-            input.title = provider ? provider.name + ' / ' + (data.model || '') : (data.model || '');
+            OSA.setModelTrigger(data.provider_id || '', data.model || '');
         }
         if (typeof OSA.refreshThinkingOptions === 'function') {
             const selected = OSA.getCachedConfig?.()?.agent?.thinking_level || 'auto';
@@ -302,7 +323,7 @@ OSA.loadModel = async function() {
 OSA.updateModel = async function() {
     const input = document.getElementById('model-input');
     if (!input) return;
-    const model = input.value.trim();
+    const model = OSA.currentModelId || input.dataset.modelId || '';
     if (!model) {
         alert('Enter a model id');
         return;
@@ -579,9 +600,7 @@ OSA.refreshCurrentSessionQueue = function() {
 OSA.syncRunningSessionSnapshot = async function(sessionId) {
     try {
         const currentSession = OSA.getCurrentSession();
-        if (!currentSession || currentSession.id !== sessionId || currentSession.task_status !== 'running') {
-            return;
-        }
+        if (!currentSession || currentSession.id !== sessionId) return;
 
         const res = await fetch(`/api/sessions/${sessionId}`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
@@ -1509,6 +1528,16 @@ document.addEventListener('click', (event) => {
 
 document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+        if (OSA.modelDropdownOpen) {
+            OSA.closeModelDropdown();
+            return;
+        }
+        const permissionModal = document.getElementById('permission-modal');
+        if (permissionModal && !permissionModal.classList.contains('hidden')) {
+            event.preventDefault();
+            OSA.respondToPermission(false, false);
+            return;
+        }
         const settingsModal = document.getElementById('settings-modal');
         if (settingsModal && !settingsModal.classList.contains('hidden')) {
             OSA.closeSettings();

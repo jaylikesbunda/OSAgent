@@ -2,7 +2,10 @@ use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::coordinator::Coordinator;
 use crate::agent::decision_memory::{DecisionCaptureOutcome, DecisionMemory, DecisionSuggestion};
 use crate::agent::events::{AgentEvent, EventBus, EventTokenUsage, ToolStatus};
-use crate::agent::instruction::{format_system_reminder, workspace_instruction_blocks};
+use crate::agent::instruction::{
+    format_system_reminder, git_workspace_context, global_instruction_blocks,
+    workspace_instruction_blocks,
+};
 use crate::agent::memory::{
     MemoryCategory, MemoryEntry, MemoryStatus, MemoryStore, MemorySuggestion,
 };
@@ -28,17 +31,17 @@ use crate::tools::bash::BashTool;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::guard::ensure_relative_path_not_backups;
 use crate::tools::output::path_touches_tool_outputs;
-use crate::tools::registry::{ToolRegistry, ToolResult};
+use crate::tools::registry::{ToolProfile, ToolRegistry, ToolResult};
 use crate::tools::truncation::{self, TruncationOptions};
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::{future::join_all, StreamExt};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio::sync::{watch, Mutex, Notify};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 const COMPACTION_PROMPT: &str = r#"Provide a continuation summary for the earlier conversation so another pass can continue the work.
@@ -84,6 +87,7 @@ pub struct AgentRuntime {
     event_bus: EventBus,
     session_locks: DashMap<String, Arc<Mutex<()>>>,
     session_cancellation: DashMap<String, Arc<Notify>>,
+    session_cancel_flags: DashMap<String, Arc<std::sync::atomic::AtomicBool>>,
     active_runs: Arc<DashMap<String, ActiveRunInfo>>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     restart_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -198,7 +202,7 @@ fn should_continue_queue_after_run(result: &Result<String>) -> bool {
 }
 
 impl AgentRuntime {
-    async fn active_provider(&self) -> Arc<dyn Provider> {
+    pub async fn active_provider(&self) -> Arc<dyn Provider> {
         self.provider.read().await.clone()
     }
 
@@ -436,15 +440,20 @@ impl AgentRuntime {
         let custom_identity = config.agent.custom_identity.as_deref();
         let custom_priorities = config.agent.custom_priorities.as_deref();
         let use_cache = config.agent.prompt_cache_enabled;
+        let available_tools = tool_registry
+            .get_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect::<Vec<_>>();
         let system_prompt = prompt::build_system_prompt(
-            &config.tools.denied,
+            &available_tools,
             PromptMode::Full,
             custom_identity,
             custom_priorities,
         );
         let prompt_cache = if use_cache {
             prompt::PromptCache::build(
-                &config.tools.denied,
+                &available_tools,
                 PromptMode::Full,
                 custom_identity,
                 custom_priorities,
@@ -491,6 +500,7 @@ impl AgentRuntime {
             event_bus,
             session_locks: DashMap::new(),
             session_cancellation: DashMap::new(),
+            session_cancel_flags: DashMap::new(),
             active_runs: Arc::new(DashMap::new()),
             shutdown_tx: Arc::new(watch::channel(false).0),
             restart_tx: Arc::new(std::sync::Mutex::new(None)),
@@ -564,8 +574,29 @@ impl AgentRuntime {
             .clone()
     }
 
+    fn get_cancel_flag(&self, session_id: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        self.session_cancel_flags
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
+    fn clear_cancel_flag(&self, session_id: &str) {
+        self.session_cancel_flags.remove(session_id);
+    }
+
+    fn is_cancelled(&self, session_id: &str) -> bool {
+        self.session_cancel_flags
+            .get(session_id)
+            .map(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or(false)
+    }
+
     /// Cancel any in-progress operation for a session
     pub fn cancel_session(&self, session_id: &str) {
+        if let Some(flag) = self.session_cancel_flags.get(session_id) {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
         if let Some(notify) = self.session_cancellation.get(session_id) {
             notify.notify_waiters();
             info!("Cancelled in-progress operation for session {}", session_id);
@@ -585,20 +616,19 @@ impl AgentRuntime {
     }
 
     fn try_start_run(&self, session_id: &str, user: &str) -> Result<RunGuard> {
-        let previous = self.active_runs.insert(
+        if self.active_runs.contains_key(session_id) {
+            return Err(OSAgentError::Session(
+                "A run is already in progress for this session".to_string(),
+            ));
+        }
+
+        self.active_runs.insert(
             session_id.to_string(),
             ActiveRunInfo {
                 started_at: SystemTime::now(),
                 user: user.to_string(),
             },
         );
-
-        if previous.is_some() {
-            self.active_runs.remove(session_id);
-            return Err(OSAgentError::Session(
-                "A run is already in progress for this session".to_string(),
-            ));
-        }
 
         Ok(RunGuard {
             session_id: session_id.to_string(),
@@ -637,6 +667,23 @@ impl AgentRuntime {
                     "Background run failed for session {} (user {}): {}",
                     session_id, user, error
                 );
+                let is_cancelled =
+                    matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
+                if is_cancelled {
+                    runtime.event_bus.emit(AgentEvent::Cancelled {
+                        session_id: session_id.clone(),
+                        sequence: 0,
+                        timestamp: SystemTime::now(),
+                    });
+                } else {
+                    runtime.event_bus.emit(AgentEvent::Error {
+                        session_id: session_id.clone(),
+                        sequence: 0,
+                        error: error.to_string(),
+                        recoverable: false,
+                        timestamp: SystemTime::now(),
+                    });
+                }
             }
             drop(run_guard);
         });
@@ -696,6 +743,23 @@ impl AgentRuntime {
                     "Queued run failed for session {} (user {}): {}",
                     session_id, user, error
                 );
+                let is_cancelled =
+                    matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
+                if is_cancelled {
+                    runtime.event_bus.emit(AgentEvent::Cancelled {
+                        session_id: session_id.clone(),
+                        sequence: 0,
+                        timestamp: SystemTime::now(),
+                    });
+                } else {
+                    runtime.event_bus.emit(AgentEvent::Error {
+                        session_id: session_id.clone(),
+                        sequence: 0,
+                        error: error.to_string(),
+                        recoverable: false,
+                        timestamp: SystemTime::now(),
+                    });
+                }
             }
 
             let should_continue = should_continue_queue_after_run(&result);
@@ -754,6 +818,8 @@ impl AgentRuntime {
 
         // Get cancellation notifier for this session
         let cancel_notify = self.get_cancellation_notify(session_id);
+        self.clear_cancel_flag(session_id);
+        let cancel_flag = self.get_cancel_flag(session_id);
 
         let active_run = self
             .active_runs
@@ -885,6 +951,17 @@ impl AgentRuntime {
             .unwrap_or_else(|| runtime_config.get_active_workspace());
 
         let workspace_path = active_workspace.resolved_path();
+        let workspace_root = PathBuf::from(shellexpand::tilde(&workspace_path).to_string());
+        let config_dir = runtime_config.config_dir();
+        let global_instruction_reminder =
+            format_system_reminder(&global_instruction_blocks(&config_dir));
+        let workspace_instruction_reminder =
+            format_system_reminder(&workspace_instruction_blocks(&workspace_root));
+        let git_context = git_workspace_context(&workspace_root).await;
+        let skill_summary_prompt = self.tool_registry.skill_summary_prompt();
+        let context_provider = self.active_provider().await;
+        let context_provider_type = context_provider.provider_type().to_string();
+        let context_model = context_provider.current_model().await;
 
         info!(
             "Resolved workspace for session: {} (path: {})",
@@ -927,6 +1004,18 @@ impl AgentRuntime {
             }
 
             // Check for cancellation at the start of each iteration
+            if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
+                warn!(
+                    "Operation cancelled via flag for session {} at iteration {}",
+                    session_id, iteration
+                );
+                self.event_bus.emit(AgentEvent::Cancelled {
+                    session_id: session_id.to_string(),
+                    sequence: 0,
+                    timestamp: SystemTime::now(),
+                });
+                return Err(OSAgentError::Session("Operation cancelled".to_string()));
+            }
             let cancel_fut = cancel_notify.notified();
             tokio::select! {
                 _ = cancel_fut => {
@@ -949,16 +1038,29 @@ impl AgentRuntime {
                 break;
             }
 
+            let active_persona = Self::active_persona_from_session(&session);
+            let tool_profile = ToolProfile::from_persona_id(
+                active_persona.as_ref().map(|persona| persona.id.as_str()),
+            );
             let tools = self
                 .tool_registry
-                .get_tool_definitions_for_message(&user_message);
+                .get_tool_definitions_for_profile(tool_profile);
             info!(
                 "process_message: Calling provider with {} tools (filtered from {} total)",
                 tools.len(),
                 self.tool_registry.get_tool_definitions().len()
             );
+            debug!(
+                "Selected {:?} profile tools for session {}: {}",
+                tool_profile,
+                session_id,
+                tools
+                    .iter()
+                    .map(|tool| tool.function.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
 
-            let active_persona = Self::active_persona_from_session(&session);
             let is_roleplay = active_persona
                 .as_ref()
                 .map(|p| p.id == "custom")
@@ -1002,15 +1104,49 @@ impl AgentRuntime {
                     active_persona,
                 )));
             }
+            api_messages.push(Message::system(format!(
+                "# Tool Capability Profile\n- Profile: {:?}\n- The provider tool schemas are the authoritative available tools for this turn.",
+                tool_profile
+            )));
 
             if !is_roleplay {
-                let ws_path = std::path::PathBuf::from(
-                    shellexpand::tilde(&active_workspace.resolved_path()).to_string(),
-                );
-                if let Some(reminder) =
-                    format_system_reminder(&workspace_instruction_blocks(&ws_path))
-                {
-                    api_messages.push(Message::system(reminder));
+                let workspace_paths = active_workspace
+                    .paths
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "- {} ({})",
+                            entry.path,
+                            if entry.permission.allows_writes() {
+                                "read-write"
+                            } else {
+                                "read-only"
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                api_messages.push(Message::system(format!(
+                    "# Runtime Environment\n- Model: {} / {}\n- Workspace: {} ({})\n- Working directory: {}\n- Platform: {}\n- This workspace is fixed for the current turn; relative tool paths resolve from its primary path.\n- If an explicit absolute path outside these roots is necessary, request it with the relevant tool; OSA will ask the user for approval.\n# Workspace Roots\n{}",
+                    context_provider_type,
+                    context_model,
+                    active_workspace.name,
+                    active_workspace.id,
+                    workspace_path,
+                    std::env::consts::OS,
+                    workspace_paths
+                )));
+                if let Some(git_context) = git_context.as_ref() {
+                    api_messages.push(Message::system(git_context.clone()));
+                }
+                if let Some(reminder) = global_instruction_reminder.as_ref() {
+                    api_messages.push(Message::system(reminder.clone()));
+                }
+                if let Some(reminder) = workspace_instruction_reminder.as_ref() {
+                    api_messages.push(Message::system(reminder.clone()));
+                }
+                if let Some(skill_summary) = skill_summary_prompt.as_ref() {
+                    api_messages.push(Message::system(skill_summary.clone()));
                 }
             }
 
@@ -1055,11 +1191,15 @@ impl AgentRuntime {
                 let estimated_pre_tokens: usize =
                     api_messages.iter().map(Self::message_tokens).sum();
                 let actual_pre_tokens = Self::session_actual_tokens(&api_messages);
-                let pre_tokens = if actual_pre_tokens > 0 {
+                let tool_schema_tokens = serde_json::to_string(&tools)
+                    .map(|schemas| (schemas.chars().count() + 3) / 4)
+                    .unwrap_or(0);
+                let message_pre_tokens = if actual_pre_tokens > 0 {
                     actual_pre_tokens
                 } else {
                     estimated_pre_tokens
                 };
+                let pre_tokens = message_pre_tokens.saturating_add(tool_schema_tokens);
 
                 let reserved_output = std::cmp::min(output_limit, 8192);
                 let usable = input_limit.unwrap_or(window.saturating_sub(reserved_output));
@@ -1106,12 +1246,19 @@ impl AgentRuntime {
                     }
                 }
 
-                let condensed_messages = Self::condense_messages(&api_messages, usable);
+                let condensed_messages = Self::condense_messages(
+                    &api_messages,
+                    usable.saturating_sub(tool_schema_tokens),
+                );
                 let condensed = condensed_messages.len() != api_messages.len();
                 if condensed {
                     api_messages = condensed_messages;
                 }
-                let post_tokens: usize = api_messages.iter().map(Self::message_tokens).sum();
+                let post_tokens: usize = api_messages
+                    .iter()
+                    .map(Self::message_tokens)
+                    .sum::<usize>()
+                    .saturating_add(tool_schema_tokens);
 
                 let actual_usage = {
                     let mut total_input = 0usize;
@@ -1168,6 +1315,7 @@ impl AgentRuntime {
                     context_window: window,
                     estimated_tokens: if condensed { post_tokens } else { pre_tokens },
                     budget_tokens: budget,
+                    tool_schema_tokens,
                     condensed,
                     actual_usage: actual_usage.clone(),
                     timestamp: SystemTime::now(),
@@ -1529,6 +1677,12 @@ impl AgentRuntime {
 
                 let all_parallel_safe = tool_calls.iter().all(|tc| {
                     self.tool_registry.is_parallel_safe(&tc.name)
+                        && Self::requested_absolute_path(
+                            &tc.name,
+                            &tc.arguments,
+                            Some(Path::new(&workspace_path)),
+                        )
+                        .is_none()
                         && !matches!(
                             tc.name.as_str(),
                             "batch" | "persona" | "question" | "subagent"
@@ -1852,13 +2006,40 @@ impl AgentRuntime {
                             {
                                 tool_args["session_id"] = serde_json::json!(session_id);
                             }
-                            self.tool_registry
-                                .execute_in_workspace_result(
+                            let external_paths = self
+                                .authorize_external_paths(
+                                    session_id,
                                     &tool_call.name,
-                                    tool_args,
-                                    Some(workspace_path.clone()),
+                                    &tool_call.id,
+                                    &tool_args,
+                                    &active_workspace,
                                 )
-                                .await
+                                .await;
+                            match external_paths {
+                                Ok((workspace_additions, resolved_path)) => {
+                                    if let Some(resolved) = resolved_path {
+                                        let path_key = match tool_call.name.as_str() {
+                                            "read_file" => Some("filePath"),
+                                            "write_file" | "edit_file" | "delete_file"
+                                            | "list_files" | "grep" | "glob" => Some("path"),
+                                            "bash" | "process" => Some("workdir"),
+                                            _ => None,
+                                        };
+                                        if let Some(key) = path_key {
+                                            tool_args[key] = serde_json::Value::String(resolved);
+                                        }
+                                    }
+                                    self.tool_registry
+                                        .execute_in_workspace_with_external_result(
+                                            &tool_call.name,
+                                            tool_args,
+                                            Some(workspace_path.clone()),
+                                            &workspace_additions,
+                                        )
+                                        .await
+                                }
+                                Err(error) => Err(error),
+                            }
                         };
 
                         let duration_ms = start.elapsed().as_millis() as u64;
@@ -2437,6 +2618,11 @@ impl AgentRuntime {
         loop {
             let next_event = tokio::select! {
                 _ = cancel_notify.notified() => {
+                    self.event_bus.emit(AgentEvent::Cancelled {
+                        session_id: session_id.to_string(),
+                        sequence: 0,
+                        timestamp: SystemTime::now(),
+                    });
                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
                 }
                 event = stream.next() => event,
@@ -2829,6 +3015,10 @@ impl AgentRuntime {
             shellexpand::tilde(&active_workspace.resolved_path()).to_string(),
         );
         let mut compact_messages = vec![Message::system(COMPACTION_PROMPT.to_string())];
+        let config_dir = self.config.read().await.config_dir();
+        if let Some(reminder) = format_system_reminder(&global_instruction_blocks(&config_dir)) {
+            compact_messages.push(Message::system(reminder));
+        }
         if let Some(reminder) =
             format_system_reminder(&workspace_instruction_blocks(&workspace_path))
         {
@@ -4427,6 +4617,10 @@ impl AgentRuntime {
     }
 
     pub async fn replace_config(&self, mut config: Config) {
+        {
+            let existing = self.config.read().await;
+            config.inherit_config_path(&existing);
+        }
         config.ensure_workspace_defaults();
         {
             let mut agent_settings = self.agent_settings.write().await;
@@ -4538,6 +4732,12 @@ impl AgentRuntime {
             "set_session_workspace: Setting workspace {} for session {}",
             workspace_id, session_id
         );
+
+        if self.active_runs.contains_key(session_id) {
+            return Err(OSAgentError::Session(
+                "Cannot switch workspace while this session is running. Stop it or wait for the current turn to finish.".to_string(),
+            ));
+        }
 
         let workspace = {
             let cfg = self.config.read().await;
@@ -4726,6 +4926,150 @@ impl AgentRuntime {
         self.decision_memory
             .reject_suggestion(id, actor, note)
             .await
+    }
+
+    fn requested_absolute_path(
+        tool_name: &str,
+        args: &serde_json::Value,
+        workspace_root: Option<&Path>,
+    ) -> Option<String> {
+        let key = match tool_name {
+            "read_file" => args
+                .get("filePath")
+                .and_then(|value| value.as_str())
+                .or_else(|| args.get("path").and_then(|value| value.as_str())),
+            "write_file" | "edit_file" | "delete_file" | "list_files" | "grep" | "glob" => {
+                args.get("path").and_then(|value| value.as_str())
+            }
+            "bash" | "process" => args.get("workdir").and_then(|value| value.as_str()),
+            _ => None,
+        }?;
+
+        let expanded = shellexpand::tilde(key).to_string();
+        if Path::new(&expanded).is_absolute() {
+            return Some(expanded);
+        }
+
+        if let Some(root) = workspace_root {
+            if expanded.contains("..") {
+                let resolved = root.join(&expanded);
+                let canonical = resolved.canonicalize().unwrap_or(resolved);
+                if canonical.is_absolute() {
+                    return Some(canonical.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    fn path_is_inside_workspace(path: &Path, workspace: &WorkspaceConfig) -> bool {
+        workspace.paths.iter().any(|entry| {
+            let root = PathBuf::from(shellexpand::tilde(&entry.path).to_string());
+            match (path.canonicalize(), root.canonicalize()) {
+                (Ok(path), Ok(root)) => path.starts_with(root),
+                _ => path.starts_with(root),
+            }
+        })
+    }
+
+    fn external_execution_root(tool_name: &str, path: &str) -> String {
+        let path = Path::new(path);
+        if matches!(
+            tool_name,
+            "list_files" | "grep" | "glob" | "bash" | "process"
+        ) || path.is_dir()
+        {
+            return path.to_string_lossy().to_string();
+        }
+        path.parent().unwrap_or(path).to_string_lossy().to_string()
+    }
+
+    async fn authorize_external_paths(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        tool_call_id: &str,
+        args: &serde_json::Value,
+        workspace: &WorkspaceConfig,
+    ) -> Result<(Vec<String>, Option<String>)> {
+        let workspace_root =
+            PathBuf::from(shellexpand::tilde(&workspace.resolved_path()).to_string());
+        let Some(path) = Self::requested_absolute_path(tool_name, args, Some(&workspace_root))
+        else {
+            return Ok((Vec::new(), None));
+        };
+        if Self::path_is_inside_workspace(Path::new(&path), workspace) {
+            return Ok((Vec::new(), None));
+        }
+        let execution_root = Self::external_execution_root(tool_name, &path);
+        if self.external_manager.has_granted_permission(&path).await {
+            return Ok((vec![execution_root], Some(path)));
+        }
+
+        let action = self
+            .external_manager
+            .evaluate(&path, &workspace.resolved_path());
+        match action {
+            PermissionAction::Allow => return Ok((vec![execution_root], Some(path))),
+            PermissionAction::Deny => {
+                return Err(OSAgentError::ToolExecution(format!(
+                    "Access to external path '{}' is denied by policy",
+                    path
+                )))
+            }
+            PermissionAction::Ask => {}
+        }
+
+        let path_type = if matches!(tool_name, "write_file" | "edit_file" | "delete_file") {
+            "write"
+        } else if matches!(tool_name, "bash" | "process") {
+            "execute"
+        } else {
+            "read"
+        };
+        let parent_pattern = Path::new(&path)
+            .parent()
+            .map(|parent| format!("{}{}**", parent.display(), std::path::MAIN_SEPARATOR))
+            .unwrap_or_else(|| path.clone());
+        let (prompt, response) = self
+            .external_manager
+            .create_waiting_prompt(
+                session_id.to_string(),
+                format!("{}:{}", tool_name, tool_call_id),
+                path.clone(),
+                path_type.to_string(),
+                vec![parent_pattern],
+            )
+            .await;
+
+        let timeout =
+            std::time::Duration::from_secs(self.external_manager.prompt_timeout_seconds().max(1));
+        let cancel_notify = self.get_cancellation_notify(session_id);
+        let response = tokio::select! {
+            response = tokio::time::timeout(timeout, response) => response,
+            _ = cancel_notify.notified() => {
+                self.external_manager.expire_prompt(&prompt.id).await;
+                return Err(OSAgentError::Session("Operation cancelled".to_string()));
+            }
+        };
+        match response {
+            Ok(Ok(true)) => Ok((vec![execution_root], Some(path))),
+            Ok(Ok(false)) => Err(OSAgentError::ToolExecution(format!(
+                "User denied access to external path '{}'",
+                path
+            ))),
+            Ok(Err(_)) => Err(OSAgentError::ToolExecution(
+                "External path permission request was cancelled".to_string(),
+            )),
+            Err(_) => {
+                self.external_manager.expire_prompt(&prompt.id).await;
+                Err(OSAgentError::ToolExecution(format!(
+                    "Permission request for '{}' timed out",
+                    path
+                )))
+            }
+        }
     }
 
     pub async fn check_external_directory_permission(&self, path: &str) -> PermissionAction {

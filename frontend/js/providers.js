@@ -12,8 +12,12 @@ OSA.expandedModels = {};
 OSA.modalModelDropdownOpen = false;
 OSA.modalModelSearchQuery = '';
 OSA.modalProviderModels = [];
+OSA.modalModelSearchDebounce = null;
 OSA.ollamaModelDebounce = null;
 OSA.providerCatalogPromise = null;
+OSA.modelPickerActiveIndex = -1;
+OSA.modelSearchRequestId = 0;
+OSA.modelOptionDelegationReady = false;
 
 // ── Favourite Models ─────────────────────────────────────────
 
@@ -63,22 +67,29 @@ OSA.buildModelOptionHtml = function(m, providerId, currentModel, opts) {
     const safePid = OSA.escapeHtml(pid);
     const safeName = OSA.escapeHtml(m.name);
     const safeProvName = OSA.escapeHtml(m.provider_name || '');
-
-    const selectClick = (opts && opts.inSettings)
-        ? 'OSA.selectModel(\'' + safeId + '\', \'' + safePid + '\'); OSA.closeSettings();'
-        : 'OSA.selectModel(\'' + safeId + '\', \'' + safePid + '\')';
+    const attr = function(value) {
+        return String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    };
 
     const providerTag = (opts && opts.showProvider && (m.provider_name || ''))
         ? '<span class="model-option-provider-tag">' + safeProvName + '</span>'
         : '';
 
-    const favBtn = '<span class="model-fav-btn' + (isFav ? ' is-fav' : '') + '" ' +
+    const favBtn = '<button type="button" class="model-fav-btn' + (isFav ? ' is-fav' : '') + '" ' +
         'title="' + (isFav ? 'Remove from favourites' : 'Add to favourites') + '" ' +
-        'onclick="event.stopPropagation(); OSA.toggleFavourite(\'' + safeId + '\', \'' + safePid + '\', \'' + safeName + '\', \'' + safeProvName + '\')">' +
+        'data-model-action="favourite">' +
         (isFav ? '★' : '☆') +
-        '</span>';
+        '</button>';
 
-    return '<div class="model-option' + (isCurrent ? ' active' : '') + '" onclick="' + selectClick + '">' +
+    return '<div class="model-option' + (isCurrent ? ' active' : '') + '" role="option" tabindex="-1" ' +
+        'aria-selected="' + (isCurrent ? 'true' : 'false') + '" ' +
+        'data-model-id="' + attr(m.id) + '" data-provider-id="' + attr(pid) + '" ' +
+        'data-model-name="' + attr(m.name) + '" data-provider-name="' + attr(m.provider_name || '') + '" ' +
+        'data-close-settings="' + ((opts && opts.inSettings) ? 'true' : 'false') + '">' +
         '<div class="model-option-info">' +
             '<span class="model-option-name">' + safeName + '</span>' +
             '<span class="model-option-id"' + cat + '>' + safeId + '</span>' +
@@ -105,6 +116,9 @@ OSA.loadProviderCatalog = async function(force = false) {
     OSA.providerCatalogPromise = OSA.getJson('/api/providers/catalog')
         .then(function(data) {
             OSA.providerCatalog = data || { providers: [], all_models: [] };
+            if (OSA.currentModelId) {
+                OSA.setModelTrigger(OSA.currentModelProviderId || '', OSA.currentModelId);
+            }
             return OSA.providerCatalog;
         })
         .catch(function(error) {
@@ -142,35 +156,93 @@ OSA.icons = {
 
 // ── Header Model Dropdown ───────────────────────────────────
 
-OSA.toggleModelDropdown = function() {
-    OSA.modelDropdownOpen = !OSA.modelDropdownOpen;
+OSA.setModelTrigger = function(providerId, modelId) {
+    const trigger = document.getElementById('model-input');
+    const label = document.getElementById('model-input-label');
+    if (!trigger || !label) return;
+    const provider = (OSA.providerCatalog.providers || []).find(function(item) { return item.id === providerId; });
+    const text = provider ? provider.name + ' · ' + (modelId || '') : (modelId || 'Select model');
+    label.textContent = text;
+    trigger.dataset.modelId = modelId || '';
+    trigger.dataset.providerId = providerId || '';
+    trigger.title = provider ? provider.name + ' / ' + (modelId || '') : (modelId || 'Browse models');
+};
+
+OSA.positionModelDropdown = function() {
     const dropdown = document.getElementById('model-dropdown');
-    if (dropdown) {
-        dropdown.classList.toggle('hidden', !OSA.modelDropdownOpen);
-        if (OSA.modelDropdownOpen) {
-            const searchInput = document.getElementById('model-search');
-            if (searchInput) {
-                searchInput.value = '';
-                OSA.modelSearchQuery = '';
-                searchInput.focus();
-            }
-            const list = dropdown.querySelector('.model-dropdown-list');
-            if (list) {
-                list.innerHTML = '<div class="model-empty">Loading models...</div>';
-            }
-            requestAnimationFrame(function() {
-                if (OSA.modelDropdownOpen) {
-                    OSA.renderModelDropdown();
-                }
-            });
-        }
+    const trigger = document.getElementById('model-input');
+    if (!dropdown || !trigger || !OSA.modelDropdownOpen) return;
+
+    const margin = 8;
+    const gap = 6;
+    const triggerRect = trigger.getBoundingClientRect();
+    const width = Math.min(380, window.innerWidth - margin * 2);
+    const availableBelow = window.innerHeight - triggerRect.bottom - gap - margin;
+    const availableAbove = triggerRect.top - gap - margin;
+    const openBelow = availableBelow >= 240 || availableBelow >= availableAbove;
+    const availableHeight = Math.max(180, openBelow ? availableBelow : availableAbove);
+    const left = Math.min(
+        Math.max(margin, triggerRect.right - width),
+        Math.max(margin, window.innerWidth - width - margin)
+    );
+
+    dropdown.style.width = width + 'px';
+    dropdown.style.left = left + 'px';
+    dropdown.style.right = 'auto';
+    dropdown.style.maxHeight = Math.min(520, availableHeight) + 'px';
+    if (openBelow) {
+        dropdown.style.top = (triggerRect.bottom + gap) + 'px';
+        dropdown.style.bottom = 'auto';
+    } else {
+        dropdown.style.top = 'auto';
+        dropdown.style.bottom = (window.innerHeight - triggerRect.top + gap) + 'px';
     }
 };
 
-OSA.closeModelDropdown = function() {
-    OSA.modelDropdownOpen = false;
+OSA.openModelDropdown = function(initialQuery) {
     const dropdown = document.getElementById('model-dropdown');
+    const trigger = document.getElementById('model-input');
+    if (!dropdown || !trigger) return;
+    OSA.ensureModelOptionDelegation();
+    if (dropdown.parentElement !== document.body) document.body.appendChild(dropdown);
+    OSA.modelDropdownOpen = true;
+    OSA.modelPickerActiveIndex = -1;
+    trigger.setAttribute('aria-expanded', 'true');
+    dropdown.classList.remove('hidden');
+    OSA.positionModelDropdown();
+    window.addEventListener('resize', OSA.positionModelDropdown);
+    window.addEventListener('scroll', OSA.positionModelDropdown, true);
+
+    const searchInput = document.getElementById('model-search');
+    if (searchInput) {
+        searchInput.value = initialQuery || '';
+        OSA.modelSearchQuery = initialQuery || '';
+        searchInput.focus();
+    }
+    const list = dropdown.querySelector('.model-dropdown-list');
+    if (list) list.innerHTML = '<div class="model-empty">Loading models...</div>';
+    OSA.renderModelDropdown();
+};
+
+OSA.toggleModelDropdown = function() {
+    if (OSA.modelDropdownOpen) {
+        OSA.closeModelDropdown();
+    } else {
+        OSA.openModelDropdown('');
+    }
+};
+
+OSA.closeModelDropdown = function(restoreFocus = true) {
+    OSA.modelDropdownOpen = false;
+    OSA.modelSearchRequestId += 1;
+    if (OSA.modelSearchDebounce) clearTimeout(OSA.modelSearchDebounce);
+    const dropdown = document.getElementById('model-dropdown');
+    const trigger = document.getElementById('model-input');
     if (dropdown) dropdown.classList.add('hidden');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    window.removeEventListener('resize', OSA.positionModelDropdown);
+    window.removeEventListener('scroll', OSA.positionModelDropdown, true);
+    if (restoreFocus && trigger) trigger.focus();
 };
 
 // Global aliases for inline onclick handlers in HTML
@@ -184,25 +256,66 @@ OSA.handleModelInputKeydown = function(event) {
     const key = event.key || '';
     if (key === 'ArrowDown' || key === 'Enter' || key === ' ') {
         event.preventDefault();
-        if (!OSA.modelDropdownOpen) {
-            OSA.toggleModelDropdown();
-        }
+        if (!OSA.modelDropdownOpen) OSA.openModelDropdown('');
         return;
     }
 
     if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
         event.preventDefault();
-        if (!OSA.modelDropdownOpen) {
-            OSA.toggleModelDropdown();
-        }
-        const searchInput = document.getElementById('model-search');
-        if (searchInput) {
-            searchInput.value = key;
-            OSA.modelSearchQuery = key;
-            searchInput.focus();
-            OSA.renderModelDropdown();
-        }
+        OSA.openModelDropdown(key);
     }
+};
+
+OSA.ensureModelOptionDelegation = function() {
+    if (OSA.modelOptionDelegationReady) return;
+    OSA.modelOptionDelegationReady = true;
+    document.addEventListener('click', function(event) {
+        const option = event.target.closest('.model-option[data-model-id]');
+        if (!option) return;
+        const modelId = option.dataset.modelId || '';
+        const providerId = option.dataset.providerId || '';
+        if (event.target.closest('[data-model-action="favourite"]')) {
+            event.preventDefault();
+            event.stopPropagation();
+            OSA.toggleFavourite(
+                modelId,
+                providerId,
+                option.dataset.modelName || modelId,
+                option.dataset.providerName || ''
+            );
+            return;
+        }
+        OSA.selectModel(modelId, providerId);
+        if (option.dataset.closeSettings === 'true') OSA.closeSettings();
+    });
+};
+OSA.ensureModelOptionDelegation();
+
+OSA.setActiveModelOption = function(index) {
+    const dropdown = document.getElementById('model-dropdown');
+    if (!dropdown) return;
+    const options = Array.from(dropdown.querySelectorAll('.model-option[data-model-id]'));
+    if (!options.length) {
+        OSA.modelPickerActiveIndex = -1;
+        return;
+    }
+    const nextIndex = Math.max(0, Math.min(index, options.length - 1));
+    OSA.modelPickerActiveIndex = nextIndex;
+    options.forEach(function(option, optionIndex) {
+        option.classList.toggle('keyboard-active', optionIndex === nextIndex);
+    });
+    options[nextIndex].scrollIntoView({ block: 'nearest' });
+};
+
+OSA.afterModelDropdownRender = function() {
+    if (!OSA.modelDropdownOpen) return;
+    const dropdown = document.getElementById('model-dropdown');
+    if (!dropdown) return;
+    const options = Array.from(dropdown.querySelectorAll('.model-option[data-model-id]'));
+    OSA.modelPickerActiveIndex = options.findIndex(function(option) {
+        return option.classList.contains('active');
+    });
+    OSA.positionModelDropdown();
 };
 
 OSA.renderModelDropdown = async function() {
@@ -210,13 +323,16 @@ OSA.renderModelDropdown = async function() {
     if (!dropdown) return;
 
     const query = OSA.modelSearchQuery.trim();
-    const currentModel = (OSA.currentModelId || document.getElementById('model-input')?.value || '').toLowerCase();
+    const requestId = ++OSA.modelSearchRequestId;
+    const currentModel = (OSA.currentModelId || document.getElementById('model-input')?.dataset.modelId || '').toLowerCase();
 
     if (query.length >= 1) {
         try {
             const models = await OSA.getJson(`/api/providers/search?q=${encodeURIComponent(query)}`);
+            if (!OSA.modelDropdownOpen || requestId !== OSA.modelSearchRequestId || query !== OSA.modelSearchQuery.trim()) return;
             OSA.renderModelSearchResults(models, currentModel);
         } catch (e) {
+            if (!OSA.modelDropdownOpen || requestId !== OSA.modelSearchRequestId) return;
             dropdown.querySelector('.model-dropdown-list').innerHTML = '<div class="model-empty">Search failed</div>';
         }
         return;
@@ -228,6 +344,7 @@ OSA.renderModelDropdown = async function() {
             list.innerHTML = '<div class="model-empty">Loading models...</div>';
         }
         await OSA.loadProviderCatalog();
+        if (!OSA.modelDropdownOpen || requestId !== OSA.modelSearchRequestId) return;
     }
 
     const { providers, all_models } = OSA.providerCatalog;
@@ -327,6 +444,7 @@ OSA.renderModelDropdown = async function() {
 
     if (!html) html = '<div class="model-empty">No models available</div>';
     dropdown.querySelector('.model-dropdown-list').innerHTML = html;
+    OSA.afterModelDropdownRender();
 };
 
 OSA.renderModelSearchResults = function(models, currentModel) {
@@ -335,6 +453,7 @@ OSA.renderModelSearchResults = function(models, currentModel) {
 
     if (!models || models.length === 0) {
         dropdown.querySelector('.model-dropdown-list').innerHTML = '<div class="model-empty">No models found</div>';
+        OSA.afterModelDropdownRender();
         return;
     }
 
@@ -364,6 +483,7 @@ OSA.renderModelSearchResults = function(models, currentModel) {
     }
 
     dropdown.querySelector('.model-dropdown-list').innerHTML = html;
+    OSA.afterModelDropdownRender();
 };
 
 OSA.selectModel = async function(modelId, providerId) {
@@ -384,14 +504,11 @@ OSA.selectModel = async function(modelId, providerId) {
         return;
     }
 
+    const previousModelId = OSA.currentModelId;
+    const previousProviderId = OSA.currentModelProviderId;
     OSA.currentModelId = modelId;
     OSA.currentModelProviderId = providerId;
-    const input = document.getElementById('model-input');
-    if (input) {
-        const provider = (OSA.providerCatalog.providers || []).find(function(item) { return item.id === providerId; });
-        input.value = provider ? provider.name + ' · ' + modelId : modelId;
-        input.title = provider ? provider.name + ' / ' + modelId : modelId;
-    }
+    OSA.setModelTrigger(providerId, modelId);
     OSA.closeModelDropdown();
 
     try {
@@ -410,6 +527,9 @@ OSA.selectModel = async function(modelId, providerId) {
             OSA.refreshThinkingOptions(providerId, modelId, selected);
         }
     } catch (error) {
+        OSA.currentModelId = previousModelId;
+        OSA.currentModelProviderId = previousProviderId;
+        OSA.setModelTrigger(previousProviderId, previousModelId);
         console.error('Failed to switch model:', error);
         alert(error.message || 'Failed to switch model');
     }
@@ -420,11 +540,44 @@ OSA.modelSearchDebounce = null;
 OSA.handleModelSearch = function(event) {
     OSA.modelSearchQuery = event.target.value;
     if (OSA.modelSearchDebounce) clearTimeout(OSA.modelSearchDebounce);
-    OSA.modelSearchDebounce = setTimeout(() => OSA.renderModelDropdown(), 200);
+    OSA.modelSearchDebounce = setTimeout(() => OSA.renderModelDropdown(), 150);
 };
 
 OSA.handleModelDropdownKeydown = function(event) {
-    if (event.key === 'Escape') { OSA.closeModelDropdown(); event.stopPropagation(); }
+    const dropdown = document.getElementById('model-dropdown');
+    const options = dropdown
+        ? Array.from(dropdown.querySelectorAll('.model-option[data-model-id]'))
+        : [];
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        OSA.closeModelDropdown();
+        return;
+    }
+    if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        OSA.setActiveModelOption(OSA.modelPickerActiveIndex + 1);
+        return;
+    }
+    if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        OSA.setActiveModelOption(OSA.modelPickerActiveIndex < 0 ? options.length - 1 : OSA.modelPickerActiveIndex - 1);
+        return;
+    }
+    if (event.key === 'Home' && options.length) {
+        event.preventDefault();
+        OSA.setActiveModelOption(0);
+        return;
+    }
+    if (event.key === 'End' && options.length) {
+        event.preventDefault();
+        OSA.setActiveModelOption(options.length - 1);
+        return;
+    }
+    if (event.key === 'Enter' && OSA.modelPickerActiveIndex >= 0 && options[OSA.modelPickerActiveIndex]) {
+        event.preventDefault();
+        options[OSA.modelPickerActiveIndex].click();
+    }
 };
 
 // ── Modal Model Dropdown ────────────────────────────────────
@@ -449,8 +602,8 @@ OSA.closeModalModelDropdown = function() {
 
 OSA.handleModalModelSearch = function(event) {
     OSA.modalModelSearchQuery = event.target.value;
-    if (OSA.modelSearchDebounce) clearTimeout(OSA.modelSearchDebounce);
-    OSA.modelSearchDebounce = setTimeout(() => OSA.renderModalModelDropdown(), 200);
+    if (OSA.modalModelSearchDebounce) clearTimeout(OSA.modalModelSearchDebounce);
+    OSA.modalModelSearchDebounce = setTimeout(() => OSA.renderModalModelDropdown(), 150);
 };
 
 OSA.handleModalDropdownKeydown = function(event) {
@@ -632,7 +785,7 @@ OSA.renderSettingsModelList = function(query) {
         return a.name.localeCompare(b.name);
     });
 
-    const currentModel = (document.getElementById('model-input')?.value || '').toLowerCase();
+    const currentModel = (OSA.currentModelId || document.getElementById('model-input')?.dataset.modelId || '').toLowerCase();
     let html = '';
 
     for (const provider of sortedProviders) {
@@ -1375,7 +1528,7 @@ OSA.closeAddProviderModal = function() {
 
 document.addEventListener('click', function(event) {
     if (OSA.modelDropdownOpen && !event.target.closest('#model-dropdown') && !event.target.closest('.model-selector')) {
-        OSA.closeModelDropdown();
+        OSA.closeModelDropdown(false);
     }
     if (OSA.modalModelDropdownOpen && !event.target.closest('#modal-model-select-wrapper')) {
         OSA.closeModalModelDropdown();

@@ -1,0 +1,151 @@
+.permission-modal {
+    position: relative;
+    z-index: 40;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    padding: 0;
+    margin-bottom: 10px;
+    background: transparent;
+    pointer-events: none;
+    width: 100%;
+    max-width: 1120px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.permission-modal.hidden { display: none; }
+
+.permission-dock {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 14px 18px;
+    background: var(--bg-secondary, #1e1e24);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    pointer-events: auto;
+    animation: permDockIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes permDockIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.permission-dock-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: var(--bg-tertiary, #2a2a32);
+    color: var(--text-muted);
+}
+
+.permission-dock-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.permission-dock-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 3px;
+}
+
+.permission-dock-detail {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.permission-dock-sep { opacity: 0.4; }
+.permission-dock-op { text-transform: capitalize; }
+
+.permission-dock-path {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 400px;
+}
+
+.permission-dock-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.perm-btn {
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    white-space: nowrap;
+    color: var(--text-primary);
+    background: var(--bg-tertiary, #2a2a32);
+}
+
+.perm-btn:hover {
+    background: var(--bg-hover, #35353e);
+    border-color: var(--border-hover);
+}
+
+.perm-btn:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+.perm-deny {
+    color: var(--text-muted);
+}
+
+.perm-once {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.perm-always {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.perm-always:hover {
+    opacity: 0.9;
+}
+
+.perm-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+@media (max-width: 600px) {
+    .permission-dock {
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .permission-dock-path {
+        max-width: 100%;
+    }
+
+    .permission-dock-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+}

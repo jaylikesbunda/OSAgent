@@ -4,7 +4,7 @@ use crate::agent::events::EventBus;
 use crate::agent::memory::MemoryStore;
 use crate::agent::provider::ToolDefinition;
 use crate::agent::subagent_manager::SubagentManager;
-use crate::config::Config;
+use crate::config::{Config, WorkspacePath, WorkspacePermission};
 use crate::error::{OSAgentError, Result};
 use crate::indexer::CodeIndexer;
 use crate::skills::SkillLoader;
@@ -33,6 +33,70 @@ pub struct ToolResult {
     pub title: Option<String>,
     #[serde(default = "default_tool_result_metadata")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProfile {
+    Default,
+    Code,
+    Plan,
+    Creative,
+    Custom,
+}
+
+impl ToolProfile {
+    pub fn from_persona_id(persona_id: Option<&str>) -> Self {
+        match persona_id.unwrap_or("default") {
+            "code" => Self::Code,
+            "plan" => Self::Plan,
+            "creative" => Self::Creative,
+            "custom" => Self::Custom,
+            _ => Self::Default,
+        }
+    }
+
+    fn allows(self, tool_name: &str) -> bool {
+        match self {
+            Self::Default => true,
+            Self::Code => !matches!(tool_name, "calendar" | "weather" | "news"),
+            Self::Plan => matches!(
+                tool_name,
+                "read_file"
+                    | "list_files"
+                    | "grep"
+                    | "glob"
+                    | "web_fetch"
+                    | "web_search"
+                    | "question"
+                    | "skill"
+                    | "skill_list"
+                    | "lsp"
+                    | "codesearch"
+                    | "task"
+                    | "todowrite"
+                    | "todoread"
+                    | "subagent"
+                    | "system_status"
+                    | "plan_exit"
+                    | "persona"
+            ),
+            Self::Creative => !matches!(
+                tool_name,
+                "bash"
+                    | "code_bash"
+                    | "delete_file"
+                    | "process"
+                    | "coordinator"
+                    | "calendar"
+                    | "weather"
+                    | "news"
+            ),
+            Self::Custom => matches!(
+                tool_name,
+                "web_fetch" | "web_search" | "question" | "skill" | "skill_list" | "persona"
+            ),
+        }
+    }
 }
 
 fn default_tool_result_metadata() -> Value {
@@ -532,7 +596,7 @@ impl ToolRegistry {
             }
         }
 
-        let definitions: Vec<ToolDefinition> = self
+        let mut definitions: Vec<ToolDefinition> = self
             .tools
             .values()
             .filter(|tool| self.allowed.is_empty() || !self.allowed.contains(tool.name()))
@@ -545,19 +609,62 @@ impl ToolRegistry {
                 },
             })
             .collect();
+        definitions.sort_by(|left, right| left.function.name.cmp(&right.function.name));
 
         let mut cache = self.cached_tool_definitions.write().unwrap();
         *cache = Some(definitions.clone());
         definitions
     }
 
+    pub fn skill_summary_prompt(&self) -> Option<String> {
+        let loader = self.skill_loader.as_ref()?;
+        let mut skills = loader.list();
+        skills.sort_by(|left, right| left.name.cmp(&right.name));
+        if skills.is_empty() {
+            return None;
+        }
+        let lines = skills
+            .into_iter()
+            .take(30)
+            .map(|skill| {
+                let normalized = skill
+                    .description
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let description = normalized.chars().take(240).collect::<String>();
+                format!("- {}: {}", skill.name, description)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(format!(
+            "# Available Skills\nUse the skill tool when one of these specialized workflows clearly matches the task.\n{}",
+            lines
+        ))
+    }
+
     pub fn get_tool_definitions_for_message(&self, user_message: &str) -> Vec<ToolDefinition> {
-        let all_tools = self.get_tool_definitions();
+        Self::filter_tool_definitions(self.get_tool_definitions(), user_message)
+    }
+
+    pub fn get_tool_definitions_for_profile(&self, profile: ToolProfile) -> Vec<ToolDefinition> {
+        self.get_tool_definitions()
+            .into_iter()
+            .filter(|tool| profile.allows(&tool.function.name))
+            .collect()
+    }
+
+    fn filter_tool_definitions(
+        all_tools: Vec<ToolDefinition>,
+        user_message: &str,
+    ) -> Vec<ToolDefinition> {
         if all_tools.len() <= 15 {
             return all_tools;
         }
 
         let message_lower = user_message.to_lowercase();
+        let coding_request = Self::is_coding_repository_request(&message_lower);
+        let personal_request = Self::is_personal_assistant_request(&message_lower);
         let mut scored: Vec<(ToolDefinition, usize)> = all_tools
             .into_iter()
             .map(|tool| {
@@ -570,39 +677,170 @@ impl ToolRegistry {
             })
             .collect();
 
-        scored.sort_by_key(|b| std::cmp::Reverse(b.1));
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .cmp(&left.1)
+                .then_with(|| left.0.function.name.cmp(&right.0.function.name))
+        });
 
-        let top_count = 12.min(scored.len());
-        let mut result: Vec<ToolDefinition> = Vec::with_capacity(top_count + 5);
-
-        for (tool, _) in scored.iter().take(top_count) {
-            result.push(tool.clone());
-        }
-
-        let essential_tools = [
-            "read_file",
-            "write_file",
-            "edit_file",
-            "bash",
-            "grep",
-            "glob",
-            "todowrite",
-            "subagent",
-            "coordinator",
-        ];
-        let existing_names: Vec<String> = result.iter().map(|t| t.function.name.clone()).collect();
-        for essential in essential_tools.iter() {
-            if !existing_names.contains(&essential.to_string()) {
-                if let Some((tool, _)) = scored.iter().find(|(t, _)| t.function.name == *essential)
+        let limit = if coding_request { 18 } else { 12 };
+        let mut result: Vec<ToolDefinition> = Vec::with_capacity(limit);
+        if coding_request {
+            const CODING_CORE: &[&str] = &[
+                "read_file",
+                "list_files",
+                "grep",
+                "glob",
+                "bash",
+                "write_file",
+                "edit_file",
+                "apply_patch",
+                "question",
+                "todowrite",
+                "subagent",
+            ];
+            for name in CODING_CORE {
+                if let Some((tool, _)) = scored.iter().find(|(tool, _)| tool.function.name == *name)
                 {
-                    if result.len() < 18 {
-                        result.push(tool.clone());
-                    }
+                    result.push(tool.clone());
                 }
             }
         }
 
+        for (tool, score) in &scored {
+            if result.len() >= limit {
+                break;
+            }
+            if (coding_request || personal_request) && *score == 0 {
+                continue;
+            }
+            if !result
+                .iter()
+                .any(|selected| selected.function.name == tool.function.name)
+            {
+                result.push(tool.clone());
+            }
+        }
+
+        if personal_request
+            && !result.iter().any(|tool| tool.function.name == "question")
+            && result.len() < limit
+        {
+            if let Some((question, _)) = scored
+                .iter()
+                .find(|(tool, _)| tool.function.name == "question")
+            {
+                result.push(question.clone());
+            }
+        }
+
         result
+    }
+
+    fn is_coding_repository_request(message: &str) -> bool {
+        let strong_context = [
+            "repository",
+            "repo",
+            "codebase",
+            "code",
+            "source code",
+            "git diff",
+        ];
+        let personal_context = [
+            "weather",
+            "forecast",
+            "calendar",
+            "appointment",
+            "headlines",
+            "latest news",
+        ];
+        if Self::message_has_any(message, &personal_context)
+            && !Self::message_has_any(message, &strong_context)
+        {
+            return false;
+        }
+
+        let coding_context = [
+            "code",
+            "repository",
+            "repo",
+            "source",
+            "file",
+            "function",
+            "class",
+            "symbol",
+            "module",
+            "crate",
+            "package",
+            "test",
+            "compile",
+            "diff",
+            "patch",
+            "bug",
+            "api",
+            "frontend",
+            "backend",
+            "database",
+            "cargo",
+            "npm",
+            "pytest",
+        ];
+        let coding_action = [
+            "inspect",
+            "read",
+            "find",
+            "search",
+            "edit",
+            "change",
+            "implement",
+            "fix",
+            "add",
+            "remove",
+            "refactor",
+            "test",
+            "build",
+            "run",
+            "debug",
+            "review",
+            "trace",
+            "create",
+            "write",
+        ];
+
+        Self::message_has_any(message, &coding_context)
+            && Self::message_has_any(message, &coding_action)
+    }
+
+    fn is_personal_assistant_request(message: &str) -> bool {
+        Self::message_has_any(
+            message,
+            &[
+                "weather",
+                "forecast",
+                "temperature",
+                "calendar",
+                "appointment",
+                "meeting",
+                "headlines",
+                "latest news",
+                "current events",
+            ],
+        )
+    }
+
+    fn message_has_any(message: &str, terms: &[&str]) -> bool {
+        let words = message
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        terms.iter().any(|term| {
+            if term.contains(' ') {
+                message.contains(term)
+            } else {
+                words.iter().any(|word| word == term)
+            }
+        })
     }
 
     fn score_tool_relevance(tool_name: &str, tool_description: &str, message: &str) -> usize {
@@ -797,18 +1035,6 @@ impl ToolRegistry {
             score += 3;
         }
 
-        let high_priority_tools = [
-            "read_file",
-            "write_file",
-            "edit_file",
-            "bash",
-            "grep",
-            "glob",
-        ];
-        if high_priority_tools.contains(&tool_name) {
-            score = score.saturating_add(5);
-        }
-
         score
     }
 
@@ -848,6 +1074,17 @@ impl ToolRegistry {
         args: Value,
         workspace_path: Option<String>,
     ) -> Result<ToolResult> {
+        self.execute_in_workspace_with_external_result(tool_name, args, workspace_path, &[])
+            .await
+    }
+
+    pub async fn execute_in_workspace_with_external_result(
+        &self,
+        tool_name: &str,
+        args: Value,
+        workspace_path: Option<String>,
+        external_paths: &[String],
+    ) -> Result<ToolResult> {
         if !self.is_allowed(tool_name) {
             return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
         }
@@ -858,10 +1095,47 @@ impl ToolRegistry {
                 config.agent.active_workspace = Some(workspace.id.clone());
                 config.agent.workspace = workspace.resolved_path();
             } else {
-                config.agent.active_workspace = Some("default".to_string());
+                let active_id = config
+                    .agent
+                    .active_workspace
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+                if let Some(workspace) = config
+                    .agent
+                    .workspaces
+                    .iter_mut()
+                    .find(|workspace| workspace.id == active_id)
+                {
+                    workspace.paths = vec![WorkspacePath {
+                        path: path.clone(),
+                        permission: WorkspacePermission::ReadWrite,
+                        description: Some("Session workspace".to_string()),
+                    }];
+                    workspace.path = path.clone();
+                }
+                config.agent.active_workspace = Some(active_id);
                 config.agent.workspace = path;
             }
             config.ensure_workspace_defaults();
+            if !external_paths.is_empty() {
+                let active_id = config.agent.active_workspace.clone();
+                if let Some(workspace) = config
+                    .agent
+                    .workspaces
+                    .iter_mut()
+                    .find(|workspace| Some(&workspace.id) == active_id.as_ref())
+                {
+                    for path in external_paths {
+                        if !workspace.paths.iter().any(|entry| entry.path == *path) {
+                            workspace.paths.push(WorkspacePath {
+                                path: path.clone(),
+                                permission: WorkspacePermission::ReadWrite,
+                                description: Some("User-approved external path".to_string()),
+                            });
+                        }
+                    }
+                }
+            }
             if let Some(tool) =
                 Self::build_tool(tool_name, config, self.storage.clone(), &self.file_cache)
             {
@@ -910,5 +1184,106 @@ impl ToolRegistry {
             self.scheduler = Some(scheduler);
             *self.cached_tool_definitions.write().unwrap() = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolProfile;
+    use crate::agent::provider::{ToolDefinition, ToolFunction};
+    use serde_json::json;
+
+    fn definitions() -> Vec<ToolDefinition> {
+        [
+            "read_file",
+            "list_files",
+            "grep",
+            "glob",
+            "bash",
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "question",
+            "todowrite",
+            "subagent",
+            "weather",
+            "calendar",
+            "news",
+            "web_search",
+            "web_fetch",
+            "process",
+            "system_status",
+            "persona",
+            "coordinator",
+        ]
+        .into_iter()
+        .map(|name| ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: name.to_string(),
+                description: format!("{name} tool"),
+                parameters: json!({ "type": "object" }),
+            },
+        })
+        .collect()
+    }
+
+    fn selected_names(profile: ToolProfile) -> Vec<String> {
+        definitions()
+            .into_iter()
+            .filter(|tool| profile.allows(&tool.function.name))
+            .map(|tool| tool.function.name)
+            .collect()
+    }
+
+    #[test]
+    fn default_profile_keeps_every_configured_tool() {
+        assert_eq!(
+            selected_names(ToolProfile::Default).len(),
+            definitions().len()
+        );
+    }
+
+    #[test]
+    fn code_profile_keeps_all_coding_tools() {
+        let selected = selected_names(ToolProfile::Code);
+        let names = selected.iter().map(String::as_str).collect::<Vec<_>>();
+
+        for core in [
+            "read_file",
+            "list_files",
+            "grep",
+            "glob",
+            "bash",
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "question",
+            "todowrite",
+            "subagent",
+        ] {
+            assert!(names.contains(&core), "missing coding tool: {core}");
+        }
+        assert!(!names.contains(&"weather"));
+        assert!(!names.contains(&"calendar"));
+        assert!(!names.contains(&"news"));
+    }
+
+    #[test]
+    fn plan_profile_excludes_mutating_tools() {
+        let names = selected_names(ToolProfile::Plan);
+        assert!(names.iter().any(|name| name == "read_file"));
+        assert!(names.iter().any(|name| name == "subagent"));
+        assert!(!names.iter().any(|name| name == "write_file"));
+        assert!(!names.iter().any(|name| name == "bash"));
+    }
+
+    #[test]
+    fn custom_profile_is_minimal() {
+        let names = selected_names(ToolProfile::Custom);
+        assert!(names.iter().any(|name| name == "question"));
+        assert!(names.iter().any(|name| name == "web_search"));
+        assert!(!names.iter().any(|name| name == "bash"));
+        assert!(!names.iter().any(|name| name == "write_file"));
     }
 }

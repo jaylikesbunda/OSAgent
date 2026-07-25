@@ -1,27 +1,20 @@
 window.OSA = window.OSA || {};
 
 OSA.updateWorkspaceChip = function(workspaceId, workspacePath) {
-    const label = document.getElementById('workspace-trigger-label');
-    const badge = document.getElementById('workspace-trigger-badge');
+    const label = document.getElementById('context-trigger-label');
+    const wsLabel = document.getElementById('ctx-ws-active-label');
     const ws = OSA.getWorkspaceState();
     const workspace = ws.workspaces.find(w => w.id === (workspaceId || 'default'));
     const effectivePath = workspacePath || OSA.primaryWorkspacePath(workspace);
+    const perm = OSA.workspacePaths(workspace)[0]?.permission;
+    const permTag = perm === 'read_only' ? ' [RO]' : perm === 'read_write' ? ' [RW]' : '';
+    const name = (workspace?.name || workspaceId || 'default') + permTag;
     if (label) {
-        label.textContent = workspace?.name || workspaceId || 'default';
+        label.textContent = name;
         label.title = effectivePath || workspace?.name || workspaceId || 'default';
     }
-    if (badge) {
-        const perm = OSA.workspacePaths(workspace)[0]?.permission;
-        if (perm === 'read_only') {
-            badge.textContent = 'ro';
-            badge.className = 'input-tab-badge ro';
-        } else if (perm === 'read_write') {
-            badge.textContent = 'rw';
-            badge.className = 'input-tab-badge rw';
-        } else {
-            badge.textContent = '';
-            badge.className = 'input-tab-badge';
-        }
+    if (wsLabel) {
+        wsLabel.textContent = name;
     }
 };
 
@@ -86,36 +79,31 @@ OSA.positionMenuForTrigger = function(menuEl, triggerEl) {
 };
 
 OSA._repositionOpenMenus = function() {
-    const wsMenu = document.getElementById('workspace-menu');
-    const wsTrigger = document.getElementById('workspace-trigger');
-    if (wsMenu && wsTrigger && !wsMenu.classList.contains('hidden')) {
-        OSA.positionMenuForTrigger(wsMenu, wsTrigger);
-    }
-    const pMenu = document.getElementById('persona-menu');
-    const pTrigger = document.getElementById('persona-trigger');
-    if (pMenu && pTrigger && !pMenu.classList.contains('hidden')) {
-        OSA.positionMenuForTrigger(pMenu, pTrigger);
+    const menu = document.getElementById('context-menu');
+    const trigger = document.getElementById('context-trigger');
+    if (menu && trigger && !menu.classList.contains('hidden')) {
+        OSA.positionMenuForTrigger(menu, trigger);
     }
 };
 
-OSA.toggleWorkspaceMenu = function() {
-    const menu = document.getElementById('workspace-menu');
-    const trigger = document.getElementById('workspace-trigger');
+OSA.toggleContextMenu = function() {
+    const menu = document.getElementById('context-menu');
+    const trigger = document.getElementById('context-trigger');
     if (!menu || !trigger) return;
-    OSA.closePersonaMenu();
     menu.classList.toggle('hidden');
     trigger.classList.toggle('open');
     if (!menu.classList.contains('hidden')) {
         OSA.positionMenuForTrigger(menu, trigger);
-        document.addEventListener('click', OSA._workspaceMenuOutsideClick);
+        document.addEventListener('click', OSA._contextMenuOutsideClick);
     } else {
-        document.removeEventListener('click', OSA._workspaceMenuOutsideClick);
+        document.removeEventListener('click', OSA._contextMenuOutsideClick);
+        OSA.closeWorkspaceEditor();
     }
 };
 
-OSA.closeWorkspaceMenu = function() {
-    const menu = document.getElementById('workspace-menu');
-    const trigger = document.getElementById('workspace-trigger');
+OSA.closeContextMenu = function() {
+    const menu = document.getElementById('context-menu');
+    const trigger = document.getElementById('context-trigger');
     if (menu) {
         menu.classList.add('hidden');
         menu.style.left = '';
@@ -123,55 +111,33 @@ OSA.closeWorkspaceMenu = function() {
         menu.style.bottom = '';
     }
     if (trigger) trigger.classList.remove('open');
-    document.removeEventListener('click', OSA._workspaceMenuOutsideClick);
+    document.removeEventListener('click', OSA._contextMenuOutsideClick);
+    OSA.closeWorkspaceEditor();
 };
 
-OSA.togglePersonaMenu = function() {
-    const menu = document.getElementById('persona-menu');
-    const trigger = document.getElementById('persona-trigger');
-    if (!menu || !trigger) return;
-    OSA.closeWorkspaceMenu();
-    if (!OSA.getAvailablePersonas()?.length) {
+OSA._contextMenuOutsideClick = function(e) {
+    const menu = document.getElementById('context-menu');
+    const trigger = document.getElementById('context-trigger');
+    if (menu && !menu.contains(e.target) && trigger && !trigger.contains(e.target)) {
+        OSA.closeContextMenu();
+    }
+};
+
+OSA.switchContextTab = function(tab) {
+    document.querySelectorAll('.ctx-tab').forEach(function(t) {
+        t.classList.toggle('active', t.dataset.tab === tab);
+    });
+    document.getElementById('ctx-tab-workspace')?.classList.toggle('hidden', tab !== 'workspace');
+    document.getElementById('ctx-tab-persona')?.classList.toggle('hidden', tab !== 'persona');
+    if (tab === 'persona' && !OSA.getAvailablePersonas()?.length) {
         OSA.loadPersonaCatalog();
     }
-    menu.classList.toggle('hidden');
-    trigger.classList.toggle('open');
-    if (!menu.classList.contains('hidden')) {
-        OSA.positionMenuForTrigger(menu, trigger);
-        document.addEventListener('click', OSA._personaMenuOutsideClick);
-    } else {
-        document.removeEventListener('click', OSA._personaMenuOutsideClick);
-    }
 };
 
-OSA.closePersonaMenu = function() {
-    const menu = document.getElementById('persona-menu');
-    const trigger = document.getElementById('persona-trigger');
-    if (menu) menu.classList.add('hidden');
-    if (trigger) trigger.classList.remove('open');
-    if (menu) {
-        menu.style.left = '';
-        menu.style.right = '';
-        menu.style.bottom = '';
-    }
-    document.removeEventListener('click', OSA._personaMenuOutsideClick);
-};
-
-OSA._workspaceMenuOutsideClick = function(e) {
-    const menu = document.getElementById('workspace-menu');
-    const trigger = document.getElementById('workspace-trigger');
-    if (menu && !menu.contains(e.target) && trigger && !trigger.contains(e.target)) {
-        OSA.closeWorkspaceMenu();
-    }
-};
-
-OSA._personaMenuOutsideClick = function(e) {
-    const menu = document.getElementById('persona-menu');
-    const trigger = document.getElementById('persona-trigger');
-    if (menu && !menu.contains(e.target) && trigger && !trigger.contains(e.target)) {
-        OSA.closePersonaMenu();
-    }
-};
+OSA.toggleWorkspaceMenu = OSA.toggleContextMenu;
+OSA.closeWorkspaceMenu = OSA.closeContextMenu;
+OSA.togglePersonaMenu = function() { OSA.toggleContextMenu(); OSA.switchContextTab('persona'); };
+OSA.closePersonaMenu = OSA.closeContextMenu;
 
 OSA.setWorkspaceInlineStatus = function(message, isError = false) {
     const status = document.getElementById('workspace-inline-status');
@@ -232,10 +198,13 @@ OSA.renderWorkspaceMenu = function() {
 };
 
 OSA.selectWorkspaceFromMenu = async function(workspaceId) {
+    const currentSession = OSA.getCurrentSession();
+    if (currentSession?.id && OSA.isAgentProcessing()) {
+        OSA.setWorkspaceInlineStatus('Stop or wait for the current turn before switching workspace.', true);
+        OSA.closeWorkspaceMenu();
+        return;
+    }
     const ws = OSA.getWorkspaceState();
-    ws.activeWorkspace = workspaceId;
-    OSA.setWorkspaceState(ws);
-    OSA.onWorkspaceSelectionChange();
 
     try {
         const res = await OSA.fetchWithAuth('/api/workspaces/active', {
@@ -244,42 +213,48 @@ OSA.selectWorkspaceFromMenu = async function(workspaceId) {
         });
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
-            console.error('Failed to set active workspace:', data.error || `HTTP ${res.status}`);
+            throw new Error(data.error || `HTTP ${res.status}`);
         }
+        if (currentSession?.id) {
+            const sessionWorkspace = await OSA.applySessionWorkspace(workspaceId);
+            if (!sessionWorkspace) return;
+        }
+        ws.activeWorkspace = workspaceId;
+        OSA.setWorkspaceState(ws);
+        OSA.onWorkspaceSelectionChange();
     } catch (error) {
-        console.error('Failed to set active workspace:', error.message);
-    }
-
-    const currentSession = OSA.getCurrentSession();
-    if (currentSession?.id) {
-        OSA.applySessionWorkspace();
+        OSA.setWorkspaceInlineStatus('Failed to switch workspace: ' + error.message, true);
     }
     OSA.closeWorkspaceMenu();
 };
+
+OSA._wsEditorPerm = 'read_write';
 
 OSA.openWorkspaceEditorForEdit = function(workspaceId) {
     const ws = OSA.getWorkspaceState();
     const workspace = ws.workspaces.find(w => w.id === workspaceId);
     if (!workspace) return;
+    const firstPath = (workspace.paths && workspace.paths[0]) || {};
     document.getElementById('workspace-inline-id').value = workspace.id || '';
     document.getElementById('workspace-inline-name').value = workspace.name || '';
-    document.getElementById('workspace-inline-description').value = workspace.description || '';
+    document.getElementById('workspace-inline-path').value = firstPath.path || '';
+    OSA.setWorkspacePerm(firstPath.permission || 'read_write');
     document.getElementById('workspace-inline-id').readOnly = true;
     OSA.setEditingWorkspaceId(workspaceId);
-    OSA.renderWorkspacePathsEditor(OSA.workspacePaths(workspace));
     document.getElementById('workspace-inline-editor').classList.remove('hidden');
-    OSA.setWorkspaceInlineStatus(`Editing ${workspace.name || workspace.id}`);
+    OSA.setWorkspaceInlineStatus('Editing ' + (workspace.name || workspace.id));
 };
 
 OSA.openWorkspaceEditorForCreate = function() {
     document.getElementById('workspace-inline-id').value = '';
     document.getElementById('workspace-inline-name').value = '';
-    document.getElementById('workspace-inline-description').value = '';
+    document.getElementById('workspace-inline-path').value = '';
     document.getElementById('workspace-inline-id').readOnly = false;
+    OSA.setWorkspacePerm('read_write');
     OSA.setEditingWorkspaceId(null);
-    OSA.renderWorkspacePathsEditor([{ path: '', permission: 'read_write' }]);
     document.getElementById('workspace-inline-editor').classList.remove('hidden');
-    OSA.setWorkspaceInlineStatus('Adding a new workspace.');
+    OSA.setWorkspaceInlineStatus('');
+    window.setTimeout(() => document.getElementById('workspace-inline-path')?.focus(), 0);
 };
 
 OSA.closeWorkspaceEditor = function() {
@@ -287,85 +262,21 @@ OSA.closeWorkspaceEditor = function() {
     OSA.setWorkspaceInlineStatus('');
 };
 
-OSA.renderWorkspacePathsEditor = function(paths) {
-    const container = document.getElementById('workspace-paths-container');
-    if (!container) return;
-    
-    if (!paths || paths.length === 0) {
-        paths = [{ path: '', permission: 'read_write' }];
-    }
-    
-    container.innerHTML = paths.map((wp, idx) => `
-        <div class="workspace-path-row" data-index="${idx}">
-            <input type="text" class="workspace-path-input" value="${OSA.escapeHtml(wp.path || '')}" placeholder="Click to browse or type path" data-path-idx="${idx}" />
-            <select class="workspace-path-perm">
-                <option value="read_write" ${wp.permission === 'read_write' ? 'selected' : ''}>Read + write</option>
-                <option value="read_only" ${wp.permission === 'read_only' ? 'selected' : ''}>Read only</option>
-            </select>
-            <button class="workspace-path-remove" type="button" onclick="OSA.removeWorkspacePathRow(${idx})">-</button>
-        </div>
-    `).join('') + `<button class="workspace-path-add" type="button" onclick="OSA.browseWorkspacePath()">+ Add path</button>`;
-    
-    container.dataset.paths = JSON.stringify(paths);
-    
-    container.querySelectorAll('.workspace-path-input').forEach(input => {
-        input.addEventListener('click', function() {
-            if (!this.dataset.browseBound) {
-                this.dataset.browseBound = 'true';
-                OSA.browseWorkspacePathForInput(this);
-            }
-        });
-    });
+OSA.setWorkspacePerm = function(perm) {
+    OSA._wsEditorPerm = perm;
+    const rw = document.getElementById('ws-perm-rw');
+    const ro = document.getElementById('ws-perm-ro');
+    if (rw) rw.classList.toggle('active', perm === 'read_write');
+    if (ro) ro.classList.toggle('active', perm === 'read_only');
 };
 
-OSA.removeWorkspacePathRow = function(index) {
-    const container = document.getElementById('workspace-paths-container');
-    let paths = JSON.parse(container.dataset.paths || '[]');
-    if (paths.length <= 1) {
-        OSA.setWorkspaceInlineStatus('A workspace must have at least one path', true);
-        return;
-    }
-    paths.splice(index, 1);
-    OSA.renderWorkspacePathsEditor(paths);
-};
-
-OSA.browseWorkspacePathForInput = async function(inputEl) {
+OSA.browseWorkspaceSimple = async function() {
     OSA.setWorkspaceInlineStatus('');
     try {
         const res = await OSA.fetchWithAuth('/api/workspaces/browse');
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        
-        inputEl.value = data.path;
-        inputEl.dataset.browseBound = '';
-        
-        const container = document.getElementById('workspace-paths-container');
-        let paths = JSON.parse(container.dataset.paths || '[]');
-        const idx = parseInt(inputEl.dataset.pathIdx);
-        if (!isNaN(idx) && paths[idx]) {
-            paths[idx].path = data.path;
-            container.dataset.paths = JSON.stringify(paths);
-        }
-        
-        OSA.setWorkspaceInlineStatus('Folder selected.');
-    } catch (error) {
-        if (error.message !== 'Folder selection was cancelled') {
-            OSA.setWorkspaceInlineStatus(error.message, true);
-        }
-        inputEl.dataset.browseBound = '';
-    }
-};
-
-OSA.browseWorkspacePath = async function() {
-    OSA.setWorkspaceInlineStatus('');
-    try {
-        const res = await OSA.fetchWithAuth('/api/workspaces/browse');
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        
-        const container = document.getElementById('workspace-paths-container');
-        let paths = JSON.parse(container.dataset.paths || '[]');
-        
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+        document.getElementById('workspace-inline-path').value = data.path;
         const parts = data.path.replace(/\\/g, '/').split('/').filter(Boolean);
         const nameInput = document.getElementById('workspace-inline-name');
         const idInput = document.getElementById('workspace-inline-id');
@@ -374,37 +285,11 @@ OSA.browseWorkspacePath = async function() {
             const slug = (parts[parts.length - 1] || 'workspace').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
             idInput.value = slug || 'workspace';
         }
-        
-        if (paths.some(existing => existing.path === data.path)) {
-            OSA.setWorkspaceInlineStatus('That path is already in this workspace.');
-            return;
-        }
-
-        paths.push({ path: data.path, permission: 'read_write' });
-        OSA.renderWorkspacePathsEditor(paths);
-        OSA.setWorkspaceInlineStatus('Folder selected.');
     } catch (error) {
         if (error.message !== 'Folder selection was cancelled') {
             OSA.setWorkspaceInlineStatus(error.message, true);
         }
     }
-};
-
-OSA.getWorkspacePathsFromEditor = function() {
-    const container = document.getElementById('workspace-paths-container');
-    const rows = container.querySelectorAll('.workspace-path-row');
-    const paths = [];
-    rows.forEach(row => {
-        const pathInput = row.querySelector('.workspace-path-input');
-        const permSelect = row.querySelector('.workspace-path-perm');
-        if (pathInput && pathInput.value.trim()) {
-            paths.push({
-                path: pathInput.value.trim(),
-                permission: permSelect ? permSelect.value : 'read_write'
-            });
-        }
-    });
-    return paths;
 };
 
 OSA.onWorkspaceSelectionChange = function() {
@@ -415,13 +300,13 @@ OSA.onWorkspaceSelectionChange = function() {
     OSA.renderWorkspaceMenu();
 };
 
-OSA.applySessionWorkspace = async function() {
+OSA.applySessionWorkspace = async function(requestedWorkspaceId) {
     const currentSession = OSA.getCurrentSession();
     if (!currentSession || !currentSession.id) {
         alert('Select a session first.');
-        return;
+        return null;
     }
-    const workspaceId = OSA.selectedWorkspaceId();
+    const workspaceId = requestedWorkspaceId || OSA.selectedWorkspaceId();
     try {
         const url = '/api/sessions/' + encodeURIComponent(currentSession.id) + '/workspace';
         const res = await OSA.fetchWithAuth(url, {
@@ -437,56 +322,52 @@ OSA.applySessionWorkspace = async function() {
         OSA.renderWorkspaceMenu();
         var nameOrId = data.name || data.id;
         OSA.setWorkspaceInlineStatus('Using ' + nameOrId + ' for this chat.');
+        return data;
     } catch (error) {
         OSA.setWorkspaceInlineStatus('Failed to set session workspace: ' + error.message, true);
+        return null;
     }
 };
 
 OSA.saveWorkspaceInline = async function() {
-    const id = document.getElementById('workspace-inline-id').value.trim();
-    const name = document.getElementById('workspace-inline-name').value.trim();
-    const description = document.getElementById('workspace-inline-description').value.trim();
-    const paths = OSA.getWorkspacePathsFromEditor();
-    
-    if (!id || !name) {
-        OSA.setWorkspaceInlineStatus('Workspace id and name are required.', true);
+    const path = document.getElementById('workspace-inline-path').value.trim();
+    if (!path) {
+        OSA.setWorkspaceInlineStatus('Pick a folder path.', true);
         return null;
     }
 
-    const dedupedPaths = [];
-    const seen = new Set();
-    paths.forEach(wp => {
-        const normalized = wp.path.trim();
-        if (!normalized || seen.has(normalized)) return;
-        seen.add(normalized);
-        dedupedPaths.push({
-            path: normalized,
-            permission: wp.permission || 'read_write'
-        });
-    });
-
-    
-    if (dedupedPaths.length === 0 || !dedupedPaths[0].path) {
-        OSA.setWorkspaceInlineStatus('At least one workspace path is required.', true);
-        return null;
+    let id = document.getElementById('workspace-inline-id').value.trim();
+    let name = document.getElementById('workspace-inline-name').value.trim();
+    if (!id) {
+        const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
+        id = (parts[parts.length - 1] || 'workspace').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'workspace';
     }
-    
+    if (!name) {
+        const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
+        name = parts[parts.length - 1] || id;
+    }
+
     const ws = OSA.getWorkspaceState();
     const exists = ws.workspaces.some(w => w.id === id);
-    const url = exists ? `/api/workspaces/${encodeURIComponent(id)}` : '/api/workspaces';
-    
+    const url = exists ? '/api/workspaces/' + encodeURIComponent(id) : '/api/workspaces';
+
     try {
         const res = await OSA.fetchWithAuth(url, {
             method: 'POST',
-            body: JSON.stringify({ id, name, paths: dedupedPaths, description: description || null })
+            body: JSON.stringify({
+                id: id,
+                name: name,
+                paths: [{ path: path, permission: OSA._wsEditorPerm || 'read_write' }],
+                description: null
+            })
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
         await OSA.loadWorkspaces();
-        OSA.setWorkspaceInlineStatus(exists ? `Updated ${data.name || data.id}.` : `Added ${data.name || data.id}.`);
+        OSA.setWorkspaceInlineStatus((exists ? 'Updated ' : 'Added ') + (data.name || data.id) + '.');
         return data;
     } catch (error) {
-        OSA.setWorkspaceInlineStatus(`Failed to save workspace: ${error.message}`, true);
+        OSA.setWorkspaceInlineStatus('Failed to save: ' + error.message, true);
         return null;
     }
 };
@@ -678,17 +559,18 @@ window.togglePersonaMenu = OSA.togglePersonaMenu;
 window.closePersonaMenu = OSA.closePersonaMenu;
 window.onWorkspaceSelectionChange = OSA.onWorkspaceSelectionChange;
 window.applySessionWorkspace = OSA.applySessionWorkspace;
-window.browseWorkspacePath = OSA.browseWorkspacePath;
+window.browseWorkspacePath = OSA.browseWorkspaceSimple;
 window.saveWorkspaceInline = OSA.saveWorkspaceInline;
 window.applyInlineWorkspaceToSession = OSA.applyInlineWorkspaceToSession;
 window.closeWorkspaceEditor = OSA.closeWorkspaceEditor;
 window.openWorkspaceEditorForCreate = OSA.openWorkspaceEditorForCreate;
 window.openWorkspaceEditorForEdit = OSA.openWorkspaceEditorForEdit;
-window.resetWorkspaceForm = OSA.resetWorkspaceForm;
 window.setActiveWorkspaceFromSettings = OSA.setActiveWorkspaceFromSettings;
 window.upsertWorkspaceFromForm = OSA.upsertWorkspaceFromForm;
 window.deleteWorkspace = OSA.deleteWorkspace;
 window.editWorkspaceInForm = OSA.editWorkspaceInForm;
+window.toggleContextMenu = OSA.toggleContextMenu;
+window.closeContextMenu = OSA.closeContextMenu;
 
 window.addEventListener('resize', () => {
     OSA.debounce('repositionMenus', OSA._repositionOpenMenus, 100);

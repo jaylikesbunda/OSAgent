@@ -1761,6 +1761,30 @@
     transition: transform 0.2s ease;
 }
 
+/* Modal Model Dropdown - ensure solid background */
+.model-select-wrapper .model-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-height: 360px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 20;
+    background: var(--bg-secondary, #24272d) !important;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-xl);
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+.model-select-wrapper .model-dropdown.hidden {
+    display: none;
+}
+
 /* Provider Checkbox */
 .provider-checkbox {
     display: flex;

@@ -1,4 +1,8 @@
 use crate::agent::events::{AgentEvent, EventBus};
+use crate::agent::instruction::{
+    format_system_reminder, git_workspace_context, global_instruction_blocks,
+    workspace_instruction_blocks,
+};
 use crate::agent::prompt::{self, PromptMode};
 use crate::agent::provider::{OpenAICompatibleProvider, Provider};
 use crate::agent::session::SessionManager;
@@ -212,6 +216,7 @@ impl SubagentManager {
             agent_type.chars().next().unwrap_or('g').to_uppercase()
         );
         subagent_session.metadata["name"] = serde_json::json!(display_name);
+        subagent_session.metadata["workspace_id"] = serde_json::json!(parent_workspace.id.clone());
         let _ = self.storage.update_session(&subagent_session);
 
         let task = SubagentTask {
@@ -422,9 +427,60 @@ impl SubagentManager {
             PromptMode::Minimal
         };
         let system_prompt = prompt::build_system_prompt(&allowed_tools, prompt_mode, None, None);
+        let active_root =
+            PathBuf::from(shellexpand::tilde(&parent_workspace.resolved_path()).to_string());
+        let global_instructions =
+            format_system_reminder(&global_instruction_blocks(&cfg.config_dir()));
+        let workspace_instructions =
+            format_system_reminder(&workspace_instruction_blocks(&active_root));
+        let git_context = git_workspace_context(&active_root).await;
+        let skill_summary = tool_registry.skill_summary_prompt();
+        let provider_type = provider.provider_type().to_string();
+        let model = provider.current_model().await;
+        let workspace_paths = parent_workspace
+            .paths
+            .iter()
+            .map(|entry| {
+                format!(
+                    "- {} ({})",
+                    entry.path,
+                    if entry.permission.allows_writes() {
+                        "read-write"
+                    } else {
+                        "read-only"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let environment_prompt = format!(
+            "# Runtime Environment\n- Model: {} / {}\n- Workspace: {} ({})\n- Working directory: {}\n- Platform: {}\n# Workspace Roots\n{}",
+            provider_type,
+            model,
+            parent_workspace.name,
+            parent_workspace.id,
+            parent_workspace.resolved_path(),
+            std::env::consts::OS,
+            workspace_paths
+        );
 
         if let Ok(Some(mut session)) = storage.get_session(&session_id) {
             session.messages.push(Message::system(system_prompt));
+            session.messages.push(Message::system(environment_prompt));
+            if let Some(git_context) = git_context {
+                session.messages.push(Message::system(git_context));
+            }
+            if let Some(global_instructions) = global_instructions {
+                session.messages.push(Message::system(global_instructions));
+            }
+            if let Some(workspace_instructions) = workspace_instructions {
+                session
+                    .messages
+                    .push(Message::system(workspace_instructions));
+            }
+            if let Some(skill_summary) = skill_summary {
+                session.messages.push(Message::system(skill_summary));
+            }
             session.messages.push(Message::user(prompt));
             let _ = storage.update_session(&session);
         }
@@ -959,6 +1015,7 @@ impl SubagentManager {
                 context_window: window,
                 estimated_tokens,
                 budget_tokens: budget,
+                tool_schema_tokens: 0,
                 condensed: false,
                 actual_usage: None,
                 timestamp: SystemTime::now(),

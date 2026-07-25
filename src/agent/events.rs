@@ -100,6 +100,8 @@ pub enum AgentEvent {
         context_window: usize,
         estimated_tokens: usize,
         budget_tokens: usize,
+        #[serde(default)]
+        tool_schema_tokens: usize,
         condensed: bool,
         #[serde(default)]
         actual_usage: Option<EventTokenUsage>,
@@ -551,6 +553,7 @@ impl AgentEvent {
                 context_window,
                 estimated_tokens,
                 budget_tokens,
+                tool_schema_tokens,
                 condensed,
                 actual_usage,
                 timestamp,
@@ -561,6 +564,7 @@ impl AgentEvent {
                 context_window,
                 estimated_tokens,
                 budget_tokens,
+                tool_schema_tokens,
                 condensed,
                 actual_usage,
                 timestamp,
