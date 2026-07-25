@@ -212,6 +212,36 @@
     color: var(--error);
 }
 
+/* Status markers, not conversation turns: keep them compact and hugging the
+   left edge of the message column instead of spanning its full width. */
+.message.error,
+.message.cancelled {
+    align-items: flex-start;
+    margin-bottom: 12px;
+    padding: 4px 0;
+}
+
+.message.error .message-role,
+.message.cancelled .message-role {
+    font-size: 10px;
+    margin-bottom: 4px;
+}
+
+.message.error .message-content,
+.message.cancelled .message-content {
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--glass-bg);
+}
+
+.message.cancelled .message-role,
+.message.cancelled .message-content {
+    color: var(--text-muted);
+}
+
 .message-content p code {
     background: var(--bg-tertiary);
     padding: 3px 8px;

@@ -147,6 +147,9 @@ lto = "thin"
 codegen-units = 16
 strip = true
 panic = "abort"
+# Release profiles disable incremental by default; this profile exists for
+# iteration, where reusing previous codegen is the whole point.
+incremental = true
 
 [[bench]]
 name = "performance"
