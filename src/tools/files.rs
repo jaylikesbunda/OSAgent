@@ -370,15 +370,15 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file or directory from the workspace with paged output"
+        "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- Paths are relative to the workspace root.\n- By default, returns up to 200 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by pattern.\n- Contents are returned with each line prefixed by its line number.\n- For directories, entries are returned one per line with a trailing / for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- You MUST read a file before editing it with edit_file."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you already have an exact path and need paged file content or directory entries"
+        "Use when you have an exact path and need file content or directory listings. Always read before editing."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for broad content discovery across many files; use glob or grep first"
+        "Do not use for broad content discovery across many files; use glob or grep first. Do not use for file modifications."
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
@@ -571,15 +571,15 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file in the workspace directory"
+        "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use read_file first to read the file's contents. This tool will fail if you did not read the file first.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the user.\n- Creates an automatic backup in .osagent_backups before overwriting."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for creating new files or replacing most of a file with new content"
+        "Use for creating new files or when a full file rewrite is more appropriate than targeted edits."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for small in-place edits; use edit_file or apply_patch instead"
+        "Do not use for partial changes to existing files; use edit_file or apply_patch instead."
     }
 
     fn parameters(&self) -> Value {
@@ -745,15 +745,15 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing text with fuzzy matching (creates automatic backup)"
+        "Performs exact string replacements in files with fuzzy matching fallbacks.\n\nUsage:\n- You MUST use read_file at least once before editing a file. The tool will error if you attempt an edit without reading the file first.\n- When editing text from read_file output, copy the exact text you want to replace, preserving indentation (tabs/spaces).\n- The tool will FAIL if old_text is not found in the file. Read the file first and copy the exact text.\n- The tool will FAIL if old_text is found multiple times. Provide more surrounding context to make the match unique, or use replace_all to change every instance.\n- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.\n- If fuzzy matching is needed, the tool tries these strategies in order: exact, line-trimmed, whitespace-normalized, indentation-flexible, block-anchor, context-aware.\n- Creates an automatic backup in .osagent_backups before modifying."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for small text replacements; supports exact matching and fuzzy fallbacks (line-trimmed, whitespace-normalized, indentation-flexible, block-anchor, context-aware) for robust edits"
+        "Use for targeted inline changes to existing files. For multi-hunk changes across a file, prefer apply_patch."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for multi-hunk edits, large rewrites, or when apply_patch is more appropriate"
+        "Do not use for creating new files (use write_file), full file rewrites (use write_file), or multi-hunk changes (use apply_patch)."
     }
 
     fn parameters(&self) -> Value {
@@ -952,15 +952,15 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "List files and directories in the workspace"
+        "List files and directories in the workspace.\n\nUsage:\n- Returns entries sorted alphabetically.\n- Directories are shown with a trailing /.\n- Skips common noise directories like node_modules, target, .git by default.\n- Use recursive:true to list all files under a directory tree.\n- Use glob for pattern-based file discovery instead."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for quick directory inspection when you need to understand the local file layout"
+        "Use for quick directory inspection when you need to understand the local file layout."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use when you need content search or already know the exact file path"
+        "Do not use when you need content search (use grep) or pattern-based file finding (use glob) or when you already know the exact file path (use read_file)."
     }
 
     fn parameters(&self) -> Value {
@@ -1148,15 +1148,15 @@ impl Tool for DeleteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Delete a file from the workspace (creates backup before deletion)"
+        "Delete a file from the workspace. Irreversible - creates an automatic backup before deletion.\n\nUsage:\n- Only use when a file truly needs removal and the user requested or clearly implied that change.\n- Creates a timestamped backup in .osagent_backups before deleting.\n- The path must be relative to the workspace root.\n- Cannot delete directories; only individual files."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use only when a file truly needs removal and the user requested or clearly implied that change"
+        "Use only when a file must be removed and the user explicitly requested deletion."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for routine edits or when keeping history in-place is safer"
+        "Do not use for routine edits (use edit_file), content replacement (use write_file), or when keeping the file with modifications is safer."
     }
 
     fn parameters(&self) -> Value {

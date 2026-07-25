@@ -367,15 +367,15 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents with regular expressions and optional glob filtering, preferring source/config files over build artifacts. Uses ripgrep when available for significantly faster searches."
+        "Search file contents with regular expressions. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Pattern is a regular expression (e.g. 'fn\\\\s+\\\\w+' to find function definitions).\n- Use file_pattern to filter by file type (e.g. '**/*.rs', '*.{ts,tsx}').\n- Results include file path, line number, and matching line content.\n- Case sensitive by default; set case_sensitive to false for case-insensitive search.\n- Performs exact regex matching - escape special characters if searching for literals.\n- Use this tool to locate code before reading or editing files."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you need to find text or code patterns across files; start with focused paths or file patterns when possible"
+        "Use to find function definitions, error messages, symbol references, or any text pattern across the codebase. Prefer over reading entire files when looking for specific content."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use when you only need file names or a full file read, and avoid broad generated/build trees unless they are specifically relevant"
+        "Do not use when you only need file names (use glob) or when you need the full file content (use read_file)."
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -745,15 +745,15 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by glob pattern using full relative-path matching. Uses ripgrep when available for significantly faster searches."
+        "Find files by name pattern using glob matching. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Use glob patterns like '**/*.rs', 'src/**/*.ts', or '*.{json,yaml}'.\n- Results are sorted by modification time (most recent first).\n- Returns relative paths from the workspace root.\n- Use this to locate files before reading or to understand project structure.\n- If you need to search file contents, use grep instead."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you need file paths that match a naming or directory pattern; start with focused directories when possible"
+        "Use to locate files by name or path pattern. Use before read_file when you don't know the exact path."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use when searching inside file contents, and avoid broad generated/build trees unless they are specifically relevant"
+        "Do not use when searching inside file contents (use grep) or when you already know the exact file path (use read_file)."
     }
 
     fn examples(&self) -> Vec<ToolExample> {

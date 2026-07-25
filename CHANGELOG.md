@@ -36,6 +36,17 @@ v0.2.0 changes:
 * Permission popup now appears above the composer bar instead of at viewport bottom
 * Added self-healing state recovery: syncRunningSessionSnapshot now detects and resets stuck processing state even when the Error event is missed
 * Combined workspace and persona buttons into one context button with tabs to save mobile space
+* Bash tool description now tells the model which shell it's actually running (cmd on Windows, sh elsewhere) so it stops guessing POSIX syntax on Windows and failing commands
+* Fixed bash tool silently mangling quoted paths on Windows: Rust's default arg-quoting re-escaped embedded quotes before handing them to `cmd /C`, which cmd parses differently, so a quoted path (e.g. `dir "C:\Users\name\Documents"`) would fail while the same path unquoted worked
+* Fixed bash tool silently bypassing the outside-workspace approval prompt: it only checked the `workdir` argument for external paths, so absolute paths embedded directly in the command text (e.g. `dir "C:\Users\name\Documents"`) ran with no approval; the command text is now scanned for absolute paths too
+* Fixed duplicate/bulk tool-call cards appearing at the top of a running turn (then interleaved again lower down) when a tool card was orphaned before its transcript slot existed; reload no longer needed to clear them
+* Fixed sessions never auto-naming from the first exchange: both the frontend trigger and the auto-name endpoint treated the default "Session N" placeholder as an already-set name, so the request was never sent and title generation never ran; both now only skip for a genuinely custom name
+* Outside-workspace approval now also triggers on environment-variable paths in bash commands (`%USERPROFILE%\Documents`, `$env:USERPROFILE`, `$HOME`, `~`), which the shell expands after the check ran and which previously slipped through unprompted
+* Fixed subagent cards appearing at the very top of the chat until reload: when the timestamp-to-message anchor lookup failed during a live turn it fell back to message index 0, pinning the card to the top; live cards now fall back to the latest message instead
+* Subagent results are now delivered straight to the waiting caller over a channel instead of being discovered by polling every 200ms and re-read from the database, and an aborted or cancelled subagent now always reports a terminal status instead of leaving the caller to time out
+* Error and cancelled notices are now anchored inline where they occurred instead of being pinned to the bottom of the chat below later messages, and are rendered compactly against the left edge of the message column
+* Fixed the launcher embedding a stale core binary: build.rs watched the path OSAGENT_CORE_SOURCE pointed at but never declared rerun-if-env-changed, so switching build profiles (e.g. -Fast) left cargo checking the previous profile's binary and the installer silently shipped an old osagent.exe
+* Fixed read-only bash mode rejecting harmless commands: mutating keywords were matched as raw substrings, so "Format-Table" tripped the "rm" rule and "different" tripped "ren"; matching is now word-boundary aware
 
 
 v0.1.1 changes:

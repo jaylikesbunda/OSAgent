@@ -4933,6 +4933,25 @@ impl AgentRuntime {
         args: &serde_json::Value,
         workspace_root: Option<&Path>,
     ) -> Option<String> {
+        if tool_name == "bash" || tool_name == "process" {
+            if let Some(workdir) = args.get("workdir").and_then(|value| value.as_str()) {
+                if let Some(resolved) = Self::resolve_key_path(workdir, workspace_root) {
+                    return Some(resolved);
+                }
+            }
+
+            let command = args.get("command").and_then(|value| value.as_str())?;
+            for token in Self::extract_command_absolute_paths(command) {
+                let is_inside = workspace_root
+                    .map(|root| Path::new(&token).starts_with(root))
+                    .unwrap_or(false);
+                if !is_inside {
+                    return Some(token);
+                }
+            }
+            return None;
+        }
+
         let key = match tool_name {
             "read_file" => args
                 .get("filePath")
@@ -4941,10 +4960,13 @@ impl AgentRuntime {
             "write_file" | "edit_file" | "delete_file" | "list_files" | "grep" | "glob" => {
                 args.get("path").and_then(|value| value.as_str())
             }
-            "bash" | "process" => args.get("workdir").and_then(|value| value.as_str()),
             _ => None,
         }?;
 
+        Self::resolve_key_path(key, workspace_root)
+    }
+
+    fn resolve_key_path(key: &str, workspace_root: Option<&Path>) -> Option<String> {
         let expanded = shellexpand::tilde(key).to_string();
         if Path::new(&expanded).is_absolute() {
             return Some(expanded);
@@ -4961,6 +4983,109 @@ impl AgentRuntime {
         }
 
         None
+    }
+
+    /// Expands the environment-variable forms a shell would resolve *after*
+    /// this check runs (`%VAR%`, `$env:VAR`, `$VAR`, `~`), so a path like
+    /// `%USERPROFILE%\Documents` is recognised as the absolute path it will
+    /// actually become. Unknown variables are left untouched.
+    fn expand_path_vars(token: &str) -> String {
+        // %VAR% (cmd)
+        let mut out = String::new();
+        let mut rest = token;
+        while let Some(start) = rest.find('%') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('%') else { break };
+            let name = &after[..end];
+            out.push_str(&rest[..start]);
+            match std::env::var(name) {
+                Ok(value) if !name.is_empty() => out.push_str(&value),
+                _ => {
+                    out.push('%');
+                    out.push_str(name);
+                    out.push('%');
+                }
+            }
+            rest = &after[end + 1..];
+        }
+        out.push_str(rest);
+
+        // $env:VAR (PowerShell) and $VAR (POSIX)
+        let mut expanded = String::new();
+        let mut rest = out.as_str();
+        while let Some(start) = rest.find('$') {
+            expanded.push_str(&rest[..start]);
+            let after = &rest[start + 1..];
+            let (body, prefix_len) = match after.strip_prefix("env:") {
+                Some(stripped) => (stripped, "env:".len()),
+                None => (after, 0),
+            };
+            let name_len = body
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(body.len());
+            let name = &body[..name_len];
+            match std::env::var(name) {
+                Ok(value) if !name.is_empty() => expanded.push_str(&value),
+                _ => expanded.push_str(&rest[start..start + 1 + prefix_len + name_len]),
+            }
+            rest = &body[name_len..];
+        }
+        expanded.push_str(rest);
+
+        shellexpand::tilde(&expanded).to_string()
+    }
+
+    /// Heuristically scans a shell command string for tokens that look like
+    /// absolute filesystem paths (Windows drive-letter, UNC, or POSIX-style),
+    /// so outside-workspace approval can trigger even when the path is
+    /// embedded in the command text rather than passed via `workdir`.
+    /// Environment-variable forms are expanded first. Still best-effort: it
+    /// cannot resolve globs or paths built up dynamically inside the command.
+    fn extract_command_absolute_paths(command: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+
+        for ch in command.chars() {
+            match ch {
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                c if c.is_whitespace() && !in_single && !in_double => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                c => current.push(c),
+            }
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+
+        tokens
+            .into_iter()
+            .map(|token| Self::expand_path_vars(&token))
+            .filter(|token| Self::looks_like_absolute_path(token))
+            .collect()
+    }
+
+    fn looks_like_absolute_path(token: &str) -> bool {
+        let bytes = token.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+        {
+            return true;
+        }
+        if token.starts_with("\\\\") && token.len() > 2 {
+            return true;
+        }
+        if cfg!(not(windows)) && token.starts_with('/') && token.len() > 1 {
+            return true;
+        }
+        false
     }
 
     fn path_is_inside_workspace(path: &Path, workspace: &WorkspaceConfig) -> bool {
@@ -5240,5 +5365,54 @@ impl AgentRuntime {
 
     pub async fn stop_scheduler(&self) {
         self.scheduler.stop().await;
+    }
+}
+
+#[cfg(test)]
+mod external_path_scan_tests {
+    use super::AgentRuntime;
+    use std::path::PathBuf;
+
+    fn ws() -> PathBuf {
+        PathBuf::from(r"I:\GhostESP2\Research-Projects\Pwn-Power")
+    }
+
+    fn scan(cmd: &str) -> Option<String> {
+        let args = serde_json::json!({ "command": cmd });
+        AgentRuntime::requested_absolute_path("bash", &args, Some(&ws()))
+    }
+
+    #[test]
+    fn detects_env_var_paths() {
+        let profile = std::env::var("USERPROFILE").expect("USERPROFILE set on Windows");
+        for cmd in [
+            r#"dir "%USERPROFILE%\Documents""#,
+            r#"dir %USERPROFILE%\Documents"#,
+            r#"powershell -Command Get-ChildItem $env:USERPROFILE\Documents"#,
+        ] {
+            let got = scan(cmd).unwrap_or_else(|| panic!("no external path found in: {cmd}"));
+            assert!(
+                got.starts_with(&profile),
+                "expected expansion under {profile}, got {got} for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_literal_absolute_paths() {
+        assert_eq!(
+            scan(r#"dir "C:\Users\deki\Documents""#),
+            Some(r"C:\Users\deki\Documents".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_workspace_internal_and_plain_commands() {
+        assert_eq!(scan("cargo test --lib"), None);
+        assert_eq!(scan("git status"), None);
+        assert_eq!(
+            scan(r#"dir "I:\GhostESP2\Research-Projects\Pwn-Power\src""#),
+            None
+        );
     }
 }

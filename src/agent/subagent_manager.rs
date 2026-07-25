@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -64,11 +64,17 @@ fn truncate_tool_output(tool_name: &str, output: &str) -> String {
     }
 }
 
+/// (status, result text, tool count)
+pub type SubagentOutcome = (String, String, i32);
+
 pub struct SubagentManager {
     storage: Arc<SqliteStorage>,
     event_bus: Arc<EventBus>,
     session_manager: Arc<SessionManager>,
     active_subagents: Arc<DashMap<String, SubagentHandle>>,
+    /// Delivers each subagent's outcome straight to its waiter, so results do
+    /// not have to be discovered by polling and re-read from storage.
+    pending_results: Arc<DashMap<String, oneshot::Receiver<SubagentOutcome>>>,
     config: Arc<tokio::sync::RwLock<Config>>,
     shared_provider: Option<Arc<dyn Provider>>,
     workspace_root: PathBuf,
@@ -95,6 +101,7 @@ impl SubagentManager {
             event_bus,
             session_manager,
             active_subagents: Arc::new(DashMap::new()),
+            pending_results: Arc::new(DashMap::new()),
             config,
             shared_provider: None,
             workspace_root,
@@ -259,21 +266,73 @@ impl SubagentManager {
         let workspace_root = self.workspace_root.clone();
         let parent_workspace_for_async = parent_workspace.clone();
 
+        let (result_tx, result_rx) = oneshot::channel::<SubagentOutcome>();
+        self.pending_results
+            .insert(subagent_session.id.clone(), result_rx);
+        let storage_for_guard = self.storage.clone();
+        let guard_task_id = task.id.clone();
+
         let handle = tokio::spawn(async move {
             struct CleanupGuard {
                 session_id: String,
+                task_id: String,
                 active_subagents: Arc<DashMap<String, SubagentHandle>>,
+                storage: Arc<SqliteStorage>,
+                result_tx: Option<oneshot::Sender<SubagentOutcome>>,
+            }
+
+            impl CleanupGuard {
+                /// Hand the outcome to the waiter once the normal path has
+                /// already persisted it.
+                fn deliver(&mut self, outcome: SubagentOutcome) {
+                    if let Some(tx) = self.result_tx.take() {
+                        let _ = tx.send(outcome);
+                    }
+                }
             }
 
             impl Drop for CleanupGuard {
                 fn drop(&mut self) {
+                    // If the run was aborted (cancel/timeout) the normal path
+                    // never delivered, so the waiter would hang until its own
+                    // timeout. Fall back to whatever storage knows.
+                    if self.result_tx.is_some() {
+                        let outcome = match self.storage.get_subagent_task(&self.task_id) {
+                            Ok(Some(task)) if task.completed_at.is_some() => (
+                                task.status.clone(),
+                                task.result.clone().unwrap_or_default(),
+                                task.tool_count,
+                            ),
+                            Ok(Some(mut task)) => {
+                                task.status = "failed".to_string();
+                                task.result =
+                                    Some("Subagent terminated before returning a result".to_string());
+                                task.completed_at = Some(Utc::now());
+                                let _ = self.storage.update_subagent_task(&task);
+                                (
+                                    "failed".to_string(),
+                                    "Subagent terminated before returning a result".to_string(),
+                                    task.tool_count,
+                                )
+                            }
+                            _ => (
+                                "failed".to_string(),
+                                "Subagent terminated before returning a result".to_string(),
+                                0,
+                            ),
+                        };
+                        self.deliver(outcome);
+                    }
                     self.active_subagents.remove(&self.session_id);
                 }
             }
 
-            let _cleanup = CleanupGuard {
+            let mut _cleanup = CleanupGuard {
                 session_id: subagent_session_id.clone(),
+                task_id: guard_task_id,
                 active_subagents: active_subagents.clone(),
+                storage: storage_for_guard,
+                result_tx: Some(result_tx),
             };
 
             let result = Self::run_subagent(
@@ -313,11 +372,13 @@ impl SubagentManager {
                         sequence: 0,
                         parent_session_id: parent_session_id_for_async.clone(),
                         subagent_session_id: subagent_session_id.clone(),
-                        status,
-                        result: result_text,
+                        status: status.clone(),
+                        result: result_text.clone(),
                         tool_count,
                         timestamp: std::time::SystemTime::now(),
                     });
+
+                    _cleanup.deliver((status, result_text, tool_count));
                 }
                 Err(e) => {
                     error!("Subagent failed: {:?}", e);
@@ -343,6 +404,8 @@ impl SubagentManager {
                         tool_count: 0,
                         timestamp: std::time::SystemTime::now(),
                     });
+
+                    _cleanup.deliver(("failed".to_string(), format!("Error: {}", e), 0));
                 }
             }
         });
@@ -901,20 +964,22 @@ impl SubagentManager {
         session_id: &str,
         timeout_secs: u64,
     ) -> Result<(String, String, i32)> {
-        let start = Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
-        loop {
-            if !self.active_subagents.contains_key(session_id) {
-                break;
+        // Wait on the subagent's own completion signal rather than polling for
+        // its disappearance and re-reading storage, which added latency and
+        // could observe a not-yet-written result.
+        if let Some((_, receiver)) = self.pending_results.remove(session_id) {
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), receiver).await {
+                Ok(Ok(outcome)) => return Ok(outcome),
+                // Sender dropped without delivering: fall through to storage.
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    let timeout_message = format!("Subagent timed out after {}s", timeout_secs);
+                    let _ = self
+                        .stop_subagent(session_id, "timeout", timeout_message.clone())
+                        .await;
+                    return Ok(("timeout".to_string(), timeout_message, 0));
+                }
             }
-            if start.elapsed() > timeout {
-                let timeout_message = format!("Subagent timed out after {}s", timeout_secs);
-                let _ = self
-                    .stop_subagent(session_id, "timeout", timeout_message.clone())
-                    .await;
-                return Ok(("timeout".to_string(), timeout_message, 0));
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         if let Ok(Some(task)) = self.storage.get_subagent_task_by_session(session_id) {

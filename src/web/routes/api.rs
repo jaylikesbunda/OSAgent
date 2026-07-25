@@ -5162,15 +5162,17 @@ async fn auto_name_session(
             }),
         ))?;
 
-    if session
-        .metadata
-        .get("name")
-        .and_then(|v| v.as_str())
-        .is_some()
-    {
-        return Ok(Json(
-            serde_json::json!({ "name": session.metadata["name"] }),
-        ));
+    fn is_default_session_name(name: &str) -> bool {
+        name.strip_prefix("Session ")
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+    }
+
+    if let Some(name) = session.metadata.get("name").and_then(|v| v.as_str()) {
+        if !is_default_session_name(name) {
+            return Ok(Json(
+                serde_json::json!({ "name": session.metadata["name"] }),
+            ));
+        }
     }
 
     let user_msg = session

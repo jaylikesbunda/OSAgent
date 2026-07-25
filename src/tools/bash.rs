@@ -13,6 +13,7 @@ pub struct BashTool {
     config: BashToolConfig,
     workspaces: Vec<PathBuf>,
     writable: bool,
+    description: String,
 }
 
 impl BashTool {
@@ -39,10 +40,18 @@ impl BashTool {
             })
             .collect();
 
+        let description = if cfg!(windows) {
+            "Execute a shell command with optional timeout and working directory.\n\nUsage:\n- Runs via `cmd /C` on this Windows host — use Windows/cmd syntax (dir, findstr, del, cmd built-ins, PowerShell via `powershell -Command \"...\"`), NOT POSIX/Unix syntax. Commands like `ls`, `/mnt/c/...`, `2>/dev/null`, or `cat` will fail with 'not recognized'.\n- Use for builds, tests, linting, git operations (staging, diff, log), package management, and any CLI commands.\n- Commands are workspace-scoped by default. Use workdir to run in a subdirectory.\n- Direct deletes (rm, del) are blocked - use delete_file instead.\n- Do NOT use for simple file reads (use read_file) or content searches (use grep/glob).\n- Do NOT use for file edits (use edit_file or apply_patch).\n- When making multiple independent bash calls, send them in a single message to run in parallel.\n- Explain what non-trivial commands do before running them."
+        } else {
+            "Execute a shell command with optional timeout and working directory.\n\nUsage:\n- Runs via `sh -lc` — use POSIX/Unix shell syntax.\n- Use for builds, tests, linting, git operations (staging, diff, log), package management, and any CLI commands.\n- Commands are workspace-scoped by default. Use workdir to run in a subdirectory.\n- Direct deletes (rm, del) are blocked - use delete_file instead.\n- Do NOT use for simple file reads (use read_file) or content searches (use grep/glob).\n- Do NOT use for file edits (use edit_file or apply_patch).\n- When making multiple independent bash calls, send them in a single message to run in parallel.\n- Explain what non-trivial commands do before running them."
+        }
+        .to_string();
+
         Self {
             config: config.tools.bash,
             workspaces,
             writable,
+            description,
         }
     }
 
@@ -83,7 +92,29 @@ impl BashTool {
             ">>",
         ];
 
-        if mutating_tokens.iter().any(|token| lowered.contains(token)) {
+        // Split into whole words so a command word is only matched as a word.
+        // A raw substring test produces false positives on ordinary arguments
+        // (e.g. "Format-Table" contains "rm", "different" contains "ren").
+        let words: Vec<&str> = lowered
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
+            .filter(|word| !word.is_empty())
+            .collect();
+
+        let is_mutating = mutating_tokens.iter().any(|token| {
+            if token.contains('>') {
+                // Redirection operators are punctuation, not words.
+                lowered.contains(token)
+            } else if let Some((head, tail)) = token.split_once(' ') {
+                // Multi-word forms like "git add" must appear adjacently.
+                words
+                    .windows(2)
+                    .any(|pair| pair[0] == head && pair[1] == tail)
+            } else {
+                words.iter().any(|word| word == token)
+            }
+        });
+
+        if is_mutating {
             return Err(OSAgentError::ToolExecution(
                 "Bash read-only mode is limited to non-mutating commands".to_string(),
             ));
@@ -431,15 +462,15 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run shell commands inside the workspace. Supports any command except blocked system commands and destructive operations. Direct deletes (rm, del) are blocked - use delete_file instead."
+        &self.description
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for build, test, run, git operations, and any CLI commands. Prefer dedicated tools for file reads, edits, and deletes."
+        "Use for running build tools, test suites, linters, git commands, package managers, and any system commands that aren't covered by dedicated tools."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for file deletion (use delete_file), routine file reads (use read_file), or small edits (use edit_file or apply_patch)"
+        "Do not use for file reads (use read_file), content searches (use grep/glob), file edits (use edit_file), or file creation (use write_file)."
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -580,10 +611,26 @@ impl Tool for BashTool {
             timeout_duration,
             tokio::task::spawn_blocking(move || {
                 if cfg!(windows) {
-                    Command::new("cmd")
-                        .args(["/C", &full_command_for_exec])
-                        .current_dir(&workspace)
-                        .output()
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        // cmd.exe does its own quote parsing for /C and does not
+                        // follow the standard argv-escaping convention. Passing
+                        // "/C" and the command as separate args lets Rust's default
+                        // Windows arg-quoting re-escape embedded quotes in the
+                        // command string, which cmd.exe then mis-parses (e.g. a
+                        // quoted path silently fails while the same path unquoted
+                        // works). raw_arg bypasses that quoting so cmd sees the
+                        // command line exactly as written.
+                        Command::new("cmd")
+                            .raw_arg(format!("/C {}", &full_command_for_exec))
+                            .current_dir(&workspace)
+                            .output()
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        unreachable!()
+                    }
                 } else {
                     Command::new("sh")
                         .args(["-lc", &full_command_for_exec])
@@ -642,6 +689,44 @@ impl Tool for BashTool {
                 e
             ))),
             Err(_) => Err(OSAgentError::Timeout),
+        }
+    }
+}
+
+#[cfg(test)]
+mod readonly_validation_tests {
+    use super::BashTool;
+
+    #[test]
+    fn allows_commands_that_merely_contain_mutating_substrings() {
+        for cmd in [
+            r"powershell -Command Get-ChildItem 'C:\Users\deki\Documents' | Format-Table Name",
+            "git diff --stat",
+            "grep -r different .",
+            "cargo tree",
+            r"dir C:\Users\deki\Documents",
+        ] {
+            assert!(
+                BashTool::validate_explicit_read_only(cmd).is_ok(),
+                "should be allowed: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn still_blocks_actually_mutating_commands() {
+        for cmd in [
+            "rm -rf build",
+            "mkdir newdir",
+            "git add .",
+            "npm install",
+            "echo hi > out.txt",
+            "Remove-Item foo",
+        ] {
+            assert!(
+                BashTool::validate_explicit_read_only(cmd).is_err(),
+                "should be blocked: {cmd}"
+            );
         }
     }
 }

@@ -85,6 +85,13 @@ fn main() {
             ])
         });
 
+    // These must be declared even though the paths below are also watched:
+    // switching build profiles (e.g. -Fast) changes which path the env var
+    // points at, and without an env trigger cargo would only re-check the
+    // *previous* profile's binary, silently embedding a stale core.
+    println!("cargo:rerun-if-env-changed=OSAGENT_CORE_SOURCE");
+    println!("cargo:rerun-if-env-changed=OSAGENT_UPDATER_SOURCE");
+
     if let Some(path) = core_source.as_ref() {
         println!("cargo:rerun-if-changed={}", path.display());
     }

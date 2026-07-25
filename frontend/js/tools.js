@@ -870,7 +870,7 @@ OSA._renderInlineToolCard = function(toolEvent, insertBefore, parent) {
     const output = toolEvent.output || '';
     const domId = `tool-${callId}`;
 
-    const existing = document.getElementById(domId);
+    const existing = document.getElementById(domId) || OSA.findAnchoredNodeById(domId);
     if (existing) {
         const statusEl = existing.querySelector('.tool-status-badge');
         if (statusEl) {
@@ -1418,7 +1418,7 @@ OSA.handleEventError = function(event) {
         <div class="message-role">Error</div>
         <div class="message-content">${OSA.escapeHtml(event.error)}</div>
     `;
-    OSA.mountFloatingNode(message);
+    OSA.mountAnchoredNode(message, OSA.getLatestAnchorMessageIndex());
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
@@ -1446,7 +1446,7 @@ OSA.handleEventCancelled = function(event) {
         <div class="message-role">Cancelled</div>
         <div class="message-content">Operation stopped by user</div>
     `;
-    OSA.mountFloatingNode(message);
+    OSA.mountAnchoredNode(message, OSA.getLatestAnchorMessageIndex());
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
@@ -1604,7 +1604,7 @@ OSA.restoreSubagentCards = function(subagentTasks) {
             </div>
         `;
 
-        OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : 0);
+        OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : OSA.getLatestAnchorMessageIndex());
 
         if (isRunning) {
             OSA._activeSubagents.set(subagentId, {
@@ -1658,7 +1658,7 @@ OSA.handleSubagentCreated = function(event) {
         </div>
     `;
     const anchorIndex = OSA.findAnchorMessageIndexForTimestamp(event.timestamp);
-    OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : 0);
+    OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : OSA.getLatestAnchorMessageIndex());
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
     OSA._activeSubagents.set(subagentId, {
@@ -2111,6 +2111,11 @@ OSA.syncToolsFromBackend = async function() {
                     messagesDiv.querySelectorAll('.tool-container:not(.context-inline-group)').forEach(el => {
                         existingCardIds.add(el.id);
                     });
+                    if (typeof OSA.getTranscriptView === 'function') {
+                        for (const nodes of OSA.getTranscriptView().anchoredNodesByIndex.values()) {
+                            nodes.forEach(n => { if (n.id) existingCardIds.add(n.id); });
+                        }
+                    }
 
                     tools.forEach(t => {
                         if (t.tool_name === 'subagent') return;

@@ -1592,9 +1592,25 @@ OSA.storeAnchoredNode = function(node, messageIndex) {
         view.anchoredNodesByIndex.set(parsedIndex, []);
     }
     const list = view.anchoredNodesByIndex.get(parsedIndex);
+    if (node.id) {
+        const dupIdx = list.findIndex((n) => n !== node && n.id === node.id);
+        if (dupIdx !== -1) {
+            list.splice(dupIdx, 1);
+        }
+    }
     if (!list.includes(node)) {
         list.push(node);
     }
+};
+
+OSA.findAnchoredNodeById = function(domId) {
+    if (!domId) return null;
+    const view = OSA.getTranscriptView();
+    for (const nodes of view.anchoredNodesByIndex.values()) {
+        const hit = nodes.find((n) => n.id === domId);
+        if (hit) return hit;
+    }
+    return null;
 };
 
 OSA.removeStoredAnchoredNode = function(node) {
@@ -1652,6 +1668,20 @@ OSA.findAnchorMessageIndexForTimestamp = function(timestamp) {
         }
     });
     return anchor;
+};
+
+// Anchor to use when a timestamp lookup fails. These nodes are created live, so
+// they belong at the current end of the transcript — falling back to index 0
+// would pin them to the very top until a reload recomputed the real anchor.
+OSA.getLatestAnchorMessageIndex = function() {
+    const session = OSA.getCurrentSession();
+    if (!session || !Array.isArray(session.messages) || session.messages.length === 0) return 0;
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+        const message = session.messages[i];
+        if (message.role === 'tool' || OSA.isHiddenSyntheticMessage(message)) continue;
+        return i;
+    }
+    return session.messages.length - 1;
 };
 
 OSA.createTranscriptEntry = function(message, originalIndex) {

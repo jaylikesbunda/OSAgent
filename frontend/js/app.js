@@ -131,10 +131,17 @@ OSA.getSessionDisplayName = function(session) {
 
 OSA._autoNamedSessions = new Set();
 
+// Sessions are created with a "Session N" placeholder, so a name being present
+// does not mean the user (or the auto-namer) ever set a real one.
+OSA.isDefaultSessionName = function(name) {
+    return typeof name === 'string' && /^Session \d+$/.test(name.trim());
+};
+
 OSA.maybeAutoNameSession = function() {
     const session = OSA.getCurrentSession();
     if (!session?.id) return;
-    if (session.metadata?.name) return;
+    const existingName = session.metadata?.name;
+    if (existingName && !OSA.isDefaultSessionName(existingName)) return;
     if (OSA._autoNamedSessions.has(session.id)) return;
     OSA._autoNamedSessions.add(session.id);
     OSA.fetchWithAuth('/api/sessions/' + encodeURIComponent(session.id) + '/auto-name', { method: 'POST' })
