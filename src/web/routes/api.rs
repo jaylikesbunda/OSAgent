@@ -5434,13 +5434,22 @@ async fn voice_progress() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
     let mut receiver = crate::voice::get_progress_receiver();
 
     let stream = async_stream::stream! {
-        while let Ok(progress) = receiver.recv().await {
-            let data = serde_json::to_string(&progress).unwrap_or_default();
-            yield Ok(Event::default().event("progress").data(data));
+        loop {
+            match receiver.recv().await {
+                Ok(progress) => {
+                    let data = serde_json::to_string(&progress).unwrap_or_default();
+                    yield Ok(Event::default().event("progress").data(data));
+                }
+                // Lagging only means intermediate frames were dropped, and the
+                // next progress event supersedes them. Ending the stream here
+                // left downloads looking frozen for the rest of their run.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     };
 
-    Sse::new(stream)
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 async fn voice_upload(

@@ -2223,8 +2223,11 @@ fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> 
             "-NoProfile",
             "-NonInteractive",
             "-Command",
+            // Expand-Archive reports failures as non-terminating errors, so
+            // without this powershell.exe exits 0 even when nothing was
+            // extracted and the caller believes the install succeeded.
             &format!(
-                "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                "$ErrorActionPreference='Stop'; Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
                 archive.display(),
                 dest.display()
             ),
@@ -2236,6 +2239,16 @@ fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> 
             "Extraction failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
+    }
+    // Exit status alone is not sufficient evidence: confirm something landed.
+    let produced_files = std::fs::read_dir(dest)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !produced_files {
+        return Err(
+            "Extraction produced no files - the download was likely incomplete or corrupted"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -3474,25 +3487,24 @@ async fn install_voice(
                 std::fs::create_dir_all(&extract_dir).ok();
                 extract_zip_powershell(&archive, &extract_dir)?;
 
-                // whisper-bin-x64 zip extracts into a flat directory — find whisper.exe
+                // whisper-bin-x64 nests the binary inside a subdirectory, so the
+                // whole tree has to be searched. Recent whisper.cpp releases also
+                // renamed the CLI, so accept the known names.
+                let binary_src = ["whisper.exe", "whisper-cli.exe", "main.exe"]
+                    .iter()
+                    .find_map(|name| find_file_recursive(&extract_dir, name))
+                    .ok_or_else(|| {
+                        "Whisper archive did not contain whisper.exe, whisper-cli.exe or main.exe"
+                            .to_string()
+                    })?;
+                let whisper_inner = binary_src
+                    .parent()
+                    .ok_or_else(|| "Could not determine Whisper extraction directory".to_string())?;
                 let binary_dest = dir.join("whisper.exe");
-                // Try direct extraction
-                let direct = extract_dir.join("whisper.exe");
-                if direct.exists() {
-                    std::fs::copy(&direct, &binary_dest).ok();
-                } else {
-                    // Search recursively
-                    if let Ok(entries) = std::fs::read_dir(&extract_dir) {
-                        for entry in entries.flatten() {
-                            if entry.file_name() == "whisper.exe" {
-                                std::fs::copy(entry.path(), &binary_dest).ok();
-                                break;
-                            }
-                        }
-                    }
-                }
-                // Copy DLLs too
-                if let Ok(entries) = std::fs::read_dir(&extract_dir) {
+                std::fs::copy(&binary_src, &binary_dest)
+                    .map_err(|e| format!("Failed to install whisper.exe: {}", e))?;
+                // DLLs sit alongside the binary, not at the archive root.
+                if let Ok(entries) = std::fs::read_dir(whisper_inner) {
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if name.ends_with(".dll") {

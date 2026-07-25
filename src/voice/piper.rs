@@ -371,30 +371,20 @@ async fn download_and_extract_binary(
         let extract_dir = dir.join("piper_extract");
         let _ = std::fs::create_dir_all(&extract_dir);
 
-        let output = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                    archive_path.display(),
-                    extract_dir.display()
-                ),
-            ])
-            .output()
-            .map_err(|e| format!("Failed to extract archive: {}", e))?;
+        super::verify_download_complete(&archive_path, total_bytes, "Piper runtime")?;
 
-        if !output.status.success() {
-            return Err(format!(
-                "Extraction failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
+        let _ = std::fs::remove_dir_all(&extract_dir);
+        super::extract_zip_with_progress(&archive_path, &extract_dir, "piper-binary", "piper")?;
 
-        let piper_dir = extract_dir.join("piper");
+        let extracted_binary = super::find_file_recursive(&extract_dir, binary_name)
+            .ok_or_else(|| format!("Piper archive did not contain {}", binary_name))?;
+        let piper_dir = extracted_binary
+            .parent()
+            .ok_or_else(|| "Could not determine Piper extraction directory".to_string())?
+            .to_path_buf();
         let final_binary = dir.join(binary_name);
-        let extracted_binary = piper_dir.join(binary_name);
 
-        if extracted_binary.exists() {
+        {
             std::fs::copy(&extracted_binary, &final_binary)
                 .map_err(|e| format!("Failed to copy binary: {}", e))?;
 
@@ -534,6 +524,7 @@ pub async fn download_voice(voice_name: &str) -> Result<PathBuf, String> {
     });
 
     let mut downloaded = 0u64;
+    let mut last_pct = -1i64;
     let mut stream = response.bytes_stream();
     let mut file = tokio::fs::File::create(&voice_path)
         .await
@@ -547,18 +538,20 @@ pub async fn download_voice(voice_name: &str) -> Result<PathBuf, String> {
                 .map_err(|e| format!("Failed to write voice: {}", e))?;
             downloaded += part.len() as u64;
 
-            broadcast_progress(super::DownloadProgress {
-                model_id: voice_name.to_string(),
-                model_type: "piper".to_string(),
-                stage: "downloading".to_string(),
-                progress: if total_bytes > 0 {
-                    downloaded as f32 / total_bytes as f32
-                } else {
-                    0.0
-                },
-                bytes_downloaded: downloaded,
-                total_bytes,
-            });
+            if super::should_emit_progress(&mut last_pct, downloaded, total_bytes) {
+                broadcast_progress(super::DownloadProgress {
+                    model_id: voice_name.to_string(),
+                    model_type: "piper".to_string(),
+                    stage: "downloading".to_string(),
+                    progress: if total_bytes > 0 {
+                        downloaded as f32 / total_bytes as f32
+                    } else {
+                        0.0
+                    },
+                    bytes_downloaded: downloaded,
+                    total_bytes,
+                });
+            }
         }
     }
 

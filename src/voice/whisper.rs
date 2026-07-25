@@ -413,71 +413,66 @@ async fn download_and_extract_binary(
 
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                    archive_path.display(),
-                    dir.display()
-                ),
-            ])
-            .output()
-            .map_err(|e| format!("Failed to extract archive: {}", e))?;
+        super::verify_download_complete(&archive_path, total_bytes, "Whisper runtime")?;
 
-        if !output.status.success() {
-            return Err(format!(
-                "Extraction failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
+        let extract_dir = dir.join("whisper_extract");
+        let _ = std::fs::remove_dir_all(&extract_dir);
+        super::extract_zip_with_progress(&archive_path, &extract_dir, "whisper-binary", "whisper")?;
 
-        let release_dir = dir.join("Release");
-        let extracted_binary = release_dir.join("whisper-cli.exe");
+        // The archive nests everything under Release/, but don't depend on that
+        // layout: search the tree, and accept the names whisper.cpp has shipped.
+        let extracted_binary = ["whisper-cli.exe", "whisper.exe", "main.exe"]
+            .iter()
+            .find_map(|name| super::find_file_recursive(&extract_dir, name))
+            .ok_or_else(|| {
+                "Whisper archive did not contain a usable binary (whisper-cli.exe, whisper.exe or main.exe)"
+                    .to_string()
+            })?;
+        let release_dir = extracted_binary
+            .parent()
+            .ok_or_else(|| "Could not determine Whisper extraction directory".to_string())?
+            .to_path_buf();
+
         let final_binary = dir.join(binary_name);
-        if extracted_binary.exists() {
-            std::fs::copy(&extracted_binary, &final_binary)
-                .map_err(|e| format!("Failed to copy binary: {}", e))?;
+        std::fs::copy(&extracted_binary, &final_binary)
+            .map_err(|e| format!("Failed to copy binary: {}", e))?;
 
-            if let Ok(entries) = std::fs::read_dir(&release_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_file() {
-                        continue;
-                    }
-
-                    let Some(file_name) = path.file_name() else {
-                        continue;
-                    };
-
-                    if file_name == "whisper-cli.exe" {
-                        continue;
-                    }
-
-                    let dest = dir.join(file_name);
-                    std::fs::copy(&path, &dest).map_err(|e| {
-                        format!(
-                            "Failed to copy runtime file '{}' : {}",
-                            file_name.to_string_lossy(),
-                            e
-                        )
-                    })?;
-                }
-            } else {
-                return Err("Failed to inspect extracted Whisper runtime files".to_string());
+        let entries = std::fs::read_dir(&release_dir)
+            .map_err(|_| "Failed to inspect extracted Whisper runtime files".to_string())?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
             }
 
-            for required in required_runtime_files() {
-                if !dir.join(required).exists() {
-                    return Err(format!(
-                        "Whisper runtime install is incomplete: missing {} after extraction",
-                        required
-                    ));
-                }
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
+
+            if path == extracted_binary {
+                continue;
             }
 
-            let _ = std::fs::remove_dir_all(&release_dir);
+            let dest = dir.join(file_name);
+            std::fs::copy(&path, &dest).map_err(|e| {
+                format!(
+                    "Failed to copy runtime file '{}' : {}",
+                    file_name.to_string_lossy(),
+                    e
+                )
+            })?;
         }
+
+        for required in required_runtime_files() {
+            if !dir.join(required).exists() {
+                return Err(format!(
+                    "Whisper runtime install is incomplete: missing {} after extraction",
+                    required
+                ));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&extract_dir);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -568,6 +563,7 @@ pub async fn download_model(model_id: &str) -> Result<PathBuf, String> {
     });
 
     let mut downloaded = 0u64;
+    let mut last_pct = -1i64;
     let mut stream = response.bytes_stream();
     let mut file = tokio::fs::File::create(&model_path)
         .await
@@ -581,18 +577,20 @@ pub async fn download_model(model_id: &str) -> Result<PathBuf, String> {
                 .map_err(|e| format!("Failed to write model: {}", e))?;
             downloaded += part.len() as u64;
 
-            broadcast_progress(super::DownloadProgress {
-                model_id: model_id.to_string(),
-                model_type: "whisper".to_string(),
-                stage: "downloading".to_string(),
-                progress: if total_bytes > 0 {
-                    downloaded as f32 / total_bytes as f32
-                } else {
-                    0.0
-                },
-                bytes_downloaded: downloaded,
-                total_bytes,
-            });
+            if super::should_emit_progress(&mut last_pct, downloaded, total_bytes) {
+                broadcast_progress(super::DownloadProgress {
+                    model_id: model_id.to_string(),
+                    model_type: "whisper".to_string(),
+                    stage: "downloading".to_string(),
+                    progress: if total_bytes > 0 {
+                        downloaded as f32 / total_bytes as f32
+                    } else {
+                        0.0
+                    },
+                    bytes_downloaded: downloaded,
+                    total_bytes,
+                });
+            }
         }
     }
 
