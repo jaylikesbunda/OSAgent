@@ -173,10 +173,7 @@ pub fn extract_zip_with_progress(
 
         // enclosed_name() rejects absolute paths and `..` traversal.
         let Some(relative) = entry.enclosed_name() else {
-            return Err(format!(
-                "Archive contains an unsafe path: {}",
-                entry.name()
-            ));
+            return Err(format!("Archive contains an unsafe path: {}", entry.name()));
         };
         let out_path = dest.join(relative);
 
@@ -311,7 +308,8 @@ mod install_robustness_tests {
             .write_all(b"not a zip at all")
             .unwrap();
 
-        let result = extract_zip_with_progress(&archive, &dir.join("out"), "whisper-binary", "whisper");
+        let result =
+            extract_zip_with_progress(&archive, &dir.join("out"), "whisper-binary", "whisper");
         assert!(result.is_err(), "corrupt archive must not report success");
     }
 
@@ -319,7 +317,10 @@ mod install_robustness_tests {
     fn truncated_download_is_rejected() {
         let dir = temp_dir("verify");
         let file = dir.join("part.bin");
-        std::fs::File::create(&file).unwrap().write_all(b"12345").unwrap();
+        std::fs::File::create(&file)
+            .unwrap()
+            .write_all(b"12345")
+            .unwrap();
 
         assert!(verify_download_complete(&file, 5, "test").is_ok());
         assert!(verify_download_complete(&file, 999, "test").is_err());

@@ -44,7 +44,12 @@ impl Notice {
     }
 }
 
-fn option(label: &str, value: &str, description: Option<&str>, selected: bool) -> CreateSelectMenuOption {
+fn option(
+    label: &str,
+    value: &str,
+    description: Option<&str>,
+    selected: bool,
+) -> CreateSelectMenuOption {
     let mut option = CreateSelectMenuOption::new(ui::truncate_chars(label, 100), value)
         .default_selection(selected);
     if let Some(description) = description {
@@ -56,7 +61,11 @@ fn option(label: &str, value: &str, description: Option<&str>, selected: bool) -
     option
 }
 
-fn select_row(custom_id: String, placeholder: &str, options: Vec<CreateSelectMenuOption>) -> Option<CreateActionRow> {
+fn select_row(
+    custom_id: String,
+    placeholder: &str,
+    options: Vec<CreateSelectMenuOption>,
+) -> Option<CreateActionRow> {
     // Discord rejects a select menu with no options outright.
     if options.is_empty() {
         return None;
@@ -86,7 +95,10 @@ impl Handler {
         provider_id: &str,
         current_model: &str,
     ) -> Option<String> {
-        let models = self.agent.get_provider_models(provider_id.to_string()).await;
+        let models = self
+            .agent
+            .get_provider_models(provider_id.to_string())
+            .await;
 
         if models.iter().any(|model| model.id == current_model) {
             return Some(current_model.to_string());
@@ -223,7 +235,11 @@ impl Handler {
             .field(
                 "Persona",
                 match &persona {
-                    Some(persona) => format!("`{}`\n-# {}", persona.name, ui::truncate_chars(&persona.summary, 60)),
+                    Some(persona) => format!(
+                        "`{}`\n-# {}",
+                        persona.name,
+                        ui::truncate_chars(&persona.summary, 60)
+                    ),
                     None => "`default`\n-# no persona set".to_string(),
                 },
                 true,
@@ -573,7 +589,11 @@ impl Handler {
         }
     }
 
-    async fn on_workspace_selected(&self, user_id: u64, selected: Option<String>) -> Option<Notice> {
+    async fn on_workspace_selected(
+        &self,
+        user_id: u64,
+        selected: Option<String>,
+    ) -> Option<Notice> {
         let workspace_id = selected?;
 
         match self.agent.set_active_workspace(&workspace_id).await {

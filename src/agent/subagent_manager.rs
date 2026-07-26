@@ -305,8 +305,9 @@ impl SubagentManager {
                             ),
                             Ok(Some(mut task)) => {
                                 task.status = "failed".to_string();
-                                task.result =
-                                    Some("Subagent terminated before returning a result".to_string());
+                                task.result = Some(
+                                    "Subagent terminated before returning a result".to_string(),
+                                );
                                 task.completed_at = Some(Utc::now());
                                 let _ = self.storage.update_subagent_task(&task);
                                 (

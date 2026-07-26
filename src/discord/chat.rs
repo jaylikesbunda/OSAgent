@@ -323,16 +323,14 @@ impl Handler {
                     .map(|workspace| format!("Workspace: `{}`", workspace.path))
                     .unwrap_or_else(|_| "Workspace: current active".to_string());
 
-                clear_status(Some(
-                    ui::embed(
-                        "Done",
-                        format!(
-                            "The agent finished without a text reply.\n{workspace}\n-# {}",
-                            self.turn_footer(&session_id, elapsed, &final_state).await
-                        ),
-                        ui::COLOR_SUCCESS,
+                clear_status(Some(ui::embed(
+                    "Done",
+                    format!(
+                        "The agent finished without a text reply.\n{workspace}\n-# {}",
+                        self.turn_footer(&session_id, elapsed, &final_state).await
                     ),
-                ))
+                    ui::COLOR_SUCCESS,
+                )))
                 .await;
             }
             Ok(Ok(response)) => {

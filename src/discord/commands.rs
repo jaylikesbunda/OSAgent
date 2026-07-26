@@ -100,7 +100,10 @@ impl Handler {
             CreateCommand::new("session")
                 .description("Manage your session")
                 .add_option(sub("status", "Show the current session"))
-                .add_option(sub("new", "Archive the current session and start a fresh one"))
+                .add_option(sub(
+                    "new",
+                    "Archive the current session and start a fresh one",
+                ))
                 .add_option(sub("archive", "Archive the current session"))
                 .add_option(sub("delete", "Permanently delete the current session")),
             CreateCommand::new("model")
@@ -116,9 +119,8 @@ impl Handler {
                 .description("Show or change the active provider")
                 .add_option(sub("list", "List configured providers"))
                 .add_option(
-                    sub("use", "Switch to another provider").add_sub_option(
-                        str_opt("id", "Provider id", true).set_autocomplete(true),
-                    ),
+                    sub("use", "Switch to another provider")
+                        .add_sub_option(str_opt("id", "Provider id", true).set_autocomplete(true)),
                 ),
             CreateCommand::new("persona")
                 .description("Manage the persona for your session")
@@ -137,20 +139,25 @@ impl Handler {
                 .description("List or switch the active workspace")
                 .add_option(sub("list", "List configured workspaces"))
                 .add_option(
-                    sub("set", "Switch the active workspace").add_sub_option(
-                        str_opt("id", "Workspace id", true).set_autocomplete(true),
-                    ),
+                    sub("set", "Switch the active workspace")
+                        .add_sub_option(str_opt("id", "Workspace id", true).set_autocomplete(true)),
                 ),
             CreateCommand::new("permissions")
                 .description("Manage external directory permissions")
                 .add_option(sub("list", "Show pending permission requests"))
                 .add_option(
-                    sub("allow", "Grant access to a path")
-                        .add_sub_option(str_opt("path", "File or directory path", true)),
+                    sub("allow", "Grant access to a path").add_sub_option(str_opt(
+                        "path",
+                        "File or directory path",
+                        true,
+                    )),
                 )
                 .add_option(
-                    sub("deny", "Refuse access to a path")
-                        .add_sub_option(str_opt("path", "File or directory path", true)),
+                    sub("deny", "Refuse access to a path").add_sub_option(str_opt(
+                        "path",
+                        "File or directory path",
+                        true,
+                    )),
                 ),
             CreateCommand::new("workflow")
                 .description("Run a workflow")
@@ -363,7 +370,12 @@ impl Handler {
                     || workspace.id.to_lowercase().contains(query)
                     || workspace.path.to_lowercase().contains(query)
             })
-            .map(|workspace| (format!("{} — {}", workspace.id, workspace.path), workspace.id))
+            .map(|workspace| {
+                (
+                    format!("{} — {}", workspace.id, workspace.path),
+                    workspace.id,
+                )
+            })
             .collect()
     }
 
@@ -433,7 +445,12 @@ impl Handler {
     }
 
     /// `/lsp` and `/subagent` are phrasings of a normal agent turn.
-    async fn run_prompt_command(&self, ctx: &Context, command: &CommandInteraction, prompt: String) {
+    async fn run_prompt_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        prompt: String,
+    ) {
         let user_id = command.user.id.get();
 
         let session_id = match self.get_or_create_session(user_id).await {
@@ -704,7 +721,10 @@ impl Handler {
         }
 
         let embed = ui::embed("Unknown Model", description, ui::COLOR_WARNING);
-        let custom_id = format!("{PANEL_PREFIX}forcemodel:{}:{provider_id}:{model_id}", command.user.id.get());
+        let custom_id = format!(
+            "{PANEL_PREFIX}forcemodel:{}:{provider_id}:{model_id}",
+            command.user.id.get()
+        );
 
         let mut response = CreateInteractionResponseMessage::new()
             .embed(embed)
@@ -713,11 +733,12 @@ impl Handler {
         // custom_id is capped at 100 characters; skip the button rather than
         // sending a payload Discord will reject.
         if custom_id.len() <= 100 {
-            response = response.components(vec![CreateActionRow::Buttons(vec![CreateButton::new(
-                custom_id,
-            )
-            .label("Use anyway")
-            .style(ButtonStyle::Secondary)])]);
+            response =
+                response.components(vec![CreateActionRow::Buttons(vec![CreateButton::new(
+                    custom_id,
+                )
+                .label("Use anyway")
+                .style(ButtonStyle::Secondary)])]);
         }
 
         if let Err(e) = command
@@ -879,8 +900,7 @@ impl Handler {
                     .await
                 {
                     Ok(persona) => {
-                        let mut description =
-                            format!("**{}**\n{}", persona.name, persona.summary);
+                        let mut description = format!("**{}**\n{}", persona.name, persona.summary);
                         if let Some(character) = &persona.roleplay_character {
                             description.push_str(&format!("\n\n_Roleplaying as: {character}_"));
                         }
@@ -908,7 +928,11 @@ impl Handler {
                 .map(|workspace| {
                     format!(
                         "{} `{}` → `{}`",
-                        if workspace.id == active.id { "▸" } else { " " },
+                        if workspace.id == active.id {
+                            "▸"
+                        } else {
+                            " "
+                        },
                         workspace.id,
                         workspace.path
                     )
@@ -949,7 +973,10 @@ impl Handler {
                 }
                 ui::embed(
                     "Workspace Updated",
-                    format!("Active workspace is `{}`\n`{}`", workspace.id, workspace.path),
+                    format!(
+                        "Active workspace is `{}`\n`{}`",
+                        workspace.id, workspace.path
+                    ),
                     ui::COLOR_SUCCESS,
                 )
             }

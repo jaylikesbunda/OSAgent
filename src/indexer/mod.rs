@@ -167,7 +167,12 @@ impl CodeIndexer {
         } else {
             "meilisearch"
         };
-        Some(PathBuf::from(home).join(".osagent").join("search").join(name))
+        Some(
+            PathBuf::from(home)
+                .join(".osagent")
+                .join("search")
+                .join(name),
+        )
     }
 
     fn meilisearch_download_url() -> Result<&'static str> {
@@ -210,9 +215,9 @@ impl CodeIndexer {
         let target = Self::managed_binary_path().ok_or_else(|| {
             OSAgentError::Config("Could not determine a home directory to install into".to_string())
         })?;
-        let dir = target.parent().ok_or_else(|| {
-            OSAgentError::Config("Invalid MeiliSearch install path".to_string())
-        })?;
+        let dir = target
+            .parent()
+            .ok_or_else(|| OSAgentError::Config("Invalid MeiliSearch install path".to_string()))?;
         std::fs::create_dir_all(dir).map_err(|e| {
             OSAgentError::Config(format!("Failed to create MeiliSearch directory: {}", e))
         })?;
@@ -243,13 +248,13 @@ impl CodeIndexer {
             let chunk = chunk.map_err(|e| {
                 OSAgentError::Config(format!("Failed while downloading MeiliSearch: {}", e))
             })?;
-            file.write_all(&chunk).await.map_err(|e| {
-                OSAgentError::Config(format!("Failed to write MeiliSearch: {}", e))
-            })?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| OSAgentError::Config(format!("Failed to write MeiliSearch: {}", e)))?;
             downloaded += chunk.len() as u64;
 
-            if total_bytes > 0 {
-                let pct = (downloaded.saturating_mul(100) / total_bytes) as i64;
+            if let Some(pct) = downloaded.saturating_mul(100).checked_div(total_bytes) {
+                let pct = pct as i64;
                 if pct / 10 != last_logged_pct / 10 {
                     last_logged_pct = pct;
                     info!("Downloading MeiliSearch: {}%", pct);

@@ -233,9 +233,7 @@ mod tests {
 
     #[test]
     fn code_fences_are_reopened_across_chunks() {
-        let body: String = (0..40)
-            .map(|i| format!("let line_{i} = {i};\n"))
-            .collect();
+        let body: String = (0..40).map(|i| format!("let line_{i} = {i};\n")).collect();
         let text = format!("intro text\n```rust\n{body}```\ntrailing");
 
         let chunks = split_message(&text, 200);

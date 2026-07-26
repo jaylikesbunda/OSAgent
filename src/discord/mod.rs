@@ -198,7 +198,10 @@ impl Handler {
             .flatten();
 
         if let Some(session_id) = resolved.as_ref() {
-            self.sessions.write().await.insert(user_id, session_id.clone());
+            self.sessions
+                .write()
+                .await
+                .insert(user_id, session_id.clone());
         }
 
         resolved
@@ -219,7 +222,10 @@ impl Handler {
             .await
         {
             Ok(session) => {
-                self.sessions.write().await.insert(user_id, session.id.clone());
+                self.sessions
+                    .write()
+                    .await
+                    .insert(user_id, session.id.clone());
                 Ok(session.id)
             }
             Err(e) => Err(format!("Failed to create session: {e}")),
@@ -582,7 +588,8 @@ impl Handler {
                         questions,
                         ..
                     } => {
-                        let channel_id = session_to_channel().read().await.get(&session_id).copied();
+                        let channel_id =
+                            session_to_channel().read().await.get(&session_id).copied();
                         let channel_id = match channel_id {
                             Some(channel_id) => channel_id,
                             None => get_last_discord_channel_id().await,
@@ -594,7 +601,13 @@ impl Handler {
                         }
 
                         handler
-                            .present_question(&http, &session_id, &question_id, channel_id, &questions)
+                            .present_question(
+                                &http,
+                                &session_id,
+                                &question_id,
+                                channel_id,
+                                &questions,
+                            )
                             .await;
                     }
                     AgentEvent::ScheduledJobFired {
@@ -629,9 +642,10 @@ impl Handler {
                             other => other.replace('_', " "),
                         };
 
-                        let embed = ui::embed(&format!("Scheduled {title}"), &message, ui::COLOR_INFO)
-                            .field("Job", job_id.chars().take(8).collect::<String>(), true)
-                            .field("Type", &job_type, true);
+                        let embed =
+                            ui::embed(&format!("Scheduled {title}"), &message, ui::COLOR_INFO)
+                                .field("Job", job_id.chars().take(8).collect::<String>(), true)
+                                .field("Type", &job_type, true);
 
                         send_notification(&http, channel_id, embed, None).await;
                     }
@@ -653,9 +667,10 @@ impl Handler {
                             continue;
                         };
 
-                        let embed = ui::embed("Workflow Approval Required", prompt, ui::COLOR_WARNING)
-                            .field("Workflow", &workflow_id, true)
-                            .field("Run", run_id.chars().take(8).collect::<String>(), true);
+                        let embed =
+                            ui::embed("Workflow Approval Required", prompt, ui::COLOR_WARNING)
+                                .field("Workflow", &workflow_id, true)
+                                .field("Run", run_id.chars().take(8).collect::<String>(), true);
 
                         let buttons = CreateActionRow::Buttons(vec![
                             CreateButton::new(format!("wf_approve:{question_id}"))
@@ -692,7 +707,11 @@ impl Handler {
                             ui::COLOR_SUCCESS,
                         )
                         .field("Workflow", &workflow_id, true)
-                        .field("Run", run_id.chars().take(8).collect::<String>(), true);
+                        .field(
+                            "Run",
+                            run_id.chars().take(8).collect::<String>(),
+                            true,
+                        );
 
                         send_notification(&http, channel_id, embed, None).await;
                     }

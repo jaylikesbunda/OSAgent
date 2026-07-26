@@ -5223,8 +5223,7 @@ async fn auto_name_session(
     let candidate = raw
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()
+        .rfind(|line| !line.is_empty())
         .unwrap_or("");
     let candidate = candidate
         .trim_start_matches("Title:")
@@ -5234,7 +5233,11 @@ async fn auto_name_session(
         .trim_matches('\'')
         .trim_matches('*')
         .trim();
-    let title = candidate.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    let title = candidate
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
 
     if title.is_empty() || title.len() < 2 {
         tracing::warn!(

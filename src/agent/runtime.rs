@@ -1192,7 +1192,7 @@ impl AgentRuntime {
                     api_messages.iter().map(Self::message_tokens).sum();
                 let actual_pre_tokens = Self::session_actual_tokens(&api_messages);
                 let tool_schema_tokens = serde_json::to_string(&tools)
-                    .map(|schemas| (schemas.chars().count() + 3) / 4)
+                    .map(|schemas| schemas.chars().count().div_ceil(4))
                     .unwrap_or(0);
                 let message_pre_tokens = if actual_pre_tokens > 0 {
                     actual_pre_tokens
