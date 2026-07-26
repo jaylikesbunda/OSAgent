@@ -1,59 +1,49 @@
 v0.2.0 changes:
 
-* Redesigned chat composer into a rounded floating card with glass background that sits on top of the conversation, with a gradient fade on messages so content scrolls under the card
-* Reworked workspace and persona popups with better breathing room, alignment, and visual hierarchy
-* Improved workspace selection: active workspace now marked with a checkmark indicator, trigger chip shows the workspace name with a ro/rw permission badge, and an empty state shows a clear "Add workspace" CTA
-* Workspace menu rows now show rounded permission pill and a dedicated icon-style edit button
-* Typing a bare slash command (e.g. /settings) now runs that command instead of sending it to the agent, and the slash menu now lists all commands as soon as you type /
-* Settings modal now closes reliably on Save Changes (post-save refreshes no longer block the close)
-* Fixed settings load/save crash from removed provider fields (base_url/model) that left most settings form fields blank and blocked saving
-* Update checker no longer fails on manifests with platform entries that omit archive/url (e.g. windows-x86_64 using only an installer URL)
-* File preview panel now renders beside the chat as a side pane instead of stacking underneath it
-* Launcher voice downloads now report progress for chunked/no-content-length downloads and show visible errors instead of sitting at 0%
+## Security & permissions
+
 * Added user approval prompts for explicit file and directory access outside the active workspace
-* Added per-turn workspace context and corrected the model-visible tool list
+* Fixed outside-workspace paths blocked before reaching the permission system (resolved .. paths now trigger the approval popup)
+* Removed per-tool .. rejection; paths with .. are now canonicalized and checked against workspace boundaries through the authorization system
+* Fixed bash tool silently bypassing the outside-workspace approval prompt: it only checked the `workdir` argument for external paths, so absolute paths embedded directly in the command text (e.g. `dir "C:\Users\name\Documents"`) ran with no approval; the command text is now scanned for absolute paths too
+* Outside-workspace approval now also triggers on environment-variable paths in bash commands (`%USERPROFILE%\Documents`, `$env:USERPROFILE`, `$HOME`, `~`), which the shell expands after the check ran and which previously slipped through unprompted
 * Blocked workspace switching during active turns and preserved parent workspaces for subagents
+
+## Tools & agent runtime
+
+* Bash tool description now tells the model which shell it's actually running (cmd on Windows, sh elsewhere) so it stops guessing POSIX syntax on Windows and failing commands
+* Fixed bash tool silently mangling quoted paths on Windows: Rust's default arg-quoting re-escaped embedded quotes before handing them to `cmd /C`, which cmd parses differently, so a quoted path (e.g. `dir "C:\Users\name\Documents"`) would fail while the same path unquoted worked
+* Fixed read-only bash mode rejecting harmless commands: mutating keywords were matched as raw substrings, so "Format-Table" tripped the "rm" rule and "different" tripped "ren"; matching is now word-boundary aware
+* Subagent results are now delivered straight to the waiting caller over a channel instead of being discovered by polling every 200ms and re-read from the database, and an aborted or cancelled subagent now always reports a terminal status instead of leaving the caller to time out
+* Added per-turn workspace context and corrected the model-visible tool list
 * Added model, Git worktree/status, global instruction, and skill context for agents and subagents
 * Added persona-based capability profiles that expose every allowed tool in the selected profile
 * Preserved nested workspace instructions at the start of file-read results
 * Removed duplicate textual tool catalogs and made provider schemas authoritative
 * Added tool-schema token estimates to context tracking and the context inspector
-* Rebuilt the model picker with an opaque, scrollable, viewport-aware popover and keyboard navigation
-* Fixed active_runs corruption on concurrent send that caused Stop button to be unreliable
-* Fixed queued run dispatch not setting isProcessing, causing Stop to send instead of cancel
-* Fixed response_complete idle flicker when queue has more items
-* Fixed error and spawn wrapper paths not emitting terminal events, causing UI to hang
-* Fixed streaming cancel emitting Error instead of Cancelled
-* Fixed queue item id mismatch between optimistic add and dispatch event
-* Added persistent cancel flag alongside Notify for reliable cancellation between iterations
-* Fixed outside-workspace paths blocked before reaching the permission system (resolved .. paths now trigger the approval popup)
-* Removed per-tool .. rejection; paths with .. are now canonicalized and checked against workspace boundaries through the authorization system
-* Simplified workspace creation to just folder path + read/write toggle
-* Restyled outside-workspace permission popup as a clean bottom dock
-* Fixed markdown rendering: links `[text](url)` and bare URLs are now clickable, numbered lists are supported
+
+## Sessions
+
 * Sessions are now auto-named from the first exchange
-* Added markdown table rendering
-* Permission popup now appears above the composer bar instead of at viewport bottom
-* Added self-healing state recovery: syncRunningSessionSnapshot now detects and resets stuck processing state even when the Error event is missed
-* Combined workspace and persona buttons into one context button with tabs to save mobile space
-* Bash tool description now tells the model which shell it's actually running (cmd on Windows, sh elsewhere) so it stops guessing POSIX syntax on Windows and failing commands
-* Fixed bash tool silently mangling quoted paths on Windows: Rust's default arg-quoting re-escaped embedded quotes before handing them to `cmd /C`, which cmd parses differently, so a quoted path (e.g. `dir "C:\Users\name\Documents"`) would fail while the same path unquoted worked
-* Fixed bash tool silently bypassing the outside-workspace approval prompt: it only checked the `workdir` argument for external paths, so absolute paths embedded directly in the command text (e.g. `dir "C:\Users\name\Documents"`) ran with no approval; the command text is now scanned for absolute paths too
-* Fixed duplicate/bulk tool-call cards appearing at the top of a running turn (then interleaved again lower down) when a tool card was orphaned before its transcript slot existed; reload no longer needed to clear them
 * Fixed sessions never auto-naming from the first exchange: both the frontend trigger and the auto-name endpoint treated the default "Session N" placeholder as an already-set name, so the request was never sent and title generation never ran; both now only skip for a genuinely custom name
-* Code search now installs MeiliSearch itself instead of permanently disabling itself with a "binary not found" warning: nothing ever populated the `~/.osagent/search` location it already probed. The download runs detached so it never blocks startup (indexer construction is synchronous and the binary is ~110MB), verifies the transfer against Content-Length, and only moves the binary into place once complete so an interrupted download cannot leave a truncated binary that looks installed. Code search enables on the next start
+* Fixed js/inspector.js never being bundled: it was missing from the frontend build's load order, so every function it defines was undefined at runtime. `OSA.scheduleSessionInspectorRefresh()` is called unguarded at the end of the tool-complete and response-complete handlers, so each of those handlers threw partway through — which is what actually stopped sessions from being auto-named, and silently skipped the session-inspector refresh after tool calls
 * The auto-name endpoint now logs why a title was not produced (model error, or an unusable response) instead of silently returning no name, and tolerates models that wrap the title in quotes, prefix it with "Title:", or emit a reasoning preamble
-* Outside-workspace approval now also triggers on environment-variable paths in bash commands (`%USERPROFILE%\Documents`, `$env:USERPROFILE`, `$HOME`, `~`), which the shell expands after the check ran and which previously slipped through unprompted
-* Fixed subagent cards appearing at the very top of the chat until reload: when the timestamp-to-message anchor lookup failed during a live turn it fell back to message index 0, pinning the card to the top; live cards now fall back to the latest message instead
-* Subagent results are now delivered straight to the waiting caller over a channel instead of being discovered by polling every 200ms and re-read from the database, and an aborted or cancelled subagent now always reports a terminal status instead of leaving the caller to time out
-* Error and cancelled notices are now anchored inline where they occurred instead of being pinned to the bottom of the chat below later messages, and are rendered compactly against the left edge of the message column
+
+## Code search
+
+* Code search now installs MeiliSearch itself instead of permanently disabling itself with a "binary not found" warning: nothing ever populated the `~/.osagent/search` location it already probed. The download runs detached so it never blocks startup (indexer construction is synchronous and the binary is ~110MB), verifies the transfer against Content-Length, and only moves the binary into place once complete so an interrupted download cannot leave a truncated binary that looks installed. Code search enables on the next start
+
+## Voice
+
 * Fixed Whisper and Piper runtime installs reporting success while installing nothing: extraction shelled out to PowerShell's Expand-Archive, whose errors are non-terminating so the process still exits 0, and the code then skipped its copy step silently when the expected binary was absent. Extraction now runs in-process via the zip crate with real errors, per-entry progress, and zip-slip protection; downloads are size-checked against Content-Length so a truncated archive is reported instead of being extracted; and a missing binary is now a hard error rather than a silent success
-* Voice runtime installs now report extraction progress per file instead of jumping from download straight to "installed"
-* Fixed voice model and voice downloads appearing to freeze partway: the progress SSE stream treated a lagging broadcast receiver as fatal and closed itself, so the download continued with the UI stuck at its last percentage (and the browser logging a "Voice progress SSE error"). Lag is now skipped rather than ending the stream, the stream sends keep-alives, progress frames are rate-limited to whole-percent changes so clients stop falling behind, and the channel has more headroom
-* Fixed the launcher's voice installer treating a failed extraction as success for the same Expand-Archive reason, and it now verifies extraction actually produced files
 * Fixed Whisper runtime install looking for its binary at one hardcoded path: it now searches the extracted tree and accepts whisper-cli.exe, whisper.exe or main.exe, and copies runtime DLLs from beside the binary it actually found
-* Fixed the launcher embedding a stale core binary: build.rs watched the path OSAGENT_CORE_SOURCE pointed at but never declared rerun-if-env-changed, so switching build profiles (e.g. -Fast) left cargo checking the previous profile's binary and the installer silently shipped an old osagent.exe
-* Fixed read-only bash mode rejecting harmless commands: mutating keywords were matched as raw substrings, so "Format-Table" tripped the "rm" rule and "different" tripped "ren"; matching is now word-boundary aware
+* Fixed voice model and voice downloads appearing to freeze partway: the progress SSE stream treated a lagging broadcast receiver as fatal and closed itself, so the download continued with the UI stuck at its last percentage (and the browser logging a "Voice progress SSE error"). Lag is now skipped rather than ending the stream, the stream sends keep-alives, progress frames are rate-limited to whole-percent changes so clients stop falling behind, and the channel has more headroom
+* Voice runtime installs now report extraction progress per file instead of jumping from download straight to "installed"
+* Fixed the launcher's voice installer treating a failed extraction as success for the same Expand-Archive reason, and it now verifies extraction actually produced files
+* Launcher voice downloads now report progress for chunked/no-content-length downloads and show visible errors instead of sitting at 0%
+
+## Discord
+
 * Discord: added /settings, a single control panel with select menus for provider, model, persona and workspace that re-renders itself after every change, so nothing has to be typed from memory
 * Discord: /model set now validates against the model catalog and offers near-matches plus an explicit "Use anyway" confirmation instead of silently accepting a typo that fails on the next turn
 * Discord: added /provider list and /provider use; switching provider and model now goes through one atomic switch, so the running provider and the config file can no longer disagree (previously the model was set on the active provider but written to the default provider's config entry, and reverted on restart)
@@ -69,6 +59,46 @@ v0.2.0 changes:
 * Discord: an empty discord.allowed_users list now denies everyone instead of allowing everyone, and in servers the bot only responds when mentioned or replied to rather than to every message in every channel it can see
 * Discord: /lsp and /subagent now actually run the request instead of printing "use /chat"; /mode reports that it is a hint rather than implying tool access changed
 * Discord: added a queue notice when a channel already has a turn running, and per-channel locks are now reclaimed instead of accumulating for the lifetime of the process
+
+## Chat UI
+
+* Redesigned chat composer into a rounded floating card with glass background that sits on top of the conversation, with a gradient fade on messages so content scrolls under the card
+* Fixed duplicate/bulk tool-call cards appearing at the top of a running turn (then interleaved again lower down) when a tool card was orphaned before its transcript slot existed; reload no longer needed to clear them
+* Fixed subagent cards appearing at the very top of the chat until reload: when the timestamp-to-message anchor lookup failed during a live turn it fell back to message index 0, pinning the card to the top; live cards now fall back to the latest message instead
+* Error and cancelled notices are now anchored inline where they occurred instead of being pinned to the bottom of the chat below later messages, and are rendered compactly against the left edge of the message column
+* Fixed markdown rendering: links `[text](url)` and bare URLs are now clickable, numbered lists are supported
+* Added markdown table rendering
+* File preview panel now renders beside the chat as a side pane instead of stacking underneath it
+* Typing a bare slash command (e.g. /settings) now runs that command instead of sending it to the agent, and the slash menu now lists all commands as soon as you type /
+* Rebuilt the model picker with an opaque, scrollable, viewport-aware popover and keyboard navigation
+
+## Workspace & settings UI
+
+* Reworked workspace and persona popups with better breathing room, alignment, and visual hierarchy
+* Improved workspace selection: active workspace now marked with a checkmark indicator, trigger chip shows the workspace name with a ro/rw permission badge, and an empty state shows a clear "Add workspace" CTA
+* Workspace menu rows now show rounded permission pill and a dedicated icon-style edit button
+* Simplified workspace creation to just folder path + read/write toggle
+* Combined workspace and persona buttons into one context button with tabs to save mobile space
+* Restyled outside-workspace permission popup as a clean bottom dock
+* Permission popup now appears above the composer bar instead of at viewport bottom
+* Settings modal now closes reliably on Save Changes (post-save refreshes no longer block the close)
+* Fixed settings load/save crash from removed provider fields (base_url/model) that left most settings form fields blank and blocked saving
+
+## Streaming, queueing & cancellation
+
+* Fixed active_runs corruption on concurrent send that caused Stop button to be unreliable
+* Fixed queued run dispatch not setting isProcessing, causing Stop to send instead of cancel
+* Fixed response_complete idle flicker when queue has more items
+* Fixed error and spawn wrapper paths not emitting terminal events, causing UI to hang
+* Fixed streaming cancel emitting Error instead of Cancelled
+* Fixed queue item id mismatch between optimistic add and dispatch event
+* Added persistent cancel flag alongside Notify for reliable cancellation between iterations
+* Added self-healing state recovery: syncRunningSessionSnapshot now detects and resets stuck processing state even when the Error event is missed
+
+## Build & updates
+
+* Fixed the launcher embedding a stale core binary: build.rs watched the path OSAGENT_CORE_SOURCE pointed at but never declared rerun-if-env-changed, so switching build profiles (e.g. -Fast) left cargo checking the previous profile's binary and the installer silently shipped an old osagent.exe
+* Update checker no longer fails on manifests with platform entries that omit archive/url (e.g. windows-x86_64 using only an installer URL)
 
 
 v0.1.1 changes:
