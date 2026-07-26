@@ -15,6 +15,7 @@ const JS_LOAD_ORDER = [
   "js/preview.js",
   "js/providers.js",
   "js/messages.js",
+  "js/inspector.js",
   "js/tools.js",
   "js/ws.js",
   "js/voice.js",

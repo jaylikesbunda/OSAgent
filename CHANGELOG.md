@@ -41,6 +41,8 @@ v0.2.0 changes:
 * Fixed bash tool silently bypassing the outside-workspace approval prompt: it only checked the `workdir` argument for external paths, so absolute paths embedded directly in the command text (e.g. `dir "C:\Users\name\Documents"`) ran with no approval; the command text is now scanned for absolute paths too
 * Fixed duplicate/bulk tool-call cards appearing at the top of a running turn (then interleaved again lower down) when a tool card was orphaned before its transcript slot existed; reload no longer needed to clear them
 * Fixed sessions never auto-naming from the first exchange: both the frontend trigger and the auto-name endpoint treated the default "Session N" placeholder as an already-set name, so the request was never sent and title generation never ran; both now only skip for a genuinely custom name
+* Code search now installs MeiliSearch itself instead of permanently disabling itself with a "binary not found" warning: nothing ever populated the `~/.osagent/search` location it already probed. The download runs detached so it never blocks startup (indexer construction is synchronous and the binary is ~110MB), verifies the transfer against Content-Length, and only moves the binary into place once complete so an interrupted download cannot leave a truncated binary that looks installed. Code search enables on the next start
+* The auto-name endpoint now logs why a title was not produced (model error, or an unusable response) instead of silently returning no name, and tolerates models that wrap the title in quotes, prefix it with "Title:", or emit a reasoning preamble
 * Outside-workspace approval now also triggers on environment-variable paths in bash commands (`%USERPROFILE%\Documents`, `$env:USERPROFILE`, `$HOME`, `~`), which the shell expands after the check ran and which previously slipped through unprompted
 * Fixed subagent cards appearing at the very top of the chat until reload: when the timestamp-to-message anchor lookup failed during a live turn it fell back to message index 0, pinning the card to the top; live cards now fall back to the latest message instead
 * Subagent results are now delivered straight to the waiting caller over a channel instead of being discovered by polling every 200ms and re-read from the database, and an aborted or cancelled subagent now always reports a terminal status instead of leaving the caller to time out
@@ -52,6 +54,21 @@ v0.2.0 changes:
 * Fixed Whisper runtime install looking for its binary at one hardcoded path: it now searches the extracted tree and accepts whisper-cli.exe, whisper.exe or main.exe, and copies runtime DLLs from beside the binary it actually found
 * Fixed the launcher embedding a stale core binary: build.rs watched the path OSAGENT_CORE_SOURCE pointed at but never declared rerun-if-env-changed, so switching build profiles (e.g. -Fast) left cargo checking the previous profile's binary and the installer silently shipped an old osagent.exe
 * Fixed read-only bash mode rejecting harmless commands: mutating keywords were matched as raw substrings, so "Format-Table" tripped the "rm" rule and "different" tripped "ren"; matching is now word-boundary aware
+* Discord: added /settings, a single control panel with select menus for provider, model, persona and workspace that re-renders itself after every change, so nothing has to be typed from memory
+* Discord: /model set now validates against the model catalog and offers near-matches plus an explicit "Use anyway" confirmation instead of silently accepting a typo that fails on the next turn
+* Discord: added /provider list and /provider use; switching provider and model now goes through one atomic switch, so the running provider and the config file can no longer disagree (previously the model was set on the active provider but written to the default provider's config entry, and reverted on restart)
+* Discord: reorganised commands into subcommands (/session, /model, /provider, /persona, /workspace, /permissions) with autocomplete on every id
+* Discord: each turn now renders one status message that updates in place with the running tool, elapsed time and failures, instead of one embed per tool, and responses carry a model · provider · persona footer
+* Discord: long responses no longer split in the middle of a code fence; a block that spans messages is closed and reopened
+* Discord: provider errors are reported with the likely cause and fix (bad API key, unknown model, rate limit, context overflow) instead of a raw error dump
+* Discord: agent questions now reach Discord again — the session-to-channel mapping was only written by an unreachable code path, so every /ask question was dropped and /answer always reported "no pending question"
+* Discord: questions are tracked per session, /answer resolves a bare option number to that option, and answering is restricted to the user whose session asked
+* Discord: fixed duplicated notifications — every gateway reconnect spawned another event listener and re-registered all slash commands, so workflow and schedule notices were delivered once per reconnect
+* Discord: workflow approval buttons now require authorization; previously anyone who could see the message could approve or reject a workflow step
+* Discord: /answer now requires authorization
+* Discord: an empty discord.allowed_users list now denies everyone instead of allowing everyone, and in servers the bot only responds when mentioned or replied to rather than to every message in every channel it can see
+* Discord: /lsp and /subagent now actually run the request instead of printing "use /chat"; /mode reports that it is a hint rather than implying tool access changed
+* Discord: added a queue notice when a channel already has a turn running, and per-channel locks are now reclaimed instead of accumulating for the lifetime of the process
 
 
 v0.1.1 changes:

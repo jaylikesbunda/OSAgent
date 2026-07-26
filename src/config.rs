@@ -177,13 +177,77 @@ pub struct TelegramConfig {
     pub allowed_users: Vec<i64>,
 }
 
+/// Discord ids are 64-bit snowflakes, which exceed the 2^53 integer range a
+/// JavaScript `Number` can hold exactly. Sending them to the web UI as JSON
+/// numbers silently corrupts them (`420155234833268737` comes back as
+/// `420155234833268740`), so they are written as strings and read back from
+/// either form.
+mod snowflake {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Number(u64),
+        Text(String),
+    }
+
+    impl Raw {
+        fn into_id(self) -> Option<u64> {
+            match self {
+                Raw::Number(id) => Some(id),
+                Raw::Text(text) => text.trim().parse().ok(),
+            }
+        }
+    }
+
+    pub mod list {
+        use super::Raw;
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(ids: &[u64], serializer: S) -> Result<S::Ok, S::Error> {
+            ids.iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Vec<u64>, D::Error> {
+            Ok(Vec::<Raw>::deserialize(deserializer)?
+                .into_iter()
+                .filter_map(Raw::into_id)
+                .collect())
+        }
+    }
+
+    pub mod optional {
+        use super::Raw;
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(
+            id: &Option<u64>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            id.map(|id| id.to_string()).serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<u64>, D::Error> {
+            Ok(Option::<Raw>::deserialize(deserializer)?.and_then(Raw::into_id))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
+    #[serde(with = "snowflake::list")]
     pub allowed_users: Vec<u64>,
+    #[serde(with = "snowflake::optional")]
     pub last_channel_id: Option<u64>,
 }
 
@@ -1424,9 +1488,53 @@ fn generate_jwt_secret() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, DiscordConfig};
     use std::fs;
     use tempfile::tempdir;
+
+    /// A snowflake must survive the trip through the web UI unchanged — as a
+    /// JSON number it would come back rounded to the nearest multiple of 64.
+    #[test]
+    fn discord_ids_survive_a_json_round_trip() {
+        let discord: DiscordConfig = toml::from_str(
+            r#"
+enabled = true
+token = "t"
+allowed_users = [420155234833268737]
+last_channel_id = 1478327393205882900
+"#,
+        )
+        .expect("legacy integer ids must still load");
+
+        assert_eq!(discord.allowed_users, vec![420155234833268737]);
+        assert_eq!(discord.last_channel_id, Some(1478327393205882900));
+
+        let json = serde_json::to_string(&discord).unwrap();
+        assert!(
+            json.contains("\"420155234833268737\""),
+            "ids must be sent as strings, got {json}"
+        );
+
+        let round_tripped: DiscordConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.allowed_users, discord.allowed_users);
+        assert_eq!(round_tripped.last_channel_id, discord.last_channel_id);
+    }
+
+    #[test]
+    fn discord_ids_persist_to_toml_as_strings() {
+        let discord = DiscordConfig {
+            enabled: true,
+            token: "t".to_string(),
+            allowed_users: vec![420155234833268737],
+            last_channel_id: None,
+        };
+
+        let text = toml::to_string(&discord).unwrap();
+        let reloaded: DiscordConfig = toml::from_str(&text).unwrap();
+
+        assert_eq!(reloaded.allowed_users, vec![420155234833268737]);
+        assert_eq!(reloaded.last_channel_id, None);
+    }
 
     #[test]
     fn load_generates_and_persists_jwt_secret() {

@@ -93,7 +93,19 @@ impl CodeIndexer {
             return Ok(None);
         }
 
-        let meilisearch_path = Self::find_meilisearch_binary()?;
+        let meilisearch_path = match Self::find_meilisearch_binary() {
+            Ok(path) => path,
+            Err(_) => {
+                // Indexer construction blocks startup, and the binary is ~110MB,
+                // so the download runs detached and code search picks it up on
+                // the next start rather than freezing the app now.
+                Self::begin_background_install();
+                return Err(OSAgentError::Config(
+                    "MeiliSearch is not installed yet; downloading it in the background. Code search will be enabled the next time OSA starts."
+                        .to_string(),
+                ));
+            }
+        };
 
         let data_dir = if let Some(home) = std::env::var_os("USERPROFILE") {
             PathBuf::from(home)
@@ -122,6 +134,163 @@ impl CodeIndexer {
             .map_err(|e| OSAgentError::Config(format!("Failed to spawn MeiliSearch: {}", e)))?;
 
         Ok(Some(child))
+    }
+
+    /// Kick off the download once, detached, so startup is never blocked by it.
+    /// Repeat calls while one is running are ignored.
+    fn begin_background_install() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+        if INSTALLING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        tokio::spawn(async move {
+            match Self::install_meilisearch_binary().await {
+                Ok(path) => info!(
+                    "MeiliSearch installed to {} - code search will be enabled on the next start",
+                    path.display()
+                ),
+                Err(e) => warn!("MeiliSearch install failed: {}", e),
+            }
+            INSTALLING.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Where a managed MeiliSearch install lives. This is the same location
+    /// `find_meilisearch_binary` already probed but that nothing ever populated.
+    fn managed_binary_path() -> Option<PathBuf> {
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+        let name = if cfg!(windows) {
+            "meilisearch.exe"
+        } else {
+            "meilisearch"
+        };
+        Some(PathBuf::from(home).join(".osagent").join("search").join(name))
+    }
+
+    fn meilisearch_download_url() -> Result<&'static str> {
+        const VERSION: &str = "v1.11.3";
+        let asset = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            "meilisearch-windows-amd64.exe"
+        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "meilisearch-macos-apple-silicon"
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            "meilisearch-macos-amd64"
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            "meilisearch-linux-amd64"
+        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            "meilisearch-linux-aarch64"
+        } else {
+            return Err(OSAgentError::Config(
+                "No prebuilt MeiliSearch binary is available for this platform. Install it manually and put it on PATH."
+                    .to_string(),
+            ));
+        };
+
+        Ok(Box::leak(
+            format!(
+                "https://github.com/meilisearch/meilisearch/releases/download/{}/{}",
+                VERSION, asset
+            )
+            .into_boxed_str(),
+        ))
+    }
+
+    /// Download MeiliSearch into the managed location on first use.
+    ///
+    /// Downloads to a temporary file and only moves it into place once the
+    /// transfer is verified, so an interrupted download cannot leave behind a
+    /// truncated binary that looks installed on the next start.
+    async fn install_meilisearch_binary() -> Result<PathBuf> {
+        use futures::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        let target = Self::managed_binary_path().ok_or_else(|| {
+            OSAgentError::Config("Could not determine a home directory to install into".to_string())
+        })?;
+        let dir = target.parent().ok_or_else(|| {
+            OSAgentError::Config("Invalid MeiliSearch install path".to_string())
+        })?;
+        std::fs::create_dir_all(dir).map_err(|e| {
+            OSAgentError::Config(format!("Failed to create MeiliSearch directory: {}", e))
+        })?;
+
+        let url = Self::meilisearch_download_url()?;
+        info!("Downloading MeiliSearch from {}", url);
+
+        let response = reqwest::get(url)
+            .await
+            .map_err(|e| OSAgentError::Config(format!("Failed to download MeiliSearch: {}", e)))?;
+        if !response.status().is_success() {
+            return Err(OSAgentError::Config(format!(
+                "Failed to download MeiliSearch: HTTP {}",
+                response.status()
+            )));
+        }
+
+        let total_bytes = response.content_length().unwrap_or(0);
+        let temp_path = target.with_extension("download");
+        let mut file = tokio::fs::File::create(&temp_path).await.map_err(|e| {
+            OSAgentError::Config(format!("Failed to create MeiliSearch download: {}", e))
+        })?;
+
+        let mut downloaded: u64 = 0;
+        let mut last_logged_pct: i64 = -1;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                OSAgentError::Config(format!("Failed while downloading MeiliSearch: {}", e))
+            })?;
+            file.write_all(&chunk).await.map_err(|e| {
+                OSAgentError::Config(format!("Failed to write MeiliSearch: {}", e))
+            })?;
+            downloaded += chunk.len() as u64;
+
+            if total_bytes > 0 {
+                let pct = (downloaded.saturating_mul(100) / total_bytes) as i64;
+                if pct / 10 != last_logged_pct / 10 {
+                    last_logged_pct = pct;
+                    info!("Downloading MeiliSearch: {}%", pct);
+                }
+            }
+        }
+
+        file.flush()
+            .await
+            .map_err(|e| OSAgentError::Config(format!("Failed to flush MeiliSearch: {}", e)))?;
+        drop(file);
+
+        let actual = std::fs::metadata(&temp_path)
+            .map_err(|e| OSAgentError::Config(format!("Failed to inspect download: {}", e)))?
+            .len();
+        if actual == 0 || (total_bytes > 0 && actual != total_bytes) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(OSAgentError::Config(format!(
+                "MeiliSearch download is incomplete: got {} bytes, expected {}",
+                actual, total_bytes
+            )));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&temp_path)
+                .map_err(|e| OSAgentError::Config(format!("Failed to read permissions: {}", e)))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&temp_path, perms).map_err(|e| {
+                OSAgentError::Config(format!("Failed to make MeiliSearch executable: {}", e))
+            })?;
+        }
+
+        std::fs::rename(&temp_path, &target).map_err(|e| {
+            OSAgentError::Config(format!("Failed to install MeiliSearch binary: {}", e))
+        })?;
+
+        info!("MeiliSearch installed to {}", target.display());
+        Ok(target)
     }
 
     fn find_meilisearch_binary() -> Result<PathBuf> {

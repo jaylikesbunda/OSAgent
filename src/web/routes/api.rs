@@ -5207,19 +5207,45 @@ async fn auto_name_session(
 
     let provider = agent.active_provider().await;
     let messages = vec![crate::storage::Message::user(prompt_text)];
-    let title = match provider.complete(&messages, &[]).await {
-        Ok(resp) => {
-            let raw = resp.content.unwrap_or_default();
-            let clean = raw.trim().trim_matches('"').trim_matches('\'');
-            let words: Vec<&str> = clean.split_whitespace().take(6).collect();
-            words.join(" ")
+    let raw = match provider.complete(&messages, &[]).await {
+        Ok(resp) => resp.content.unwrap_or_default(),
+        Err(e) => {
+            // Previously swallowed, which made a failing title call
+            // indistinguishable from one that was never attempted.
+            tracing::warn!("auto_name_session: model call failed for {}: {}", id, e);
+            return Ok(Json(serde_json::json!({ "name": null })));
         }
-        Err(_) => return Ok(Json(serde_json::json!({ "name": null }))),
     };
 
+    // Models often wrap the answer in quotes, prefix it with "Title:", or add a
+    // reasoning preamble on its own line. Take the last non-empty line and strip
+    // the common decorations rather than discarding an otherwise usable title.
+    let candidate = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back()
+        .unwrap_or("");
+    let candidate = candidate
+        .trim_start_matches("Title:")
+        .trim_start_matches("title:")
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('*')
+        .trim();
+    let title = candidate.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+
     if title.is_empty() || title.len() < 2 {
+        tracing::warn!(
+            "auto_name_session: model returned no usable title for {} (raw: {:?})",
+            id,
+            raw.chars().take(120).collect::<String>()
+        );
         return Ok(Json(serde_json::json!({ "name": null })));
     }
+
+    tracing::info!("auto_name_session: naming session {} -> {:?}", id, title);
 
     let mut updated = session;
     updated.metadata["name"] = serde_json::json!(title);

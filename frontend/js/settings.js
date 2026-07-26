@@ -281,7 +281,10 @@ OSA.saveSettings = async function() {
             .filter(Boolean)
             .map(v => {
                 if (!/^\d+$/.test(v)) throw new Error(`Invalid Discord user ID: ${v}`);
-                return Number(v);
+                // Keep the id as a string: Discord snowflakes are larger than
+                // Number.MAX_SAFE_INTEGER, so Number(v) silently rounds them
+                // (420155234833268737 becomes 420155234833268740).
+                return v;
             });
     } catch (error) {
         errorDiv.textContent = error.message;
