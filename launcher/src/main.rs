@@ -88,20 +88,34 @@ fn sync_embedded_binary(target_path: &Path, bytes: &[u8]) -> Option<PathBuf> {
     Some(target_path.to_path_buf())
 }
 
+fn embedded_binary_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let exe_path = std::env::current_exe().ok()?;
+        Some(exe_path.parent()?.to_path_buf())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let bin_dir = dirs_next::home_dir()?.join(".osagent").join("bin");
+        fs::create_dir_all(&bin_dir).ok()?;
+        Some(bin_dir)
+    }
+}
+
 fn get_embedded_core_path() -> Option<PathBuf> {
     if CORE_BINARY.is_empty() || CORE_BINARY == b"placeholder" {
         return None;
     }
 
     let cached = CORE_EXTRACTED_PATH.get_or_init(|| {
-        let exe_path = std::env::current_exe().ok()?;
-        let exe_dir = exe_path.parent()?;
+        let bin_dir = embedded_binary_dir()?;
         let core_name = if cfg!(windows) {
             "osagent.exe"
         } else {
             "osagent"
         };
-        let core_path = exe_dir.join(core_name);
+        let core_path = bin_dir.join(core_name);
 
         let core_path = sync_embedded_binary(&core_path, CORE_BINARY)?;
 
@@ -118,14 +132,13 @@ fn get_embedded_updater_path() -> Option<PathBuf> {
     }
 
     let cached = UPDATER_EXTRACTED_PATH.get_or_init(|| {
-        let exe_path = std::env::current_exe().ok()?;
-        let exe_dir = exe_path.parent()?;
+        let bin_dir = embedded_binary_dir()?;
         let updater_name = if cfg!(windows) {
             "osagent-updater.exe"
         } else {
             "osagent-updater"
         };
-        let updater_path = exe_dir.join(updater_name);
+        let updater_path = bin_dir.join(updater_name);
 
         let updater_path = sync_embedded_binary(&updater_path, UPDATER_BINARY)?;
 
