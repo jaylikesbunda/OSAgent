@@ -634,6 +634,28 @@
     background: rgba(239, 68, 68, 0.1);
 }
 
+.subagent-status-badge.retrying {
+    color: #f0b429;
+    background: rgba(240, 180, 41, 0.12);
+    animation: badgePulse 1.5s ease-in-out infinite;
+}
+
+.subagent-live {
+    padding: 4px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.subagent-current-tool {
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+}
+
 .subagent-tool-count {
     font-size: 11px;
     color: var(--text-muted);
@@ -718,6 +740,14 @@
 
 .subagent-tool-item:last-child {
     border-bottom: none;
+}
+
+.subagent-tool-item.completed {
+    color: #22c55e;
+}
+
+.subagent-tool-item.failed {
+    color: #ef4444;
 }
 
 .subagent-result {

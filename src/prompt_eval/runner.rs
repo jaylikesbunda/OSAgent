@@ -266,7 +266,7 @@ impl EvaluationRunner {
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse, EvalError> {
         self.provider
-            .complete(messages, tools)
+            .complete(None, messages, tools)
             .await
             .map_err(|e| EvalError::ProviderError(e.to_string()))
     }

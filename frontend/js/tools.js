@@ -72,6 +72,16 @@ OSA.ROW_TOOLS = new Set(['read_file', 'list_files', 'task', 'skill', 'web_fetch'
 OSA.CONTEXT_TOOLS = new Set(['read_file', 'list_files', 'glob', 'grep']);
 
 OSA.handleAgentEvent = function(event) {
+    if (OSA.debug) {
+        const summary = {};
+        if (event.tool_name !== undefined) summary.tool = event.tool_name;
+        if (event.tool_call_id !== undefined) summary.call = event.tool_call_id;
+        if (event.message_index !== undefined) summary.idx = event.message_index;
+        if (event.error !== undefined) summary.error = typeof event.error === 'string' ? event.error.slice(0, 200) : event.error;
+        if (event.reason !== undefined) summary.reason = typeof event.reason === 'string' ? event.reason.slice(0, 200) : event.reason;
+        if (event.sequence !== undefined) summary.seq = event.sequence;
+        OSA.debug.log('event.' + event.type, summary);
+    }
     const isStopping = OSA.isAgentStopping();
     const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked', 'workflow_started', 'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed', 'workflow_completed', 'workflow_failed'];
     
@@ -115,6 +125,7 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'response_start':
+            OSA.clearRetryNotice();
             chain.lastAssistantDomId = OSA.getStreamingAssistantDomId() || chain.lastAssistantDomId;
             OSA.beginAssistantResponse();
             OSA.renderQueuedMessages(OSA.getSessionQueue());
@@ -127,6 +138,7 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'tool_start':
+            OSA.clearRetryNotice();
             chain.lastToolStartSeq = seq;
             chain.pendingToolCallIds = chain.pendingToolCallIds || [];
             if (event.tool_call_id && !chain.pendingToolCallIds.includes(event.tool_call_id)) {
@@ -200,6 +212,14 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'retry':
+            if (event.subagent_session_id) {
+                OSA.handleSubagentRetry(event);
+            } else {
+                OSA.showRetryNotice(event);
+            }
+            OSA.scheduleSessionInspectorRefresh();
+            break;
+
         case 'compaction':
         case 'step_finish':
         case 'reasoning':
@@ -813,6 +833,10 @@ OSA.createToolCard = function(event, insertBefore = null) {
     const toolName = event.tool_name;
     const callId = event.tool_call_id;
 
+    if (OSA.debug) {
+        OSA.debug.log('tool.start', { tool: toolName, call: callId, idx: event.message_index !== undefined ? event.message_index : 0, isContext: OSA.isContextTool(toolName) });
+    }
+
     if (OSA.isContextTool(toolName)) {
         const messageIndex = event.message_index !== undefined ? event.message_index : 0;
         OSA.addContextToolToGroup(event, false, false, messageIndex);
@@ -1403,7 +1427,34 @@ OSA.renderTaskMessage = function(event) {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 };
 
+OSA.showRetryNotice = function(event) {
+    const root = OSA.getFloatingRoot();
+    if (!root) return;
+    const existing = document.getElementById('osa-retry-notice');
+    if (existing) existing.remove();
+    const delay = event.next_retry_in_ms ? Math.max(1, Math.round(event.next_retry_in_ms / 1000)) : null;
+    const attempt = event.attempt_count || 0;
+    const max = event.max_attempts || 0;
+    let text = 'Provider request failed — retrying';
+    if (delay) text += ` in ~${delay}s`;
+    if (attempt && max) text += ` (attempt ${attempt}/${max})`;
+    const chip = document.createElement('div');
+    chip.id = 'osa-retry-notice';
+    chip.className = 'retry-notice';
+    chip.textContent = text;
+    root.appendChild(chip);
+    if (OSA.debug) {
+        OSA.debug.log('retry.notice', { text, attempt, max, delay });
+    }
+};
+
+OSA.clearRetryNotice = function() {
+    const existing = document.getElementById('osa-retry-notice');
+    if (existing) existing.remove();
+};
+
 OSA.handleEventError = function(event) {
+    OSA.clearRetryNotice();
     console.error('Agent error:', event.error);
     if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
     OSA.completeThinkingDisplay();
@@ -1542,6 +1593,25 @@ OSA.updateSubagentContextRing = function(subagentId, contextState) {
     ring.title = `Context: ${metrics.pct}%`;
 };
 
+OSA.formatSubagentDuration = function(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    const totalSeconds = Math.round(ms / 1000);
+    if (totalSeconds < 60) return `${totalSeconds}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes < 60) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    const restMinutes = minutes % 60;
+    return restMinutes > 0 ? `${hours}h ${restMinutes}m` : `${hours}h`;
+};
+
+OSA.completedDurationMs = function(createdAt, completedAt) {
+    const start = createdAt ? new Date(createdAt).getTime() : 0;
+    const end = completedAt ? new Date(completedAt).getTime() : 0;
+    if (!start || !end || end < start) return 0;
+    return end - start;
+};
+
 OSA.restoreSubagentCards = function(subagentTasks) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv || !subagentTasks || subagentTasks.length === 0) return;
@@ -1572,6 +1642,9 @@ OSA.restoreSubagentCards = function(subagentTasks) {
         const isRunning = task.is_running;
         const result = task.result || '';
         const prompt = task.prompt || '';
+        const durationText = OSA.formatSubagentDuration(
+            OSA.completedDurationMs(task.created_at, task.completed_at)
+        );
         const contextRingHtml = OSA.buildContextRingHtml(task.context_state, subagentId);
 
         const container = document.createElement('div');
@@ -1587,9 +1660,12 @@ OSA.restoreSubagentCards = function(subagentTasks) {
                 <div class="subagent-status">
                     ${contextRingHtml}
                     <span class="subagent-status-badge ${isRunning ? 'running' : status}" id="subagent-status-${subagentId}">${isRunning ? 'running' : status}</span>
-                    <span class="subagent-tool-count" id="subagent-count-${subagentId}">${toolCount} tool${toolCount !== 1 ? 's' : ''}</span>
+                    <span class="subagent-tool-count" id="subagent-count-${subagentId}">${toolCount} tool${toolCount !== 1 ? 's' : ''}${durationText ? ` · ${durationText}` : ''}</span>
                     <span class="subagent-chevron" id="subagent-chevron-${subagentId}">&#x25B6;</span>
                 </div>
+            </div>
+            <div class="subagent-live" id="subagent-live-${subagentId}" style="display:none">
+                <span class="subagent-current-tool" id="subagent-current-${subagentId}"></span>
             </div>
             <div class="subagent-body" id="subagent-body-${subagentId}" style="display:none">
                 <div class="subagent-body-inner">
@@ -1657,6 +1733,12 @@ OSA.handleSubagentCreated = function(event) {
             </div>
         </div>
     `;
+    const liveStrip = document.createElement('div');
+    liveStrip.id = `subagent-live-${subagentId}`;
+    liveStrip.className = 'subagent-live';
+    liveStrip.style.display = 'none';
+    liveStrip.innerHTML = `<span class="subagent-current-tool" id="subagent-current-${subagentId}"></span>`;
+    container.insertBefore(liveStrip, container.querySelector('.subagent-body'));
     const anchorIndex = OSA.findAnchorMessageIndexForTimestamp(event.timestamp);
     OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : OSA.getLatestAnchorMessageIndex());
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -1682,13 +1764,44 @@ OSA.handleSubagentProgress = function(event) {
         countEl.textContent = `${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
     }
 
+    const currentEl = document.getElementById(`subagent-current-${subagentId}`);
+    const liveStrip = document.getElementById(`subagent-live-${subagentId}`);
+    const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
     const toolsEl = document.getElementById(`subagent-tools-${subagentId}`);
-    if (toolsEl && event.tool_name) {
-        const toolItem = document.createElement('div');
-        toolItem.className = 'subagent-tool-item';
-        toolItem.textContent = `${event.tool_name}`;
-        toolsEl.appendChild(toolItem);
-        toolsEl.scrollTop = toolsEl.scrollHeight;
+
+    if (status === 'executing') {
+        if (liveStrip) liveStrip.style.display = '';
+        if (currentEl) currentEl.textContent = `\u21B3 ${event.tool_name || ''}`;
+        if (statusBadge) {
+            statusBadge.textContent = 'running';
+            statusBadge.className = 'subagent-status-badge running';
+        }
+    } else if (status === 'completed' || status === 'failed') {
+        if (currentEl && currentEl.textContent.trim() === `\u21B3 ${event.tool_name || ''}`) {
+            currentEl.textContent = '';
+        }
+        if (liveStrip && !(currentEl && currentEl.textContent.trim())) {
+            liveStrip.style.display = 'none';
+        }
+        if (toolsEl && event.tool_name) {
+            const toolItem = document.createElement('div');
+            toolItem.className = `subagent-tool-item ${status}`;
+            toolItem.textContent = event.tool_name;
+            toolsEl.appendChild(toolItem);
+            toolsEl.scrollTop = toolsEl.scrollHeight;
+        }
+        if (statusBadge && statusBadge.textContent === 'retrying') {
+            statusBadge.textContent = 'running';
+            statusBadge.className = 'subagent-status-badge running';
+        }
+    } else {
+        if (toolsEl && event.tool_name) {
+            const toolItem = document.createElement('div');
+            toolItem.className = 'subagent-tool-item';
+            toolItem.textContent = event.tool_name;
+            toolsEl.appendChild(toolItem);
+            toolsEl.scrollTop = toolsEl.scrollHeight;
+        }
     }
 
     const data = OSA._activeSubagents.get(subagentId);
@@ -1698,11 +1811,34 @@ OSA.handleSubagentProgress = function(event) {
     }
 };
 
+OSA.handleSubagentRetry = function(event) {
+    const subagentId = event.subagent_session_id;
+    if (!subagentId) return;
+    const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
+    const currentEl = document.getElementById(`subagent-current-${subagentId}`);
+    const liveStrip = document.getElementById(`subagent-live-${subagentId}`);
+    if (statusBadge) {
+        statusBadge.textContent = 'retrying';
+        statusBadge.className = 'subagent-status-badge retrying';
+    }
+    if (liveStrip) liveStrip.style.display = '';
+    if (currentEl) {
+        const delay = event.next_retry_in_ms ? Math.max(1, Math.round(event.next_retry_in_ms / 1000)) : null;
+        const attempt = event.attempt_count || 0;
+        const max = event.max_attempts || 0;
+        let text = `\u21B3 retrying in ~${delay}s`;
+        if (!delay) text = `\u21B3 retrying`;
+        if (attempt && max) text += ` (attempt ${attempt}/${max})`;
+        currentEl.textContent = text;
+    }
+};
+
 OSA.handleSubagentCompleted = function(event) {
     const subagentId = event.subagent_session_id;
     const status = event.status || 'completed';
     const result = event.result || '';
     const toolCount = event.tool_count || 0;
+    const durationText = OSA.formatSubagentDuration(event.duration_ms);
 
     const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
     if (statusBadge) {
@@ -1712,8 +1848,11 @@ OSA.handleSubagentCompleted = function(event) {
 
     const countEl = document.getElementById(`subagent-count-${subagentId}`);
     if (countEl) {
-        countEl.textContent = `${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
+        countEl.textContent = `${toolCount} tool${toolCount !== 1 ? 's' : ''}${durationText ? ` · ${durationText}` : ''}`;
     }
+
+    const liveStrip = document.getElementById(`subagent-live-${subagentId}`);
+    if (liveStrip) liveStrip.style.display = 'none';
 
     const cancelBtn = document.getElementById(`subagent-cancel-${subagentId}`);
     if (cancelBtn) {
@@ -2117,22 +2256,35 @@ OSA.syncToolsFromBackend = async function() {
                         }
                     }
 
+                    let syncCreated = 0;
+                    let syncSkippedWindow = 0;
+                    let syncExisting = 0;
                     tools.forEach(t => {
                         if (t.tool_name === 'subagent') return;
                         if (typeof OSA.isMessageIndexInRenderedWindow === 'function' && !OSA.isMessageIndexInRenderedWindow(t.message_index)) {
+                            syncSkippedWindow++;
                             return;
                         }
                         const callId = t.tool_call_id;
                         if (OSA.isContextTool(t.tool_name)) {
                             if (!existingContextIds.has(`ctx-${callId}`)) {
                                 OSA.restoreToolCard(t);
+                                syncCreated++;
+                            } else {
+                                syncExisting++;
                             }
                         } else {
                             if (!existingCardIds.has(`tool-${callId}`)) {
                                 OSA.restoreToolCard(t);
+                                syncCreated++;
+                            } else {
+                                syncExisting++;
                             }
                         }
                     });
+                    if (OSA.debug) {
+                        OSA.debug.log('tool.sync', { total: tools.length, created: syncCreated, existing: syncExisting, skippedOutOfWindow: syncSkippedWindow });
+                    }
                 }
             }
         }

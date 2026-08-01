@@ -132,6 +132,10 @@ checkpoint_interval = 5
 # support automatic prompt caching. Set to false to rebuild the full prompt
 # every turn.
 prompt_cache_enabled = true
+# Maximum number of nested subagent levels (the main agent counts as 0).
+# Spawning deeper than this fails with an explicit error. Subagents already
+# exclude the subagent tool from their allowlist; this config is the hard limit.
+subagent_depth = 1
 
 # Discord Bot (optional; requires building with `--features discord`)
 # [discord]

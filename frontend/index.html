@@ -547,6 +547,16 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label" for="setting-debug-overlay">Debug Overlay</label>
+                                <span class="toggle-desc">Show the live event and tool-placement diagnostics panel (also toggled with Shift+D)</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-debug-overlay" onchange="OSA.onDebugOverlayToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">System Prompt</div>
@@ -1240,6 +1250,7 @@
     </div>
 
     <script defer src="/static/js/state.js"></script>
+    <script defer src="/static/js/debug.js"></script>
     <script defer src="/static/js/utils.js"></script>
     <script defer src="/static/js/api.js"></script>
     <script defer src="/static/js/diff.js"></script>

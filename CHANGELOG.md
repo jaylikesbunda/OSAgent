@@ -1,3 +1,34 @@
+v0.3.0 changes:
+
+## Provider error handling
+
+* Provider errors are now parsed structurally instead of classified by sniffing the message text: the HTTP status code, the provider's error code (e.g. `context_length_exceeded`, `rate_limit_exceeded`) and any `Retry-After` hint are extracted from the response once and carried on the error, so rate-limit, context-overflow and retryable classifications no longer depend on the exact wording each provider uses. Text-based matching remains as a fallback for proxies that return plain-text bodies
+* Retries now honor the server's `Retry-After` hint instead of ignoring it: `retry-after-ms`, `retry-after` (seconds or HTTP date) and `x-ratelimit-reset` are all understood, so a 429 that says "wait 30s" no longer retries after 8s and fails again, or sleeps through a short window. The hint is capped at 5 minutes so a misbehaving server cannot stall the agent loop
+* 5xx responses are now always retried, even when the error text doesn't say "status code 5xx" — previously a 503 from a gateway with non-standard wording was treated as permanent and aborted the turn
+* Retry backoff is now exponential (`base × 2^attempt`, capped) instead of linear, matching provider expectations for transient failures
+* OpenAI-style 404 "model not found" responses remain retryable for providers known to return them spuriously
+* Retries are now announced live instead of only after the fact: before each attempt the provider emits a retry event carrying the attempt number, the maximum, and the server-requested delay, and the chat UI shows a "Provider request failed — retrying in ~Ns (attempt N/M)" notice that clears when the turn resumes. Previously the only signal was a single event after the request had already succeeded
+* When the provider's last-resort context compression kicks in (request exceeded the context window despite the pre-emptive estimate), the resulting summary is now persisted into the session instead of being discarded after that one request — the model sees it on later turns and history stays bounded
+
+## Tools & agent runtime
+
+* Failed tool calls are now recorded distinctly: the tool message persisted to the session carries `success: false` plus the error text in metadata (and session tool events include the error message), so failures are no longer indistinguishable from a tool that returned the string "Error: ..."
+* Argument/schema validation errors (missing or invalid parameters) now end with explicit guidance telling the model to rewrite the input to satisfy the expected schema, so it stops resubmitting the same malformed call
+* The tool loop's allowlist and loop-guard error messages are now marked as failed tool results with the same success/error metadata instead of bare tool messages
+
+## Chat UI diagnostics
+
+* Added a debug overlay (toggleable from Settings > Agent > Debug Overlay, or with Shift+D) that shows a live stream of agent events and every tool-card placement decision — anchors resolved, slots found or missing, cards recovered, and cards orphaned in the transcript's virtualized window — plus a Copy button that dumps the diagnostics and current transcript state, so "tool cards missing until session reload" style issues can be diagnosed instead of guessed at. Off by default
+* Tool cards are now anchored under both the requested and the resolved message index, and a pending-mount pass runs after every transcript render: cards that arrived before their anchor message was rendered are re-attached as soon as it appears, instead of staying invisible until a session reload
+* The 2.5s backend tool-sync now logs how many cards it created, skipped as out-of-window, or left in place
+
+## Subagents
+
+* Added nesting control: new `agent.subagent_depth` config (default 1) is a hard limit on how many subagent levels can be spawned — the main agent counts as 0, so a subagent can no longer spawn another subagent beyond the configured depth, and the attempt fails with an explicit "Subagent depth limit reached" error instead of silently forking
+* Subagent cards now show live execution detail like opencode: while running, a status strip displays the current tool being executed (`↳ read_file`) and flips to `↳ retrying in ~5s (attempt 2/4)` when the provider retries (retry events are now routed to the parent session with the subagent id so the card can react); completed/failed tools are appended to the tool list in green/red
+* Completed subagent cards show duration (`N tools · 2m 14s`) computed server-side on completion and client-side when restored from history
+* Subagent retries also surface as a "retrying" badge state on the card, clearing when work resumes
+
 v0.2.0 changes:
 
 ## Security & permissions

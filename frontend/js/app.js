@@ -989,6 +989,10 @@ OSA.restoreToolsAtPositions = function(tools) {
         return OSA.isMessageIndexInRenderedWindow(t.message_index);
     });
 
+    if (OSA.debug) {
+        OSA.debug.log('tool.restore', { candidates: tools.length, inWindow: filteredTools.length });
+    }
+
     if (filteredTools.length === 0) return;
 
     if (messagesDiv.querySelectorAll('.message').length === 0) {

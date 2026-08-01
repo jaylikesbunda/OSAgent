@@ -9,6 +9,7 @@ const isWatch = process.argv.includes("--watch");
 
 const JS_LOAD_ORDER = [
   "js/state.js",
+  "js/debug.js",
   "js/utils.js",
   "js/api.js",
   "js/diff.js",

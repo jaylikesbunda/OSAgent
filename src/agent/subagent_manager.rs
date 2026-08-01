@@ -185,6 +185,34 @@ impl SubagentManager {
 
         allowed.into_iter().collect()
     }
+    /// Count how many subagent levels the given session sits below the main
+    /// agent: 0 for a top-level session, 1 for a direct subagent, etc.
+    fn subagent_depth_of(storage: &SqliteStorage, session_id: &str) -> usize {
+        let mut depth = 0usize;
+        let mut current = Some(session_id.to_string());
+        while let Some(id) = current {
+            match storage.get_session(&id) {
+                Ok(Some(session)) => {
+                    current = session.parent_id.clone();
+                    if session.parent_id.is_some() {
+                        depth += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        depth
+    }
+
+    /// Wall-clock time the subagent task has been running, in milliseconds.
+    fn task_duration_ms(storage: &Arc<SqliteStorage>, task_id: &str) -> u64 {
+        storage
+            .get_subagent_task(task_id)
+            .ok()
+            .flatten()
+            .map(|task| (Utc::now() - task.created_at).num_milliseconds().max(0) as u64)
+            .unwrap_or(0)
+    }
 
     pub async fn spawn_subagent(
         &self,
@@ -193,6 +221,15 @@ impl SubagentManager {
         prompt: String,
         agent_type: String,
     ) -> Result<String> {
+        let depth_limit = self.config.read().await.agent.subagent_depth;
+        let current_depth = Self::subagent_depth_of(&self.storage, &parent_session_id);
+        if current_depth >= depth_limit {
+            return Err(crate::error::OSAgentError::ToolExecution(format!(
+                "Subagent depth limit reached ({}). Increase 'subagent_depth' in the agent config to allow nested subagents.",
+                depth_limit
+            )));
+        }
+
         let parent_session = self
             .session_manager
             .get_session(&parent_session_id)
@@ -355,6 +392,7 @@ impl SubagentManager {
 
             match result {
                 Ok((status, result_text, tool_count)) => {
+                    let duration_ms = Self::task_duration_ms(&storage, &task_id);
                     if let Ok(Some(mut task)) = storage.get_subagent_task(&task_id) {
                         task.status = status.clone();
                         task.result = Some(result_text.clone());
@@ -376,6 +414,7 @@ impl SubagentManager {
                         status: status.clone(),
                         result: result_text.clone(),
                         tool_count,
+                        duration_ms,
                         timestamp: std::time::SystemTime::now(),
                     });
 
@@ -383,6 +422,7 @@ impl SubagentManager {
                 }
                 Err(e) => {
                     error!("Subagent failed: {:?}", e);
+                    let duration_ms = Self::task_duration_ms(&storage, &task_id);
                     if let Ok(Some(mut task)) = storage.get_subagent_task(&task_id) {
                         task.status = "failed".to_string();
                         task.result = Some(format!("Error: {}", e));
@@ -403,6 +443,7 @@ impl SubagentManager {
                         status: "failed".to_string(),
                         result: format!("Error: {}", e),
                         tool_count: 0,
+                        duration_ms,
                         timestamp: std::time::SystemTime::now(),
                     });
 
@@ -688,7 +729,7 @@ impl SubagentManager {
             _ = cancel_rx.recv() => {
                 return Err(crate::error::OSAgentError::ToolExecution("Subagent cancelled".to_string()));
             }
-            result = provider.complete(&api_messages, &tools) => {
+            result = provider.complete(Some(&session_id), &api_messages, &tools) => {
                 result.map_err(|e| crate::error::OSAgentError::Provider(e.to_string()))?
             }
         };
@@ -814,6 +855,17 @@ impl SubagentManager {
                                 "output": output,
                             }),
                         );
+
+                        event_bus.emit(AgentEvent::SubagentProgress {
+                            session_id: parent_session_id.clone(),
+                            sequence: 0,
+                            parent_session_id: parent_session_id.clone(),
+                            subagent_session_id: session_id.clone(),
+                            tool_name: tool_call.name.clone(),
+                            tool_count,
+                            status: "completed".to_string(),
+                            timestamp: SystemTime::now(),
+                        });
                     }
                     Err(e) => {
                         let error_msg = format!("Error: {}", e);
@@ -833,6 +885,17 @@ impl SubagentManager {
                                 "output": error_msg,
                             }),
                         );
+
+                        event_bus.emit(AgentEvent::SubagentProgress {
+                            session_id: parent_session_id.clone(),
+                            sequence: 0,
+                            parent_session_id: parent_session_id.clone(),
+                            subagent_session_id: session_id.clone(),
+                            tool_name: tool_call.name.clone(),
+                            tool_count,
+                            status: "failed".to_string(),
+                            timestamp: SystemTime::now(),
+                        });
                     }
                 }
 

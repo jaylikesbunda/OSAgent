@@ -93,10 +93,18 @@ pub struct AgentConfig {
     pub custom_priorities: Option<Vec<String>>,
     #[serde(default = "default_prompt_cache_enabled")]
     pub prompt_cache_enabled: bool,
+    /// Maximum number of nested subagent levels (main agent counts as 0).
+    /// Spawning deeper than this fails with an explicit error.
+    #[serde(default = "default_subagent_depth")]
+    pub subagent_depth: usize,
 }
 
 fn default_prompt_cache_enabled() -> bool {
     true
+}
+
+fn default_subagent_depth() -> usize {
+    1
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -478,6 +486,7 @@ impl Default for AgentConfig {
             custom_identity: None,
             custom_priorities: None,
             prompt_cache_enabled: default_prompt_cache_enabled(),
+            subagent_depth: default_subagent_depth(),
         }
     }
 }

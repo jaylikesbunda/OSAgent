@@ -17,15 +17,45 @@ use super::provider_adapter::{create_provider_adapter, ProviderAdapter, RequestM
 use super::provider_auth::{get_extra_headers, resolve_provider_config};
 use super::reasoning;
 
-const MAX_RETRIES: u32 = 4;
+pub(crate) const MAX_RETRIES: u32 = 4;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 const MAX_TOOL_SCHEMA_TOKENS: usize = 16_000;
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+/// Receives notifications before each provider retry attempt so callers can
+/// surface "retrying in Ns" status in real time instead of after the fact.
+pub trait RetryListener: Send + Sync {
+    fn on_retry(
+        &self,
+        session_id: Option<&str>,
+        attempt: u32,
+        max_attempts: u32,
+        delay: Duration,
+        reason: &str,
+    );
+}
+
+impl<F> RetryListener for F
+where
+    F: Fn(Option<&str>, u32, u32, Duration, &str) + Send + Sync,
+{
+    fn on_retry(
+        &self,
+        session_id: Option<&str>,
+        attempt: u32,
+        max_attempts: u32,
+        delay: Duration,
+        reason: &str,
+    ) {
+        self(session_id, attempt, max_attempts, delay, reason)
+    }
+}
 
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn complete(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse>;
@@ -33,6 +63,7 @@ pub trait Provider: Send + Sync {
     #[allow(dead_code)]
     async fn complete_stream(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>>;
@@ -68,6 +99,8 @@ pub struct ProviderResponse {
     pub retry_count: u32,
     #[serde(default)]
     pub context_compressed: bool,
+    #[serde(default)]
+    pub compressed_summary: Option<String>,
     #[serde(default)]
     pub usage: Option<TokenUsage>,
 }
@@ -131,6 +164,7 @@ pub struct OpenAICompatibleProvider {
     context_window_attempted: RwLock<bool>,
     model_override: RwLock<Option<String>>,
     catalog: Option<Arc<ModelCatalog>>,
+    retry_listener: std::sync::RwLock<Option<Arc<dyn RetryListener>>>,
 }
 
 impl OpenAICompatibleProvider {
@@ -200,7 +234,29 @@ impl OpenAICompatibleProvider {
             context_window_attempted: RwLock::new(false),
             model_override: RwLock::new(None),
             catalog,
+            retry_listener: std::sync::RwLock::new(None),
         })
+    }
+
+    pub fn set_retry_listener(&self, listener: Option<Arc<dyn RetryListener>>) {
+        if let Ok(mut guard) = self.retry_listener.write() {
+            *guard = listener;
+        }
+    }
+
+    fn notify_retry(
+        &self,
+        session_id: Option<&str>,
+        attempt: u32,
+        max_attempts: u32,
+        delay: Duration,
+        reason: &str,
+    ) {
+        if let Ok(guard) = self.retry_listener.read() {
+            if let Some(listener) = guard.as_ref() {
+                listener.on_retry(session_id, attempt, max_attempts, delay, reason);
+            }
+        }
     }
 
     fn build_messages(&self, messages: &[Message], provider_type: &str) -> Vec<serde_json::Value> {
@@ -873,6 +929,7 @@ impl OpenAICompatibleProvider {
             finish_reason,
             retry_count: 0,
             context_compressed: false,
+            compressed_summary: None,
             usage,
         }
     }
@@ -889,6 +946,7 @@ impl OpenAICompatibleProvider {
                 .to_string(),
             retry_count: 0,
             context_compressed: false,
+            compressed_summary: None,
             usage: Self::parse_response_usage(response_json),
         }
     }
@@ -931,36 +989,16 @@ impl OpenAICompatibleProvider {
             .map_err(|e| OSAgentError::Provider(format!("Responses request failed: {}", e)))?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response
             .text()
             .await
             .map_err(|e| OSAgentError::Provider(format!("Failed to read responses body: {}", e)))?;
 
         if !status.is_success() {
-            let detail = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|json| {
-                    json.get("detail")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            json.get("error")
-                                .and_then(|v| v.get("message"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        })
-                        .or_else(|| {
-                            json.get("message")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        })
-                })
-                .unwrap_or_else(|| body.clone());
-
-            return Err(OSAgentError::Provider(format!(
-                "API request failed ({}): {}",
-                status, detail
-            )));
+            let err = Self::provider_http_error(status, &headers, &body);
+            error!("{}", err);
+            return Err(err);
         }
 
         let mut content = String::new();
@@ -1015,7 +1053,19 @@ impl OpenAICompatibleProvider {
                         .and_then(|v| v.as_str())
                         .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
                         .unwrap_or("Unknown responses stream error");
-                    return Err(OSAgentError::Provider(msg.to_string()));
+                    let error_code = parsed
+                        .get("error")
+                        .and_then(|v| v.get("code"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    return Err(OSAgentError::ProviderStructured(
+                        crate::error::ProviderErrorInfo {
+                            message: msg.to_string(),
+                            status_code: None,
+                            retry_after: None,
+                            error_code,
+                        },
+                    ));
                 }
                 "response.output_text.delta" => {
                     if let Some(delta) = parsed.get("delta").and_then(|v| v.as_str()) {
@@ -1117,6 +1167,7 @@ impl OpenAICompatibleProvider {
             finish_reason: final_status.unwrap_or_else(|| "completed".to_string()),
             retry_count: 0,
             context_compressed: false,
+            compressed_summary: None,
             usage,
         })
     }
@@ -1331,11 +1382,127 @@ impl OpenAICompatibleProvider {
     }
 
     fn retry_delay_for_attempt(attempt: u32, error: &OSAgentError) -> Duration {
-        if error.is_rate_limited() {
-            Duration::from_secs(8 * attempt as u64)
-        } else {
-            Duration::from_secs(BASE_RETRY_DELAY_SECS * attempt as u64)
+        // Honor the server's Retry-After hint when present; it is authoritative
+        // and avoids retrying too early on long rate-limit windows.
+        if let Some(delay) = error.retry_after_delay() {
+            return delay;
         }
+        let base = if error.is_rate_limited() {
+            8
+        } else {
+            BASE_RETRY_DELAY_SECS
+        };
+        // Exponential backoff: base * 2^(attempt-1), capped to bound total wait.
+        let multiplier = 1u64 << attempt.saturating_sub(1).min(6);
+        Duration::from_secs(base.saturating_mul(multiplier).min(120))
+    }
+
+    /// Parse a `Retry-After` hint from response headers.
+    /// Supports OpenAI-style `retry-after-ms`, standard `retry-after`
+    /// (seconds or HTTP-date), and OpenAI's `x-ratelimit-reset` (epoch seconds).
+    fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+        if let Some(value) = headers.get("retry-after-ms") {
+            if let Ok(ms) = value.to_str().ok()?.trim().parse::<f64>() {
+                if ms.is_finite() && ms > 0.0 {
+                    return Some(Duration::from_millis(ms as u64));
+                }
+            }
+        }
+        if let Some(value) = headers.get("retry-after") {
+            let raw = value.to_str().ok()?.trim();
+            if let Ok(seconds) = raw.parse::<f64>() {
+                if seconds.is_finite() && seconds > 0.0 {
+                    return Some(Duration::from_secs_f64(seconds));
+                }
+            }
+            if let Ok(date) = chrono::DateTime::parse_from_rfc2822(raw) {
+                let seconds = date.signed_duration_since(chrono::Utc::now()).num_seconds();
+                if seconds > 0 {
+                    return Some(Duration::from_secs(seconds as u64));
+                }
+            }
+        }
+        if let Some(value) = headers.get("x-ratelimit-reset") {
+            if let Ok(epoch) = value.to_str().ok()?.trim().parse::<i64>() {
+                let remaining = epoch - chrono::Utc::now().timestamp();
+                if remaining > 0 {
+                    return Some(Duration::from_secs(remaining as u64));
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract the provider's error code (e.g. `context_length_exceeded`)
+    /// from an error response body.
+    fn extract_error_code(body: &str) -> Option<String> {
+        let json: serde_json::Value = serde_json::from_str(body).ok()?;
+        json.get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(|code| code.as_str())
+            .map(|code| code.to_string())
+            .or_else(|| {
+                json.get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(|code| code.as_i64())
+                    .map(|code| code.to_string())
+            })
+            .or_else(|| {
+                json.get("error")
+                    .and_then(|error| error.get("type"))
+                    .and_then(|error_type| error_type.as_str())
+                    .map(|error_type| error_type.to_string())
+            })
+    }
+
+    /// Extract a human-readable detail message from an error response body,
+    /// trying common provider shapes (`error.message`, `message`, `detail`).
+    fn extract_error_detail(body: &str) -> Option<String> {
+        let json: serde_json::Value = serde_json::from_str(body).ok()?;
+        json.get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+            .map(|message| message.to_string())
+            .or_else(|| json.get("message").and_then(|v| v.as_str()).map(String::from))
+            .or_else(|| json.get("detail").and_then(|v| v.as_str()).map(String::from))
+    }
+
+    /// Build a structured provider error from a failed HTTP response.
+    fn provider_http_error(
+        status: reqwest::StatusCode,
+        headers: &reqwest::header::HeaderMap,
+        body: &str,
+    ) -> OSAgentError {
+        let error_code = Self::extract_error_code(body);
+        let detail = Self::extract_error_detail(body)
+            .unwrap_or_else(|| body.trim().to_string())
+            .trim()
+            .to_string();
+        let message = if detail.is_empty() {
+            format!("API request failed ({})", status)
+        } else {
+            format!("API request failed ({}): {}", status, detail)
+        };
+        OSAgentError::ProviderStructured(crate::error::ProviderErrorInfo {
+            message,
+            status_code: Some(status.as_u16()),
+            retry_after: Self::parse_retry_after(headers),
+            error_code,
+        })
+    }
+
+    /// Parse an HTTP status code out of a free-form error message,
+    /// e.g. eventsource errors shaped like "Invalid status code: 429".
+    fn parse_status_code_from_message(text: &str) -> Option<u16> {
+        let lower = text.to_lowercase();
+        let start = lower.find("status code")? + "status code".len();
+        let rest = &lower[start..];
+        let digits: String = rest
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
     }
 
     fn trim_message_content(content: &str, max_chars: usize) -> String {
@@ -1559,18 +1726,21 @@ impl OpenAICompatibleProvider {
 
     async fn complete_with_retry(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse> {
         let mut last_error: Option<OSAgentError> = None;
         let mut current_messages = messages.to_vec();
         let mut context_compressed = false;
+        let mut compressed_summary: Option<String> = None;
 
         for attempt in 1..=MAX_RETRIES {
             match self.do_complete(&current_messages, tools).await {
                 Ok(mut response) => {
                     response.retry_count = attempt.saturating_sub(1);
                     response.context_compressed = context_compressed;
+                    response.compressed_summary = compressed_summary.clone();
                     return Ok(response);
                 }
                 Err(e) => {
@@ -1583,6 +1753,17 @@ impl OpenAICompatibleProvider {
                                 attempt,
                                 MAX_RETRIES
                             );
+                            compressed_summary = compressed_messages.iter().find_map(|msg| {
+                                if msg.role == "assistant"
+                                    && msg
+                                        .content
+                                        .starts_with("Earlier conversation compressed")
+                                {
+                                    Some(msg.content.clone())
+                                } else {
+                                    None
+                                }
+                            });
                             current_messages = compressed_messages;
                             context_compressed = true;
                             last_error = Some(e);
@@ -1599,6 +1780,7 @@ impl OpenAICompatibleProvider {
                             e,
                             delay.as_secs()
                         );
+                        self.notify_retry(session_id, attempt, MAX_RETRIES, delay, &e.to_string());
                         last_error = Some(e);
                         tokio::time::sleep(delay).await;
                         continue;
@@ -1615,6 +1797,7 @@ impl OpenAICompatibleProvider {
 
     async fn complete_stream_with_retry(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
@@ -1649,6 +1832,7 @@ impl OpenAICompatibleProvider {
                             e,
                             delay.as_secs()
                         );
+                        self.notify_retry(session_id, attempt, MAX_RETRIES, delay, &e.to_string());
                         last_error = Some(e);
                         tokio::time::sleep(delay).await;
                         continue;
@@ -1830,10 +2014,17 @@ impl OpenAICompatibleProvider {
                             done: false,
                         }))
                     }
-                    Err(err) => Some(Err(OSAgentError::Provider(format!(
-                        "stream error: {}",
-                        err
-                    )))),
+                    Err(err) => {
+                        let text = err.to_string();
+                        Some(Err(OSAgentError::ProviderStructured(
+                            crate::error::ProviderErrorInfo {
+                                status_code: Self::parse_status_code_from_message(&text),
+                                message: format!("stream error: {}", text),
+                                retry_after: None,
+                                error_code: None,
+                            },
+                        )))
+                    }
                 }
             })
             .boxed();
@@ -2018,10 +2209,11 @@ impl OpenAICompatibleProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let headers = response.headers().clone();
             let error_text = response.text().await.unwrap_or_default();
-            let error_msg = format!("API request failed ({}): {}", status, error_text);
-            error!("{}", error_msg);
-            return Err(OSAgentError::Provider(error_msg));
+            let err = Self::provider_http_error(status, &headers, &error_text);
+            error!("{}", err);
+            return Err(err);
         }
 
         let response_text = response.text().await.map_err(|e| {
@@ -2048,10 +2240,24 @@ impl OpenAICompatibleProvider {
 
         if let Some(error) = response_json.get("error") {
             let error_msg = error["message"].as_str().unwrap_or("Unknown error");
-            let error_code = error["code"].as_i64().unwrap_or(0);
-            let full_error = format!("API error ({}): {}", error_code, error_msg);
+            let error_code = error["code"]
+                .as_str()
+                .map(|code| code.to_string())
+                .or_else(|| error["code"].as_i64().map(|code| code.to_string()));
+            let full_error = if let Some(code) = &error_code {
+                format!("API error ({}): {}", code, error_msg)
+            } else {
+                format!("API error: {}", error_msg)
+            };
             error!("{}", full_error);
-            return Err(OSAgentError::Provider(full_error));
+            return Err(OSAgentError::ProviderStructured(
+                crate::error::ProviderErrorInfo {
+                    message: full_error,
+                    status_code: None,
+                    retry_after: None,
+                    error_code,
+                },
+            ));
         }
 
         let parsed = Self::parse_chat_completions_response(&response_json);
@@ -2076,18 +2282,20 @@ impl OpenAICompatibleProvider {
 impl Provider for OpenAICompatibleProvider {
     async fn complete(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse> {
-        self.complete_with_retry(messages, tools).await
+        self.complete_with_retry(session_id, messages, tools).await
     }
 
     async fn complete_stream(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
-        self.complete_stream_with_retry(messages, tools).await
+        self.complete_stream_with_retry(session_id, messages, tools).await
     }
 
     async fn model_context_window(&self) -> Option<usize> {

@@ -5207,7 +5207,7 @@ async fn auto_name_session(
 
     let provider = agent.active_provider().await;
     let messages = vec![crate::storage::Message::user(prompt_text)];
-    let raw = match provider.complete(&messages, &[]).await {
+    let raw = match provider.complete(None, &messages, &[]).await {
         Ok(resp) => resp.content.unwrap_or_default(),
         Err(e) => {
             // Previously swallowed, which made a failing title call

@@ -1629,17 +1629,60 @@ OSA.removeStoredAnchoredNode = function(node) {
 };
 
 OSA.mountAnchoredNode = function(node, messageIndex, insertBefore = null) {
+    const requestedIndex = Number.parseInt(String(messageIndex), 10);
     const resolvedIndex = OSA.resolveTranscriptAnchorMessageIndex(messageIndex);
     if (!Number.isInteger(resolvedIndex)) return node;
+    if (OSA.debug) {
+        if (Number.isInteger(requestedIndex) && requestedIndex !== resolvedIndex) {
+            OSA.debug.log('anchor.remap', { node: node.id || String(node.className), requested: requestedIndex, resolved: resolvedIndex });
+        }
+    }
     OSA.storeAnchoredNode(node, resolvedIndex);
+    if (Number.isInteger(requestedIndex) && requestedIndex !== resolvedIndex) {
+        OSA.storeAnchoredNode(node, requestedIndex);
+    }
     const slot = OSA.getTranscriptSlotForMessageIndex(resolvedIndex);
-    if (!slot) return node;
+    if (!slot) {
+        if (OSA.debug) {
+            OSA.debug.log('anchor.hidden', { node: node.id || String(node.className), requested: requestedIndex, resolved: resolvedIndex });
+            OSA.debug.warn('anchor.hidden', node.id || String(node.className), 'anchored node has no rendered transcript slot; it stays invisible until the transcript renders this index or the session is reloaded');
+        }
+        return node;
+    }
     if (insertBefore && insertBefore.parentNode === slot) {
         slot.insertBefore(node, insertBefore);
     } else {
         slot.appendChild(node);
     }
+    if (OSA.debug) {
+        OSA.debug.log('anchor.mounted', { node: node.id || String(node.className), requested: requestedIndex, resolved: resolvedIndex });
+    }
     return node;
+};
+
+OSA.mountPendingAnchoredNodes = function() {
+    const view = OSA.getTranscriptView();
+    if (!view || !view.listRoot) return 0;
+    let recovered = 0;
+    for (const [index, nodes] of view.anchoredNodesByIndex.entries()) {
+        const rendered = view.renderedMessageIndices.has(index);
+        const slot = OSA.getTranscriptSlotForMessageIndex(index);
+        for (const node of [...nodes]) {
+            if (node.isConnected) continue;
+            if (!rendered || !slot) {
+                if (OSA.debug) {
+                    OSA.debug.warn('anchor.orphan', node.id || String(node.className), `anchored node stored at index ${index} is detached and not rendered (window ${view.windowStart}..${view.windowEnd}, descriptors ${view.descriptors.length}) — it will only appear on session reload`);
+                }
+                continue;
+            }
+            slot.appendChild(node);
+            recovered++;
+            if (OSA.debug) {
+                OSA.debug.log('anchor.recovered', { node: node.id || String(node.className), index });
+            }
+        }
+    }
+    return recovered;
 };
 
 OSA.mountFloatingNode = function(node, insertBefore = null) {
@@ -1727,6 +1770,9 @@ OSA.attachAnchoredNodesForEntry = function(wrapper, messageIndex) {
     const view = OSA.getTranscriptView();
     const nodes = view.anchoredNodesByIndex.get(messageIndex) || [];
     slot.replaceChildren(...nodes);
+    if (OSA.debug && nodes.length > 0) {
+        OSA.debug.log('anchor.attach', { index: messageIndex, nodes: nodes.map(n => n.id || String(n.className)) });
+    }
 };
 
 OSA.getVisibleMessages = function(messages) {
@@ -2087,6 +2133,12 @@ OSA.syncRenderedMessages = function(messages, options = {}) {
         }
         view.lastDescriptorCount = total;
         view.isRendering = false;
+        if (typeof OSA.mountPendingAnchoredNodes === 'function') {
+            OSA.mountPendingAnchoredNodes();
+        }
+        if (OSA.debug) {
+            OSA.debug.log('render.sync', { reason: options.reason || '', total, windowStart: view.windowStart, windowEnd: view.windowEnd, anchored: Array.from(view.anchoredNodesByIndex.values()).reduce((n, l) => n + l.length, 0) });
+        }
         const elapsedMs = Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart);
         if ((options.reason === 'session-switch' || elapsedMs > 24) && OSA.perfLog) {
             OSA.perfLog('syncRenderedMessages:noop', {
@@ -2164,6 +2216,13 @@ OSA.syncRenderedMessages = function(messages, options = {}) {
     view.lastDescriptorCount = total;
 
     view.isRendering = false;
+
+    if (typeof OSA.mountPendingAnchoredNodes === 'function') {
+        OSA.mountPendingAnchoredNodes();
+    }
+    if (OSA.debug) {
+        OSA.debug.log('render.sync', { reason: options.reason || '', total, windowStart: view.windowStart, windowEnd: view.windowEnd, anchored: Array.from(view.anchoredNodesByIndex.values()).reduce((n, l) => n + l.length, 0) });
+    }
 
     const elapsedMs = Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart);
     if ((options.reason === 'session-switch' || elapsedMs > 24) && OSA.perfLog) {

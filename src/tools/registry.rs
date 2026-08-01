@@ -665,7 +665,31 @@ impl ToolRegistry {
             return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
         }
 
-        tool.execute_result(args).await
+        tool.execute_result(args).await.map_err(Self::with_rewrite_guidance)
+    }
+
+    /// Append explicit "rewrite the input" guidance to argument/schema
+    /// validation errors so the model knows how to recover, instead of
+    /// receiving a bare error string it may not understand.
+    fn with_rewrite_guidance(error: OSAgentError) -> OSAgentError {
+        const GUIDANCE: &str = " Please rewrite the input so it satisfies the expected schema.";
+        if let OSAgentError::ToolExecution(message) = &error {
+            if !message.contains(GUIDANCE) && Self::is_argument_error(message) {
+                return OSAgentError::ToolExecution(format!("{}{}", message, GUIDANCE));
+            }
+        }
+        error
+    }
+
+    fn is_argument_error(message: &str) -> bool {
+        let lower = message.to_lowercase();
+        lower.contains("missing")
+            || lower.contains("required")
+            || lower.contains("expected")
+            || lower.contains("must be provided")
+            || lower.contains("parameter")
+            || lower.contains("argument")
+            || lower.contains("schema")
     }
 
     pub async fn execute_in_workspace(
@@ -751,10 +775,16 @@ impl ToolRegistry {
             if let Some(tool) =
                 Self::build_tool(tool_name, config, self.storage.clone(), &self.file_cache)
             {
-                return tool.execute_result(args).await;
+                return tool
+                    .execute_result(args)
+                    .await
+                    .map_err(Self::with_rewrite_guidance);
             }
             if let Some(tool) = self.tools.get(tool_name) {
-                return tool.execute_result(args).await;
+                return tool
+                    .execute_result(args)
+                    .await
+                    .map_err(Self::with_rewrite_guidance);
             }
             return Err(OSAgentError::ToolExecution(format!(
                 "Tool not found: {}",

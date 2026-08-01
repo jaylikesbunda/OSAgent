@@ -134,6 +134,14 @@ pub enum AgentEvent {
         sequence: u64,
         scope: String,
         attempt_count: u32,
+        #[serde(default)]
+        max_attempts: u32,
+        #[serde(default)]
+        next_retry_in_ms: u64,
+        /// Set when the retrying session is a subagent, so the parent chat
+        /// can surface the retry on the subagent card.
+        #[serde(default)]
+        subagent_session_id: Option<String>,
         reason: String,
         timestamp: SystemTime,
     },
@@ -232,6 +240,8 @@ pub enum AgentEvent {
         status: String,
         result: String,
         tool_count: i32,
+        #[serde(default)]
+        duration_ms: u64,
         timestamp: SystemTime,
     },
     CoordinatorPhase {
@@ -613,6 +623,9 @@ impl AgentEvent {
                 session_id,
                 scope,
                 attempt_count,
+                max_attempts,
+                next_retry_in_ms,
+                subagent_session_id,
                 reason,
                 timestamp,
                 ..
@@ -621,6 +634,9 @@ impl AgentEvent {
                 sequence: value,
                 scope,
                 attempt_count,
+                max_attempts,
+                next_retry_in_ms,
+                subagent_session_id,
                 reason,
                 timestamp,
             },
@@ -794,6 +810,7 @@ impl AgentEvent {
                 status,
                 result,
                 tool_count,
+                duration_ms,
                 timestamp,
                 ..
             } => AgentEvent::SubagentCompleted {
@@ -804,6 +821,7 @@ impl AgentEvent {
                 status,
                 result,
                 tool_count,
+                duration_ms,
                 timestamp,
             },
             AgentEvent::CoordinatorPhase {

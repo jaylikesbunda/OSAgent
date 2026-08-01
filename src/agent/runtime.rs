@@ -12,7 +12,9 @@ use crate::agent::memory::{
 use crate::agent::model_catalog::ModelCatalog;
 use crate::agent::persona::{self, ActivePersona};
 use crate::agent::prompt::{self, PromptMode};
-use crate::agent::provider::{OpenAICompatibleProvider, Provider, StreamEvent};
+use crate::agent::provider::{
+    MAX_RETRIES, OpenAICompatibleProvider, Provider, RetryListener, StreamEvent,
+};
 use crate::agent::provider_presets;
 use crate::agent::session::SessionManager;
 use crate::agent::subagent_manager::SubagentManager;
@@ -245,6 +247,9 @@ impl AgentRuntime {
             .map_err(|e| warn!("Failed to clear tasks on startup: {}", e))
             .ok();
         log_phase("storage_init", &mut phase_start);
+
+        let event_bus = EventBus::new_with_storage(storage.clone());
+
         let mut provider_instances: Vec<(String, Arc<dyn Provider>)> = Vec::new();
 
         for provider_cfg in &config.providers {
@@ -268,6 +273,10 @@ impl AgentRuntime {
                     agent_settings.clone(),
                 )?,
             );
+            provider.set_retry_listener(Some(Self::provider_retry_listener(
+                Arc::new(event_bus.clone()),
+                storage.clone(),
+            )));
             provider_instances.push((provider_cfg.provider_type.clone(), provider));
         }
 
@@ -281,6 +290,10 @@ impl AgentRuntime {
                     agent_settings.clone(),
                 )?,
             );
+            provider.set_retry_listener(Some(Self::provider_retry_listener(
+                Arc::new(event_bus.clone()),
+                storage.clone(),
+            )));
             provider_instances.push((config.provider.provider_type.clone(), provider));
         }
         log_phase("providers_init", &mut phase_start);
@@ -341,8 +354,6 @@ impl AgentRuntime {
             }
         }
         log_phase("plugin_init", &mut phase_start);
-
-        let event_bus = EventBus::new_with_storage(storage.clone());
 
         let skill_loader = if config.tools.skills.enabled {
             let skills_dir =
@@ -1357,7 +1368,7 @@ impl AgentRuntime {
                     });
                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
                 }
-                result = provider.complete_stream(&api_messages, &tools) => result,
+                result = provider.complete_stream(Some(session_id), &api_messages, &tools) => result,
             };
 
             let (mut response, used_streaming) = match stream_attempt {
@@ -1396,7 +1407,7 @@ impl AgentRuntime {
                                     });
                                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
                                 }
-                                result = provider.complete(&api_messages, &tools) => {
+                                result = provider.complete(Some(session_id), &api_messages, &tools) => {
                                     result.map_err(|e| {
                                         error!("Provider error in session {}: {}", session_id, e);
                                         self.event_bus.emit(AgentEvent::Error {
@@ -1436,7 +1447,7 @@ impl AgentRuntime {
                             });
                             return Err(OSAgentError::Session("Operation cancelled".to_string()));
                         }
-                        result = provider.complete(&api_messages, &tools) => {
+                        result = provider.complete(Some(session_id), &api_messages, &tools) => {
                             result.map_err(|e| {
                                 error!("Provider error in session {}: {}", session_id, e);
                                 self.event_bus.emit(AgentEvent::Error {
@@ -1488,7 +1499,7 @@ impl AgentRuntime {
                         });
                         return Err(OSAgentError::Session("Operation cancelled".to_string()));
                     }
-                    result = provider.complete(&api_messages, &tools) => {
+                    result = provider.complete(Some(session_id), &api_messages, &tools) => {
                         result.map_err(|e| {
                             error!("Provider fallback error in session {}: {}", session_id, e);
                             self.event_bus.emit(AgentEvent::Error {
@@ -1562,7 +1573,7 @@ impl AgentRuntime {
                 response.tool_calls.as_ref().map(|t| t.len())
             );
 
-            if response.retry_count > 0 {
+            if response.retry_count > 0 && response.context_compressed {
                 self.record_session_event(
                     &mut session,
                     "retry",
@@ -1577,13 +1588,59 @@ impl AgentRuntime {
                     sequence: 0,
                     scope: "provider".to_string(),
                     attempt_count: response.retry_count,
-                    reason: if response.context_compressed {
-                        "provider retried after compressing request context".to_string()
-                    } else {
-                        "provider retried after recoverable failure".to_string()
-                    },
+                    max_attempts: MAX_RETRIES,
+                    next_retry_in_ms: 0,
+                    subagent_session_id: None,
+                    reason: "provider retried after compressing request context".to_string(),
                     timestamp: SystemTime::now(),
                 });
+            } else if response.retry_count > 0 {
+                self.record_session_event(
+                    &mut session,
+                    "retry",
+                    serde_json::json!({
+                        "scope": "provider",
+                        "attempt_count": response.retry_count,
+                        "context_compressed": response.context_compressed,
+                    }),
+                )?;
+            }
+
+            if response.context_compressed {
+                if let Some(summary) = response.compressed_summary.clone() {
+                    let compacted_count =
+                        Self::apply_provider_compaction(&mut session, &summary);
+                    if compacted_count > 0 {
+                        info!(
+                            "Persisting provider-side context compression for session {}: replaced {} messages with summary",
+                            session_id, compacted_count
+                        );
+                        if let Some(ref mut cs) = session.context_state {
+                            cs.compaction_stats.total_compactions += 1;
+                            cs.compaction_stats.total_compacted_messages += compacted_count;
+                        }
+                        self.record_session_event(
+                            &mut session,
+                            "compaction",
+                            serde_json::json!({
+                                "iteration": iteration,
+                                "pruned_messages": 0,
+                                "compacted_messages": compacted_count,
+                                "replayed": false,
+                                "source": "provider_fallback",
+                            }),
+                        )?;
+                        self.event_bus.emit(AgentEvent::Compaction {
+                            session_id: session_id.to_string(),
+                            sequence: 0,
+                            pruned_messages: 0,
+                            compacted_messages: compacted_count,
+                            replayed: false,
+                            timestamp: SystemTime::now(),
+                        });
+                        self.session_manager.update_session(&session).await?;
+                    }
+                }
             }
 
             let has_tool_calls = response
@@ -1715,7 +1772,8 @@ impl AgentRuntime {
                         .await?;
 
                     for (tool_call, result) in tool_calls.iter().zip(parallel_results) {
-                        let (tool_result, success, duration_ms, tool_sig, tool_intent) = result;
+                        let (tool_result, success, duration_ms, tool_sig, tool_intent, error_detail) =
+                            result;
                         let output = tool_result.output.clone();
                         if success {
                             tool_success_count += 1;
@@ -1786,16 +1844,23 @@ impl AgentRuntime {
 
                         let tool_message =
                             Self::summarize_tool_output_for_context(&tool_call.name, &output);
+                        let mut tool_meta = serde_json::json!({
+                            "tool_name": tool_call.name,
+                            "success": success,
+                            "tool_result": {
+                                "title": tool_result.title,
+                                "metadata": tool_result.metadata,
+                            }
+                        });
+                        if !success {
+                            if let Some(err) = &error_detail {
+                                tool_meta["error_message"] = serde_json::json!(err);
+                            }
+                        }
                         session.messages.push(Message::tool_result_with_metadata(
                             tool_call.id.clone(),
                             tool_message,
-                            serde_json::json!({
-                                "tool_name": tool_call.name,
-                                "tool_result": {
-                                    "title": tool_result.title,
-                                    "metadata": tool_result.metadata,
-                                }
-                            }),
+                            tool_meta,
                         ));
                     }
                 } else {
@@ -1838,9 +1903,15 @@ impl AgentRuntime {
 
                             let tool_message =
                                 format!("Tool: {}\nError: {}", tool_call.name, error_msg);
-                            session
-                                .messages
-                                .push(Message::tool_result(tool_call.id.clone(), tool_message));
+                            session.messages.push(Message::tool_result_with_metadata(
+                                tool_call.id.clone(),
+                                tool_message,
+                                serde_json::json!({
+                                    "tool_name": tool_call.name,
+                                    "success": false,
+                                    "error_message": error_msg,
+                                }),
+                            ));
                             continue;
                         }
 
@@ -1903,9 +1974,14 @@ impl AgentRuntime {
                                 timestamp: SystemTime::now(),
                             });
 
-                            session.messages.push(Message::tool_result(
+                            session.messages.push(Message::tool_result_with_metadata(
                                 tool_call.id.clone(),
                                 format!("Tool: {}\nError: {}", tool_call.name, loop_msg),
+                                serde_json::json!({
+                                    "tool_name": tool_call.name,
+                                    "success": false,
+                                    "error_message": loop_msg,
+                                }),
                             ));
                             loop_guard_triggered = true;
                             continue;
@@ -2060,18 +2136,23 @@ impl AgentRuntime {
                             timestamp: SystemTime::now(),
                         });
 
-                        let (mut tool_result, audit_output, success) = match result {
+                        let (mut tool_result, audit_output, success, error_detail) = match result {
                             Ok(tool_result) => {
                                 info!(
                                     "Tool {} executed successfully in {}ms",
                                     tool_call.name, duration_ms
                                 );
-                                (tool_result.clone(), tool_result.output.clone(), true)
+                                (tool_result.clone(), tool_result.output.clone(), true, None)
                             }
                             Err(e) => {
                                 let error_msg = format!("Error: {}", e);
                                 error!("Tool {} failed: {}", tool_call.name, error_msg);
-                                (ToolResult::new(error_msg.clone()), error_msg, false)
+                                (
+                                    ToolResult::new(error_msg.clone()),
+                                    error_msg,
+                                    false,
+                                    Some(e.to_string()),
+                                )
                             }
                         };
 
@@ -2130,6 +2211,7 @@ impl AgentRuntime {
                                 "success": success,
                                 "duration_ms": duration_ms,
                                 "tool_call_id": tool_call.id.clone(),
+                                "error": error_detail.clone(),
                             }),
                         )?;
 
@@ -2192,16 +2274,23 @@ impl AgentRuntime {
                         if tool_call.name != "batch" {
                             let tool_message =
                                 Self::summarize_tool_output_for_context(&tool_call.name, &output);
+                            let mut tool_meta = serde_json::json!({
+                                "tool_name": tool_call.name,
+                                "success": success,
+                                "tool_result": {
+                                    "title": tool_result.title,
+                                    "metadata": tool_result.metadata,
+                                }
+                            });
+                            if !success {
+                                if let Some(err) = &error_detail {
+                                    tool_meta["error_message"] = serde_json::json!(err);
+                                }
+                            }
                             session.messages.push(Message::tool_result_with_metadata(
                                 tool_call.id.clone(),
                                 tool_message,
-                                serde_json::json!({
-                                    "tool_name": tool_call.name,
-                                    "tool_result": {
-                                        "title": tool_result.title,
-                                        "metadata": tool_result.metadata,
-                                    }
-                                }),
+                                tool_meta,
                             ));
                         }
                     }
@@ -2563,12 +2652,72 @@ impl AgentRuntime {
         });
     }
 
+    /// Builds the provider retry listener: emits a live `Retry` event before
+    /// each retry sleep. When the retrying session is a subagent, the event is
+    /// also emitted against the parent session (with `subagent_session_id`
+    /// set) so the parent chat can surface it on the subagent card.
+    fn provider_retry_listener(
+        event_bus: Arc<EventBus>,
+        storage: Arc<SqliteStorage>,
+    ) -> Arc<dyn RetryListener> {
+        Arc::new(
+            move |session_id: Option<&str>,
+                  attempt: u32,
+                  max_attempts: u32,
+                  delay: std::time::Duration,
+                  reason: &str| {
+                let Some(sid) = session_id else { return };
+                let reason_text = format!(
+                    "Provider request failed: {} — retrying in ~{}s",
+                    reason,
+                    delay.as_secs()
+                );
+                let parent_id = storage
+                    .get_session(sid)
+                    .ok()
+                    .flatten()
+                    .and_then(|session| session.parent_id);
+                if let Some(parent) = parent_id {
+                    event_bus.emit(AgentEvent::Retry {
+                        session_id: parent,
+                        sequence: 0,
+                        scope: "provider".to_string(),
+                        attempt_count: attempt,
+                        max_attempts,
+                        next_retry_in_ms: delay.as_millis() as u64,
+                        subagent_session_id: Some(sid.to_string()),
+                        reason: reason_text.clone(),
+                        timestamp: SystemTime::now(),
+                    });
+                }
+                event_bus.emit(AgentEvent::Retry {
+                    session_id: sid.to_string(),
+                    sequence: 0,
+                    scope: "provider".to_string(),
+                    attempt_count: attempt,
+                    max_attempts,
+                    next_retry_in_ms: delay.as_millis() as u64,
+                    subagent_session_id: None,
+                    reason: reason_text,
+                    timestamp: SystemTime::now(),
+                });
+            },
+        )
+    }
+
     fn is_streaming_fallback_error(error: &OSAgentError) -> bool {
-        matches!(error, OSAgentError::Provider(message) if {
-            message.contains("Streaming currently supports only")
-                || message.contains("Invalid status code: 4")
-                || message.contains("Invalid status code: 5")
-        })
+        match error {
+            OSAgentError::Provider(message) => {
+                message.contains("Streaming currently supports only")
+                    || message.contains("Invalid status code: 4")
+                    || message.contains("Invalid status code: 5")
+            }
+            OSAgentError::ProviderStructured(info) => {
+                info.message.contains("Streaming currently supports only")
+                    || info.status_code.is_some_and(|status| status >= 400)
+            }
+            _ => false,
+        }
     }
 
     async fn maybe_persist_streaming_message(
@@ -2788,6 +2937,7 @@ impl AgentRuntime {
             finish_reason,
             retry_count: 0,
             context_compressed: false,
+            compressed_summary: None,
             usage,
         })
     }
@@ -2981,6 +3131,34 @@ impl AgentRuntime {
         pruned
     }
 
+    /// Persist a provider-side context compression into the session: the middle
+    /// of the history is replaced with the summary the provider produced, so the
+    /// model sees it on later turns instead of the compression being lost after
+    /// the single request.
+    fn apply_provider_compaction(session: &mut Session, summary: &str) -> usize {
+        let original_len = session.messages.len();
+        if original_len < 8 {
+            return 0;
+        }
+        let keep_tail = 6usize.min(original_len.saturating_sub(4));
+        let keep_head = 3usize.min(original_len.saturating_sub(keep_tail));
+        if original_len <= keep_head + keep_tail + 1 {
+            return 0;
+        }
+
+        let head = session.messages[..keep_head].to_vec();
+        let tail = session.messages[original_len - keep_tail..].to_vec();
+        let mut compacted = head;
+        compacted.push(Message::synthetic_assistant(
+            format!("Compaction summary:\n{}", summary.trim()),
+            "compaction_summary",
+        ));
+        compacted.extend(tail);
+        let compacted_count = original_len - compacted.len();
+        session.messages = compacted;
+        compacted_count
+    }
+
     async fn compact_session_history(
         &self,
         session: &mut Session,
@@ -3030,7 +3208,7 @@ impl AgentRuntime {
         )));
 
         let provider = self.active_provider().await;
-        let summary = match provider.complete(&compact_messages, &[]).await {
+        let summary = match provider.complete(Some(&session.id), &compact_messages, &[]).await {
             Ok(response) => response
                 .content
                 .unwrap_or_else(|| Self::summarize_for_context(&prefix, 2_500)),
@@ -3464,7 +3642,7 @@ impl AgentRuntime {
         _iteration: usize,
         _user: &str,
         message_index: i32,
-    ) -> Result<Vec<(ToolResult, bool, u64, String, Option<String>)>> {
+    ) -> Result<Vec<(ToolResult, bool, u64, String, Option<String>, Option<String>)>> {
         let session_id = session_id.to_string();
         let workspace_path = active_workspace.resolved_path();
         let registry = self.tool_registry.clone();
@@ -3555,6 +3733,7 @@ impl AgentRuntime {
                             0,
                             String::new(),
                             None,
+                            None,
                         );
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
@@ -3587,7 +3766,7 @@ impl AgentRuntime {
                             output.clone(),
                             duration_ms,
                         );
-                        (output, true, duration_ms, String::new(), None::<String>)
+                        (output, true, duration_ms, String::new(), None::<String>, None)
                     }
                     Err(e) => {
                         let error_msg = format!("Error: {}", e);
@@ -3607,6 +3786,7 @@ impl AgentRuntime {
                             duration_ms,
                             String::new(),
                             None::<String>,
+                            Some(e.to_string()),
                         )
                     }
                 }
@@ -3617,7 +3797,7 @@ impl AgentRuntime {
         let mut outputs = Vec::new();
 
         for (tool_call, result) in tool_calls.iter().zip(results) {
-            let (tool_result, success, duration_ms, _, _) = result;
+            let (tool_result, success, duration_ms, _, _, error_detail) = result;
 
             let tool_signature = Self::tool_call_signature(&tool_call.name, &tool_call.arguments);
             let tool_intent = Self::tool_intent_signature(&tool_call.name, &tool_call.arguments);
@@ -3634,6 +3814,7 @@ impl AgentRuntime {
                 duration_ms,
                 tool_signature,
                 tool_intent,
+                error_detail,
             ));
         }
 
@@ -4304,6 +4485,10 @@ impl AgentRuntime {
                 self.agent_settings.clone(),
             )?,
         );
+        provider.set_retry_listener(Some(Self::provider_retry_listener(
+            Arc::new(self.event_bus.clone()),
+            self.storage.clone(),
+        )));
 
         let default_provider = self.config.read().await.default_provider.clone();
         let should_activate = default_provider.is_empty() || default_provider == provider_id;

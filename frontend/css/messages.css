@@ -32,6 +32,18 @@
     min-height: 0;
 }
 
+.retry-notice {
+    max-width: 800px;
+    margin: 0 auto 12px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: rgba(240, 180, 41, 0.12);
+    border: 1px solid rgba(240, 180, 41, 0.35);
+    color: #f0b429;
+    font-size: 12px;
+    animation: fadeSlideUp 0.3s ease-out;
+}
+
 .message {
     max-width: 800px;
     margin: 0 auto 24px;
