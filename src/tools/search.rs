@@ -10,15 +10,48 @@ use globset::{Glob, GlobMatcher};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::debug;
 use walkdir::WalkDir;
 
 static RG_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+const MAX_WALKDIR_MATCHES: usize = 10_000;
+
+fn is_heavy_dir(path: &Path) -> bool {
+    path.components().any(|component| {
+        let part = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        matches!(
+            part.as_str(),
+            "node_modules"
+                | "target"
+                | "dist"
+                | "out"
+                | "build"
+                | ".git"
+                | ".hg"
+                | ".svn"
+                | ".cache"
+                | ".idea"
+                | ".vscode"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+                | ".pio"
+                | "libdeps"
+                | ".arduino15"
+                | "managed_components"
+                | ".esphome"
+                | ".pioenvs"
+        )
+    })
+}
 
 fn rg_binary_name() -> &'static str {
     if cfg!(windows) {
@@ -171,7 +204,7 @@ impl GrepTool {
         case_sensitive: bool,
         timeout_secs: u64,
     ) -> Result<(LargeOutputResult, usize)> {
-        let mut cmd = Command::new(rg_binary_name());
+        let mut cmd = tokio::process::Command::new(rg_binary_name());
         cmd.args([
             "--no-heading",
             "--with-filename",
@@ -179,7 +212,9 @@ impl GrepTool {
             "--color=never",
             "--no-messages",
             "--hidden",
-        ]);
+        ])
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null());
 
         if !case_sensitive {
             cmd.arg("-i");
@@ -200,13 +235,10 @@ impl GrepTool {
 
         cmd.arg("--").arg(pattern).arg(search_path);
 
-        let output = timeout(
-            Duration::from_secs(timeout_secs),
-            tokio::task::spawn_blocking(move || cmd.output()),
-        )
-        .await
-        .map_err(|_| OSAgentError::Timeout)?
-        .map_err(|e| OSAgentError::ToolExecution(e.to_string()))??;
+        let output = timeout(Duration::from_secs(timeout_secs), cmd.output())
+            .await
+            .map_err(|_| OSAgentError::Timeout)?
+            .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
 
         if !output.status.success() && !output.stderr.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -264,6 +296,9 @@ impl GrepTool {
         let pattern_str_owned = pattern_str.to_string();
         let writable = self.writable;
         let search_path = search_path.to_path_buf();
+        let search_path_is_heavy = is_heavy_dir(&search_path);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = cancelled.clone();
 
         let result = timeout(
             Duration::from_secs(timeout_secs),
@@ -288,6 +323,10 @@ impl GrepTool {
                     .into_iter()
                     .filter_map(|entry| entry.ok())
                 {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     let entry_path = entry.path();
                     if !entry.file_type().is_file() {
                         continue;
@@ -302,31 +341,72 @@ impl GrepTool {
                     {
                         continue;
                     }
+                    if !search_path_is_heavy && is_heavy_dir(entry_path) {
+                        continue;
+                    }
                     if !path_matches(matcher.as_ref(), relative_path) {
                         continue;
                     }
 
-                    let Ok(content) = fs::read_to_string(entry_path) else {
+                    let Ok(file) = fs::File::open(entry_path) else {
                         continue;
                     };
+                    let mut reader = std::io::BufReader::new(file);
 
-                    for (line_num, line) in content.lines().enumerate() {
-                        if pattern.is_match(line) {
-                            matches.push((
-                                path_sort_key(relative_path),
-                                format!("{}:{}: {}", relative_path.display(), line_num + 1, line),
-                            ));
+                    let mut header = [0u8; 4096];
+                    let header_len = match reader.read(&mut header) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    if header[..header_len].contains(&0) {
+                        continue;
+                    }
+
+                    let mut line = String::new();
+                    let mut line_num = 0usize;
+                    let mut lines_checked = 0usize;
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                line_num += 1;
+                                let line_text = line.strip_suffix('\n').unwrap_or(&line);
+                                if pattern.is_match(line_text) {
+                                    matches.push((
+                                        path_sort_key(relative_path),
+                                        format!(
+                                            "{}:{}: {}",
+                                            relative_path.display(),
+                                            line_num,
+                                            line_text
+                                        ),
+                                    ));
+                                    if matches.len() >= MAX_WALKDIR_MATCHES {
+                                        return Ok((matches, true));
+                                    }
+                                }
+                                lines_checked += 1;
+                                if lines_checked % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+                                    return Ok((matches, false));
+                                }
+                            }
+                            Err(_) => break,
                         }
                     }
                 }
 
-                Ok(matches)
+                Ok((matches, false))
             }),
         )
         .await
-        .map_err(|_| OSAgentError::Timeout)?;
+        .map_err(|_| {
+            cancelled.store(true, Ordering::Relaxed);
+            OSAgentError::Timeout
+        })?;
 
-        let mut matches = result.map_err(|e| OSAgentError::ToolExecution(e.to_string()))??;
+        let (mut matches, truncated) =
+            result.map_err(|e| OSAgentError::ToolExecution(e.to_string()))??;
 
         if matches.is_empty() {
             Ok((
@@ -342,11 +422,17 @@ impl GrepTool {
         } else {
             let match_count = matches.len();
             matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            let output = matches
+            let mut output = matches
                 .into_iter()
                 .map(|(_, line)| line)
                 .collect::<Vec<_>>()
                 .join("\n");
+            if truncated {
+                output.push_str(&format!(
+                    "\n\n[Search hit the {} match cap; results truncated]",
+                    MAX_WALKDIR_MATCHES
+                ));
+            }
             Ok((
                 maybe_store_large_output_result(
                     &self.default_workspace()?,
@@ -367,7 +453,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents with regular expressions. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Pattern is a regular expression (e.g. 'fn\\\\s+\\\\w+' to find function definitions).\n- Use file_pattern to filter by file type (e.g. '**/*.rs', '*.{ts,tsx}').\n- Results include file path, line number, and matching line content.\n- Case sensitive by default; set case_sensitive to false for case-insensitive search.\n- Performs exact regex matching - escape special characters if searching for literals.\n- Use this tool to locate code before reading or editing files."
+        "Search file contents with regular expressions. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Pattern is a regular expression (e.g. 'fn\\\\s+\\\\w+' to find function definitions).\n- Use file_pattern to filter by file type (e.g. '**/*.rs', '*.{ts,tsx}').\n- Results include file path, line number, and matching line content.\n- Case sensitive by default; set case_sensitive to false for case-insensitive search.\n- Performs exact regex matching - escape special characters if searching for literals.\n- Use this tool to locate code before reading or editing files.\n- When doing an open-ended search that may require multiple rounds of grepping and globbing, use the task or subagent tool with an explore agent instead, to reduce context usage."
     }
 
     fn when_to_use(&self) -> &str {
@@ -375,7 +461,7 @@ impl Tool for GrepTool {
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use when you only need file names (use glob) or when you need the full file content (use read_file)."
+        "Do not use when you only need file names (use glob) or when you need the full file content (use read_file). For open-ended multi-round discovery across the codebase, delegate to the task or subagent tool with an explore agent."
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -463,6 +549,7 @@ impl Tool for GrepTool {
                             "file_pattern": file_pattern,
                             "case_sensitive": case_sensitive
                         }),
+                        attachments: Vec::new(),
                     })
                 }
                 Err(e) => {
@@ -494,6 +581,7 @@ impl Tool for GrepTool {
                 "file_pattern": file_pattern,
                 "case_sensitive": case_sensitive
             }),
+            attachments: Vec::new(),
         })
     }
 }
@@ -562,7 +650,7 @@ impl GlobTool {
         search_path: &Path,
         timeout_secs: u64,
     ) -> Result<(LargeOutputResult, usize)> {
-        let mut cmd = Command::new(rg_binary_name());
+        let mut cmd = tokio::process::Command::new(rg_binary_name());
         cmd.args([
             "--files",
             "--hidden",
@@ -573,24 +661,16 @@ impl GlobTool {
             "!.osagent_backups",
             "--glob",
             "!.osa_tool_outputs",
-        ]);
+        ])
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null());
 
         cmd.arg(search_path);
 
-        let output = match timeout(
-            Duration::from_secs(timeout_secs),
-            tokio::task::spawn_blocking(move || cmd.output()),
-        )
-        .await
-        {
-            Ok(inner_result) => match inner_result {
-                Ok(output) => output,
-                Err(e) => return Err(OSAgentError::ToolExecution(e.to_string())),
-            },
-            Err(_) => return Err(OSAgentError::Timeout),
-        };
-
-        let output = output.map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
+        let output = timeout(Duration::from_secs(timeout_secs), cmd.output())
+            .await
+            .map_err(|_| OSAgentError::Timeout)?
+            .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
         if stdout.is_empty() {
@@ -654,6 +734,9 @@ impl GlobTool {
         let workspace = self.default_workspace()?;
         let writable = self.writable;
         let search_path = search_path.to_path_buf();
+        let search_path_is_heavy = is_heavy_dir(&search_path);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = cancelled.clone();
 
         let result = timeout(
             Duration::from_secs(timeout_secs),
@@ -673,6 +756,10 @@ impl GlobTool {
                     .into_iter()
                     .filter_map(|entry| entry.ok())
                 {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     if !entry.file_type().is_file() {
                         continue;
                     }
@@ -689,6 +776,9 @@ impl GlobTool {
                     {
                         continue;
                     }
+                    if !search_path_is_heavy && is_heavy_dir(entry.path()) {
+                        continue;
+                    }
                     if matcher.is_match(relative_path) {
                         matches.push((
                             path_sort_key(relative_path),
@@ -701,7 +791,10 @@ impl GlobTool {
             }),
         )
         .await
-        .map_err(|_| OSAgentError::Timeout)?;
+        .map_err(|_| {
+            cancelled.store(true, Ordering::Relaxed);
+            OSAgentError::Timeout
+        })?;
 
         let mut matches = result.map_err(|e| OSAgentError::ToolExecution(e.to_string()))??;
 
@@ -745,7 +838,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by name pattern using glob matching. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Use glob patterns like '**/*.rs', 'src/**/*.ts', or '*.{json,yaml}'.\n- Results are sorted by modification time (most recent first).\n- Returns relative paths from the workspace root.\n- Use this to locate files before reading or to understand project structure.\n- If you need to search file contents, use grep instead."
+        "Find files by name pattern using glob matching. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Use glob patterns like '**/*.rs', 'src/**/*.ts', or '*.{json,yaml}'.\n- Results are sorted by modification time (most recent first).\n- Returns relative paths from the workspace root.\n- Use this to locate files before reading or to understand project structure.\n- If you need to search file contents, use grep instead.\n- When doing an open-ended search that may require multiple rounds of globbing and grepping, use the task or subagent tool with an explore agent instead, to reduce context usage."
     }
 
     fn when_to_use(&self) -> &str {
@@ -753,7 +846,7 @@ impl Tool for GlobTool {
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use when searching inside file contents (use grep) or when you already know the exact file path (use read_file)."
+        "Do not use when searching inside file contents (use grep) or when you already know the exact file path (use read_file). For open-ended multi-round discovery across the codebase, delegate to the task or subagent tool with an explore agent."
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -821,6 +914,7 @@ impl Tool for GlobTool {
                             "path": path,
                             "pattern": pattern
                         }),
+                        attachments: Vec::new(),
                     })
                 }
                 Err(e) => {
@@ -844,6 +938,7 @@ impl Tool for GlobTool {
                 "path": path,
                 "pattern": pattern
             }),
+            attachments: Vec::new(),
         })
     }
 }

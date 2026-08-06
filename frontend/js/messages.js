@@ -10,7 +10,8 @@ OSA.isHiddenSyntheticMessage = function(message) {
         const hasVisibleThinking = OSA.getShowThinkingBlocks && OSA.getShowThinkingBlocks()
             ? !!(message.thinking || '').trim()
             : false;
-        if (hasContent || hasVisibleThinking) {
+        const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+        if (hasContent || hasVisibleThinking || hasToolCalls) {
             return false;
         }
     }
@@ -191,8 +192,16 @@ OSA.scheduleFormattedRender = function(element, rawText, onRendered) {
             if (!el || !el.isConnected) return;
             const rawText = el.dataset.rawText || '';
             if (el.dataset.renderedText === rawText) return;
-            el.innerHTML = OSA.formatMessage(rawText);
-            el.dataset.renderedText = rawText;
+            if (el.dataset.renderedText === undefined || el.dataset.renderedText === '') {
+                el.innerHTML = '';
+                el._md = OSA.createIncrementalMd();
+            }
+            if (el._md) {
+                OSA.renderIncrementalMarkdown(el, rawText);
+            } else {
+                el.innerHTML = OSA.formatMessage(rawText);
+                el.dataset.renderedText = rawText;
+            }
             didUpdate = true;
             if (el._onRendered) {
                 el._onRendered();
@@ -249,7 +258,7 @@ OSA.ensureThinkingContainer = function(message) {
     let container = message.querySelector('.message-thinking');
     if (!container) {
         container = document.createElement('div');
-        container.className = 'message-thinking expanded streaming';
+        container.className = 'message-thinking streaming';
         container.innerHTML = `
             <button type="button" class="thinking-toggle" onclick="OSA.toggleThinkingBlock(this)">
                 <span class="thinking-toggle-label">Thinking</span>
@@ -297,14 +306,18 @@ OSA.appendCurrentSessionAssistantThinking = function(content) {
     if (!content) return;
     const message = OSA.ensureCurrentSessionAssistantMessage();
     if (!message) return;
-    message.thinking = (message.thinking || '') + content;
+    const current = message.thinking || '';
+    if (content.length >= 4 && current.endsWith(content)) return;
+    message.thinking = current + content;
 };
 
 OSA.appendCurrentSessionAssistantContent = function(content) {
     if (!content) return;
     const message = OSA.ensureCurrentSessionAssistantMessage();
     if (!message) return;
-    message.content = (message.content || '') + content;
+    const current = message.content || '';
+    if (content.length >= 4 && current.endsWith(content)) return;
+    message.content = current + content;
 };
 
 OSA.resetCurrentSessionAssistantContent = function() {
@@ -372,6 +385,7 @@ OSA.markStreamingBoundary = function() {
                 delete thinking.dataset.userToggled;
             }
             message.dataset.boundaryAfter = 'tool';
+            OSA.finalizeIncrementalRenders(message);
         }
     }
     OSA.clearPendingFormattedRenders();
@@ -398,11 +412,6 @@ OSA.prepareAssistantMessageElementForStreaming = function(messageEl, sourceMessa
     const thinkingWrap = messageEl.querySelector('.message-thinking');
     if (thinkingWrap && OSA.getShowThinkingBlocks()) {
         thinkingWrap.classList.add('streaming');
-        if (!thinkingWrap.dataset.userToggled) {
-            if (expandThinking && !!(sourceMessage?.thinking || '').trim()) {
-                thinkingWrap.classList.add('expanded');
-            }
-        }
         OSA.setThinkingPreview(thinkingWrap, sourceMessage?.thinking || '');
     }
 
@@ -450,6 +459,15 @@ OSA.adoptStreamingAssistantFromRenderedSession = function(session) {
     const messageEl = candidates.at(-1);
     if (!messageEl) return null;
 
+    if (messageEl.dataset.boundaryAfter === 'tool' || OSA.transcriptHasBlockingSiblingAfter(messageEl)) {
+        const contentEl = messageEl.querySelector('.message-content');
+        const nextContent = assistant.content || '';
+        if (contentEl && (contentEl.dataset.rawText || '') !== nextContent) {
+            OSA.scheduleFormattedRender(contentEl, nextContent);
+        }
+        return null;
+    }
+
     return OSA.prepareAssistantMessageElementForStreaming(messageEl, assistant, OSA.getShowThinkingBlocks());
 };
 
@@ -487,6 +505,8 @@ OSA.releaseStreamingAssistantMessage = function() {
         }
         delete thinking.dataset.userToggled;
     }
+
+    OSA.finalizeIncrementalRenders(message);
 
     const chain = OSA.getMessageChain();
     chain.lastAssistantDomId = domId;
@@ -548,6 +568,8 @@ OSA.commitStreamingAssistantSegment = function() {
 
     const chain = OSA.getMessageChain();
     chain.lastAssistantDomId = domId;
+
+    OSA.finalizeIncrementalRenders(message);
 
     OSA.resetStreamingMessage();
 };
@@ -1055,15 +1077,17 @@ OSA.beginThinkingDisplay = function() {
     const container = OSA.ensureThinkingContainer(message);
     if (!container) return null;
     container.classList.add('streaming');
-    if (!existingContainer || !container.dataset.userToggled) {
-        container.classList.add('expanded');
-    }
     OSA.setThinkingPreview(container, '');
     return container;
 };
 
 OSA.appendThinkingChunk = function(content) {
     if (!content) return;
+    const session = OSA.getCurrentSession();
+    const msgs = session && Array.isArray(session.messages) ? session.messages : [];
+    const last = msgs[msgs.length - 1];
+    const sessionText = last && last.role === 'assistant' ? (last.thinking || '') : '';
+    if (content.length >= 4 && sessionText.endsWith(content)) return;
     OSA.appendCurrentSessionAssistantThinking(content);
     if (!OSA.getShowThinkingBlocks()) return;
     const message = OSA.ensureStreamingAssistantMessage();
@@ -1097,10 +1121,16 @@ OSA.completeThinkingDisplay = function() {
     if (rawText) {
         OSA.setThinkingPreview(container, rawText);
     }
+    if (body) OSA.flushIncrementalMarkdown(body, body.dataset.rawText || '');
 };
 
 OSA.appendAssistantChunk = function(content) {
     if (!content) return;
+    const session = OSA.getCurrentSession();
+    const msgs = session && Array.isArray(session.messages) ? session.messages : [];
+    const last = msgs[msgs.length - 1];
+    const sessionText = last && last.role === 'assistant' ? (last.content || '') : '';
+    if (content.length >= 4 && sessionText.endsWith(content)) return;
     OSA.appendCurrentSessionAssistantContent(content);
     const message = OSA.ensureStreamingAssistantMessage();
     if (!message) return;
@@ -1124,6 +1154,7 @@ OSA.completeAssistantResponse = function(usage) {
     if (message) {
         message.classList.remove('streaming');
         OSA.completeThinkingDisplay();
+        OSA.finalizeIncrementalRenders(message);
 
         const session = OSA.getCurrentSession();
         const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
@@ -1284,6 +1315,16 @@ OSA.showErrorCard = function(errorMsg) {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 };
 
+OSA.formatInlineMarkdown = function(line) {
+    let s = line
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
+    s = s.replace(/(^|[^"=])(https?:\/\/[^\s<>"')\]]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    return s;
+};
+
 OSA.formatMessage = function(text) {
     const escaped = OSA.escapeHtml((text || '').replace(/\n+$/, ''));
     const lines = escaped.split('\n');
@@ -1294,15 +1335,7 @@ OSA.formatMessage = function(text) {
     let tableRows = [];
     let tableHasHeader = false;
 
-    const formatInlineMarkdown = (line) => {
-        let s = line
-            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-            .replace(/`([^`]+)`/g, '<code>$1</code>');
-        s = s.replace(/(^|[^"=])(https?:\/\/[^\s<>"')\]]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-        return s;
-    };
+    const formatInlineMarkdown = OSA.formatInlineMarkdown;
 
     const flushList = () => {
         if (listItems.length) {
@@ -1390,6 +1423,263 @@ OSA.formatMessage = function(text) {
     flushTable();
     flushCodeBlock();
     return html;
+};
+
+OSA.createIncrementalMd = function() {
+    return {
+        renderedLen: 0,
+        codeLang: null,
+        codeText: null,
+        codeFirst: true,
+        listEl: null,
+        tableRows: null,
+        tableHeader: false,
+        tail: null,
+    };
+};
+
+OSA.mdIsTableRow = function(t) {
+    return t.startsWith('|') && t.endsWith('|') && t.length > 2;
+};
+
+OSA.mdIsTableSeparator = function(t) {
+    return /^\|[\s\-:|]+\|$/.test(t);
+};
+
+OSA.mdIsHeader = function(t) {
+    return /^#+\s/.test(t);
+};
+
+OSA.mdParseTableCells = function(t) {
+    return t.slice(1, -1).split('|');
+};
+
+OSA.mdBuildListItem = function(text) {
+    const li = document.createElement('li');
+    li.innerHTML = OSA.formatInlineMarkdown(OSA.escapeHtml(text));
+    return li;
+};
+
+OSA.mdBuildTable = function(md) {
+    const table = document.createElement('table');
+    (md.tableRows || []).forEach((row, i) => {
+        const tr = document.createElement('tr');
+        const tag = (i === 0 && md.tableHeader) ? 'th' : 'td';
+        row.forEach(cell => {
+            const cellEl = document.createElement(tag);
+            cellEl.innerHTML = OSA.formatInlineMarkdown(OSA.escapeHtml(cell.trim()));
+            tr.appendChild(cellEl);
+        });
+        table.appendChild(tr);
+    });
+    md.tableRows = null;
+    md.tableHeader = false;
+    return table;
+};
+
+OSA.mdOpenCodeBlock = function(md, lang, el) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-block';
+    const header = document.createElement('div');
+    header.className = 'code-header';
+    const langSpan = document.createElement('span');
+    langSpan.className = 'code-lang';
+    langSpan.textContent = lang || 'text';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'code-copy';
+    copyBtn.textContent = 'Copy';
+    copyBtn.onclick = function() { OSA.copyCode(this); };
+    header.appendChild(langSpan);
+    header.appendChild(copyBtn);
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    if (lang) code.className = 'language-' + lang;
+    const textNode = document.createTextNode('');
+    code.appendChild(textNode);
+    pre.appendChild(code);
+    wrap.appendChild(header);
+    wrap.appendChild(pre);
+    el.appendChild(wrap);
+    md.codeLang = lang || '';
+    md.codeText = textNode;
+    md.codeFirst = true;
+};
+
+OSA.mdAppendLine = function(md, line, el) {
+    const trimmed = line.trim();
+
+    if (md.codeLang !== null) {
+        if (trimmed === '```') {
+            const text = md.codeText ? md.codeText.data : '';
+            const codeEl = md.codeText ? md.codeText.parentNode : null;
+            if (codeEl) {
+                codeEl.innerHTML = md.codeLang
+                    ? OSA.highlightCode(text, md.codeLang)
+                    : OSA.escapeHtml(text);
+            }
+            md.codeLang = null;
+            md.codeText = null;
+        } else if (md.codeText) {
+            md.codeText.appendData((md.codeFirst ? '' : '\n') + line);
+            md.codeFirst = false;
+        }
+        return;
+    }
+
+    if (OSA.mdIsTableRow(trimmed)) {
+        if (OSA.mdIsTableSeparator(trimmed)) {
+            md.tableHeader = true;
+            return;
+        }
+        if (md.listEl) {
+            el.appendChild(md.listEl);
+            md.listEl = null;
+        }
+        if (!md.tableRows) md.tableRows = [];
+        md.tableRows.push(OSA.mdParseTableCells(trimmed));
+        return;
+    }
+
+    if (md.tableRows) {
+        el.appendChild(OSA.mdBuildTable(md));
+    }
+
+    if (OSA.mdIsHeader(trimmed)) {
+        if (md.listEl) {
+            el.appendChild(md.listEl);
+            md.listEl = null;
+        }
+        const level = (trimmed.match(/^(#+)/) || ['', ''])[1].length;
+        const h = document.createElement('h' + level);
+        h.innerHTML = OSA.formatInlineMarkdown(OSA.escapeHtml(trimmed.replace(/^#+\s/, '')));
+        el.appendChild(h);
+        return;
+    }
+
+    if (/^```(\w+)?$/.test(trimmed)) {
+        if (md.listEl) {
+            el.appendChild(md.listEl);
+            md.listEl = null;
+        }
+        OSA.mdOpenCodeBlock(md, (trimmed.match(/^```(\w+)?$/) || ['', ''])[1], el);
+        return;
+    }
+
+    if (trimmed.startsWith('- ')) {
+        if (!md.listEl) md.listEl = document.createElement('ul');
+        md.listEl.appendChild(OSA.mdBuildListItem(trimmed.slice(2)));
+        return;
+    }
+
+    const numberedMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
+    if (numberedMatch) {
+        if (!md.listEl) md.listEl = document.createElement('ul');
+        md.listEl.appendChild(OSA.mdBuildListItem(numberedMatch[2]));
+        return;
+    }
+
+    if (md.listEl) {
+        el.appendChild(md.listEl);
+        md.listEl = null;
+    }
+
+    if (trimmed.length === 0) {
+        el.appendChild(document.createElement('br'));
+    } else {
+        const p = document.createElement('p');
+        p.innerHTML = OSA.formatInlineMarkdown(OSA.escapeHtml(line));
+        el.appendChild(p);
+    }
+};
+
+OSA.renderIncrementalMarkdown = function(el, rawText) {
+    let md = el._md;
+    if (rawText.length < md.renderedLen) {
+        el.innerHTML = '';
+        el._md = OSA.createIncrementalMd();
+        md = el._md;
+    }
+    const delta = rawText.slice(md.renderedLen);
+    if (!delta) {
+        el.dataset.renderedText = rawText;
+        return;
+    }
+    const lastNl = delta.lastIndexOf('\n');
+    const complete = lastNl >= 0 ? delta.slice(0, lastNl + 1) : '';
+    const partial = lastNl >= 0 ? delta.slice(lastNl + 1) : delta;
+
+    if (md.tail) {
+        md.tail.remove();
+        md.tail = null;
+    }
+
+    if (complete) {
+        const lines = complete.split('\n');
+        lines.pop();
+        for (const line of lines) {
+            OSA.mdAppendLine(md, line, el);
+        }
+    }
+
+    if (partial && md.codeLang === null) {
+        const tail = document.createElement('span');
+        tail.className = 'md-partial';
+        tail.innerHTML = OSA.formatInlineMarkdown(OSA.escapeHtml(partial));
+        el.appendChild(tail);
+        md.tail = tail;
+    }
+
+    md.renderedLen += complete.length;
+    el.dataset.renderedText = rawText;
+};
+
+OSA.flushIncrementalMarkdown = function(el, rawText) {
+    let md = el && el._md;
+    if (!md) return;
+    if (rawText.length < md.renderedLen) {
+        el.innerHTML = '';
+        el._md = OSA.createIncrementalMd();
+        md = el._md;
+    }
+    const partial = rawText.slice(md.renderedLen);
+    if (partial) {
+        OSA.mdAppendLine(md, partial, el);
+    }
+    if (md.tail) {
+        md.tail.remove();
+        md.tail = null;
+    }
+    if (md.listEl) {
+        el.appendChild(md.listEl);
+        md.listEl = null;
+    }
+    if (md.tableRows) {
+        el.appendChild(OSA.mdBuildTable(md));
+    }
+    if (md.codeLang !== null && md.codeText) {
+        const codeEl = md.codeText.parentNode;
+        if (codeEl) {
+            const text = md.codeText.data;
+            codeEl.innerHTML = md.codeLang
+                ? OSA.highlightCode(text, md.codeLang)
+                : OSA.escapeHtml(text);
+        }
+        md.codeLang = null;
+        md.codeText = null;
+    }
+    while (el.lastChild && el.lastChild.tagName === 'BR') {
+        el.lastChild.remove();
+    }
+    md.renderedLen = rawText.length;
+    el.dataset.renderedText = rawText;
+};
+
+OSA.finalizeIncrementalRenders = function(messageEl) {
+    if (!messageEl) return;
+    const contentEl = messageEl.querySelector('.message-content');
+    if (contentEl) OSA.flushIncrementalMarkdown(contentEl, contentEl.dataset.rawText || '');
+    const thinkingBody = messageEl.querySelector('.thinking-body');
+    if (thinkingBody) OSA.flushIncrementalMarkdown(thinkingBody, thinkingBody.dataset.rawText || '');
 };
 
 OSA.highlightCode = function(code, lang) {
@@ -1789,7 +2079,8 @@ OSA.getVisibleMessages = function(messages) {
             if (message.role !== 'assistant') return true;
             const hasContent = !!(message.content || '').trim();
             const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
-            if (hasContent || hasVisibleThinking) return true;
+            const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+            if (hasContent || hasVisibleThinking || hasToolCalls) return true;
             return running && list[lastIdx] === message;
         });
 };
@@ -1808,7 +2099,8 @@ OSA.getVisibleMessages = function(messages) {
             if (message.role !== 'assistant') return true;
             const hasContent = !!(message.content || '').trim();
             const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
-            if (hasContent || hasVisibleThinking) return true;
+            const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+            if (hasContent || hasVisibleThinking || hasToolCalls) return true;
             return running && list[lastIdx] === message;
         });
 };

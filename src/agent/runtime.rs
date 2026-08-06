@@ -13,7 +13,7 @@ use crate::agent::model_catalog::ModelCatalog;
 use crate::agent::persona::{self, ActivePersona};
 use crate::agent::prompt::{self, PromptMode};
 use crate::agent::provider::{
-    MAX_RETRIES, OpenAICompatibleProvider, Provider, RetryListener, StreamEvent,
+    OpenAICompatibleProvider, Provider, RetryListener, StreamEvent, MAX_RETRIES,
 };
 use crate::agent::provider_presets;
 use crate::agent::session::SessionManager;
@@ -969,6 +969,7 @@ impl AgentRuntime {
         let workspace_instruction_reminder =
             format_system_reminder(&workspace_instruction_blocks(&workspace_root));
         let git_context = git_workspace_context(&workspace_root).await;
+        let is_git_repo = workspace_root.join(".git").is_dir() || git_context.is_some();
         let skill_summary_prompt = self.tool_registry.skill_summary_prompt();
         let context_provider = self.active_provider().await;
         let context_provider_type = context_provider.provider_type().to_string();
@@ -1138,12 +1139,13 @@ impl AgentRuntime {
                     .collect::<Vec<_>>()
                     .join("\n");
                 api_messages.push(Message::system(format!(
-                    "# Runtime Environment\n- Model: {} / {}\n- Workspace: {} ({})\n- Working directory: {}\n- Platform: {}\n- This workspace is fixed for the current turn; relative tool paths resolve from its primary path.\n- If an explicit absolute path outside these roots is necessary, request it with the relevant tool; OSA will ask the user for approval.\n# Workspace Roots\n{}",
+                    "# Runtime Environment\n- Model: {} / {}\n- Workspace: {} ({})\n- Working directory: {}\n- Is directory a git repo: {}\n- Platform: {}\n- This workspace is fixed for the current turn; relative tool paths resolve from its primary path.\n- If an explicit absolute path outside these roots is necessary, request it with the relevant tool; OSA will ask the user for approval.\n# Workspace Roots\n{}",
                     context_provider_type,
                     context_model,
                     active_workspace.name,
                     active_workspace.id,
                     workspace_path,
+                    if is_git_repo { "yes" } else { "no" },
                     std::env::consts::OS,
                     workspace_paths
                 )));
@@ -1608,8 +1610,7 @@ impl AgentRuntime {
 
             if response.context_compressed {
                 if let Some(summary) = response.compressed_summary.clone() {
-                    let compacted_count =
-                        Self::apply_provider_compaction(&mut session, &summary);
+                    let compacted_count = Self::apply_provider_compaction(&mut session, &summary);
                     if compacted_count > 0 {
                         info!(
                             "Persisting provider-side context compression for session {}: replaced {} messages with summary",
@@ -1772,8 +1773,14 @@ impl AgentRuntime {
                         .await?;
 
                     for (tool_call, result) in tool_calls.iter().zip(parallel_results) {
-                        let (tool_result, success, duration_ms, tool_sig, tool_intent, error_detail) =
-                            result;
+                        let (
+                            tool_result,
+                            success,
+                            duration_ms,
+                            tool_sig,
+                            tool_intent,
+                            error_detail,
+                        ) = result;
                         let output = tool_result.output.clone();
                         if success {
                             tool_success_count += 1;
@@ -2292,6 +2299,17 @@ impl AgentRuntime {
                                 tool_message,
                                 tool_meta,
                             ));
+                            if !tool_result.attachments.is_empty() {
+                                if let Some(tool_msg) = session.messages.last_mut() {
+                                    for attachment in &tool_result.attachments {
+                                        tool_msg.images.push(MessageImage {
+                                            filename: attachment.filename.clone(),
+                                            mime: attachment.mime.clone(),
+                                            data_url: attachment.data_url.clone(),
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -3208,7 +3226,10 @@ impl AgentRuntime {
         )));
 
         let provider = self.active_provider().await;
-        let summary = match provider.complete(Some(&session.id), &compact_messages, &[]).await {
+        let summary = match provider
+            .complete(Some(&session.id), &compact_messages, &[])
+            .await
+        {
             Ok(response) => response
                 .content
                 .unwrap_or_else(|| Self::summarize_for_context(&prefix, 2_500)),
@@ -3642,7 +3663,16 @@ impl AgentRuntime {
         _iteration: usize,
         _user: &str,
         message_index: i32,
-    ) -> Result<Vec<(ToolResult, bool, u64, String, Option<String>, Option<String>)>> {
+    ) -> Result<
+        Vec<(
+            ToolResult,
+            bool,
+            u64,
+            String,
+            Option<String>,
+            Option<String>,
+        )>,
+    > {
         let session_id = session_id.to_string();
         let workspace_path = active_workspace.resolved_path();
         let registry = self.tool_registry.clone();
@@ -3766,7 +3796,14 @@ impl AgentRuntime {
                             output.clone(),
                             duration_ms,
                         );
-                        (output, true, duration_ms, String::new(), None::<String>, None)
+                        (
+                            output,
+                            true,
+                            duration_ms,
+                            String::new(),
+                            None::<String>,
+                            None,
+                        )
                     }
                     Err(e) => {
                         let error_msg = format!("Error: {}", e);

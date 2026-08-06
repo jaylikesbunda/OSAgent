@@ -29,6 +29,37 @@ v0.3.0 changes:
 * Completed subagent cards show duration (`N tools · 2m 14s`) computed server-side on completion and client-side when restored from history
 * Subagent retries also surface as a "retrying" badge state on the card, clearing when work resumes
 
+## Streaming performance
+
+* Fixed chat streaming render cost: assistant responses are now rendered incrementally — only the newly received chunk is parsed and appended each animation frame instead of re-parsing and re-rendering the entire accumulated message, so per-frame cost stays flat as messages grow instead of climbing linearly (most noticeable on slower machines)
+* Fixed lang-less code fences (``` with no language) rendering as plain paragraphs instead of code blocks in the incremental renderer
+
+## Agent prompting & context
+
+* The system prompt now carries concrete behavior rules: keep replies concise (a few lines unless the user asks for detail), batch independent tool calls into a single message, run the repo's lint/typecheck/test/build command when one exists and fix what it reports, explain non-trivial shell commands before running them, never commit or push without being explicitly asked, and avoid adding code comments unless asked
+* The runtime environment block now reports whether the workspace is a git repository (`- Is directory a git repo: yes/no`) alongside model, workspace, working directory and platform, for both the main agent and subagents
+* Open-ended discovery (searches that will need multiple rounds of globbing and grepping) is now delegated to explore subagents via the task tool instead of being run inline; the grep/glob tool descriptions, their when-not-to-use guidance and the large-output spill hints all point the model at that delegation path
+
+## Coding tools
+
+* read_file now reads images and PDFs instead of rejecting them as binary: PNG/JPEG/GIF/WebP files are attached to the conversation as images the model can see (capped at 10MB), and PDFs have their text extracted with the same offset/limit pagination as text files
+* apply_patch hunk matching is now fuzzy: it falls back from byte-exact to whitespace-insensitive and then similarity-based matching, so patches with slightly stale context lines apply instead of failing
+* apply_patch now runs post-apply diagnostics through the LSP server when one is available and reports per-file errors/warnings in the tool output
+* The LSP transport was a stub (responses were logged but never routed back to callers); it now implements real LSP framing — Content-Length header parsing, request/response correlation, an initialize/initialized handshake, buffered publishDiagnostics — and the client gains pull diagnostics (`textDocument/diagnostic`) with push diagnostics as fallback, plus a check that the server binary actually exists on PATH
+
+## Search tool timeouts
+
+* Fixed grep/glob tools stalling turns for exactly 60s and then producing late results: rg was run through a detached `spawn_blocking` child that a tokio timeout could abandon but never kill, so timed-out searches kept running (and the tool loop sat waiting); both grep and glob now run rg as a `tokio::process::Command` with `kill_on_drop`, so a timeout actually terminates the child
+* The fallback directory walk (used when rg is unavailable) is now cancellable: a shared cancel flag set on timeout stops the walk, which previously kept scanning (including binary files) long after the caller gave up
+* The fallback walk now skips heavy directories (`.pio`, `node_modules`, `target`, `dist`, `.git`, `.venv`, ...) unless the search root itself is one, sniffs the first 4KB to skip binary files without reading whole files, reads line-by-line instead of loading entire files, and caps results at 10,000 matches with an explicit "results truncated" note
+
+## Chat streaming fixes
+
+* Fixed tool cards disappearing from the chat after the assistant message that invoked them loses its anchor: assistant messages that carry `tool_calls` (the "tool prelude" messages) were treated as hidden when their content was empty, so the transcript entry hosting their cards was removed on the next re-render and the cards could only be restored by reloading the session; preludes with tool calls now stay in the transcript as card anchors
+* Fixed the message "still writing" indicator staying stuck on completed segments: the 2.5s tool-sync kept re-adopting the last assistant message as a streaming element even after it was finalized at a tool boundary, re-adding the streaming cursor every poll; finalized segments (marked `boundaryAfter=tool` or already hosting tool cards) are now content-synced quietly instead of being re-streamed
+* Fixed duplicated text fragments in streamed messages (e.g. the tail of a line, with raw `**`/backtick characters, appearing twice): when the 2.5s snapshot sync had already applied a full response and a delayed or re-delivered `response_chunk` for the same content then arrived, the chunk was appended a second time; content and thinking chunk appends now skip text that is already present at the end of the current segment, which also covers dual SSE/WebSocket delivery
+* Thinking blocks now stay collapsed by default: auto-expanding while streaming, at creation, and on re-adoption was removed, so the "Thinking" preview stays minimized until the user opens it (manual open/close toggles still stick)
+
 v0.2.0 changes:
 
 ## Security & permissions

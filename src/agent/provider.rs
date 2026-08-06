@@ -279,7 +279,31 @@ impl OpenAICompatibleProvider {
                 });
 
                 if msg.role == "tool" {
-                    value["content"] = serde_json::json!(msg.content);
+                    if !msg.images.is_empty() {
+                        let mut content_parts: Vec<serde_json::Value> = Vec::new();
+                        content_parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": msg.content
+                        }));
+                        for img in &msg.images {
+                            if image_url_as_string {
+                                content_parts.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": img.data_url
+                                }));
+                            } else {
+                                content_parts.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": img.data_url
+                                    }
+                                }));
+                            }
+                        }
+                        value["content"] = serde_json::json!(content_parts);
+                    } else {
+                        value["content"] = serde_json::json!(msg.content);
+                    }
                     if let Some(tool_call_id) = &msg.tool_call_id {
                         value["tool_call_id"] = serde_json::json!(tool_call_id);
                     }
@@ -1463,8 +1487,16 @@ impl OpenAICompatibleProvider {
             .and_then(|error| error.get("message"))
             .and_then(|message| message.as_str())
             .map(|message| message.to_string())
-            .or_else(|| json.get("message").and_then(|v| v.as_str()).map(String::from))
-            .or_else(|| json.get("detail").and_then(|v| v.as_str()).map(String::from))
+            .or_else(|| {
+                json.get("message")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .or_else(|| {
+                json.get("detail")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
     }
 
     /// Build a structured provider error from a failed HTTP response.
@@ -1755,9 +1787,7 @@ impl OpenAICompatibleProvider {
                             );
                             compressed_summary = compressed_messages.iter().find_map(|msg| {
                                 if msg.role == "assistant"
-                                    && msg
-                                        .content
-                                        .starts_with("Earlier conversation compressed")
+                                    && msg.content.starts_with("Earlier conversation compressed")
                                 {
                                     Some(msg.content.clone())
                                 } else {
@@ -2295,7 +2325,8 @@ impl Provider for OpenAICompatibleProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
-        self.complete_stream_with_retry(session_id, messages, tools).await
+        self.complete_stream_with_retry(session_id, messages, tools)
+            .await
     }
 
     async fn model_context_window(&self) -> Option<usize> {

@@ -143,7 +143,7 @@ pub fn maybe_store_large_output_result(
                 .to_string();
             return LargeOutputResult {
                 display_output: format!(
-                    "{}\n\n[output truncated: {} chars across {} lines]\nFull output saved to {}\nUse read_file with offset/limit to inspect specific sections. Cached tool outputs are retained for about 7 days.",
+                    "{}\n\n[output truncated: {} chars across {} lines]\nFull output saved to {}\nIf you need to work with the full output, delegate to the task or subagent tool with an explore agent to process it with grep and read_file — do NOT read the full file yourself. Otherwise use read_file with offset/limit to inspect specific sections. Cached tool outputs are retained for about 7 days.",
                     preview, total_chars, total_lines, relative
                 ),
                 truncated: true,

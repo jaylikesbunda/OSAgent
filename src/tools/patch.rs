@@ -1,11 +1,14 @@
 use crate::config::Config;
 use crate::error::{OSAgentError, Result};
+use crate::lsp::client::LspClient;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::guard::ensure_relative_path_not_backups;
 use crate::tools::registry::{Tool, ToolExample};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::cmp::max;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +53,7 @@ pub struct ApplyPatchTool {
     workspace: PathBuf,
     backup_dir: PathBuf,
     cache: Arc<FileReadCache>,
+    lsp: LspClient,
 }
 
 impl ApplyPatchTool {
@@ -60,6 +64,7 @@ impl ApplyPatchTool {
                 workspace,
                 backup_dir: PathBuf::new(),
                 cache,
+                lsp: LspClient::new(HashMap::new()),
             };
         }
 
@@ -78,6 +83,7 @@ impl ApplyPatchTool {
             workspace: canonical_workspace,
             backup_dir,
             cache,
+            lsp: LspClient::new(HashMap::new()),
         }
     }
 
@@ -317,8 +323,37 @@ impl ApplyPatchTool {
         }
 
         let max_start = original_lines.len().checked_sub(expected.len())?;
+
+        // 1. Exact match
         for start in search_start..=max_start {
             if original_lines[start..start + expected.len()] == *expected {
+                return Some(start);
+            }
+        }
+
+        // 2. Line-trimmed match (whitespace around lines may differ)
+        for start in search_start..=max_start {
+            let window = &original_lines[start..start + expected.len()];
+            if window
+                .iter()
+                .zip(expected.iter())
+                .all(|(a, b)| a.trim() == b.trim())
+            {
+                return Some(start);
+            }
+        }
+
+        // 3. Similarity-based fuzzy match
+        let best = (search_start..=max_start)
+            .map(|start| {
+                let window = &original_lines[start..start + expected.len()];
+                let sim = line_block_similarity(window, expected);
+                (start, sim)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((start, similarity)) = best {
+            if similarity >= 0.8 {
                 return Some(start);
             }
         }
@@ -360,23 +395,35 @@ impl ApplyPatchTool {
             for line in &hunk.lines {
                 match line {
                     PatchLine::Context(value) => {
-                        if original_lines.get(source_idx).map(String::as_str)
-                            != Some(value.as_str())
-                        {
+                        let Some(actual) = original_lines.get(source_idx) else {
                             return Err(OSAgentError::ToolExecution(
-                                "Patch context did not match file contents".to_string(),
+                                "Patch context extended past end of file".to_string(),
                             ));
+                        };
+                        if actual != value && actual.trim() != value.trim() {
+                            return Err(OSAgentError::ToolExecution(format!(
+                                "Patch context did not match file contents (line {}: expected '{}', found '{}')",
+                                source_idx + 1,
+                                value,
+                                actual
+                            )));
                         }
-                        result.push(value.clone());
+                        result.push(actual.clone());
                         source_idx += 1;
                     }
                     PatchLine::Remove(value) => {
-                        if original_lines.get(source_idx).map(String::as_str)
-                            != Some(value.as_str())
-                        {
+                        let Some(actual) = original_lines.get(source_idx) else {
                             return Err(OSAgentError::ToolExecution(
-                                "Patch removal did not match file contents".to_string(),
+                                "Patch removal extended past end of file".to_string(),
                             ));
+                        };
+                        if actual != value && actual.trim() != value.trim() {
+                            return Err(OSAgentError::ToolExecution(format!(
+                                "Patch removal did not match file contents (line {}: expected '{}', found '{}')",
+                                source_idx + 1,
+                                value,
+                                actual
+                            )));
                         }
                         source_idx += 1;
                     }
@@ -395,6 +442,54 @@ impl ApplyPatchTool {
         }
         Ok(output)
     }
+
+    async fn check_lsp_diagnostics(&self, file_path: &PathBuf, display_path: &str) -> String {
+        let path_str = file_path.to_string_lossy().to_string();
+        let workspace = self.workspace.clone();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(25),
+            self.lsp.diagnostics(&path_str, &workspace),
+        )
+        .await;
+
+        let Ok(diagnostics) = result else {
+            return String::new();
+        };
+
+        let interesting: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.severity <= 2 && !d.message.is_empty())
+            .take(15)
+            .collect();
+        if interesting.is_empty() {
+            return String::new();
+        }
+
+        let mut out = format!("LSP diagnostics for {}:\n", display_path);
+        for d in interesting {
+            let level = if d.severity == 1 { "error" } else { "warning" };
+            let code = d
+                .code
+                .as_deref()
+                .map(|c| format!(" [{}]", c))
+                .unwrap_or_default();
+            let source = d
+                .source
+                .as_deref()
+                .map(|s| format!(" ({})", s))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "- line {}:{}: {}{}: {}{}\n",
+                d.line + 1,
+                d.character + 1,
+                level,
+                code,
+                d.message,
+                source
+            ));
+        }
+        out
+    }
 }
 
 #[async_trait]
@@ -404,7 +499,7 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply structured multi-file patches for atomic changes across one or more files.\n\nUsage:\n- Use for precise multi-hunk edits where edit_file would require multiple calls.\n- Use for coordinated changes across multiple files in a single operation.\n- The patch format uses *** Begin Patch / *** End Patch envelopes with *** Add File / *** Update File / *** Delete File headers.\n- Update hunks use @@ markers with - (remove) and + (add) lines, like unified diff.\n- Read the target files first before constructing a patch.\n- Creates automatic backups in .osagent_backups before modifying."
+        "Apply structured multi-file patches for atomic changes across one or more files.\n\nUsage:\n- Use for precise multi-hunk edits where edit_file would require multiple calls.\n- Use for coordinated changes across multiple files in a single operation.\n- The patch format uses *** Begin Patch / *** End Patch envelopes with *** Add File / *** Update File / *** Delete File headers.\n- Update hunks use @@ markers with - (remove) and + (add) lines, like unified diff.\n- Hunk matching is fuzzy: it falls back to whitespace-insensitive and similarity-based matching when the context is not byte-exact.\n- Read the target files first before constructing a patch.\n- After applying, LSP diagnostics (when an LSP server is available) may be reported so you can fix errors.\n- Creates automatic backups in .osagent_backups before modifying."
     }
 
     fn when_to_use(&self) -> &str {
@@ -470,6 +565,10 @@ impl Tool for ApplyPatchTool {
                         self.cache.invalidate(&canonical);
                     }
                     results.push(format!("Added {}", path));
+                    let diagnostics = self.check_lsp_diagnostics(&file_path, &path).await;
+                    if !diagnostics.is_empty() {
+                        results.push(diagnostics);
+                    }
                 }
                 PatchOperation::Delete { path } => {
                     let file_path = self.validate_path(&path)?;
@@ -539,6 +638,10 @@ impl Tool for ApplyPatchTool {
                             path,
                             move_to.unwrap()
                         ));
+                        let diagnostics = self.check_lsp_diagnostics(&target_path, &path).await;
+                        if !diagnostics.is_empty() {
+                            results.push(diagnostics);
+                        }
                     } else {
                         fs::write(&source_path, updated).map_err(|e| {
                             OSAgentError::ToolExecution(format!("Failed to write file: {}", e))
@@ -547,11 +650,141 @@ impl Tool for ApplyPatchTool {
                             self.cache.invalidate(&canonical);
                         }
                         results.push(format!("Updated {}", path));
+                        let diagnostics = self.check_lsp_diagnostics(&target_path, &path).await;
+                        if !diagnostics.is_empty() {
+                            results.push(diagnostics);
+                        }
                     }
                 }
             }
         }
 
         Ok(results.join("\n"))
+    }
+}
+
+fn line_block_similarity(actual: &[String], expected: &[String]) -> f64 {
+    if actual.len() != expected.len() || expected.is_empty() {
+        return 0.0;
+    }
+
+    let matching = actual
+        .iter()
+        .zip(expected.iter())
+        .filter(|(a, b)| a.trim() == b.trim())
+        .count();
+    let line_sim = matching as f64 / expected.len() as f64;
+
+    let actual_joined: String = actual.iter().map(|l| l.trim()).collect::<Vec<_>>().join("");
+    let expected_joined: String = expected
+        .iter()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join("");
+    let char_sim = lcs_ratio(&actual_joined, &expected_joined);
+
+    0.5 * line_sim + 0.5 * char_sim
+}
+
+fn lcs_ratio(a: &str, b: &str) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev = vec![0usize; b_chars.len() + 1];
+    let mut curr = vec![0usize; b_chars.len() + 1];
+
+    for i in 1..=a_chars.len() {
+        for j in 1..=b_chars.len() {
+            curr[j] = if a_chars[i - 1] == b_chars[j - 1] {
+                prev[j - 1] + 1
+            } else {
+                prev[j].max(curr[j - 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    let lcs = prev[b_chars.len()] as f64;
+    let max_len = max(a_chars.len(), b_chars.len()).max(1);
+    lcs / max_len as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(content: &str) -> Vec<String> {
+        content.lines().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn exact_hunk_located() {
+        let original = lines("aaa\nbbb\nfoo\nbar\nbaz\n");
+        let expected = lines("foo\nbar\nbaz");
+        assert_eq!(
+            ApplyPatchTool::find_hunk_start(&original, 0, &expected),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn hunk_search_resumes_after_cursor() {
+        let original = lines("foo\nbar\nbaz\nfoo\nbar\nbaz\n");
+        let expected = lines("foo\nbar\nbaz");
+        assert_eq!(
+            ApplyPatchTool::find_hunk_start(&original, 3, &expected),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn trimmed_hunk_located() {
+        let original = lines("fn foo() {\n  let x = 1;\n}\nfn bar() {\n}");
+        let expected = lines("fn foo() {\n    let x = 1;\n}");
+        assert_eq!(
+            ApplyPatchTool::find_hunk_start(&original, 0, &expected),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn fuzzy_hunk_located_by_similarity() {
+        let original = lines("fn foo() {\n    let x = 1;\n    let y = 2;\n}");
+        let expected = lines("fn foo() {\n    let x = 1;\n    let y = 3;\n}");
+        assert_eq!(
+            ApplyPatchTool::find_hunk_start(&original, 0, &expected),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn similarity_rejects_unrelated_block() {
+        let original = lines("fn foo() {\n    let x = 1;\n    let y = 2;\n}");
+        let expected = lines("fn bar() {\n    let z = 9;\n}");
+        let start = ApplyPatchTool::find_hunk_start(&original, 0, &expected);
+        assert!(start.is_none() || start.unwrap() > original.len() - expected.len());
+    }
+
+    #[test]
+    fn line_block_similarity_scores() {
+        assert_eq!(
+            line_block_similarity(&lines("a\nb\nc"), &lines("a\nb\nc")),
+            1.0
+        );
+        assert_eq!(
+            line_block_similarity(&lines("a\nb"), &lines("a\nb\nc")),
+            0.0
+        );
+        let sim = line_block_similarity(
+            &lines("fn foo() {\n    let x = 1;\n}"),
+            &lines("fn foo() {\n    let x = 2;\n}"),
+        );
+        assert!(sim >= 0.8, "expected similarity >= 0.8, got {}", sim);
     }
 }

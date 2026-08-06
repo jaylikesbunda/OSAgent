@@ -108,6 +108,11 @@
     margin-bottom: 0;
 }
 
+.message-content .md-partial {
+    display: block;
+    margin: 0 0 12px 0;
+}
+
 .message-content ul {
     margin: 0 0 12px 20px;
     padding: 0;

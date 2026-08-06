@@ -9,8 +9,8 @@ use crate::agent::session::SessionManager;
 use crate::config::{Config, WorkspaceConfig};
 use crate::error::Result;
 use crate::storage::{
-    CompactionStats, Message, MessageTokens, Session, SessionContextState, SqliteStorage,
-    SubagentTask, ToolUsageStats,
+    CompactionStats, Message, MessageImage, MessageTokens, Session, SessionContextState,
+    SqliteStorage, SubagentTask, ToolUsageStats,
 };
 use crate::tools::registry::ToolRegistry;
 use chrono::Utc;
@@ -539,6 +539,7 @@ impl SubagentManager {
         let workspace_instructions =
             format_system_reminder(&workspace_instruction_blocks(&active_root));
         let git_context = git_workspace_context(&active_root).await;
+        let is_git_repo = active_root.join(".git").is_dir() || git_context.is_some();
         let skill_summary = tool_registry.skill_summary_prompt();
         let provider_type = provider.provider_type().to_string();
         let model = provider.current_model().await;
@@ -559,12 +560,13 @@ impl SubagentManager {
             .collect::<Vec<_>>()
             .join("\n");
         let environment_prompt = format!(
-            "# Runtime Environment\n- Model: {} / {}\n- Workspace: {} ({})\n- Working directory: {}\n- Platform: {}\n# Workspace Roots\n{}",
+            "# Runtime Environment\n- Model: {} / {}\n- Workspace: {} ({})\n- Working directory: {}\n- Is directory a git repo: {}\n- Platform: {}\n# Workspace Roots\n{}",
             provider_type,
             model,
             parent_workspace.name,
             parent_workspace.id,
             parent_workspace.resolved_path(),
+            if is_git_repo { "yes" } else { "no" },
             std::env::consts::OS,
             workspace_paths
         );
@@ -830,7 +832,9 @@ impl SubagentManager {
                 ) {
                     tool_args["session_id"] = serde_json::json!(session_id.clone());
                 }
-                let result = tool_registry.execute(&tool_call.name, tool_args).await;
+                let result = tool_registry
+                    .execute_result(&tool_call.name, tool_args)
+                    .await;
                 let duration_ms = start.elapsed().as_millis() as u64;
 
                 match result {
@@ -840,10 +844,19 @@ impl SubagentManager {
                             "Subagent tool '{}' executed in {}ms",
                             tool_call.name, duration_ms
                         );
-                        let truncated = truncate_tool_output(&tool_call.name, &output);
+                        let truncated = truncate_tool_output(&tool_call.name, &output.output);
                         session
                             .messages
                             .push(Message::tool_result(tool_call.id.clone(), truncated));
+                        if let Some(last) = session.messages.last_mut() {
+                            for attachment in &output.attachments {
+                                last.images.push(MessageImage {
+                                    filename: attachment.filename.clone(),
+                                    mime: attachment.mime.clone(),
+                                    data_url: attachment.data_url.clone(),
+                                });
+                            }
+                        }
 
                         let _ = storage.append_session_event(
                             &session_id,

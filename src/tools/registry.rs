@@ -27,12 +27,21 @@ pub struct ToolExample {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolAttachment {
+    pub filename: String,
+    pub mime: String,
+    pub data_url: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolResult {
     pub output: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default = "default_tool_result_metadata")]
     pub metadata: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ToolAttachment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +118,7 @@ impl ToolResult {
             output: output.into(),
             title: None,
             metadata: default_tool_result_metadata(),
+            attachments: Vec::new(),
         }
     }
 }
@@ -665,7 +675,9 @@ impl ToolRegistry {
             return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
         }
 
-        tool.execute_result(args).await.map_err(Self::with_rewrite_guidance)
+        tool.execute_result(args)
+            .await
+            .map_err(Self::with_rewrite_guidance)
     }
 
     /// Append explicit "rewrite the input" guidance to argument/schema

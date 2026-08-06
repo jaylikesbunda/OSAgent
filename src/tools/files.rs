@@ -5,8 +5,9 @@ use crate::tools::file_cache::FileReadCache;
 use crate::tools::fuzzy_edit::{apply_replacement, fuzzy_find};
 use crate::tools::guard::{ensure_relative_path_not_backups, path_touches_backups};
 use crate::tools::output::path_touches_tool_outputs;
-use crate::tools::registry::{Tool, ToolResult};
+use crate::tools::registry::{Tool, ToolAttachment, ToolResult};
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::fs;
@@ -193,6 +194,7 @@ impl ReadFileTool {
                     "count": 0,
                     "truncated": false
                 }),
+                attachments: Vec::new(),
             });
         }
 
@@ -228,6 +230,7 @@ impl ReadFileTool {
                 "count": formatted.len(),
                 "truncated": truncated
             }),
+            attachments: Vec::new(),
         })
     }
 
@@ -256,12 +259,19 @@ impl ReadFileTool {
                     "total_lines": 0,
                     "truncated": false
                 }),
+                attachments: Vec::new(),
             });
         }
 
         let sample_len = bytes.len().min(4096);
         let nul_count = bytes[..sample_len].iter().filter(|b| **b == 0).count();
         if nul_count > 0 {
+            if let Some(mime) = detect_image_mime(&bytes) {
+                return self.read_image(&bytes, mime, requested_path).await;
+            }
+            if bytes.starts_with(b"%PDF-") {
+                return self.read_pdf(&bytes, offset, limit, requested_path).await;
+            }
             return Err(OSAgentError::ToolExecution(
                 "File appears to be binary and cannot be displayed as text".to_string(),
             ));
@@ -292,6 +302,7 @@ impl ReadFileTool {
                     "total_lines": 0,
                     "truncated": false
                 }),
+                attachments: Vec::new(),
             });
         }
 
@@ -359,8 +370,142 @@ impl ReadFileTool {
                 "total_lines": total_lines,
                 "truncated": truncated
             }),
+            attachments: Vec::new(),
         })
     }
+
+    async fn read_image(
+        &self,
+        bytes: &[u8],
+        mime: &str,
+        requested_path: &str,
+    ) -> Result<ToolResult> {
+        const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(OSAgentError::ToolExecution(format!(
+                "Image file is {} bytes (max supported: {} bytes). Use a smaller image.",
+                bytes.len(),
+                MAX_IMAGE_BYTES
+            )));
+        }
+        let data_url = format!(
+            "data:{};base64,{}",
+            mime,
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        Ok(ToolResult {
+            output: format!(
+                "Image {} ({} bytes, {}) has been attached to the conversation. Describe what you see in it.",
+                requested_path,
+                bytes.len(),
+                mime
+            ),
+            title: Some(requested_path.to_string()),
+            metadata: json!({
+                "kind": "image",
+                "path": requested_path,
+                "mime": mime,
+                "bytes": bytes.len()
+            }),
+            attachments: vec![ToolAttachment {
+                filename: requested_path.to_string(),
+                mime: mime.to_string(),
+                data_url,
+            }],
+        })
+    }
+
+    async fn read_pdf(
+        &self,
+        bytes: &[u8],
+        offset: usize,
+        limit: usize,
+        requested_path: &str,
+    ) -> Result<ToolResult> {
+        let bytes = bytes.to_vec();
+        let text = tokio::task::spawn_blocking(move || {
+            pdf_extract::extract_text_from_mem(&bytes)
+                .map_err(|e| format!("Failed to extract text from PDF: {}", e))
+        })
+        .await
+        .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))?
+        .map_err(OSAgentError::ToolExecution)?;
+        let text = text.trim().to_string();
+        let total_lines = text.lines().count();
+
+        let (output, start_line, end_line, truncated) = if total_lines == 0 {
+            (
+                "(PDF contains no extractable text; it may be a scanned or image-only document)"
+                    .to_string(),
+                0usize,
+                0usize,
+                false,
+            )
+        } else {
+            let start_line = offset.max(1);
+            if start_line > total_lines {
+                return Err(OSAgentError::ToolExecution(format!(
+                    "offset {} is past end of PDF text ({} lines)",
+                    start_line, total_lines
+                )));
+            }
+            let end_line = (start_line + limit - 1).min(total_lines);
+            let truncated = end_line < total_lines;
+            let mut output = text
+                .lines()
+                .skip(start_line - 1)
+                .take(end_line - start_line + 1)
+                .enumerate()
+                .map(|(index, line)| format!("{}: {}", start_line + index, line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if truncated {
+                output.push_str(&format!(
+                    "\n\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
+                    start_line,
+                    end_line,
+                    total_lines,
+                    end_line + 1
+                ));
+            } else {
+                output.push_str(&format!(
+                    "\n\n[Showing lines {}-{} of {}]",
+                    start_line, end_line, total_lines
+                ));
+            }
+            (output, start_line, end_line, truncated)
+        };
+
+        Ok(ToolResult {
+            output,
+            title: Some(requested_path.to_string()),
+            metadata: json!({
+                "kind": "pdf",
+                "path": requested_path,
+                "offset": start_line,
+                "limit": limit,
+                "total_lines": total_lines,
+                "truncated": truncated
+            }),
+            attachments: Vec::new(),
+        })
+    }
+}
+
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 8 && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if bytes.len() >= 3 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 6 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 #[async_trait]
@@ -370,7 +515,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- Paths are relative to the workspace root.\n- By default, returns up to 200 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by pattern.\n- Contents are returned with each line prefixed by its line number.\n- For directories, entries are returned one per line with a trailing / for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- You MUST read a file before editing it with edit_file."
+        "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- Paths are relative to the workspace root.\n- By default, returns up to 200 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by pattern.\n- Contents are returned with each line prefixed by its line number.\n- For directories, entries are returned one per line with a trailing / for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- Image files (png/jpeg/gif/webp) are attached to the conversation as images so you can see them.\n- PDF files are read as extracted text with the same offset/limit pagination.\n- You MUST read a file before editing it with edit_file."
     }
 
     fn when_to_use(&self) -> &str {

@@ -116,16 +116,13 @@ impl OSAgentError {
         match self {
             Self::ProviderStructured(info) => {
                 info.status_code == Some(429)
-                    || info
-                        .error_code
-                        .as_deref()
-                        .is_some_and(|code| {
-                            let lower = code.to_lowercase();
-                            lower.contains("rate_limit")
-                                || lower.contains("rate-limit")
-                                || lower.contains("too_many")
-                                || lower.contains("quota")
-                        })
+                    || info.error_code.as_deref().is_some_and(|code| {
+                        let lower = code.to_lowercase();
+                        lower.contains("rate_limit")
+                            || lower.contains("rate-limit")
+                            || lower.contains("too_many")
+                            || lower.contains("quota")
+                    })
                     || contains_any(
                         &info.message.to_lowercase(),
                         &[
@@ -328,9 +325,7 @@ impl OSAgentError {
     /// OpenAI may return 404 for models that are actually available.
     pub fn is_openai_retryable(&self) -> bool {
         match self {
-            Self::ProviderStructured(info) => {
-                info.status_code == Some(404) || self.is_retryable()
-            }
+            Self::ProviderStructured(info) => info.status_code == Some(404) || self.is_retryable(),
             Self::Provider(message) => {
                 let lower = message.to_lowercase();
                 lower.contains("status code 404") || lower.contains("(404") || self.is_retryable()

@@ -284,6 +284,9 @@ fn build_priorities_section(mode: PromptMode, custom_priorities: Option<&[String
             "- Prefer the most specific tool; parallelize independent search/read steps"
                 .to_string(),
             "- Use todowrite for multi-step work that is easy to lose track of".to_string(),
+            "- Be concise: keep replies short unless the user asks for detail; a one-word or one-line answer is usually best".to_string(),
+            "- When making multiple independent tool calls (reads, greps, globs, searches, bash), batch them into a single message to run in parallel".to_string(),
+            "- Balance proactiveness: take clear follow-up actions that serve the request, but never surprise the user with unrequested changes".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Priorities".to_string(),
@@ -299,9 +302,9 @@ fn build_validation_section(mode: PromptMode) -> Vec<String> {
     match mode {
         PromptMode::Full => vec![
             "# Validation".to_string(),
-            "- Run lint, typecheck, tests, or build steps when they exist and are relevant"
-                .to_string(),
+            "- After making code changes, it is MANDATORY to run the repo's lint, typecheck, test, or build command when one exists — do not skip it".to_string(),
             "- Prefer repo-native commands and focused validation first".to_string(),
+            "- Check the README or manifest files to determine the correct validation command; never assume a test framework".to_string(),
             "- Report whether validation passed, failed, or was unavailable".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
@@ -341,6 +344,7 @@ fn build_workflow_section(mode: PromptMode) -> Vec<String> {
             "- Use the most specific tool that fits the job".to_string(),
             "- Make the smallest correct change that solves the problem".to_string(),
             "- Delegate focused research or complex multi-file work with subagent or coordinator when it reduces context load or risk".to_string(),
+            "- After making changes, run the repo's lint/typecheck/test/build command if one exists, then fix anything it reports".to_string(),
             "- Validate with narrow checks; finish with status and blockers".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
@@ -363,6 +367,10 @@ fn build_tool_selection_section(_allowed_tools: &[String], mode: PromptMode) -> 
         "- Read files before editing them".to_string(),
     ];
 
+    if mode == PromptMode::Full {
+        lines.push("- For open-ended searches that will require multiple rounds of globbing and grepping, delegate to the task or subagent tool with an explore agent to reduce context usage. Do not duplicate that work yourself; continue with non-overlapping tasks or wait for the result.".to_string());
+    }
+
     if mode == PromptMode::Minimal || mode == PromptMode::Explore {
         lines.push("- Do not spawn additional subagents".to_string());
     }
@@ -375,6 +383,7 @@ fn build_communication_section(mode: PromptMode) -> Vec<String> {
         PromptMode::Full => vec![
             "# Communication".to_string(),
             "- Be precise and technical".to_string(),
+            "- Be concise: keep replies under a few lines unless the user asks for detail; one-word or one-line answers are best".to_string(),
             "- Include relevant code snippets and line numbers".to_string(),
             "- Explain the why, not just the what".to_string(),
             "- Use standard technical terminology".to_string(),
@@ -414,6 +423,8 @@ fn build_constraints_section() -> Vec<String> {
         "# Constraints".to_string(),
         "- Do not add features or refactor beyond what was asked".to_string(),
         "- Do not add comments/TODOs unless explicitly asked".to_string(),
+        "- NEVER commit or push changes unless the user explicitly asks; it is VERY IMPORTANT to only commit when explicitly asked".to_string(),
+        "- Before running a non-trivial shell command, briefly explain what it does and why".to_string(),
         "- Verify changes work before reporting complete".to_string(),
     ]
 }

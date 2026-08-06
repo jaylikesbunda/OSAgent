@@ -682,6 +682,7 @@ impl Tool for BashTool {
                         "original_chars": summarized.original_chars,
                         "original_lines": summarized.original_lines,
                     }),
+                    attachments: Vec::new(),
                 })
             }
             Ok(Err(e)) => Err(OSAgentError::ToolExecution(format!(
