@@ -20,6 +20,7 @@ pub mod error;
 pub mod external;
 pub mod indexer;
 pub mod lsp;
+pub mod mcp;
 pub mod oauth;
 pub mod permission;
 pub mod plugin;

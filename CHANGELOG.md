@@ -20,6 +20,16 @@ v0.4.0 changes:
 * Mic capture is now resampled and downmixed to 16 kHz mono on the client (up to ~3× less upload, no server-side resample), has a live input level monitor so a muted or wrong-device mic is visible immediately, supports explicit device selection (kept in localStorage since device IDs are browser-scoped), and recording is cancelled when TTS starts so the agent never hears its own speech
 * Session storage now runs on a pooled SQLite connection with an explicit transcript table and a backfill migration for existing sessions, plus message search and message truncation (truncate refuses while a turn is in flight) backing the new `/api/session-search` and `/api/sessions/:id/messages/truncate` endpoints
 
+## MCP servers & tool discovery
+
+* Added MCP (Model Context Protocol) client support over stdio and HTTP, with paginated tool discovery, `readOnly`/`destructive` hints, and per-server timeouts
+* Tool schemas are deferred: the model sees one line per server, not every tool, so connecting a 50-tool server costs about a line of context instead of 50 schemas
+* Added `tool_search` — the agent searches the catalog in plain language and the matches become callable immediately; `select:<name>` re-fetches a specific schema
+* Added `tool_script` — runs a Python or Node script that drives many tools at once, so intermediate results never reach the conversation. Scripts declare `uses` up front and the bridge rejects anything else
+* Activated tools are appended after the native tool block, so discovering a tool invalidates only the tail of the provider's cached prompt prefix
+* Plan mode only sees MCP tools the server marks read-only; the roleplay persona gets no MCP access at all
+* Added Settings > MCP Servers: add, edit, enable, remove, test a connection before saving, and browse a server's tools. Servers connect in the background so startup is not blocked
+
 ## CLI
 
 * Running the binary bare now defaults to `start` instead of printing a usage error

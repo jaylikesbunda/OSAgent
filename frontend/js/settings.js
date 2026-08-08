@@ -530,6 +530,8 @@ OSA.switchSettingsTab = async function(tabId) {
         await OSA.loadDoctorStatus();
     } else if (tabId === 'skills') {
         await OSA.loadSkillsUI();
+    } else if (tabId === 'mcp') {
+        await OSA.loadMcpUI();
     }
 };
 

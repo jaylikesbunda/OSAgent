@@ -7,17 +7,22 @@ use crate::agent::subagent_manager::SubagentManager;
 use crate::config::{Config, WorkspacePath, WorkspacePermission};
 use crate::error::{OSAgentError, Result};
 use crate::indexer::CodeIndexer;
+use crate::mcp::{McpHandle, McpManager, MCP_TOOL_PREFIX};
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     bash, batch, calendar, code, codesearch, coordinator, decision_memory, files, lsp, memory,
     news, patch, persona, plan, process, question, scheduler, search, skill, subagent,
-    system_status, task, todo, weather, web,
+    system_status, task, todo, tool_script, tool_search, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Appended alongside MCP tools rather than sorted into the native
+/// block; see `get_tool_definitions`.
+const TOOL_SEARCH_NAME: &str = "tool_search";
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -65,6 +70,20 @@ impl ToolProfile {
     }
 
     fn allows(self, tool_name: &str) -> bool {
+        // Discovery and the tools it yields travel together. A profile
+        // that can call `tool_search` but not the tools it activates
+        // sends the agent down a dead end: it searches, is told the tool
+        // loaded, then cannot call it. Custom is the roleplay persona
+        // and is deliberately near-toolless, so it gets neither.
+        //
+        // Plan additionally drops non-read-only MCP tools; that needs
+        // the catalog, so it happens in the registry.
+        if tool_name == "tool_search" || tool_name.starts_with(MCP_TOOL_PREFIX) {
+            return !matches!(self, Self::Custom);
+        }
+        if tool_name == "tool_script" {
+            return matches!(self, Self::Default | Self::Code | Self::Creative);
+        }
         match self {
             Self::Default => true,
             Self::Code => !matches!(tool_name, "calendar" | "weather" | "news"),
@@ -176,6 +195,10 @@ pub struct ToolRegistry {
     file_cache: Arc<FileReadCache>,
     coordinator: Option<Arc<Coordinator>>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
+    mcp: McpHandle,
+    /// Native tool definitions only. MCP definitions are appended fresh
+    /// on every read so that activating one never reorders or rewrites
+    /// this block — the provider's cached prompt prefix survives.
     cached_tool_definitions: std::sync::RwLock<Option<Vec<ToolDefinition>>>,
 }
 
@@ -300,8 +323,25 @@ impl ToolRegistry {
         file_cache: Arc<FileReadCache>,
     ) -> Result<Self> {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        let mcp = McpHandle::new();
 
         tools.insert("batch".to_string(), Arc::new(batch::BatchTool::new()));
+
+        // Registered unconditionally: MCP servers connect after the
+        // registry is built, and both tools read the catalog through
+        // `mcp` at call time. They self-describe as unavailable when no
+        // server is connected.
+        tools.insert(
+            "tool_search".to_string(),
+            Arc::new(tool_search::ToolSearchTool::new(
+                mcp.clone(),
+                config.mcp.search_result_limit,
+            )),
+        );
+        tools.insert(
+            "tool_script".to_string(),
+            Arc::new(tool_script::ToolScriptTool::new()),
+        );
 
         tools.insert(
             "bash".to_string(),
@@ -518,6 +558,7 @@ impl ToolRegistry {
             file_cache,
             coordinator: None,
             scheduler: None,
+            mcp,
             cached_tool_definitions: std::sync::RwLock::new(None),
         })
     }
@@ -574,11 +615,25 @@ impl ToolRegistry {
         }
     }
 
+    pub fn has_tool(&self, tool_name: &str) -> bool {
+        self.tools.contains_key(tool_name)
+    }
+
     pub fn is_allowed(&self, tool_name: &str) -> bool {
         self.allowed.is_empty() || !self.allowed.contains(tool_name)
     }
 
     pub fn is_parallel_safe(&self, tool_name: &str) -> bool {
+        // An MCP tool is only safe to fan out when the server itself
+        // claims it is read-only; absent the hint, assume it mutates.
+        if Self::is_mcp_tool(tool_name) {
+            return self
+                .mcp_manager()
+                .and_then(|manager| manager.entry(tool_name))
+                .map(|entry| entry.read_only)
+                .unwrap_or(false);
+        }
+
         matches!(
             tool_name,
             "read_file"
@@ -598,7 +653,45 @@ impl ToolRegistry {
         )
     }
 
+    /// Native tools, then `tool_search`, then every activated MCP tool.
+    ///
+    /// Order is load-bearing. The native block is sorted and byte-stable
+    /// for the life of the process; everything MCP-related is appended
+    /// after it, so discovering a tool invalidates only the tail of the
+    /// provider's cached prompt prefix instead of the whole block.
+    ///
+    /// `tool_search` rides in that tail rather than in the sorted native
+    /// block because it is useless without a catalog: with no MCP server
+    /// connected it would otherwise cost tokens in every request just to
+    /// tell the model there is nothing to search.
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = self.native_tool_definitions();
+
+        let Some(manager) = self.mcp_manager() else {
+            return definitions;
+        };
+        if manager.is_empty() {
+            return definitions;
+        }
+
+        if let Some(search) = self.tools.get(TOOL_SEARCH_NAME) {
+            if self.is_allowed(TOOL_SEARCH_NAME) {
+                definitions.push(ToolDefinition {
+                    tool_type: "function".to_string(),
+                    function: crate::agent::provider::ToolFunction {
+                        name: search.name().to_string(),
+                        description: Self::tool_prompt_description(search),
+                        parameters: search.parameters(),
+                    },
+                });
+            }
+        }
+
+        definitions.extend(manager.activated_definitions());
+        definitions
+    }
+
+    fn native_tool_definitions(&self) -> Vec<ToolDefinition> {
         {
             let cache = self.cached_tool_definitions.read().unwrap();
             if let Some(ref defs) = *cache {
@@ -609,6 +702,7 @@ impl ToolRegistry {
         let mut definitions: Vec<ToolDefinition> = self
             .tools
             .values()
+            .filter(|tool| tool.name() != TOOL_SEARCH_NAME)
             .filter(|tool| self.allowed.is_empty() || !self.allowed.contains(tool.name()))
             .map(|tool| ToolDefinition {
                 tool_type: "function".to_string(),
@@ -654,10 +748,84 @@ impl ToolRegistry {
     }
 
     pub fn get_tool_definitions_for_profile(&self, profile: ToolProfile) -> Vec<ToolDefinition> {
+        let manager = self.mcp_manager();
         self.get_tool_definitions()
             .into_iter()
             .filter(|tool| profile.allows(&tool.function.name))
+            .filter(|tool| {
+                // Plan mode is read-only by contract; an MCP tool that
+                // does not claim `readOnlyHint` has to be assumed to
+                // mutate something.
+                if profile != ToolProfile::Plan || !tool.function.name.starts_with(MCP_TOOL_PREFIX) {
+                    return true;
+                }
+                manager
+                    .as_ref()
+                    .and_then(|manager| manager.entry(&tool.function.name))
+                    .map(|entry| entry.read_only)
+                    .unwrap_or(false)
+            })
             .collect()
+    }
+
+    pub fn mcp_manager(&self) -> Option<Arc<McpManager>> {
+        self.mcp.get()
+    }
+
+    pub fn mcp_handle(&self) -> McpHandle {
+        self.mcp.clone()
+    }
+
+    /// Attach a connected MCP catalog. Takes `&self` because servers
+    /// connect after the registry is already shared behind an `Arc`, and
+    /// because the UI can reconnect them mid-session. Returns the
+    /// displaced manager so the caller can shut it down.
+    pub fn register_mcp(&self, manager: Arc<McpManager>) -> Option<Arc<McpManager>> {
+        self.mcp.set(Some(manager))
+    }
+
+    /// The always-in-context server manifest, if any servers connected.
+    pub fn mcp_manifest_prompt(&self) -> Option<String> {
+        let manager = self.mcp_manager()?;
+        if manager.is_empty() {
+            return None;
+        }
+        manager.manifest_prompt()
+    }
+
+    pub fn is_mcp_tool(tool_name: &str) -> bool {
+        tool_name.starts_with(MCP_TOOL_PREFIX)
+    }
+
+    async fn execute_mcp(&self, tool_name: &str, args: Value) -> Result<ToolResult> {
+        if !self.is_allowed(tool_name) {
+            return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
+        }
+
+        let manager = self.mcp_manager().ok_or_else(|| {
+            OSAgentError::ToolExecution("No MCP servers are connected".to_string())
+        })?;
+
+        let (output, is_error) = manager.call(tool_name, args).await?;
+        if is_error {
+            // The server reported a tool-level failure. Surface it as an
+            // error so the runtime's retry and loop-detection logic sees
+            // it, rather than as a successful result containing prose.
+            return Err(OSAgentError::ToolExecution(output));
+        }
+
+        let entry = manager.entry(tool_name);
+        Ok(ToolResult {
+            output,
+            title: entry
+                .as_ref()
+                .map(|entry| format!("{} · {}", entry.server, entry.tool)),
+            metadata: json!({
+                "mcp_server": entry.as_ref().map(|entry| entry.server.clone()),
+                "mcp_tool": entry.as_ref().map(|entry| entry.tool.clone()),
+            }),
+            attachments: Vec::new(),
+        })
     }
 
     pub async fn execute(&self, tool_name: &str, args: Value) -> Result<String> {
@@ -666,6 +834,10 @@ impl ToolRegistry {
     }
 
     pub async fn execute_result(&self, tool_name: &str, args: Value) -> Result<ToolResult> {
+        if Self::is_mcp_tool(tool_name) {
+            return self.execute_mcp(tool_name, args).await;
+        }
+
         let tool = self
             .tools
             .get(tool_name)
@@ -735,6 +907,12 @@ impl ToolRegistry {
     ) -> Result<ToolResult> {
         if !self.is_allowed(tool_name) {
             return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
+        }
+
+        // MCP tools have no workspace binding — the server owns its own
+        // scope — so they skip the per-workspace rebuild entirely.
+        if Self::is_mcp_tool(tool_name) {
+            return self.execute_mcp(tool_name, args).await;
         }
 
         if let Some(path) = workspace_path {

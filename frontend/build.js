@@ -28,6 +28,7 @@ const JS_LOAD_ORDER = [
   "js/question.js",
   "js/permission.js",
   "js/skills.js",
+  "js/mcp.js",
   "js/jobs.js",
   "js/app.js",
 ];
@@ -50,6 +51,7 @@ const CSS_LOAD_ORDER = [
   "css/permission.css",
   "css/responsive.css",
   "css/skills.css",
+  "css/mcp.css",
   "css/jobs.css",
 ];
 

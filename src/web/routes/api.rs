@@ -679,6 +679,12 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/plugins/enable", post(enable_plugin))
         .route("/api/plugins/disable", post(disable_plugin))
         .route("/api/plugins/reload", post(reload_plugins))
+        .route("/api/mcp/servers", get(mcp_status).post(upsert_mcp_server))
+        .route("/api/mcp/servers/:name", delete(delete_mcp_server))
+        .route("/api/mcp/servers/:name/enabled", post(toggle_mcp_server))
+        .route("/api/mcp/test", post(test_mcp_server))
+        .route("/api/mcp/reload", post(reload_mcp_servers))
+        .route("/api/mcp/catalog", get(mcp_catalog))
         .route("/api/update/check", get(check_update))
         .route("/api/update/download", post(download_update))
         .route("/api/update/install", post(install_update))
@@ -3441,6 +3447,192 @@ async fn delete_permission_rule(
 #[derive(Debug, Serialize)]
 pub struct PluginListResponse {
     pub plugins: Vec<LoadedPlugin>,
+}
+
+/// Shape the UI posts when adding or editing a server.
+///
+/// Deliberately close to `McpServerConfig` but with everything optional
+/// except the name, so the form can send only what the chosen transport
+/// needs.
+#[derive(Debug, Deserialize)]
+pub struct McpServerRequest {
+    pub name: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub always_active: Option<Vec<String>>,
+}
+
+impl McpServerRequest {
+    fn into_config(self) -> crate::config::McpServerConfig {
+        let transport = match self.transport.as_deref() {
+            Some("http") => Some(crate::config::McpTransport::Http),
+            Some("stdio") => Some(crate::config::McpTransport::Stdio),
+            _ => None,
+        };
+
+        crate::config::McpServerConfig {
+            name: self.name.trim().to_string(),
+            enabled: self.enabled.unwrap_or(true),
+            transport,
+            command: self.command.filter(|value| !value.trim().is_empty()),
+            args: self.args.unwrap_or_default(),
+            env: self.env.unwrap_or_default(),
+            cwd: self.cwd.filter(|value| !value.trim().is_empty()),
+            url: self.url.filter(|value| !value.trim().is_empty()),
+            headers: self.headers.unwrap_or_default(),
+            timeout_seconds: self.timeout_seconds.unwrap_or(60).clamp(1, 600),
+            description: self.description.filter(|value| !value.trim().is_empty()),
+            always_active: self.always_active.unwrap_or_default(),
+        }
+    }
+}
+
+async fn mcp_status(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Json<serde_json::Value> {
+    Json(agent.mcp_status().await)
+}
+
+async fn upsert_mcp_server(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Json(payload): Json<McpServerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let name = payload.name.trim().to_string();
+    agent
+        .upsert_mcp_server(payload.into_config())
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+        })?;
+
+    // Return the post-reconnect status so the UI can show immediately
+    // whether the server the user just saved actually came up.
+    let status = agent.mcp_status().await;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("MCP server '{}' saved", name),
+        "status": status,
+    })))
+}
+
+async fn delete_mcp_server(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    agent.remove_mcp_server(&name).await.map_err(|error| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("MCP server '{}' removed", name)
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpToggleRequest {
+    pub enabled: bool,
+}
+
+async fn toggle_mcp_server(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(name): Path<String>,
+    Json(payload): Json<McpToggleRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    agent
+        .set_mcp_server_enabled(&name, payload.enabled)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "status": agent.mcp_status().await,
+    })))
+}
+
+/// Try a server without saving it, so the form can offer "Test" before
+/// "Save".
+async fn test_mcp_server(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Json(payload): Json<McpServerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let result = agent
+        .test_mcp_server(payload.into_config())
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(result))
+}
+
+async fn reload_mcp_servers(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    agent.reload_mcp_servers().await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "status": agent.mcp_status().await,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpCatalogQuery {
+    #[serde(default)]
+    pub server: Option<String>,
+}
+
+async fn mcp_catalog(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Query(query): Query<McpCatalogQuery>,
+) -> Json<serde_json::Value> {
+    let tools = agent.mcp_catalog(query.server).await;
+    Json(serde_json::json!({ "tools": tools }))
 }
 
 async fn list_plugins(

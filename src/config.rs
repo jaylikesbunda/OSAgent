@@ -34,6 +34,8 @@ pub struct Config {
     pub experimental: ExperimentalConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +421,144 @@ impl Default for SchedulerConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    pub enabled: bool,
+    pub servers: Vec<McpServerConfig>,
+    /// Ceiling on tools activated into a single session's tool array.
+    /// Activation is what trades context for capability, so it needs a
+    /// bound the model cannot talk its way past.
+    pub max_activated_tools: usize,
+    /// Results returned by one `tool_search` call.
+    pub search_result_limit: usize,
+    /// Expose the per-server manifest in the system prompt. Turning this
+    /// off saves a few dozen tokens and makes MCP tools effectively
+    /// undiscoverable — only sensible when every tool you want is listed
+    /// in a server's `always_active`.
+    pub manifest_in_prompt: bool,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: Vec::new(),
+            max_activated_tools: 48,
+            search_result_limit: 8,
+            manifest_in_prompt: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransport {
+    #[default]
+    Stdio,
+    Http,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub enabled: bool,
+    /// Explicit transport. When unset it is inferred: a `url` means
+    /// http, a `command` means stdio.
+    pub transport: Option<McpTransport>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub cwd: Option<String>,
+    pub url: Option<String>,
+    pub headers: std::collections::HashMap<String, String>,
+    pub timeout_seconds: u64,
+    /// One-line capability summary for the manifest. Worth setting: it
+    /// is what the model reads when deciding whether to search here.
+    pub description: Option<String>,
+    /// Tool names activated at startup, skipping the search round trip
+    /// for paths used every session.
+    pub always_active: Vec<String>,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            // A server someone just added is meant to run; requiring a
+            // second toggle to enable it is a papercut, not a safeguard.
+            enabled: true,
+            transport: None,
+            command: None,
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            url: None,
+            headers: std::collections::HashMap::new(),
+            timeout_seconds: 60,
+            description: None,
+            always_active: Vec::new(),
+        }
+    }
+}
+
+impl McpServerConfig {
+    /// Reject a server that cannot possibly connect, before we spawn
+    /// anything. Returns a message aimed at whoever typed it into the UI.
+    pub fn validate(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            return Err(OSAgentError::Config("MCP server name is required".into()));
+        }
+        if !self
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(OSAgentError::Config(format!(
+                "MCP server name '{}' may only contain letters, numbers, '_' and '-'",
+                self.name
+            )));
+        }
+        match self.transport_kind() {
+            McpTransport::Stdio => {
+                if self.command.as_deref().unwrap_or("").trim().is_empty() {
+                    return Err(OSAgentError::Config(format!(
+                        "MCP server '{}': a command is required for stdio transport",
+                        self.name
+                    )));
+                }
+            }
+            McpTransport::Http => {
+                let url = self.url.as_deref().unwrap_or("").trim();
+                if url.is_empty() {
+                    return Err(OSAgentError::Config(format!(
+                        "MCP server '{}': a url is required for http transport",
+                        self.name
+                    )));
+                }
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err(OSAgentError::Config(format!(
+                        "MCP server '{}': url must start with http:// or https://",
+                        self.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn transport_kind(&self) -> McpTransport {
+        self.transport.unwrap_or({
+            if self.url.is_some() {
+                McpTransport::Http
+            } else {
+                McpTransport::Stdio
+            }
+        })
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -756,6 +896,7 @@ impl Config {
             update: UpdateConfig::default(),
             experimental: ExperimentalConfig::default(),
             scheduler: SchedulerConfig::default(),
+            mcp: McpConfig::default(),
         };
         cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();
@@ -793,6 +934,18 @@ impl Config {
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(shellexpand::tilde("~/.osagent").to_string()))
+    }
+
+    /// Persist back to the file this config was loaded from.
+    ///
+    /// Callers that mutate a live config (the settings UI) need this;
+    /// re-deriving the path at every call site invites writing to the
+    /// wrong file when OSA was started with `--config`.
+    pub fn save_to_current_path(&self) -> Result<()> {
+        let path = self.config_path.clone().unwrap_or_else(|| {
+            PathBuf::from(shellexpand::tilde("~/.osagent/config.toml").to_string())
+        });
+        self.save(path)
     }
 
     pub(crate) fn inherit_config_path(&mut self, existing: &Self) {

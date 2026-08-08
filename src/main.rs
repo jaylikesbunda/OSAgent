@@ -24,6 +24,7 @@ mod error;
 mod external;
 mod indexer;
 mod lsp;
+mod mcp;
 mod oauth;
 mod permission;
 mod plugin;

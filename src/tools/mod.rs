@@ -28,6 +28,8 @@ pub mod subagent;
 pub mod system_status;
 pub mod task;
 pub mod todo;
+pub mod tool_script;
+pub mod tool_search;
 pub mod truncation;
 pub mod weather;
 pub mod web;

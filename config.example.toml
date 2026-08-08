@@ -189,6 +189,38 @@ audit_file = "~/.osagent/audit.log"
 [storage]
 database = "~/.osagent/osagent.db"
 
+# --- MCP (Model Context Protocol) Servers ---
+# Connect external tool servers. Their schemas are NOT loaded into every
+# request: the agent sees a one-line summary per server and calls
+# `tool_search` to load only the tools a task needs. Adding a server with
+# 50 tools therefore costs about one line of context, not 50 schemas.
+#
+# The Settings > MCP Servers screen manages all of this, including a
+# "Test connection" button. Editing by hand works too.
+#
+# [mcp]
+# enabled = true
+# max_activated_tools = 48    # ceiling on tools loaded into one session
+# search_result_limit = 8     # results returned per tool_search call
+# manifest_in_prompt = true   # keep the per-server summary in context
+#
+# Local server over stdio (most common):
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
+# description = "Read and write files under ~/notes"
+#
+# Remote server over HTTP:
+# [[mcp.servers]]
+# name = "linear"
+# url = "https://mcp.linear.app/mcp"
+# headers = { Authorization = "Bearer YOUR_TOKEN" }
+# description = "Issues, projects and cycles"
+# # Tools listed here load at startup, skipping the tool_search step.
+# # Each one costs context in every request, so keep the list short.
+# always_active = ["create_issue"]
+
 # --- Update Configuration ---
 # Updates are served from Cloudflare R2 CDN.
 # [update]
