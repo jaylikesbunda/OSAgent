@@ -104,6 +104,24 @@ OSA.buildModelOptionHtml = function(m, providerId, currentModel, opts) {
     '</div>';
 };
 
+// /api/providers/catalog sends each model once, in all_models. Settings and the
+// provider cards still read provider.models, so rebuild those lists here.
+OSA.hydrateProviderModels = function(catalog) {
+    const byProvider = {};
+    const models = catalog.all_models || [];
+    for (let i = 0; i < models.length; i++) {
+        const m = models[i];
+        if (!byProvider[m.provider_id]) byProvider[m.provider_id] = [];
+        byProvider[m.provider_id].push(m);
+    }
+    const providers = catalog.providers || [];
+    for (let i = 0; i < providers.length; i++) {
+        const p = providers[i];
+        if (!p.models || p.models.length === 0) p.models = byProvider[p.id] || [];
+    }
+    return catalog;
+};
+
 OSA.loadProviderCatalog = async function(force = false) {
     if (!force && OSA.providerCatalog?.providers?.length) {
         return OSA.providerCatalog;
@@ -115,7 +133,8 @@ OSA.loadProviderCatalog = async function(force = false) {
 
     OSA.providerCatalogPromise = OSA.getJson('/api/providers/catalog')
         .then(function(data) {
-            OSA.providerCatalog = data || { providers: [], all_models: [] };
+            OSA.providerCatalog = OSA.hydrateProviderModels(data || { providers: [], all_models: [] });
+            OSA.providerCatalogFetchedAt = Date.now();
             if (OSA.currentModelId) {
                 OSA.setModelTrigger(OSA.currentModelProviderId || '', OSA.currentModelId);
             }
@@ -130,6 +149,32 @@ OSA.loadProviderCatalog = async function(force = false) {
         });
 
     return OSA.providerCatalogPromise;
+};
+
+OSA.CATALOG_REFRESH_MS = 60000;
+
+// The server answers from its build-time models.dev snapshot until the live
+// fetch lands, so the catalog pulled at page load can be a release behind.
+// Re-pull it in the background while the user reads the list.
+OSA.catalogSignature = function(catalog) {
+    const providers = (catalog && catalog.providers) || [];
+    const connected = providers.filter(function(p) { return p.connected; })
+        .map(function(p) { return p.id; }).join(',');
+    return connected + '#' + ((catalog && catalog.all_models) || []).length;
+};
+
+OSA.refreshProviderCatalogInBackground = function() {
+    if (OSA.providerCatalogFetchedAt
+        && Date.now() - OSA.providerCatalogFetchedAt < OSA.CATALOG_REFRESH_MS) {
+        return;
+    }
+    const before = OSA.catalogSignature(OSA.providerCatalog);
+    OSA.loadProviderCatalog(true).then(function(catalog) {
+        // Almost always identical. Re-rendering regardless meant a second full
+        // rebuild of the list moments after opening it.
+        if (OSA.catalogSignature(catalog) === before) return;
+        if (OSA.modelDropdownOpen && !OSA.modelSearchQuery.trim()) OSA.renderModelDropdown();
+    });
 };
 
 OSA.sortProvidersForDropdown = function(providers) {
@@ -222,6 +267,7 @@ OSA.openModelDropdown = function(initialQuery) {
     const list = dropdown.querySelector('.model-dropdown-list');
     if (list) list.innerHTML = '<div class="model-empty">Loading models...</div>';
     OSA.renderModelDropdown();
+    OSA.refreshProviderCatalogInBackground();
 };
 
 OSA.toggleModelDropdown = function() {
@@ -291,28 +337,33 @@ OSA.ensureModelOptionDelegation = function() {
 };
 OSA.ensureModelOptionDelegation();
 
+// Cached at render time. Re-querying per keypress meant walking every option
+// in the list on each arrow key.
+OSA.modelOptionNodes = [];
+
 OSA.setActiveModelOption = function(index) {
-    const dropdown = document.getElementById('model-dropdown');
-    if (!dropdown) return;
-    const options = Array.from(dropdown.querySelectorAll('.model-option[data-model-id]'));
+    const options = OSA.modelOptionNodes;
     if (!options.length) {
         OSA.modelPickerActiveIndex = -1;
         return;
     }
     const nextIndex = Math.max(0, Math.min(index, options.length - 1));
+    const previous = options[OSA.modelPickerActiveIndex];
+    if (previous) previous.classList.remove('keyboard-active');
     OSA.modelPickerActiveIndex = nextIndex;
-    options.forEach(function(option, optionIndex) {
-        option.classList.toggle('keyboard-active', optionIndex === nextIndex);
-    });
+    options[nextIndex].classList.add('keyboard-active');
     options[nextIndex].scrollIntoView({ block: 'nearest' });
 };
 
 OSA.afterModelDropdownRender = function() {
-    if (!OSA.modelDropdownOpen) return;
+    if (!OSA.modelDropdownOpen) {
+        OSA.modelOptionNodes = [];
+        return;
+    }
     const dropdown = document.getElementById('model-dropdown');
     if (!dropdown) return;
-    const options = Array.from(dropdown.querySelectorAll('.model-option[data-model-id]'));
-    OSA.modelPickerActiveIndex = options.findIndex(function(option) {
+    OSA.modelOptionNodes = Array.from(dropdown.querySelectorAll('.model-option[data-model-id]'));
+    OSA.modelPickerActiveIndex = OSA.modelOptionNodes.findIndex(function(option) {
         return option.classList.contains('active');
     });
     OSA.positionModelDropdown();
@@ -427,19 +478,23 @@ OSA.renderModelDropdown = async function() {
         }
     }
 
+    // Models from providers you have not configured are reachable through the
+    // search box. Rendering all of them here meant ~6k options and ~56k DOM
+    // nodes on every open, for rows nobody scrolls to.
+    var unconnectedCount = 0;
+    var unconnectedProviders = 0;
     for (var pi = 0; pi < sortedProviders.length; pi++) {
         var provider2 = sortedProviders[pi];
         if (provider2.connected) continue;
-        var pModels = provider2.models || [];
-        if (pModels.length === 0) continue;
-        html += '<div class="model-group-title">' + OSA.escapeHtml(provider2.name) + '</div>';
-        for (var mj = 0; mj < pModels.length; mj++) {
-            var pm = pModels[mj];
-            var pKey = pm.id + '|' + (pm.provider_id || provider2.id);
-            if (renderedModelKeys.has(pKey.toLowerCase())) continue;
-            html += OSA.buildModelOptionHtml(pm, provider2.id, currentModel, {});
-            renderedModelKeys.add(pKey.toLowerCase());
-        }
+        var pCount = (provider2.models || []).length;
+        if (pCount === 0) continue;
+        unconnectedProviders++;
+        unconnectedCount += pCount;
+    }
+    if (unconnectedCount > 0) {
+        html += '<div class="model-dropdown-hint">Type to search '
+            + unconnectedCount.toLocaleString() + ' more models across '
+            + unconnectedProviders + ' other providers</div>';
     }
 
     if (!html) html = '<div class="model-empty">No models available</div>';
@@ -889,7 +944,7 @@ OSA.renderSettingsProviders = async function() {
             OSA.getJson('/api/providers/catalog'),
             OSA.getJson('/api/providers')
         ]);
-        OSA.providerCatalog = catalog;
+        OSA.providerCatalog = OSA.hydrateProviderModels(catalog);
         OSA.renderRoutingOverview(catalog, providersData);
 
         // Build a map of connected provider configs (id → config entry)

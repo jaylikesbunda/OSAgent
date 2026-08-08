@@ -1808,17 +1808,14 @@ async fn search_sessions(
     Query(params): Query<SessionSearchQuery>,
 ) -> Result<Json<Vec<crate::storage::SessionSearchHit>>, (StatusCode, Json<ErrorResponse>)> {
     let limit = params.limit.unwrap_or(50).min(200);
-    let hits = agent
-        .search_messages(&params.q, limit)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let hits = agent.search_messages(&params.q, limit).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(hits))
 }
@@ -4860,6 +4857,39 @@ fn ollama_context_cache() -> &'static dashmap::DashMap<String, (usize, Instant)>
     STORE.get_or_init(dashmap::DashMap::new)
 }
 
+/// Shared client for the local Ollama probes. Building a `reqwest::Client`
+/// loads the platform root certificate store, which is far more expensive than
+/// the localhost request itself — doing it per call made the model dropdown and
+/// the provider settings page wait on setup every time they opened.
+fn ollama_http_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(8))
+                // Ollama is normally on loopback: if nothing is listening, fail
+                // fast instead of holding the whole catalog response open.
+                .connect_timeout(Duration::from_millis(1500))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+/// Cached `/api/tags` result, keyed by base URL. The catalog, the search
+/// endpoint and the settings page all resolve the live Ollama list, and search
+/// re-resolves it on every keystroke; without this each of those paid a fresh
+/// round trip (or a full connect timeout when Ollama is not running).
+fn ollama_models_cache(
+) -> &'static dashmap::DashMap<String, (Vec<crate::agent::model_catalog::ModelInfo>, Instant)> {
+    static STORE: OnceLock<
+        dashmap::DashMap<String, (Vec<crate::agent::model_catalog::ModelInfo>, Instant)>,
+    > = OnceLock::new();
+    STORE.get_or_init(dashmap::DashMap::new)
+}
+
+const OLLAMA_MODELS_TTL: Duration = Duration::from_secs(20);
+
 fn extract_ollama_context_window(payload: &serde_json::Value) -> Option<usize> {
     if let Some(model_info) = payload
         .get("model_info")
@@ -5027,17 +5057,43 @@ async fn fetch_live_ollama_models(
     agent: &Arc<AgentRuntime>,
     base_url_override: Option<String>,
 ) -> Vec<crate::agent::model_catalog::ModelInfo> {
+    fetch_live_ollama_models_inner(agent, base_url_override, true).await
+}
+
+async fn fetch_live_ollama_models_inner(
+    agent: &Arc<AgentRuntime>,
+    base_url_override: Option<String>,
+    use_cache: bool,
+) -> Vec<crate::agent::model_catalog::ModelInfo> {
     let base_url = resolve_ollama_base_url(agent, base_url_override).await;
     let normalized_base = normalize_ollama_base_url(&base_url);
+
+    if use_cache {
+        if let Some(entry) = ollama_models_cache().get(&normalized_base) {
+            if entry.value().1.elapsed() < OLLAMA_MODELS_TTL {
+                return entry.value().0.clone();
+            }
+        }
+    }
+
+    let models = fetch_live_ollama_models_uncached(agent, &normalized_base).await;
+    // Cache misses too: when Ollama is not installed the probe is a wasted
+    // connect attempt on every catalog read and every search keystroke.
+    ollama_models_cache().insert(normalized_base, (models.clone(), Instant::now()));
+    models
+}
+
+async fn fetch_live_ollama_models_uncached(
+    agent: &Arc<AgentRuntime>,
+    normalized_base: &str,
+) -> Vec<crate::agent::model_catalog::ModelInfo> {
+    let normalized_base = normalized_base.to_string();
     let tags_url = format!("{}/api/tags", normalized_base.trim_end_matches('/'));
     let api_key = resolve_ollama_api_key(agent).await;
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return Vec::new(),
+    let client = match ollama_http_client() {
+        Some(client) => client.clone(),
+        None => return Vec::new(),
     };
 
     let mut tags_request = client.get(tags_url);
@@ -5086,10 +5142,14 @@ async fn fetch_live_ollama_models(
         })
         .collect();
 
-    for model in &mut models {
-        if let Some(info) =
-            fetch_ollama_model_info(&client, &normalized_base, api_key.as_deref(), &model.id).await
-        {
+    // One /api/show per model. Serially this made the first catalog load scale
+    // with the number of installed models; they are independent, so fan out.
+    let infos = futures::future::join_all(models.iter().map(|model| {
+        fetch_ollama_model_info(&client, &normalized_base, api_key.as_deref(), &model.id)
+    }))
+    .await;
+    for (model, info) in models.iter_mut().zip(infos) {
+        if let Some(info) = info {
             model.context_window = info.context_window.unwrap_or(0);
             model.supports_vision = info.supports_vision;
         }
@@ -5161,6 +5221,11 @@ async fn catalog_handler(
 ) -> Json<serde_json::Value> {
     let mut catalog = agent.get_catalog_state().await;
     apply_live_ollama_models_to_catalog(&agent, &mut catalog).await;
+    // Each provider's list repeats `all_models` verbatim, which doubled the
+    // payload to ~3MB. The client regroups by provider_id on arrival.
+    for provider in &mut catalog.providers {
+        provider.models.clear();
+    }
     Json(serde_json::to_value(&catalog).unwrap_or(serde_json::json!({})))
 }
 
@@ -5172,7 +5237,9 @@ async fn models_handler(
     let base_url = params.base_url;
     let models = if !provider_id.is_empty() {
         if provider_id == "ollama" {
-            fetch_live_ollama_models(&agent, base_url).await
+            // Explicit discovery from the provider settings modal: the user is
+            // configuring the endpoint and expects a live probe, not a cached one.
+            fetch_live_ollama_models_inner(&agent, base_url, false).await
         } else {
             agent.get_provider_models(provider_id).await
         }

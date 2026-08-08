@@ -209,6 +209,17 @@
     cursor: pointer;
     transition: background var(--transition-fast);
     gap: 10px;
+    /* Search can still return hundreds of rows; skip layout for the ones
+       scrolled out of view. The placeholder size matches the padded row. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 42px;
+}
+
+.model-dropdown-hint {
+    padding: 10px 14px;
+    font-size: 11px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
 }
 
 .model-option:hover {

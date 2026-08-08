@@ -19,31 +19,7 @@ An AI agent that belongs on your desktop, not in the cloud.
 
 Point it at a folder and ask it to do things: refactor a codebase, run a script and fix what breaks, research something across a dozen pages, or check your calendar and brief you every morning. It talks to 100+ model providers, runs as a single binary with no runtime to install, and reaches you through a web UI, a Discord bot, or your voice.
 
-## Why OSAgent
-
-- **Single binary, zero runtime deps** — no Node, no Python, no Docker. Starts in ~540ms on ~14MB of RAM.
-- **Your machine, your model** — runs entirely local against Ollama, or bring an API key. Nothing is sent anywhere you didn't configure.
-- **Reach it from anywhere you already are** — web UI at `localhost:8765`, a Discord bot with per-channel sessions, or voice in and out.
-
-## Features
-
-**Models**
-- 100+ providers — OpenRouter, OpenAI, Anthropic, Google AI, GitHub Copilot, OpenAI Codex, Ollama, Groq, DeepSeek, xAI, AWS Bedrock, Azure, and more
-- OAuth login for GitHub Copilot, Google, and OpenAI Codex — no API keys needed
-
-**Interfaces**
-- Web UI — chat interface at `localhost:8765`
-- Discord bot — slash commands, per-channel/per-user sessions, live tool progress
-- Voice I/O — Whisper STT + Piper TTS, with browser fallback
-
-**What it can do**
-- 30+ built-in tools — file read/write/patch, code execution (Python/Node/Bash), grep/glob, LSP, web fetch and search, process control
-- Desktop assistant tools — calendar, weather, news, system status, persistent memory
-- Jobs scheduling — cron-based reminders, recurring tasks, daily briefings
-
-**Extending it**
-- Visual workflow editor — node-based drag-and-drop automation with conditions, loops, and branching
-- Skills system — installable `.oskill` bundles for custom integrations
+Nothing is sent anywhere you didn't configure. Point it at a local Ollama instance and it runs entirely off-grid.
 
 ## Quick Start
 
@@ -55,7 +31,7 @@ Download the latest release for your platform from [GitHub Releases](https://git
 | Linux (x86_64) | `osagent-linux-x86_64.deb` |
 | macOS (Apple Silicon) | `osagent-macos-arm64.dmg` |
 
-Then run the launcher and follow the wizard: pick a provider (OAuth or API key), pick a workspace folder, done — your browser opens to `http://localhost:8765`.
+Then run the launcher and follow the wizard: pick a provider (OAuth or API key), pick a workspace folder, done. Your browser opens to `http://localhost:8765`.
 
 Prefer the terminal:
 
@@ -64,18 +40,31 @@ osagent start                      # Start with default config
 osagent start -w /path/to/project  # Start with a specific workspace
 ```
 
-Auto-updates are served via `https://osa.fuckyourcdn.com/releases/latest.json`.
+## Features
 
-## Benchmarks
+**Models**
+- 100+ providers: OpenRouter, OpenAI, Anthropic, Google AI, GitHub Copilot, OpenAI Codex, Ollama, Groq, DeepSeek, xAI, AWS Bedrock, Azure, and more
+- OAuth login for GitHub Copilot, Google, and OpenAI Codex, so no API keys needed
 
-Measured with in-repo runtime benchmarks (release, provider-free workloads, 10 runs on 2026-04-08):
+**Interfaces**
+- Web UI: chat interface at `localhost:8765`
+- Discord bot: slash commands, per-channel/per-user sessions, live tool progress
+- Voice I/O: Whisper STT + Piper TTS, with browser fallback
 
-| Metric | OSAgent |
-|---|---|
-| Startup to ready | ~543ms |
-| Ready RSS | ~13.68MB |
-| Idle RSS | ~22.66MB |
-| Install size | ~50MB (deb/dmg) |
+**What it can do**
+- 30+ built-in tools: file read/write/patch, code execution (Python/Node/Bash), grep/glob, LSP, web fetch and search, process control
+- Desktop assistant tools: calendar, weather, news, system status, persistent memory
+- Jobs scheduling: cron-based reminders, recurring tasks, daily briefings
+
+**Extending it**
+- Visual workflow editor: node-based drag-and-drop automation with conditions, loops, and branching
+- Skills system: installable `.oskill` bundles for custom integrations
+
+It ships coding tools and assistant tools side by side, so trim `[tools].allowed` to whichever half you actually want.
+
+## Performance
+
+~543ms to ready, ~13.7MB RSS at ready, ~50MB installed. Measured with in-repo runtime benchmarks (release, provider-free workloads, 10 runs on 2026-04-08):
 
 ```bash
 cargo run --release --bin osagent-bench -- --profiles release --iterations 10
@@ -125,13 +114,11 @@ allowed_users = ["1234567890"]
 
 ## Skills
 
-Extend OSAgent with custom integrations:
+A skill is a zipped folder containing `SKILL.md` (agent instructions) and `manifest.toml` (metadata), renamed to `.oskill`. Build one and install it via **Settings → Skills** in the Web UI:
 
 ```bash
-mkdir my-skill && cd my-skill
-# Create SKILL.md (agent instructions) and manifest.toml (metadata)
+cd my-skill
 zip -r ../my-skill.oskill *
-# Install via Settings → Skills in the Web UI
 ```
 
 See `examples/skills/` for examples.
@@ -144,22 +131,17 @@ cd OSAgent
 .\build-launcher.ps1 -Installer
 ```
 
-Release artifacts:
+`build-launcher.ps1` is Windows-only. On Linux and macOS, run `launcher/build.sh`, which checks formatting, runs clippy, and builds the release binary. Packaged installers (`.deb` / `.dmg`) are produced by the release pipeline rather than locally:
+
 - Windows: `launcher/target/release/bundle/nsis/*.exe` (installer)
 - Linux: `launcher/target/release/bundle/deb/*.deb`
 - macOS: `launcher/target/release/bundle/macos/*.app`
 
-See `RELEASING.md` for the full release flow.
+See [RELEASING.md](RELEASING.md) for the full release flow.
 
-## FAQ
+## Contributing
 
-**What do I need to get started?** Bring your own model. Use GitHub Copilot or OpenAI Codex via OAuth, any OpenRouter/Anthropic API key, or Ollama for fully local models. Download the binary, run it, open `localhost:8765`.
-
-**Can I run it fully offline?** Yes. Point at a local Ollama instance and you're off-grid.
-
-**How does Discord integration work?** Add your bot token to config. OSAgent becomes a Discord bot with per-channel sessions, slash commands, and real-time tool progress. Same binary as the web UI.
-
-**Is it a coding agent or a general assistant?** Both — it ships LSP, patch, and code-execution tools alongside calendar, weather, and scheduling ones. Trim `[tools].allowed` to whichever half you actually want.
+Bug reports and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). For security issues, please follow [SECURITY.md](SECURITY.md) rather than opening a public issue. Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

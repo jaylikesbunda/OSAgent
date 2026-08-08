@@ -842,6 +842,9 @@ mod transcript_parse_tests {
     #[test]
     fn thread_count_is_sane() {
         let threads = transcribe_threads();
-        assert!((4..=16).contains(&threads), "unexpected thread count {threads}");
+        assert!(
+            (4..=16).contains(&threads),
+            "unexpected thread count {threads}"
+        );
     }
 }

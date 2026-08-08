@@ -1,7 +1,7 @@
 use crate::agent::provider_presets::{get_presets, ProviderPreset};
 use crate::config::ProviderConfig;
 use serde::{Deserialize, Serialize};
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +146,30 @@ pub type ModelsDevCatalog = std::collections::BTreeMap<String, ModelsDevProvider
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_SECS: u64 = 3600;
 
+/// models.dev snapshot captured at build time by `build.rs`. Presets are never
+/// a model source: their lists are hand-maintained and go stale between
+/// releases, so this is what the picker falls back to before the live fetch
+/// lands, or when the machine is offline.
+const MODELS_SNAPSHOT_JSON: &str = include_str!("models_snapshot.json");
+
+fn snapshot_catalog() -> Option<&'static ModelsDevCatalog> {
+    static SNAPSHOT: OnceLock<Option<ModelsDevCatalog>> = OnceLock::new();
+    SNAPSHOT
+        .get_or_init(
+            || match serde_json::from_str::<ModelsDevCatalog>(MODELS_SNAPSHOT_JSON) {
+                Ok(catalog) if !catalog.is_empty() => Some(catalog),
+                // build.rs writes `{}` when it can neither fetch nor find a
+                // previous snapshot.
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!("build-time models snapshot is unusable: {}", e);
+                    None
+                }
+            },
+        )
+        .as_ref()
+}
+
 impl ModelsDevModel {
     fn limit(&self) -> ModelLimitInfo {
         let context = if self.limit.context > 0 {
@@ -258,55 +282,7 @@ impl ModelCatalog {
                 prov_id.clone()
             };
 
-            let mut models: Vec<ModelInfo> = prov
-                .models
-                .iter()
-                .filter(|(_, m)| {
-                    !m.family.contains(&"embedding".to_string())
-                        && !m.family.contains(&"whisper".to_string())
-                        && !m.name.to_lowercase().contains("embed")
-                        && !m.name.to_lowercase().contains("whisper")
-                })
-                .map(|(model_id, m)| {
-                    let limit = m.limit();
-                    ModelInfo {
-                        id: model_id.clone(),
-                        name: m.name.clone(),
-                        provider_id: prov_id.clone(),
-                        provider_name: name.clone(),
-                        context_window: limit.context,
-                        input_limit: limit.input,
-                        output_limit: limit.output,
-                        supports_tools: m.tool_call,
-                        supports_vision: m.supports_vision(),
-                        category: m.category(),
-                        available: connected,
-                    }
-                })
-                .collect();
-
-            if let Some(preset) = preset {
-                let existing_ids: std::collections::HashSet<String> =
-                    models.iter().map(|m| m.id.clone()).collect();
-                for model in &preset.models {
-                    if existing_ids.contains(&model.id) {
-                        continue;
-                    }
-                    models.push(ModelInfo {
-                        id: model.id.clone(),
-                        name: model.name.clone(),
-                        provider_id: prov_id.clone(),
-                        provider_name: name.clone(),
-                        context_window: model.context_window,
-                        input_limit: None,
-                        output_limit: 0,
-                        supports_tools: model.supports_tools,
-                        supports_vision: model.supports_vision,
-                        category: model.category.clone(),
-                        available: connected,
-                    });
-                }
-            }
+            let models = Self::models_from_dev_provider(prov_id, &name, prov, connected);
 
             all_models.extend(models.clone());
 
@@ -344,25 +320,8 @@ impl ModelCatalog {
                 String::new()
             };
 
-            let models: Vec<ModelInfo> = preset
-                .models
-                .iter()
-                .map(|model| ModelInfo {
-                    id: model.id.clone(),
-                    name: model.name.clone(),
-                    provider_id: preset.id.clone(),
-                    provider_name: preset.name.clone(),
-                    context_window: model.context_window,
-                    input_limit: None,
-                    output_limit: 0,
-                    supports_tools: model.supports_tools,
-                    supports_vision: model.supports_vision,
-                    category: model.category.clone(),
-                    available: connected,
-                })
-                .collect();
-
-            all_models.extend(models.clone());
+            // Provider metadata only. A provider models.dev has never heard of
+            // gets listed so it can still be configured, but with no models.
             providers.push(ProviderInfo {
                 id: preset.id.clone(),
                 name: preset.name.clone(),
@@ -372,20 +331,71 @@ impl ModelCatalog {
                 api_key_source,
                 oauth_supported: crate::oauth::provider::is_oauth_provider(&preset.id),
                 api_key_url: preset.api_key_url.clone(),
-                models,
+                models: Vec::new(),
             });
         }
 
         (providers, all_models)
     }
 
+    fn models_from_dev_provider(
+        provider_id: &str,
+        provider_name: &str,
+        prov: &ModelsDevProvider,
+        available: bool,
+    ) -> Vec<ModelInfo> {
+        prov.models
+            .iter()
+            .filter(|(_, m)| {
+                !m.family.contains(&"embedding".to_string())
+                    && !m.family.contains(&"whisper".to_string())
+                    && !m.name.to_lowercase().contains("embed")
+                    && !m.name.to_lowercase().contains("whisper")
+            })
+            .map(|(model_id, m)| {
+                let limit = m.limit();
+                ModelInfo {
+                    id: model_id.clone(),
+                    name: m.name.clone(),
+                    provider_id: provider_id.to_string(),
+                    provider_name: provider_name.to_string(),
+                    context_window: limit.context,
+                    input_limit: limit.input,
+                    output_limit: limit.output,
+                    supports_tools: m.tool_call,
+                    supports_vision: m.supports_vision(),
+                    category: m.category(),
+                    available,
+                }
+            })
+            .collect()
+    }
+
+    /// Runs `pick` against the freshest catalog available: the live fetch when
+    /// the cache is warm, then the build-time snapshot.
+    fn with_active_catalog<T>(&self, pick: impl Fn(&ModelsDevCatalog) -> Option<T>) -> Option<T> {
+        {
+            let cache = self.cached_catalog.read().unwrap();
+            if let Some((catalog, timestamp)) = cache.as_ref() {
+                if timestamp.elapsed().as_secs() < CACHE_TTL_SECS {
+                    if let Some(value) = pick(catalog) {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        snapshot_catalog().and_then(pick)
+    }
+
+    /// Last resort, used only when the snapshot is missing too: the configurable
+    /// providers with no models attached. Better an empty picker than the stale
+    /// preset lists.
     fn from_presets(
         connected_ids: &std::collections::HashSet<String>,
         env_detected: &[ProviderPreset],
     ) -> (Vec<ProviderInfo>, Vec<ModelInfo>) {
         let presets = get_presets();
         let mut providers = Vec::new();
-        let mut all_models = Vec::new();
 
         for preset in &presets {
             let connected = connected_ids.contains(&preset.id)
@@ -401,26 +411,6 @@ impl ModelCatalog {
                 String::new()
             };
 
-            let models: Vec<ModelInfo> = preset
-                .models
-                .iter()
-                .map(|m| ModelInfo {
-                    id: m.id.clone(),
-                    name: m.name.clone(),
-                    provider_id: preset.id.clone(),
-                    provider_name: preset.name.clone(),
-                    context_window: m.context_window,
-                    input_limit: None,
-                    output_limit: 0,
-                    supports_tools: m.supports_tools,
-                    supports_vision: m.supports_vision,
-                    category: m.category.clone(),
-                    available: connected,
-                })
-                .collect();
-
-            all_models.extend(models.clone());
-
             providers.push(ProviderInfo {
                 id: preset.id.clone(),
                 name: preset.name.clone(),
@@ -430,11 +420,11 @@ impl ModelCatalog {
                 api_key_source,
                 oauth_supported: crate::oauth::provider::is_oauth_provider(&preset.id),
                 api_key_url: preset.api_key_url.clone(),
-                models,
+                models: Vec::new(),
             });
         }
 
-        (providers, all_models)
+        (providers, Vec::new())
     }
 
     pub async fn refresh_catalog(&self) {
@@ -454,14 +444,15 @@ impl ModelCatalog {
 
         let (providers, mut all_models) = {
             let cache = self.cached_catalog.read().unwrap();
-            if let Some((catalog, timestamp)) = cache.as_ref() {
-                if timestamp.elapsed().as_secs() < CACHE_TTL_SECS {
-                    Self::from_models_dev(catalog, &connected_ids, &env_detected)
-                } else {
-                    Self::from_presets(&connected_ids, &env_detected)
-                }
-            } else {
-                Self::from_presets(&connected_ids, &env_detected)
+            let live = cache.as_ref().and_then(|(catalog, timestamp)| {
+                (timestamp.elapsed().as_secs() < CACHE_TTL_SECS).then_some(catalog)
+            });
+            match live {
+                Some(catalog) => Self::from_models_dev(catalog, &connected_ids, &env_detected),
+                None => match snapshot_catalog() {
+                    Some(catalog) => Self::from_models_dev(catalog, &connected_ids, &env_detected),
+                    None => Self::from_presets(&connected_ids, &env_detected),
+                },
             }
         };
 
@@ -497,35 +488,36 @@ impl ModelCatalog {
     }
 
     pub fn get_models_for_provider(&self, provider_id: &str) -> Vec<ModelInfo> {
-        let presets = get_presets();
-        if let Some(preset) = presets.iter().find(|p| p.id == provider_id) {
-            return preset
-                .models
-                .iter()
-                .map(|m| ModelInfo {
-                    id: m.id.clone(),
-                    name: m.name.clone(),
-                    provider_id: preset.id.clone(),
-                    provider_name: preset.name.clone(),
-                    context_window: m.context_window,
-                    input_limit: None,
-                    output_limit: 0,
-                    supports_tools: m.supports_tools,
-                    supports_vision: m.supports_vision,
-                    category: m.category.clone(),
-                    available: true,
-                })
-                .collect();
-        }
-        Vec::new()
+        let preset_name = get_presets()
+            .into_iter()
+            .find(|p| p.id == provider_id)
+            .map(|p| p.name);
+
+        self.with_active_catalog(|catalog| {
+            let prov = catalog.get(provider_id)?;
+            let name = if prov.name.is_empty() {
+                preset_name
+                    .clone()
+                    .unwrap_or_else(|| provider_id.to_string())
+            } else {
+                prov.name.clone()
+            };
+            let models = Self::models_from_dev_provider(provider_id, &name, prov, true);
+            (!models.is_empty()).then_some(models)
+        })
+        .unwrap_or_default()
     }
 
     pub fn lookup_context_window(&self, provider_id: &str, model_id: &str) -> Option<usize> {
-        let presets = get_presets();
-        if let Some(preset) = presets.iter().find(|p| p.id == provider_id) {
-            if let Some(model) = preset.models.iter().find(|m| m.id == model_id) {
-                return Some(model.context_window);
-            }
+        let from_catalog = self.with_active_catalog(|catalog| {
+            catalog
+                .get(provider_id)?
+                .models
+                .get(model_id)
+                .map(|model| model.limit().context)
+        });
+        if from_catalog.is_some() {
+            return from_catalog;
         }
         self.custom_models
             .read()
@@ -554,56 +546,33 @@ impl ModelCatalog {
         provider_id: &str,
         model_id: &str,
     ) -> Option<ModelReasoningMetadata> {
-        {
-            let cache = self.cached_catalog.read().unwrap();
-            if let Some((catalog, timestamp)) = cache.as_ref() {
-                if timestamp.elapsed().as_secs() < CACHE_TTL_SECS {
-                    if let Some(provider) = catalog.get(provider_id) {
-                        if let Some(model) = provider.models.get(model_id) {
-                            return Some(ModelReasoningMetadata {
-                                provider_id: provider_id.to_string(),
-                                model_id: model_id.to_string(),
-                                family: model.family.clone(),
-                                reasoning: model.reasoning,
-                                release_date: model.release_date.clone(),
-                                output_limit: model.limit.output,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        let presets = get_presets();
-        presets
-            .iter()
-            .find(|preset| preset.id == provider_id)
-            .and_then(|preset| preset.models.iter().find(|model| model.id == model_id))
-            .map(|model| ModelReasoningMetadata {
+        self.with_active_catalog(|catalog| {
+            let model = catalog.get(provider_id)?.models.get(model_id)?;
+            Some(ModelReasoningMetadata {
                 provider_id: provider_id.to_string(),
                 model_id: model_id.to_string(),
-                family: infer_family(model_id),
-                reasoning: model.category == "reasoning"
-                    || model.id.to_ascii_lowercase().contains("codex"),
-                release_date: String::new(),
-                output_limit: 0,
+                family: model.family.clone(),
+                reasoning: model.reasoning,
+                release_date: model.release_date.clone(),
+                output_limit: model.limit.output,
             })
-            .or_else(|| {
-                self.custom_models
-                    .read()
-                    .unwrap()
-                    .iter()
-                    .find(|model| model.provider_id == provider_id && model.model_id == model_id)
-                    .map(|model| ModelReasoningMetadata {
-                        provider_id: provider_id.to_string(),
-                        model_id: model_id.to_string(),
-                        family: infer_family(model_id),
-                        reasoning: model.model_id.to_ascii_lowercase().contains("reason")
-                            || model.model_id.to_ascii_lowercase().contains("codex"),
-                        release_date: String::new(),
-                        output_limit: 0,
-                    })
-            })
+        })
+        .or_else(|| {
+            self.custom_models
+                .read()
+                .unwrap()
+                .iter()
+                .find(|model| model.provider_id == provider_id && model.model_id == model_id)
+                .map(|model| ModelReasoningMetadata {
+                    provider_id: provider_id.to_string(),
+                    model_id: model_id.to_string(),
+                    family: infer_family(model_id),
+                    reasoning: model.model_id.to_ascii_lowercase().contains("reason")
+                        || model.model_id.to_ascii_lowercase().contains("codex"),
+                    release_date: String::new(),
+                    output_limit: 0,
+                })
+        })
     }
 
     pub fn search_models(&self, query: &str) -> Vec<ModelInfo> {

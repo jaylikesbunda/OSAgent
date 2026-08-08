@@ -205,8 +205,7 @@ impl SqliteStorage {
         let pool = ConnectionPool::new(
             1,
             || {
-                let conn =
-                    rusqlite::Connection::open_in_memory().map_err(OSAgentError::Storage)?;
+                let conn = rusqlite::Connection::open_in_memory().map_err(OSAgentError::Storage)?;
                 Self::apply_pragmas(&conn)?;
                 Ok(conn)
             },
@@ -766,7 +765,9 @@ impl SqliteStorage {
 
     fn load_messages(conn: &rusqlite::Connection, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = conn
-            .prepare_cached("SELECT body FROM session_transcript WHERE session_id = ?1 ORDER BY seq")
+            .prepare_cached(
+                "SELECT body FROM session_transcript WHERE session_id = ?1 ORDER BY seq",
+            )
             .map_err(OSAgentError::Storage)?;
 
         let rows = stmt
@@ -780,7 +781,9 @@ impl SqliteStorage {
             // it; skip it rather than failing the read.
             match serde_json::from_slice(&body) {
                 Ok(message) => messages.push(message),
-                Err(err) => tracing::warn!("Skipping unreadable message in {}: {}", session_id, err),
+                Err(err) => {
+                    tracing::warn!("Skipping unreadable message in {}: {}", session_id, err)
+                }
             }
         }
         Ok(messages)
@@ -2460,7 +2463,10 @@ mod transcript_tests {
             storage.update_session(&session).expect("update");
         }
 
-        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        let loaded = storage
+            .get_session(&session.id)
+            .expect("get")
+            .expect("some");
         assert_eq!(contents(&loaded), vec!["m0", "m1", "m2", "m3", "m4"]);
         cleanup(&path);
     }
@@ -2484,7 +2490,10 @@ mod transcript_tests {
             storage.update_session(&session).expect("update");
         }
 
-        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        let loaded = storage
+            .get_session(&session.id)
+            .expect("get")
+            .expect("some");
         assert_eq!(contents(&loaded), vec!["question", "Hello"]);
         cleanup(&path);
     }
@@ -2511,7 +2520,10 @@ mod transcript_tests {
         ];
         storage.update_session(&session).expect("update");
 
-        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        let loaded = storage
+            .get_session(&session.id)
+            .expect("get")
+            .expect("some");
         assert_eq!(contents(&loaded), vec!["m0", "summary of m1 to m4", "m5"]);
         cleanup(&path);
     }
@@ -2532,7 +2544,10 @@ mod transcript_tests {
         session.messages.truncate(2);
         storage.update_session(&session).expect("update");
 
-        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        let loaded = storage
+            .get_session(&session.id)
+            .expect("get")
+            .expect("some");
         assert_eq!(contents(&loaded), vec!["m0", "m1"]);
         cleanup(&path);
     }
@@ -2553,13 +2568,19 @@ mod transcript_tests {
         };
 
         let storage = store(&path);
-        let mut session = storage.get_session(&session_id).expect("get").expect("some");
+        let mut session = storage
+            .get_session(&session_id)
+            .expect("get")
+            .expect("some");
         assert_eq!(contents(&session), vec!["before restart"]);
 
         session.messages.push(msg("assistant", "after restart"));
         storage.update_session(&session).expect("update");
 
-        let loaded = storage.get_session(&session_id).expect("get").expect("some");
+        let loaded = storage
+            .get_session(&session_id)
+            .expect("get")
+            .expect("some");
         assert_eq!(contents(&loaded), vec!["before restart", "after restart"]);
         cleanup(&path);
     }
@@ -2595,7 +2616,10 @@ mod transcript_tests {
         };
 
         let storage = store(&path);
-        let loaded = storage.get_session(&session_id).expect("get").expect("some");
+        let loaded = storage
+            .get_session(&session_id)
+            .expect("get")
+            .expect("some");
         assert_eq!(contents(&loaded), vec!["old one", "old two"]);
         cleanup(&path);
     }
@@ -2608,7 +2632,8 @@ mod transcript_tests {
         let mut a = storage
             .create_session("m".to_string(), "p".to_string(), None)
             .expect("create");
-        a.messages.push(msg("user", "how do I configure the piper voice"));
+        a.messages
+            .push(msg("user", "how do I configure the piper voice"));
         storage.update_session(&a).expect("update");
 
         let mut b = storage
@@ -2622,7 +2647,10 @@ mod transcript_tests {
         assert_eq!(hits[0].session_id, a.id);
         assert!(hits[0].snippet.contains("piper"));
 
-        assert!(storage.search_messages("   ", 10).expect("search").is_empty());
+        assert!(storage
+            .search_messages("   ", 10)
+            .expect("search")
+            .is_empty());
         cleanup(&path);
     }
 }

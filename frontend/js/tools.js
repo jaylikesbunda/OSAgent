@@ -1206,17 +1206,19 @@ OSA.toggleToolCard = function(domId) {
 
     if (!card) return;
 
-    if (body && body.style.display !== 'none') {
-        body.classList.remove('visible');
-        body.style.display = 'none';
-        if (chevron) chevron.classList.remove('open');
-    } else {
-        if (body) {
-            body.classList.add('visible');
-            body.style.display = '';
-        }
-        if (chevron) chevron.classList.add('open');
+    // `.tool-body` is collapsed by the stylesheet, so a freshly rendered card
+    // has no inline display at all. Deriving the state from `style.display`
+    // read that as "open" and spent the first click collapsing an already
+    // collapsed body — which is why expanding took two clicks. The `.visible`
+    // class is the real state; the inline style is only cleared so cards
+    // toggled by the previous logic are not stuck behind `display: none`.
+    const isOpen = body ? body.classList.contains('visible') : false;
+
+    if (body) {
+        body.classList.toggle('visible', !isOpen);
+        body.style.display = '';
     }
+    if (chevron) chevron.classList.toggle('open', !isOpen);
 };
 
 OSA.updateToolProgress = function(event) {

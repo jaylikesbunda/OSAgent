@@ -267,10 +267,7 @@ pub async fn transcribe(
         .map_err(|e| format!("whisper-server request failed: {e}"))?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "whisper-server returned {}",
-            response.status()
-        ));
+        return Err(format!("whisper-server returned {}", response.status()));
     }
 
     let payload: serde_json::Value = response

@@ -139,13 +139,7 @@ async fn main() -> anyhow::Result<()> {
     // The filter has to be built after parsing: initialising it first meant
     // -v was read long after the level was already fixed, so the flag's only
     // observable effect was logging that it had been enabled.
-    let verbose = matches!(
-        &command,
-        Commands::Start {
-            verbose: true,
-            ..
-        }
-    );
+    let verbose = matches!(&command, Commands::Start { verbose: true, .. });
     let default_level = if verbose { Level::DEBUG } else { Level::INFO };
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -357,16 +351,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::Service { command } => {
             let os = std::env::consts::OS;
             match command {
-                ServiceCommands::Install => {
-                    match os {
-                        "linux" => install_systemd_service()?,
-                        "macos" => install_launchd_service()?,
-                        "windows" => install_windows_service()?,
-                        _ => {
-                            eprintln!("Service installation not supported on this OS: {}", os);
-                        }
+                ServiceCommands::Install => match os {
+                    "linux" => install_systemd_service()?,
+                    "macos" => install_launchd_service()?,
+                    "windows" => install_windows_service()?,
+                    _ => {
+                        eprintln!("Service installation not supported on this OS: {}", os);
                     }
-                }
+                },
                 ServiceCommands::Uninstall => match os {
                     "linux" => uninstall_systemd_service()?,
                     "macos" => uninstall_launchd_service()?,
@@ -446,8 +438,8 @@ async fn main() -> anyhow::Result<()> {
 /// to print a link and do nothing.
 #[cfg(windows)]
 fn install_windows_service() -> anyhow::Result<()> {
-    let binary_path = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("Failed to get current exe: {}", e))?;
+    let binary_path =
+        std::env::current_exe().map_err(|e| anyhow::anyhow!("Failed to get current exe: {}", e))?;
 
     // sc.exe takes the whole command line as a single binPath value, and the
     // space between the executable and its argument has to survive quoting.

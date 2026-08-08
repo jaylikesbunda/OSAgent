@@ -966,6 +966,7 @@ OSA.cancelSpeechOutput = function() {
     // handler would otherwise clear the busy flag belonging to a newer run.
     OSA.bumpSpeechPlaybackGeneration();
     OSA.clearSpeechQueue();
+    OSA._explicitSpeech = false;
     OSA._speechBusy = false;
     OSA.stopAudioPlayback();
     if (window.speechSynthesis && window.speechSynthesis.speaking) {
@@ -1216,10 +1217,18 @@ OSA.isSpeaking = function() {
     return OSA.isSpeechBusy() || OSA.isAudioPlaying();
 };
 
+// Clicking Speak on a message is an explicit request, so it plays even when
+// voice output is off in settings. The flag clears when the queue drains.
+OSA._explicitSpeech = false;
+
+OSA.speechOutputAllowed = function(voiceConfig) {
+    if (OSA._explicitSpeech) return true;
+    return OSA.getTtsEnabled() && !!voiceConfig?.enabled;
+};
+
 OSA.speakText = function(text, options = {}) {
-    const ttsEnabled = OSA.getTtsEnabled();
     const voiceConfig = OSA.getVoiceConfig();
-    if (!ttsEnabled || !voiceConfig?.enabled) return;
+    if (!OSA.speechOutputAllowed(voiceConfig)) return;
 
     const payload = OSA.sanitizeSpeechText(text).slice(0, 1000);
     if (!payload) return;
@@ -1236,7 +1245,7 @@ OSA.speakText = function(text, options = {}) {
 /// Plays the next utterance if nothing is currently being spoken or fetched.
 OSA.pumpSpeechQueue = function() {
     const voiceConfig = OSA.getVoiceConfig();
-    if (!OSA.getTtsEnabled() || !voiceConfig?.enabled) {
+    if (!OSA.speechOutputAllowed(voiceConfig)) {
         OSA.clearSpeechQueue();
         return;
     }
@@ -1244,6 +1253,7 @@ OSA.pumpSpeechQueue = function() {
 
     const queue = OSA.getSpeechQueue();
     if (!queue.length) {
+        OSA._explicitSpeech = false;
         OSA.updateGlobalPlaybackBar();
         return;
     }
@@ -1306,6 +1316,19 @@ OSA.pumpSpeechQueue = function() {
         .catch(e => {
             clearTimeout(timeout);
             console.error('Piper TTS error:', e);
+            // Piper being unreachable used to mean silence with nothing but a
+            // console line. The browser voice is always available, so use it
+            // rather than dropping the utterance.
+            if (generation === OSA.getSpeechPlaybackGeneration() && window.speechSynthesis) {
+                const utterance = new SpeechSynthesisUtterance(payload);
+                utterance.lang = voiceConfig?.language || 'en';
+                utterance.rate = voiceConfig?.voice_speed || 1.0;
+                utterance.onend = finish;
+                utterance.onerror = finish;
+                window.speechSynthesis.speak(utterance);
+                OSA.updateGlobalPlaybackBar();
+                return;
+            }
             finish();
         });
     } else {
@@ -1446,15 +1469,11 @@ OSA.speakMessageElement = function(button) {
     OSA.cancelSpeechOutput();
     OSA.setSpeakingMessage(messageEl);
 
-    // Replay is explicit, so honour it even when auto-speak is off. speakText
-    // gates on the TTS toggle, so lift it for the duration of this utterance.
-    const wasEnabled = OSA.getTtsEnabled();
-    if (!wasEnabled) OSA.setTtsEnabled(true);
-    OSA.speakText(text, { interrupt: true });
-    if (!wasEnabled) {
-        // Restore the toggle without cancelling what we just queued.
-        OSA.setTtsEnabled(false);
-    }
+    // Replay is explicit, so it bypasses both the auto-speak toggle and the
+    // voice.enabled setting. cancelSpeechOutput above clears the flag, so it
+    // has to be set after it.
+    OSA._explicitSpeech = true;
+    OSA.speakText(text, { interrupt: false });
 };
 
 OSA.setSpeakingMessage = function(messageEl) {
