@@ -21,9 +21,9 @@ Nothing is sent anywhere you didn't configure. Point it at a local Ollama instan
 
 ## Why OSAgent
 
-- **Stays on, unnoticed** — starts in ~540ms and idles at ~14MB of RAM (1/50th of a typical Electron agent), so it can run the background jobs, Discord sessions, and daily briefings around the clock.
-- **Runs anywhere** — a single binary with no Node, Python, or Docker: a 2GB VPS, a Raspberry Pi, a locked-down corporate laptop, a container fleet.
-- **Your machine, your model** — local via Ollama, or any API key.
+- **Stays on, unnoticed**: starts in ~540ms and idles at ~14MB of RAM (1/50th of a typical Electron agent), so it can run the background jobs, Discord sessions, and daily briefings around the clock.
+- **Runs anywhere**: a single binary with no Node, Python, or Docker: a 2GB VPS, a Raspberry Pi, a locked-down corporate laptop, a container fleet.
+- **Your machine, your model**: local via Ollama, or any API key.
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ Nothing is sent anywhere you didn't configure. Point it at a local Ollama instan
 | Linux (x86_64) | `osagent-linux-x86_64.deb` |
 | macOS (Apple Silicon) | `osagent-macos-arm64.dmg` |
 
-Download the installer, pick a provider (OAuth or API key), pick a workspace — done. Your browser opens to `http://localhost:8765`.
+Download the installer, pick a provider (OAuth or API key), pick a workspace, done. Your browser opens to `http://localhost:8765`.
 
 Prefer the terminal:
 
@@ -44,13 +44,13 @@ osagent start -w /path/to/project  # Start with a specific workspace
 
 ## What it does
 
-- **Models** — 100+ providers (OpenRouter, OpenAI, Anthropic, Google, Ollama, Bedrock, Azure, ...), OAuth login for GitHub Copilot / Google / OpenAI Codex
-- **Interfaces** — web UI, Discord bot with per-channel sessions, voice (Whisper STT + Piper TTS)
-- **Tools** — 30+ built-in: file edit, code execution, grep/glob, LSP, web fetch/search, calendar, weather, persistent memory
-- **Scheduling** — cron jobs, reminders, recurring tasks, daily briefings
-- **Extending** — visual workflow editor, installable `.oskill` skill bundles
+- **Models**: 100+ providers (OpenRouter, OpenAI, Anthropic, Google, Ollama, Bedrock, Azure, ...), OAuth login for GitHub Copilot / Google / OpenAI Codex
+- **Interfaces**: web UI, Discord bot with per-channel sessions, voice (Whisper STT + Piper TTS)
+- **Tools**: 30+ built-in: file edit, code execution, grep/glob, LSP, web fetch/search, calendar, weather, persistent memory
+- **Scheduling**: cron jobs, reminders, recurring tasks, daily briefings
+- **Extending**: visual workflow editor, installable `.oskill` skill bundles
 
-Coding tools and assistant tools ship side by side — trim `[tools].allowed` to whichever half you want.
+Coding tools and assistant tools ship side by side, so trim `[tools].allowed` to whichever half you want.
 
 ## Configuration
 
@@ -84,4 +84,4 @@ cd OSAgent
 
 ## Contributing & License
 
-Bug reports and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md). [MIT](LICENSE).
+Bug reports and PRs welcome; see [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md). [MIT](LICENSE).
