@@ -175,6 +175,9 @@ OSA.clearPendingFormattedRenders = function() {
 
 OSA.scheduleFormattedRender = function(element, rawText, onRendered) {
     if (!element) return;
+    // The <speak> block is for the synthesizer, not the reader. Strip it before
+    // it reaches the DOM so it never flashes into the chat mid-stream.
+    rawText = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(rawText) : rawText;
     element.dataset.rawText = rawText;
     if (onRendered) element._onRendered = onRendered;
     OSA.getPendingFormattedElements().add(element);
@@ -641,7 +644,72 @@ OSA.renderAssistantActionButtons = function(checkpoint) {
         html += '<button class="msg-action-btn msg-action-restore" disabled title="No restore checkpoint available yet">Restore</button>';
     }
 
+    html += '<button class="msg-action-btn msg-action-retry" onclick="OSA.regenerateFromMessage(this)" title="Discard this reply and run the turn again">Retry</button>';
+    html += '<button class="msg-action-btn msg-action-speak" onclick="OSA.speakMessageElement(this)" title="Read this message aloud (click again to stop)">Speak</button>';
+
     return html;
+};
+
+/// Finds the index of a rendered message within the current session.
+OSA.indexOfRenderedMessage = function(messageEl) {
+    const all = Array.from(document.querySelectorAll('#messages .message'));
+    return all.indexOf(messageEl);
+};
+
+/// Drops this assistant reply (and anything after it) and re-runs the turn
+/// from the preceding user message. Previously the only recovery from a bad
+/// turn was a follow-up correction, which left the bad turn poisoning context.
+OSA.regenerateFromMessage = async function(button) {
+    const messageEl = button.closest('.message');
+    const session = OSA.getCurrentSession();
+    if (!messageEl || !session?.id) return;
+
+    if (OSA.isAgentProcessing()) {
+        OSA.showToast?.('Stop the current turn before retrying.');
+        return;
+    }
+
+    const index = OSA.indexOfRenderedMessage(messageEl);
+    if (index < 1) return;
+
+    // Walk back to the user message that produced this reply, so the retry
+    // re-sends the original prompt rather than an empty turn.
+    const all = Array.from(document.querySelectorAll('#messages .message'));
+    let userIndex = index - 1;
+    while (userIndex >= 0 && !all[userIndex].classList.contains('user')) {
+        userIndex -= 1;
+    }
+    if (userIndex < 0) return;
+
+    const prompt = all[userIndex].querySelector('.message-content')?.dataset.rawText
+        || all[userIndex].innerText
+        || '';
+    if (!prompt.trim()) return;
+
+    await OSA.truncateSessionMessages(session.id, userIndex);
+    for (let i = all.length - 1; i >= userIndex; i -= 1) {
+        all[i].remove();
+    }
+
+    const input = document.getElementById('message-input');
+    if (input) input.value = prompt.trim();
+    OSA.sendMessage();
+};
+
+OSA.truncateSessionMessages = async function(sessionId, from) {
+    const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(sessionId)}/messages/truncate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from }),
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to edit history');
+    }
+    const session = OSA.getCurrentSession();
+    if (session && Array.isArray(session.messages)) {
+        session.messages.length = Math.min(session.messages.length, from);
+    }
 };
 
 OSA.updateAssistantMessageActions = function(messageEl, sourceMessage) {
@@ -1126,6 +1194,7 @@ OSA.completeThinkingDisplay = function() {
 
 OSA.appendAssistantChunk = function(content) {
     if (!content) return;
+    OSA.feedSpeechStream?.(content);
     const session = OSA.getCurrentSession();
     const msgs = session && Array.isArray(session.messages) ? session.messages : [];
     const last = msgs[msgs.length - 1];
@@ -1229,11 +1298,31 @@ OSA.completeAssistantResponse = function(usage) {
         if (rawText && startTime && OSA.getTtsEnabled() && OSA.getVoiceConfig()?.enabled) {
             const activePersona = OSA.getActivePersona();
             const isRoleplay = activePersona?.id === 'custom';
-            const speechText = OSA.prepareSpeechText(rawText, isRoleplay);
-            if (speechText) {
-                OSA.speakText(speechText);
+
+            const speakBlock = OSA.extractSpeakBlock?.(OSA._speechStreamBuffer || '');
+
+            if (speakBlock && !isRoleplay) {
+                // The model wrote the spoken version itself; say only what has
+                // not already been spoken while streaming.
+                if (!OSA.speechStreamHandledTurn?.()) {
+                    OSA.speakText(speakBlock, { interrupt: false });
+                }
+            } else if (OSA.speechStreamHandledTurn?.() && !isRoleplay) {
+                // Sentences were spoken as they streamed; only the trailing
+                // fragment after the last terminator is still unspoken.
+                const tail = (OSA._speechStreamBuffer || '').slice(OSA._speechStreamSpoken || 0);
+                const spokenTail = OSA.sanitizeSpeechText(tail);
+                if (spokenTail) {
+                    OSA.speakText(spokenTail, { interrupt: false });
+                }
+            } else {
+                const speechText = OSA.prepareSpeechText(rawText, isRoleplay);
+                if (speechText) {
+                    OSA.speakText(speechText);
+                }
             }
         }
+        OSA.resetSpeechStream?.();
     }
     OSA.setTurnStartTime(null);
     OSA.resetStreamingMessage();

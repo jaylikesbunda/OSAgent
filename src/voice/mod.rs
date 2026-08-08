@@ -1,5 +1,6 @@
 pub mod piper;
 pub mod whisper;
+pub mod whisper_server;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -3,12 +3,123 @@ use crate::storage::models::*;
 use chrono::Utc;
 use rusqlite::params;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use uuid::Uuid;
+
+/// Number of connections kept open. WAL lets readers run concurrently with the
+/// single writer, so this mostly buys read parallelism: before this, every
+/// query in the process — including a sidebar refresh deserialising history —
+/// serialised through one `Mutex<Connection>` and could stall an active turn.
+const POOL_SIZE: usize = 4;
+
+/// A fixed-size connection pool.
+///
+/// Hand-rolled rather than pulling in r2d2: the pool is a dozen lines, and the
+/// project's pitch is a single binary with no runtime dependencies.
+///
+/// Write serialisation is left to SQLite itself (WAL + `busy_timeout`), which
+/// is what the pragmas were already configured for.
+struct ConnectionPool {
+    idle: Mutex<Vec<rusqlite::Connection>>,
+    available: Condvar,
+    /// Holds a shared-cache in-memory database open. Without a live handle the
+    /// database is dropped as soon as the last connection returns it, so an
+    /// idle pool would silently lose the schema between calls.
+    ///
+    /// Wrapped in a `Mutex` purely for `Sync`: `rusqlite::Connection` is `Send`
+    /// but not `Sync`, and a bare field here would make the whole pool — and
+    /// every tool holding storage — non-`Sync`.
+    _keeper: Option<Mutex<rusqlite::Connection>>,
+}
+
+impl ConnectionPool {
+    fn new(
+        size: usize,
+        open: impl Fn() -> Result<rusqlite::Connection>,
+        keeper: Option<Mutex<rusqlite::Connection>>,
+    ) -> Result<Self> {
+        let mut idle = Vec::with_capacity(size);
+        for _ in 0..size {
+            idle.push(open()?);
+        }
+        Ok(Self {
+            idle: Mutex::new(idle),
+            available: Condvar::new(),
+            _keeper: keeper,
+        })
+    }
+
+    fn checkout(&self) -> Result<rusqlite::Connection> {
+        let mut idle = self
+            .idle
+            .lock()
+            .map_err(|_| OSAgentError::Unknown("db pool mutex poisoned".to_string()))?;
+        loop {
+            if let Some(conn) = idle.pop() {
+                return Ok(conn);
+            }
+            idle = self
+                .available
+                .wait(idle)
+                .map_err(|_| OSAgentError::Unknown("db pool mutex poisoned".to_string()))?;
+        }
+    }
+
+    fn checkin(&self, conn: rusqlite::Connection) {
+        if let Ok(mut idle) = self.idle.lock() {
+            idle.push(conn);
+            self.available.notify_one();
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct SqliteStorage {
-    conn: Arc<Mutex<rusqlite::Connection>>,
+    pool: Arc<ConnectionPool>,
+    /// Per-session hash of each stored message, used to find the first index
+    /// where an incoming transcript diverges from what is on disk.
+    ///
+    /// Messages are not append-only: the streaming assistant message is
+    /// rewritten on every chunk, and context compaction replaces a span in the
+    /// middle of history. Diffing on hashes handles all three shapes — append,
+    /// last-message rewrite, mid-history replacement — without reading the
+    /// stored bodies back. A cold cache simply degrades to one full rewrite.
+    fingerprints: Arc<Mutex<std::collections::HashMap<String, Vec<u64>>>>,
+}
+
+fn message_fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Returns its connection to the pool on drop, including on the error and panic
+/// paths, so a failing query cannot leak a connection out of the pool.
+struct PooledConn<'a> {
+    conn: Option<rusqlite::Connection>,
+    pool: &'a ConnectionPool,
+}
+
+impl std::ops::Deref for PooledConn<'_> {
+    type Target = rusqlite::Connection;
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("connection checked out")
+    }
+}
+
+impl std::ops::DerefMut for PooledConn<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn.as_mut().expect("connection checked out")
+    }
+}
+
+impl Drop for PooledConn<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.checkin(conn);
+        }
+    }
 }
 
 impl SqliteStorage {
@@ -62,30 +173,63 @@ impl SqliteStorage {
             })?;
         }
 
-        let conn = rusqlite::Connection::open(&path).map_err(OSAgentError::Storage)?;
-        Self::apply_pragmas(&conn)?;
+        let pool = ConnectionPool::new(
+            POOL_SIZE,
+            || {
+                let conn = rusqlite::Connection::open(&path).map_err(OSAgentError::Storage)?;
+                Self::apply_pragmas(&conn)?;
+                Ok(conn)
+            },
+            None,
+        )?;
+
         let storage = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool: Arc::new(pool),
+            fingerprints: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
         storage.run_migrations()?;
         Ok(storage)
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        let conn = rusqlite::Connection::open_in_memory().map_err(OSAgentError::Storage)?;
-        Self::apply_pragmas(&conn)?;
+        // A plain `:memory:` database is private to its connection, so this
+        // pool is deliberately size 1.
+        //
+        // The obvious alternative — a shared-cache `file:...?mode=memory` URI —
+        // does let several connections see one database, but shared cache also
+        // switches SQLite to table-level locking, which raises SQLITE_LOCKED
+        // rather than SQLITE_BUSY. `busy_timeout` does not apply to
+        // SQLITE_LOCKED, so concurrent writers fail immediately instead of
+        // waiting. In-memory storage is only used for tests, which do not need
+        // the read parallelism, so the single connection is the right trade.
+        let pool = ConnectionPool::new(
+            1,
+            || {
+                let conn =
+                    rusqlite::Connection::open_in_memory().map_err(OSAgentError::Storage)?;
+                Self::apply_pragmas(&conn)?;
+                Ok(conn)
+            },
+            None,
+        )?;
+
         let storage = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool: Arc::new(pool),
+            fingerprints: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
         storage.run_migrations()?;
         Ok(storage)
     }
 
+    fn checkout(&self) -> Result<PooledConn<'_>> {
+        Ok(PooledConn {
+            conn: Some(self.pool.checkout()?),
+            pool: &self.pool,
+        })
+    }
+
     fn with_conn<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> Result<T>) -> Result<T> {
-        let guard = self
-            .conn
-            .lock()
-            .map_err(|_| OSAgentError::Unknown("db mutex poisoned".to_string()))?;
+        let guard = self.checkout()?;
         f(&guard)
     }
 
@@ -93,10 +237,7 @@ impl SqliteStorage {
         &self,
         f: impl FnOnce(&mut rusqlite::Connection) -> Result<T>,
     ) -> Result<T> {
-        let mut guard = self
-            .conn
-            .lock()
-            .map_err(|_| OSAgentError::Unknown("db mutex poisoned".to_string()))?;
+        let mut guard = self.checkout()?;
         f(&mut guard)
     }
 
@@ -223,6 +364,25 @@ impl SqliteStorage {
                     output TEXT NOT NULL,
                     duration_ms INTEGER NOT NULL,
                     user TEXT NOT NULL
+                );
+
+                -- Records one-off data migrations that cannot be detected by
+                -- inspecting the schema, so they run exactly once.
+                CREATE TABLE IF NOT EXISTS schema_markers (
+                    marker TEXT PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                );
+
+                -- One row per message, replacing the whole-transcript BLOB on
+                -- `sessions`. Appending used to re-serialise and rewrite every
+                -- message in the session, so cost per turn grew with
+                -- conversation length.
+                CREATE TABLE IF NOT EXISTS session_transcript (
+                    session_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    body BLOB NOT NULL,
+                    PRIMARY KEY (session_id, seq),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
@@ -406,6 +566,88 @@ impl SqliteStorage {
                 [],
             )?;
             Ok(())
+        })?;
+
+        self.backfill_session_messages()
+    }
+
+    /// Moves existing transcripts out of the `sessions.messages` BLOB and into
+    /// `session_transcript` rows.
+    ///
+    /// Runs once, guarded by the `messages_migrated` marker. The old BLOB
+    /// column is left in place and untouched — it is not dropped and not
+    /// written again — so the pre-migration transcript stays on disk as a
+    /// rollback artifact.
+    fn backfill_session_messages(&self) -> Result<()> {
+        let already_done: bool = self.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM schema_markers WHERE marker = 'messages_migrated'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false))
+        })?;
+
+        if already_done {
+            return Ok(());
+        }
+
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+
+            let rows: Vec<(String, Vec<u8>)> = {
+                let mut stmt = tx
+                    .prepare("SELECT id, messages FROM sessions")
+                    .map_err(OSAgentError::Storage)?;
+                let mapped = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(OSAgentError::Storage)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(OSAgentError::Storage)?;
+                mapped
+            };
+
+            let mut migrated = 0usize;
+            for (session_id, blob) in rows {
+                let messages: Vec<Message> = match serde_json::from_slice(&blob) {
+                    Ok(messages) => messages,
+                    Err(err) => {
+                        // A transcript we cannot parse is left in the BLOB
+                        // rather than silently dropped.
+                        tracing::warn!(
+                            "Skipping message migration for session {}: {}",
+                            session_id,
+                            err
+                        );
+                        continue;
+                    }
+                };
+
+                for (seq, message) in messages.iter().enumerate() {
+                    let body = serde_json::to_vec(message)
+                        .map_err(|e| OSAgentError::Parse(e.to_string()))?;
+                    tx.execute(
+                        "INSERT OR REPLACE INTO session_transcript (session_id, seq, body) VALUES (?1, ?2, ?3)",
+                        params![session_id, seq as i64, body],
+                    )
+                    .map_err(OSAgentError::Storage)?;
+                }
+                migrated += 1;
+            }
+
+            tx.execute(
+                "INSERT OR REPLACE INTO schema_markers (marker, applied_at) VALUES ('messages_migrated', ?1)",
+                params![Utc::now().timestamp()],
+            )
+            .map_err(OSAgentError::Storage)?;
+
+            tx.commit().map_err(OSAgentError::Storage)?;
+
+            if migrated > 0 {
+                tracing::info!("Migrated {} session transcripts to row storage", migrated);
+            }
+            Ok(())
         })
     }
 
@@ -484,13 +726,12 @@ impl SqliteStorage {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE id = ?1")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![id], |row| {
-                let messages_bytes: Vec<u8> = row.get(5)?;
-                let metadata_bytes: Vec<u8> = row.get(6)?;
-                let context_state_bytes: Option<Vec<u8>> = row.get(10)?;
+                let metadata_bytes: Vec<u8> = row.get(5)?;
+                let context_state_bytes: Option<Vec<u8>> = row.get(9)?;
                 let context_state = context_state_bytes
                     .and_then(|bytes| serde_json::from_slice(&bytes).ok());
                 Ok(Session {
@@ -501,27 +742,153 @@ impl SqliteStorage {
                         .unwrap_or_else(Utc::now),
                     model: row.get(3)?,
                     provider: row.get(4)?,
-                    messages: serde_json::from_slice(&messages_bytes).unwrap_or_default(),
+                    // Filled in from session_transcript below.
+                    messages: Vec::new(),
                     metadata: serde_json::from_slice(&metadata_bytes)
                         .unwrap_or_else(|_| serde_json::json!({})),
-                    parent_id: row.get(7)?,
-                    agent_type: row.get(8)?,
-                    task_status: row.get(9)?,
+                    parent_id: row.get(6)?,
+                    agent_type: row.get(7)?,
+                    task_status: row.get(8)?,
                     context_state,
                 })
             });
 
             match result {
-                Ok(session) => Ok(Some(session)),
+                Ok(mut session) => {
+                    session.messages = Self::load_messages(conn, &session.id)?;
+                    Ok(Some(session))
+                }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(OSAgentError::Storage(e)),
             }
         })
     }
 
+    fn load_messages(conn: &rusqlite::Connection, session_id: &str) -> Result<Vec<Message>> {
+        let mut stmt = conn
+            .prepare_cached("SELECT body FROM session_transcript WHERE session_id = ?1 ORDER BY seq")
+            .map_err(OSAgentError::Storage)?;
+
+        let rows = stmt
+            .query_map(params![session_id], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(OSAgentError::Storage)?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            let body = row.map_err(OSAgentError::Storage)?;
+            // A single unparseable row should not take the whole session with
+            // it; skip it rather than failing the read.
+            match serde_json::from_slice(&body) {
+                Ok(message) => messages.push(message),
+                Err(err) => tracing::warn!("Skipping unreadable message in {}: {}", session_id, err),
+            }
+        }
+        Ok(messages)
+    }
+
+    /// Substring search across stored message content.
+    ///
+    /// Returns the matching session ids most-recently-updated first. Sidebar
+    /// filtering only ever matched session titles that happened to be rendered
+    /// in the DOM, so older conversations were unsearchable.
+    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchHit>> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT m.session_id, m.seq, m.body
+                     FROM session_transcript m
+                     JOIN sessions s ON s.id = m.session_id
+                     ORDER BY s.updated_at DESC, m.seq",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(OSAgentError::Storage)?;
+
+            let mut hits: Vec<SessionSearchHit> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+
+            for row in rows {
+                let (session_id, seq, body) = row.map_err(OSAgentError::Storage)?;
+                if seen.contains(&session_id) {
+                    continue;
+                }
+                let Ok(message) = serde_json::from_slice::<Message>(&body) else {
+                    continue;
+                };
+                let Some(at) = message.content.to_lowercase().find(&needle) else {
+                    continue;
+                };
+
+                // A window around the match, so the caller can show why it hit.
+                let start = message.content[..at]
+                    .char_indices()
+                    .rev()
+                    .nth(40)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let end = message.content[at..]
+                    .char_indices()
+                    .nth(120)
+                    .map(|(i, _)| at + i)
+                    .unwrap_or(message.content.len());
+
+                seen.insert(session_id.clone());
+                hits.push(SessionSearchHit {
+                    session_id,
+                    seq: seq as usize,
+                    role: message.role,
+                    snippet: message.content[start..end].trim().to_string(),
+                });
+
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+
+            Ok(hits)
+        })
+    }
+
+    /// Drops every message from `from` onward.
+    ///
+    /// Backs edit-and-resend and regenerate: the user picks a point, the tail
+    /// goes, and the next turn runs from there. Without this the only way to
+    /// recover from a bad turn was to leave it in context and talk around it.
+    pub fn truncate_session_messages(&self, session_id: &str, from: usize) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM session_transcript WHERE session_id = ?1 AND seq >= ?2",
+                params![session_id, from as i64],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })?;
+
+        // The cache now describes rows that no longer exist.
+        let mut cache = self
+            .fingerprints
+            .lock()
+            .map_err(|_| OSAgentError::Unknown("fingerprint mutex poisoned".to_string()))?;
+        if let Some(hashes) = cache.get_mut(session_id) {
+            hashes.truncate(from);
+        }
+        Ok(())
+    }
+
     pub fn update_session(&self, session: &Session) -> Result<()> {
-        let messages_bytes = serde_json::to_vec(&session.messages)
-            .map_err(|e| OSAgentError::Parse(e.to_string()))?;
         let metadata_bytes = serde_json::to_vec(&session.metadata)
             .map_err(|e| OSAgentError::Parse(e.to_string()))?;
         let context_state_bytes: Option<Vec<u8>> = session
@@ -529,12 +896,52 @@ impl SqliteStorage {
             .as_ref()
             .map(|cs| serde_json::to_vec(cs).unwrap_or_default());
 
-        self.with_conn(|conn| {
-            conn.execute(
-                "UPDATE sessions SET updated_at = ?1, messages = ?2, metadata = ?3, task_status = ?4, context_state = ?5 WHERE id = ?6",
+        // Serialise each message once, then find where this transcript first
+        // differs from what we last wrote. The common cases touch one row:
+        // appending a message, or rewriting the streaming assistant message.
+        let bodies: Vec<Vec<u8>> = session
+            .messages
+            .iter()
+            .map(|message| {
+                serde_json::to_vec(message).map_err(|e| OSAgentError::Parse(e.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let hashes: Vec<u64> = bodies.iter().map(|b| message_fingerprint(b)).collect();
+
+        let divergence = {
+            let cache = self
+                .fingerprints
+                .lock()
+                .map_err(|_| OSAgentError::Unknown("fingerprint mutex poisoned".to_string()))?;
+            match cache.get(&session.id) {
+                // No cache (fresh process, or first write for this session):
+                // rewrite everything once and repopulate.
+                None => 0,
+                Some(stored) => stored
+                    .iter()
+                    .zip(hashes.iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(stored.len().min(hashes.len())),
+            }
+        };
+
+        let stored_len = {
+            let cache = self
+                .fingerprints
+                .lock()
+                .map_err(|_| OSAgentError::Unknown("fingerprint mutex poisoned".to_string()))?;
+            cache.get(&session.id).map(|v| v.len())
+        };
+
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+
+            // Note the BLOB column is intentionally not written any more; it is
+            // left holding its pre-migration value as a rollback artifact.
+            tx.execute(
+                "UPDATE sessions SET updated_at = ?1, metadata = ?2, task_status = ?3, context_state = ?4 WHERE id = ?5",
                 params![
                     Utc::now().timestamp(),
-                    messages_bytes,
                     metadata_bytes,
                     session.task_status.clone(),
                     context_state_bytes,
@@ -542,20 +949,50 @@ impl SqliteStorage {
                 ],
             )
             .map_err(OSAgentError::Storage)?;
+
+            // Drop everything from the divergence point on. When the transcript
+            // shrank (compaction) this also removes the orphaned tail.
+            let needs_truncate = stored_len.map(|len| len > divergence).unwrap_or(true);
+            if needs_truncate {
+                tx.execute(
+                    "DELETE FROM session_transcript WHERE session_id = ?1 AND seq >= ?2",
+                    params![session.id, divergence as i64],
+                )
+                .map_err(OSAgentError::Storage)?;
+            }
+
+            for (offset, body) in bodies.iter().enumerate().skip(divergence) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO session_transcript (session_id, seq, body) VALUES (?1, ?2, ?3)",
+                    params![session.id, offset as i64, body],
+                )
+                .map_err(OSAgentError::Storage)?;
+            }
+
+            tx.commit().map_err(OSAgentError::Storage)?;
             Ok(())
-        })
+        })?;
+
+        // Only record the new state once the write actually committed, so a
+        // failed write cannot leave the cache claiming rows that are not there.
+        let mut cache = self
+            .fingerprints
+            .lock()
+            .map_err(|_| OSAgentError::Unknown("fingerprint mutex poisoned".to_string()))?;
+        cache.insert(session.id.clone(), hashes);
+
+        Ok(())
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, context_state FROM sessions ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
-            let sessions = stmt
+            let mut sessions = stmt
                 .query_map([], |row| {
-                    let messages_bytes: Vec<u8> = row.get(5)?;
-                    let metadata_bytes: Vec<u8> = row.get(6)?;
-                    let context_state_bytes: Option<Vec<u8>> = row.get(10)?;
+                    let metadata_bytes: Vec<u8> = row.get(5)?;
+                    let context_state_bytes: Option<Vec<u8>> = row.get(9)?;
                     let context_state = context_state_bytes
                         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
                     Ok(Session {
@@ -566,18 +1003,51 @@ impl SqliteStorage {
                             .unwrap_or_else(Utc::now),
                         model: row.get(3)?,
                         provider: row.get(4)?,
-                        messages: serde_json::from_slice(&messages_bytes).unwrap_or_default(),
+                        messages: Vec::new(),
                         metadata: serde_json::from_slice(&metadata_bytes)
                             .unwrap_or_else(|_| serde_json::json!({})),
-                        parent_id: row.get(7)?,
-                        agent_type: row.get(8)?,
-                        task_status: row.get(9)?,
+                        parent_id: row.get(6)?,
+                        agent_type: row.get(7)?,
+                        task_status: row.get(8)?,
                         context_state,
                     })
                 })
                 .map_err(OSAgentError::Storage)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(OSAgentError::Storage)?;
+
+            // One pass over every message rather than a query per session:
+            // this call is already the expensive one, and N+1 here would be
+            // worse than what it replaced.
+            let mut by_session: std::collections::HashMap<String, Vec<Message>> =
+                std::collections::HashMap::new();
+            {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT session_id, body FROM session_transcript ORDER BY session_id, seq",
+                    )
+                    .map_err(OSAgentError::Storage)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        let session_id: String = row.get(0)?;
+                        let body: Vec<u8> = row.get(1)?;
+                        Ok((session_id, body))
+                    })
+                    .map_err(OSAgentError::Storage)?;
+                for row in rows {
+                    let (session_id, body) = row.map_err(OSAgentError::Storage)?;
+                    if let Ok(message) = serde_json::from_slice::<Message>(&body) {
+                        by_session.entry(session_id).or_default().push(message);
+                    }
+                }
+            }
+
+            for session in &mut sessions {
+                if let Some(messages) = by_session.remove(&session.id) {
+                    session.messages = messages;
+                }
+            }
+
             Ok(sessions)
         })
     }
@@ -1842,5 +2312,317 @@ impl SqliteStorage {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    /// Production uses a file-backed database, which is the only configuration
+    /// where the pool actually holds multiple connections, so these exercise
+    /// that path rather than the size-1 in-memory one.
+    fn temp_storage() -> (SqliteStorage, PathBuf) {
+        let path = std::env::temp_dir().join(format!("osagent-pool-{}.db", Uuid::new_v4()));
+        let storage = SqliteStorage::new(path.to_str().expect("utf8 path")).expect("open");
+        (storage, path)
+    }
+
+    fn cleanup(path: &PathBuf) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    /// A write through one pooled connection must be visible to every other.
+    #[test]
+    fn writes_are_visible_across_pooled_connections() {
+        let (storage, path) = temp_storage();
+        let session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+
+        // Hold the rest of the pool so the read is forced onto a different
+        // connection than the one that wrote.
+        let held: Vec<_> = (0..POOL_SIZE - 1)
+            .map(|_| storage.checkout().expect("checkout"))
+            .collect();
+        let found = storage.get_session(&session.id).expect("read");
+        drop(held);
+
+        assert!(found.is_some(), "write not visible to another connection");
+        cleanup(&path);
+    }
+
+    /// Connections must come back on every path, including when the closure
+    /// returns an error. A leak would starve the pool and then block forever on
+    /// the condvar rather than fail loudly.
+    #[test]
+    fn connections_return_to_pool_on_error() {
+        let (storage, path) = temp_storage();
+
+        for _ in 0..POOL_SIZE * 3 {
+            let result: Result<()> = storage.with_conn(|conn| {
+                conn.execute("SELECT nonsense from nowhere", [])
+                    .map_err(OSAgentError::Storage)?;
+                Ok(())
+            });
+            assert!(result.is_err());
+        }
+
+        assert_eq!(
+            storage.pool.idle.lock().unwrap().len(),
+            POOL_SIZE,
+            "pool did not recover every connection"
+        );
+        cleanup(&path);
+    }
+
+    /// Every query in the process used to serialise through one global mutex.
+    /// This drives real cross-thread contention through the pool.
+    #[test]
+    fn concurrent_readers_and_writers() {
+        let (storage, path) = temp_storage();
+        let seed = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let storage = &storage;
+                let id = seed.id.clone();
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        storage.get_session(&id).expect("read");
+                        storage
+                            .create_session("m".to_string(), "p".to_string(), None)
+                            .expect("write");
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            storage.pool.idle.lock().unwrap().len(),
+            POOL_SIZE,
+            "pool did not recover every connection"
+        );
+        cleanup(&path);
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+
+    fn temp_path() -> PathBuf {
+        std::env::temp_dir().join(format!("osagent-tx-{}.db", Uuid::new_v4()))
+    }
+
+    fn cleanup(path: &PathBuf) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    fn msg(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            thinking: None,
+            timestamp: Utc::now(),
+            tool_calls: None,
+            tool_call_id: None,
+            metadata: serde_json::json!({}),
+            tokens: None,
+            images: Vec::new(),
+        }
+    }
+
+    fn contents(session: &Session) -> Vec<String> {
+        session.messages.iter().map(|m| m.content.clone()).collect()
+    }
+
+    fn store(path: &PathBuf) -> SqliteStorage {
+        SqliteStorage::new(path.to_str().expect("utf8")).expect("open")
+    }
+
+    #[test]
+    fn appends_round_trip_in_order() {
+        let path = temp_path();
+        let storage = store(&path);
+        let mut session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+
+        for i in 0..5 {
+            session.messages.push(msg("user", &format!("m{}", i)));
+            storage.update_session(&session).expect("update");
+        }
+
+        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        assert_eq!(contents(&loaded), vec!["m0", "m1", "m2", "m3", "m4"]);
+        cleanup(&path);
+    }
+
+    /// The streaming assistant message is rewritten on every chunk. Only the
+    /// last row should change, and the transcript must not grow.
+    #[test]
+    fn rewriting_last_message_does_not_duplicate_it() {
+        let path = temp_path();
+        let storage = store(&path);
+        let mut session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+
+        session.messages.push(msg("user", "question"));
+        session.messages.push(msg("assistant", ""));
+        storage.update_session(&session).expect("update");
+
+        for chunk in ["He", "Hell", "Hello"] {
+            session.messages.last_mut().unwrap().content = chunk.to_string();
+            storage.update_session(&session).expect("update");
+        }
+
+        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        assert_eq!(contents(&loaded), vec!["question", "Hello"]);
+        cleanup(&path);
+    }
+
+    /// Context compaction replaces a span in the middle of history. A naive
+    /// append-only diff would leave the old tail behind.
+    #[test]
+    fn mid_history_replacement_leaves_no_orphans() {
+        let path = temp_path();
+        let storage = store(&path);
+        let mut session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+
+        for i in 0..6 {
+            session.messages.push(msg("user", &format!("m{}", i)));
+        }
+        storage.update_session(&session).expect("update");
+
+        session.messages = vec![
+            msg("user", "m0"),
+            msg("system", "summary of m1 to m4"),
+            msg("user", "m5"),
+        ];
+        storage.update_session(&session).expect("update");
+
+        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        assert_eq!(contents(&loaded), vec!["m0", "summary of m1 to m4", "m5"]);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn truncation_removes_the_tail() {
+        let path = temp_path();
+        let storage = store(&path);
+        let mut session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+
+        for i in 0..5 {
+            session.messages.push(msg("user", &format!("m{}", i)));
+        }
+        storage.update_session(&session).expect("update");
+
+        session.messages.truncate(2);
+        storage.update_session(&session).expect("update");
+
+        let loaded = storage.get_session(&session.id).expect("get").expect("some");
+        assert_eq!(contents(&loaded), vec!["m0", "m1"]);
+        cleanup(&path);
+    }
+
+    /// A restarted process has no fingerprints. The first write must fall back
+    /// to a full rewrite rather than assuming the rows on disk match.
+    #[test]
+    fn cold_fingerprint_cache_rewrites_correctly() {
+        let path = temp_path();
+        let session_id = {
+            let storage = store(&path);
+            let mut session = storage
+                .create_session("m".to_string(), "p".to_string(), None)
+                .expect("create");
+            session.messages.push(msg("user", "before restart"));
+            storage.update_session(&session).expect("update");
+            session.id
+        };
+
+        let storage = store(&path);
+        let mut session = storage.get_session(&session_id).expect("get").expect("some");
+        assert_eq!(contents(&session), vec!["before restart"]);
+
+        session.messages.push(msg("assistant", "after restart"));
+        storage.update_session(&session).expect("update");
+
+        let loaded = storage.get_session(&session_id).expect("get").expect("some");
+        assert_eq!(contents(&loaded), vec!["before restart", "after restart"]);
+        cleanup(&path);
+    }
+
+    /// Databases written before this change keep their transcripts in the
+    /// sessions.messages BLOB. Opening one must move them into rows.
+    #[test]
+    fn backfills_transcripts_from_legacy_blob() {
+        let path = temp_path();
+        let session_id = {
+            let storage = store(&path);
+            let session = storage
+                .create_session("m".to_string(), "p".to_string(), None)
+                .expect("create");
+
+            let legacy = vec![msg("user", "old one"), msg("assistant", "old two")];
+            let blob = serde_json::to_vec(&legacy).expect("encode");
+            storage
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE sessions SET messages = ?1 WHERE id = ?2",
+                        params![blob, session.id],
+                    )
+                    .map_err(OSAgentError::Storage)?;
+                    conn.execute("DELETE FROM session_transcript", [])
+                        .map_err(OSAgentError::Storage)?;
+                    conn.execute("DELETE FROM schema_markers", [])
+                        .map_err(OSAgentError::Storage)?;
+                    Ok(())
+                })
+                .expect("seed legacy state");
+            session.id
+        };
+
+        let storage = store(&path);
+        let loaded = storage.get_session(&session_id).expect("get").expect("some");
+        assert_eq!(contents(&loaded), vec!["old one", "old two"]);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn searches_message_content_across_sessions() {
+        let path = temp_path();
+        let storage = store(&path);
+
+        let mut a = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+        a.messages.push(msg("user", "how do I configure the piper voice"));
+        storage.update_session(&a).expect("update");
+
+        let mut b = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+        b.messages.push(msg("user", "unrelated conversation"));
+        storage.update_session(&b).expect("update");
+
+        let hits = storage.search_messages("PIPER", 10).expect("search");
+        assert_eq!(hits.len(), 1, "expected exactly one matching session");
+        assert_eq!(hits[0].session_id, a.id);
+        assert!(hits[0].snippet.contains("piper"));
+
+        assert!(storage.search_messages("   ", 10).expect("search").is_empty());
+        cleanup(&path);
     }
 }

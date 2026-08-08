@@ -43,8 +43,22 @@ mod discord;
 #[command(name = "osagent")]
 #[command(about = "Secure local AI agent", long_about = None)]
 struct Cli {
+    /// Defaults to `start` so that running the bare binary does something
+    /// useful instead of printing a usage error.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+}
+
+fn default_config_path() -> PathBuf {
+    PathBuf::from("~/.osagent/config.toml")
+}
+
+/// Path to the restart sentinel. Deliberately absolute: this used to be a
+/// relative path, which dropped a dotfile into whatever directory the user
+/// happened to launch from, and silently broke restart-from-settings when the
+/// service ran with a read-only working directory.
+fn restart_flag_path() -> PathBuf {
+    PathBuf::from(shellexpand::tilde("~/.osagent/restart_flag").to_string())
 }
 
 #[derive(Subcommand)]
@@ -57,6 +71,9 @@ enum Commands {
         /// Custom workspace directory (overrides config)
         #[arg(short = 'w', long)]
         workspace: Option<String>,
+        /// Port for the web UI (overrides config and OSAGENT_PORT)
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
         /// Enable verbose logging
         #[arg(short, long)]
         verbose: bool,
@@ -112,18 +129,37 @@ enum ServiceCommands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let command = cli.command.unwrap_or(Commands::Start {
+        config: default_config_path(),
+        workspace: None,
+        port: None,
+        verbose: false,
+    });
+
+    // The filter has to be built after parsing: initialising it first meant
+    // -v was read long after the level was already fixed, so the flag's only
+    // observable effect was logging that it had been enabled.
+    let verbose = matches!(
+        &command,
+        Commands::Start {
+            verbose: true,
+            ..
+        }
+    );
+    let default_level = if verbose { Level::DEBUG } else { Level::INFO };
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
+                .with_default_directive(default_level.into())
                 .from_env_lossy(),
         )
         .init();
 
-    match cli.command {
+    match command {
         Commands::Start {
             config,
             workspace,
+            port,
             verbose,
         } => {
             let config_path = shellexpand::tilde(&config.to_string_lossy()).to_string();
@@ -162,6 +198,18 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // Port precedence mirrors the workspace chain above:
+            // flag > environment > config file.
+            let port_override = port.or_else(|| {
+                std::env::var("OSAGENT_PORT")
+                    .ok()
+                    .and_then(|p| p.parse::<u16>().ok())
+            });
+            if let Some(p) = port_override {
+                info!("Using port override: {}", p);
+                config.server.port = p;
+            }
+
             config.ensure_workspace_defaults();
 
             if verbose {
@@ -186,21 +234,31 @@ async fn main() -> anyhow::Result<()> {
 
             // Helper function to check for restart flag
             let check_restart_flag = || -> bool {
-                std::fs::read_to_string(".osagent_restart_flag")
+                std::fs::read_to_string(restart_flag_path())
                     .map(|s| s.trim() == "1")
                     .unwrap_or(false)
             };
 
             // Helper function to clear restart flag
             let clear_restart_flag = || {
-                let _ = std::fs::remove_file(".osagent_restart_flag");
+                let _ = std::fs::remove_file(restart_flag_path());
             };
 
             clear_restart_flag();
 
+            // A previous run killed hard (launcher, crash, Task Manager) can
+            // leave whisper-server alive; on Windows it can hold this process's
+            // listening socket open and make the bind below fail.
+            voice::whisper_server::kill_stale_servers();
+
             // Main server loop - allows restart
             loop {
                 let mut config = config::Config::load(&config_path)?;
+                // Re-apply the override: the restart path reloads from disk and
+                // would otherwise silently drop back to the configured port.
+                if let Some(p) = port_override {
+                    config.server.port = p;
+                }
                 config.ensure_workspace_defaults();
                 let discord_enabled = cfg!(feature = "discord")
                     && config.discord.as_ref().map(|d| d.enabled).unwrap_or(false);
@@ -265,6 +323,10 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
                 }
 
+                // The resident Whisper model is hundreds of megabytes; do not
+                // leave it running across a restart or after shutdown.
+                voice::whisper_server::shutdown();
+
                 // Check if restart was requested
                 if check_restart_flag() {
                     clear_restart_flag();
@@ -299,11 +361,7 @@ async fn main() -> anyhow::Result<()> {
                     match os {
                         "linux" => install_systemd_service()?,
                         "macos" => install_launchd_service()?,
-                        "windows" => {
-                            eprintln!("Windows service installation requires NSSM.");
-                            eprintln!("See: https://nssm.cc/usage");
-                            eprintln!("\nOr run 'osagent start' to start without installing as a service.");
-                        }
+                        "windows" => install_windows_service()?,
                         _ => {
                             eprintln!("Service installation not supported on this OS: {}", os);
                         }
@@ -312,10 +370,7 @@ async fn main() -> anyhow::Result<()> {
                 ServiceCommands::Uninstall => match os {
                     "linux" => uninstall_systemd_service()?,
                     "macos" => uninstall_launchd_service()?,
-                    "windows" => {
-                        eprintln!("Windows service uninstallation requires NSSM.");
-                        eprintln!("See: https://nssm.cc/usage");
-                    }
+                    "windows" => uninstall_windows_service()?,
                     _ => {
                         eprintln!("Service uninstallation not supported on this OS: {}", os);
                     }
@@ -323,9 +378,7 @@ async fn main() -> anyhow::Result<()> {
                 ServiceCommands::Start => match os {
                     "linux" => run_systemctl("start", "osagent")?,
                     "macos" => run_launchctl("start", "com.osagent")?,
-                    "windows" => {
-                        eprintln!("Use Task Manager or 'net start osagent' to start the service.");
-                    }
+                    "windows" => run_sc(&["start", "osagent"])?,
                     _ => {
                         eprintln!("Service start not supported on this OS: {}", os);
                     }
@@ -333,9 +386,7 @@ async fn main() -> anyhow::Result<()> {
                 ServiceCommands::Stop => match os {
                     "linux" => run_systemctl("stop", "osagent")?,
                     "macos" => run_launchctl("stop", "com.osagent")?,
-                    "windows" => {
-                        eprintln!("Use Task Manager or 'net stop osagent' to stop the service.");
-                    }
+                    "windows" => run_sc(&["stop", "osagent"])?,
                     _ => {
                         eprintln!("Service stop not supported on this OS: {}", os);
                     }
@@ -386,6 +437,107 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Registers OSA with the Windows Service Control Manager.
+///
+/// Uses `sc.exe`, which ships with Windows, rather than sending users off to
+/// download NSSM: on the project's primary platform the previous behaviour was
+/// to print a link and do nothing.
+#[cfg(windows)]
+fn install_windows_service() -> anyhow::Result<()> {
+    let binary_path = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to get current exe: {}", e))?;
+
+    // sc.exe takes the whole command line as a single binPath value, and the
+    // space between the executable and its argument has to survive quoting.
+    let bin_path = format!("\"{}\" start", binary_path.display());
+
+    let status = std::process::Command::new("sc.exe")
+        .args([
+            "create",
+            "osagent",
+            "binPath=",
+            &bin_path,
+            "start=",
+            "auto",
+            "DisplayName=",
+            "OSA AI Assistant",
+        ])
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run sc.exe: {}", e))?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "sc.exe create failed (exit {:?}). This needs an elevated prompt.",
+            status.code()
+        );
+    }
+
+    let _ = std::process::Command::new("sc.exe")
+        .args([
+            "description",
+            "osagent",
+            "Local-first AI agent (https://opensourceagent.net)",
+        ])
+        .status();
+
+    println!("Service 'osagent' installed and set to start automatically.");
+    println!("  Run 'osagent service start' to start it now.");
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn uninstall_windows_service() -> anyhow::Result<()> {
+    let _ = std::process::Command::new("sc.exe")
+        .args(["stop", "osagent"])
+        .status();
+
+    let status = std::process::Command::new("sc.exe")
+        .args(["delete", "osagent"])
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run sc.exe: {}", e))?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "sc.exe delete failed (exit {:?}). This needs an elevated prompt.",
+            status.code()
+        );
+    }
+
+    println!("Service uninstalled.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_sc(args: &[&str]) -> anyhow::Result<()> {
+    let status = std::process::Command::new("sc.exe")
+        .args(args)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run sc.exe: {}", e))?;
+
+    if !status.success() {
+        anyhow::bail!("sc.exe {:?} failed (exit {:?}).", args, status.code());
+    }
+    Ok(())
+}
+
+// The `match os` arms above are compiled on every platform, so these stubs are
+// needed off Windows even though those arms are unreachable there.
+#[cfg(not(windows))]
+fn install_windows_service() -> anyhow::Result<()> {
+    anyhow::bail!("Windows services are not available on this platform")
+}
+
+#[cfg(not(windows))]
+fn uninstall_windows_service() -> anyhow::Result<()> {
+    anyhow::bail!("Windows services are not available on this platform")
+}
+
+#[cfg(not(windows))]
+fn run_sc(_args: &[&str]) -> anyhow::Result<()> {
+    anyhow::bail!("Windows services are not available on this platform")
 }
 
 fn install_systemd_service() -> anyhow::Result<()> {

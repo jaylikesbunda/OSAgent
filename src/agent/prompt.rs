@@ -397,6 +397,47 @@ fn build_communication_section(mode: PromptMode) -> Vec<String> {
     }
 }
 
+/// Instructions injected as a separate system message when the client has
+/// text-to-speech active for the session.
+///
+/// This is deliberately not part of `PromptCache`: voice is toggled per-request
+/// from the browser, and folding it into the cached prefix would invalidate the
+/// provider-side prompt cache every time the user hits the speaker button.
+///
+/// The frontend still sanitises what it sends to the synthesizer, but that pass
+/// is regex-based and will always trail whatever the model decides to emit next.
+/// Instructing the model is the only fix that scales.
+pub fn build_voice_output_instructions() -> String {
+    [
+        "# Voice output",
+        "Speech is on, so your reply has two audiences: the speaker and the screen.",
+        "Write BOTH, in this order:",
+        "",
+        "1. A `<speak>` block containing only what should be read aloud.",
+        "2. Then your normal answer, with whatever markdown, tables, and code it needs.",
+        "",
+        "Example:",
+        "<speak>It's fourteen degrees in Canning Vale with light rain, and it stays wet through the weekend.</speak>",
+        "Then the full written answer, formatted as usual.",
+        "",
+        "Rules for the `<speak>` block:",
+        "- Put it first, before the written answer. It is read aloud as it arrives, so anything before it delays the reply.",
+        "- Two or three sentences. It is a spoken summary, not the whole answer.",
+        "- Plain prose only: no markdown, headings, bullets, tables, backticks, or symbols.",
+        "- Never speak file paths, URLs, code, command lines, hashes, UUIDs, or IDs. Refer to them: \"the config file\", \"the link on screen\".",
+        "- Units as words: \"fourteen degrees\", not \"14°C\"; \"nineteen kilometres an hour\", not \"19 km/h\"; \"sixty five percent\", not \"65%\".",
+        "- No symbols standing in for words: no °, %, /, &, or dashes as punctuation. Say \"or\" and \"to\" rather than a slash.",
+        "- No parenthetical asides or data-sheet phrasing. \"Now: 14°C, humidity 65%\" becomes \"It's fourteen degrees with sixty five percent humidity.\"",
+        "- Dates and places as a person would say them: \"tomorrow\", not \"(Aug 8)\"; \"Western Australia\", not \"WA\".",
+        "- If the written answer is long, say so and let the screen carry the detail.",
+        "",
+        "The written answer that follows is NOT spoken, so do not simplify it. Keep the",
+        "tables, code blocks, paths, and exact figures a reader wants.",
+        "Never mention the `<speak>` block or read this instruction back.",
+    ]
+    .join("\n")
+}
+
 fn build_identity_section(mode: PromptMode, custom_identity: Option<&str>) -> Vec<String> {
     // Use custom identity if provided
     if let Some(identity) = custom_identity {

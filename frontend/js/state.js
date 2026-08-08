@@ -92,7 +92,15 @@ OSA.getEventSource = () => OSA.eventSource;
 OSA.setEventSource = es => OSA.eventSource = es;
 OSA.getActiveTools = () => OSA.activeTools;
 OSA.isAgentProcessing = () => OSA.isProcessing;
-OSA.setProcessing = p => OSA.isProcessing = p;
+// Notifies the voice-mode orb. Processing is set from several places
+// (send, turn complete, stop, forced reset) and none of them touched the mic
+// button, which was previously the only thing that re-rendered voice mode — so
+// the orb sat on "Tap to speak" for the whole time the agent was thinking.
+OSA.setProcessing = p => {
+    OSA.isProcessing = p;
+    OSA.renderVoiceModeState?.();
+    return p;
+};
 OSA.isAgentStopping = () => OSA.isStopping;
 OSA.setStopping = s => OSA.isStopping = s;
 OSA.getHasReceivedResponse = () => OSA.hasReceivedResponse;

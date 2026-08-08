@@ -1102,6 +1102,17 @@ impl AgentRuntime {
                 vec![Message::system(prompt_text)]
             };
 
+            // Voice mode is stored on the session (rather than passed per call)
+            // so it survives reloads and applies to every surface, not just web.
+            let voice_mode = session
+                .metadata
+                .get("voice_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if voice_mode {
+                api_messages.push(Message::system(prompt::build_voice_output_instructions()));
+            }
+
             if !is_roleplay {
                 if let Some(decision_block) = self.decision_memory.prompt_block().await? {
                     api_messages.push(Message::system(decision_block));
@@ -4607,6 +4618,29 @@ impl AgentRuntime {
 
     pub async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>> {
         self.session_manager.list_session_summaries().await
+    }
+
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::storage::SessionSearchHit>> {
+        self.storage.search_messages(query, limit)
+    }
+
+    /// Drops messages from `from` onward so the next turn re-runs from that
+    /// point. Refuses while a turn is in flight, since the running turn holds
+    /// its own copy of the transcript and would write it straight back.
+    pub async fn truncate_session_messages(&self, session_id: &str, from: usize) -> Result<()> {
+        if self.active_runs.contains_key(session_id) {
+            return Err(OSAgentError::Session(
+                "Cannot edit history while the agent is running. Stop it first.".to_string(),
+            ));
+        }
+
+        let session_lock = self.get_session_lock(session_id);
+        let _lock_guard = session_lock.lock().await;
+        self.storage.truncate_session_messages(session_id, from)
     }
 
     pub async fn enqueue_message(

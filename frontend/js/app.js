@@ -27,6 +27,7 @@ OSA.queueDeferredStartupTasks = function() {
 
     OSA.runWhenIdle(function() {
         OSA.initVoice();
+        OSA.initPushToTalk?.();
         OSA.loadProviderCatalog();
         OSA.refreshWorkflowAvailability?.();
     });
@@ -201,7 +202,7 @@ OSA.checkAuthAndInit = async function() {
         
         const token = OSA.getToken();
         if (token) {
-            const validRes = await OSA.fetchWithAuth('/api/sessions');
+            const validRes = await OSA.fetchWithAuth('/api/session-summaries');
             if (validRes.ok) {
                 OSA.prefetchedSessions = await validRes.json().catch(() => null);
                 OSA.showApp();
@@ -361,7 +362,7 @@ OSA.loadSessions = async function() {
             sessions = OSA.prefetchedSessions;
             OSA.prefetchedSessions = null;
         } else {
-            const res = await OSA.fetchWithAuth('/api/sessions');
+            const res = await OSA.fetchWithAuth('/api/session-summaries');
             sessions = await res.json();
         }
 
@@ -467,7 +468,7 @@ OSA.loadSessions = async function() {
 
         list.innerHTML = `
             <div class="session-search">
-                <input type="text" id="session-search-input" placeholder="Search sessions..." oninput="OSA.debounce('sessionSearch', () => OSA.filterSessions(this.value), 200)" />
+                <input type="text" id="session-search-input" placeholder="Search sessions..." oninput="OSA.debounce('sessionSearch', () => OSA.filterSessionsWithContent(this.value), 250)" />
                 <select id="session-source-filter" onchange="OSA.setSessionSourceFilter(this.value); OSA.filterSessions(document.getElementById('session-search-input')?.value || '')">
                     <option value="all">All sources</option>
                     <option value="web">Web</option>
@@ -1138,6 +1139,24 @@ OSA.sendMessage = async function() {
     const attachments = OSA.getAttachments().slice();
     if (!message && attachments.length === 0) return;
 
+    // Barge-in: sending is an explicit signal the user is done listening.
+    if (typeof OSA.cancelSpeechOutput === 'function') {
+        OSA.cancelSpeechOutput();
+    }
+    OSA.resetSpeechStream?.();
+    // Clear the voice-mode reply panel here rather than in resetSpeechStream:
+    // that also runs at turn end, which would wipe the text while it is still
+    // being spoken. Clearing on send keeps the last answer on screen until the
+    // next question, and stops replies accumulating across turns.
+    OSA.resetVoiceModeReply?.();
+
+    // Assert voice_mode before the turn runs, and await it: the agent reads the
+    // flag off the session when building the prompt, so a fire-and-forget PATCH
+    // could lose the race and the reply would come back screen-shaped.
+    if (typeof OSA.ensureVoiceModeSynced === 'function') {
+        await OSA.ensureVoiceModeSynced();
+    }
+
     const clientMessageId = OSA.generateClientMessageId();
     const shouldQueueLocally = OSA.isAgentProcessing() || (OSA.getSessionQueue() || []).length > 0;
     let optimisticDomId = '';
@@ -1539,6 +1558,12 @@ document.addEventListener('click', (event) => {
 
 document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+        // Voice mode is the outermost surface, so it closes first.
+        if (OSA.isVoiceModeOpen?.()) {
+            event.preventDefault();
+            OSA.closeVoiceMode();
+            return;
+        }
         if (OSA.modelDropdownOpen) {
             OSA.closeModelDropdown();
             return;
@@ -1579,7 +1604,23 @@ document.addEventListener('keydown', (event) => {
             jobsModal.classList.add('hidden');
             return;
         }
+        const slashMenu = document.getElementById('slash-menu');
+        if (slashMenu && !slashMenu.classList.contains('hidden')) {
+            OSA.hideSlashMenu();
+            return;
+        }
         OSA.hideSlashMenu();
+
+        // With no overlay to dismiss, Escape is the interrupt. This is the only
+        // way to cancel a turn while there is text in the input, since the send
+        // button prioritises sending over stopping once the draft is non-empty.
+        if (OSA.isAgentProcessing() && !OSA.isAgentStopping()) {
+            event.preventDefault();
+            OSA.stopGeneration();
+        } else if (typeof OSA.cancelSpeechOutput === 'function' && OSA.isSpeaking?.()) {
+            event.preventDefault();
+            OSA.cancelSpeechOutput();
+        }
         return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key === 'l') {
@@ -1694,17 +1735,49 @@ OSA.hideSlashMenu = function() {
     if (menu) menu.classList.add('hidden');
 };
 
+// Searches message content on the server and folds the matching session ids
+// into the sidebar filter. The local pass below still matches titles, so a
+// query hits both. Sidebar filtering used to be DOM-only, which meant anything
+// not currently rendered — i.e. most of your history — was unsearchable.
+OSA.searchSessionContent = async function(query) {
+    const q = (query || '').trim();
+    if (q.length < 3) {
+        OSA._contentMatchIds = null;
+        return;
+    }
+
+    try {
+        const res = await OSA.fetchWithAuth(`/api/session-search?q=${encodeURIComponent(q)}`);
+        if (!res.ok) return;
+        const hits = await res.json();
+        OSA._contentMatchIds = new Set(hits.map(hit => hit.session_id));
+    } catch (err) {
+        // Title matching still works; content search is additive.
+        console.warn('Session content search failed:', err);
+        OSA._contentMatchIds = null;
+    }
+};
+
+OSA.filterSessionsWithContent = async function(query) {
+    await OSA.searchSessionContent(query);
+    OSA.filterSessions(query);
+};
+
 OSA.filterSessions = function(query) {
     const items = document.querySelectorAll('.session-item');
     const childrenGroups = document.querySelectorAll('.session-children');
     const q = query.toLowerCase();
     const sourceFilter = OSA.getSessionSourceFilter ? OSA.getSessionSourceFilter() : 'all';
     
+    const contentMatches = OSA._contentMatchIds;
+
     items.forEach(item => {
         const text = (item.textContent || '').toLowerCase();
         const source = item.dataset.sessionSource || 'web';
         const matchesSource = sourceFilter === 'all' || source === sourceFilter;
-        item.style.display = ((!q || text.includes(q)) && matchesSource) ? '' : 'none';
+        const matchesTitle = !q || text.includes(q);
+        const matchesContent = !!q && !!contentMatches && contentMatches.has(item.dataset.sessionId);
+        item.style.display = ((matchesTitle || matchesContent) && matchesSource) ? '' : 'none';
     });
 
     if (q || sourceFilter !== 'all') {
@@ -2175,6 +2248,14 @@ OSA.setupAttachmentPicker = function() {
 
     const input = document.getElementById('message-input');
     if (input) {
+        // Barge-in: the user starting to type means they have stopped listening.
+        // Fires once per playback rather than on every keystroke.
+        input.addEventListener('input', () => {
+            if (typeof OSA.cancelSpeechOutput === 'function' && OSA.isSpeaking?.()) {
+                OSA.cancelSpeechOutput();
+            }
+        });
+
         input.addEventListener('paste', async (e) => {
             const items = Array.from(e.clipboardData.items);
             const fileItems = items.filter(item => item.kind === 'file');

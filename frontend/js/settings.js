@@ -217,6 +217,8 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-voice-language').value = voice.language || 'en';
         document.getElementById('setting-auto-send').checked = !!voice.auto_send;
         document.getElementById('setting-auto-speak').checked = !!voice.auto_speak;
+        document.getElementById('setting-speak-tool-progress').checked = !!voice.speak_tool_progress;
+        document.getElementById('setting-silence-auto-stop').checked = voice.silence_auto_stop !== false;
         document.getElementById('setting-voice-speed').value = voice.voice_speed || 1.0;
         
         document.getElementById('setting-password-enabled').checked = config.server?.password_enabled || false;
@@ -355,6 +357,8 @@ OSA.saveSettings = async function() {
         language: document.getElementById('setting-voice-language').value || 'en',
         auto_send: document.getElementById('setting-auto-send').checked,
         auto_speak: document.getElementById('setting-auto-speak').checked,
+        speak_tool_progress: document.getElementById('setting-speak-tool-progress').checked,
+        silence_auto_stop: document.getElementById('setting-silence-auto-stop').checked,
         voice_speed: parseFloat(document.getElementById('setting-voice-speed').value) || 1.0,
         whisper_model: previousVoice?.whisper_model || null,
         piper_voice: previousVoice?.piper_voice || null

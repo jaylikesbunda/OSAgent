@@ -15,6 +15,11 @@ pub struct WhisperStatus {
     pub binary_installed: bool,
     pub model_name: Option<String>,
     pub model_path: Option<String>,
+    /// Whether the persistent server binary is present. The UI only streams
+    /// partial transcripts when it is: without a resident model every partial
+    /// would reload hundreds of megabytes from disk.
+    #[serde(default)]
+    pub server_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +118,7 @@ pub fn get_status() -> WhisperStatus {
                 .unwrap_or_default()
         }),
         model_path: model_path.map(|p| p.to_string_lossy().to_string()),
+        server_available: super::whisper_server::is_available(),
     }
 }
 
@@ -611,6 +617,40 @@ pub async fn download_model(model_id: &str) -> Result<PathBuf, String> {
     Ok(model_path)
 }
 
+/// Prefers the English-only build of a model when the configured language is
+/// English. `tiny.en` and `base.en` are meaningfully faster and more accurate
+/// on English than their multilingual counterparts at the same size.
+///
+/// Only a preference: the caller falls back to the requested model when the
+/// `.en` variant is not downloaded.
+fn prefer_english_variant(model_id: &str, language: Option<&str>) -> String {
+    let is_english = language
+        .map(|lang| {
+            let lang = lang.to_lowercase();
+            lang == "en" || lang.starts_with("en-") || lang.starts_with("en_")
+        })
+        .unwrap_or(false);
+
+    if !is_english || model_id.ends_with(".en") {
+        return model_id.to_string();
+    }
+
+    // medium/large have .en builds too, but only these are offered for download.
+    match model_id {
+        "tiny" | "base" | "small" => format!("{}.en", model_id),
+        other => other.to_string(),
+    }
+}
+
+/// Threads to give whisper.cpp. Uses physical cores where we can tell, capped
+/// so a very large machine does not spend more time on thread overhead than
+/// inference.
+fn transcribe_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(4, 16))
+        .unwrap_or(4)
+}
+
 pub async fn transcribe(
     audio_path: &std::path::Path,
     language: Option<&str>,
@@ -622,16 +662,35 @@ pub async fn transcribe(
     }
 
     let model_path = if let Some(id) = model_id {
-        find_model_by_id(id).ok_or_else(|| {
-            format!(
-                "Selected Whisper model '{}' is not installed. Download it first from Voice settings.",
-                id
-            )
-        })?
+        let requested = prefer_english_variant(id, language);
+        find_model_by_id(&requested)
+            .or_else(|| find_model_by_id(id))
+            .ok_or_else(|| {
+                format!(
+                    "Selected Whisper model '{}' is not installed. Download it first from Voice settings.",
+                    id
+                )
+            })?
     } else {
         find_downloaded_model()
             .ok_or_else(|| "No Whisper model installed. Download a model first.".to_string())?
     };
+
+    let threads = transcribe_threads();
+
+    // Prefer the resident server: the CLI reloads the entire model for every
+    // utterance, which dominates latency on short input. Any failure falls
+    // through to the CLI below, so this can never make transcription
+    // unavailable — only slower.
+    if super::whisper_server::is_available() {
+        match super::whisper_server::transcribe(audio_path, language, &model_path, threads).await {
+            Ok(text) => return Ok(text),
+            Err(err) => {
+                tracing::warn!("whisper-server transcription failed, using CLI: {}", err);
+                super::whisper_server::mark_unhealthy();
+            }
+        }
+    }
 
     let mut args = vec![
         "-f".to_string(),
@@ -639,7 +698,15 @@ pub async fn transcribe(
         "-m".to_string(),
         model_path.to_string_lossy().to_string(),
         "-nt".to_string(),
-        "--output-txt".to_string(),
+        // Physical cores. whisper.cpp's own default is conservative, and
+        // transcription is the only thing running at this point.
+        "-t".to_string(),
+        threads.to_string(),
+        // Greedy instead of the default 5-beam search. For short conversational
+        // utterances the accuracy difference is negligible and this is roughly
+        // beam-count faster.
+        "-bs".to_string(),
+        "1".to_string(),
     ];
 
     if let Some(lang) = language {
@@ -664,20 +731,117 @@ pub async fn transcribe(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_transcript(&stdout))
+}
+
+/// Joins every transcribed segment.
+///
+/// whisper.cpp prints one line per segment. The previous parser looked for a
+/// `]` to skip a timestamp prefix, but `-nt` removes timestamps entirely, so it
+/// never matched and fell through to returning only the *last* line — silently
+/// dropping everything before it on any utterance long enough to be split into
+/// more than one segment.
+///
+/// Timestamps are still stripped when present, so this stays correct if `-nt`
+/// is ever dropped.
+fn parse_transcript(stdout: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
 
     for line in stdout.lines() {
-        if !line.starts_with('[') && !line.is_empty() {
-            if let Some(after_bracket) = line.split(']').nth(1) {
-                return Ok(after_bracket.trim().to_string());
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Progress and diagnostics go to stdout on some builds.
+        if line.starts_with("whisper_")
+            || line.starts_with("main:")
+            || line.starts_with("system_info:")
+        {
+            continue;
+        }
+
+        let text = if line.starts_with('[') {
+            match line.split_once(']') {
+                Some((_, rest)) => rest.trim(),
+                None => continue,
             }
+        } else {
+            line
+        };
+
+        if !text.is_empty() {
+            parts.push(text);
         }
     }
 
-    Ok(stdout.lines().last().unwrap_or("").to_string())
+    parts.join(" ")
 }
 
 pub async fn install_all(model: WhisperModel) -> Result<(), String> {
     install_binary().await?;
     download_model(model.id()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod transcript_parse_tests {
+    use super::*;
+
+    /// The regression this replaces: with -nt there are no timestamps, the old
+    /// parser matched nothing, and it returned only the final line.
+    #[test]
+    fn joins_every_segment_without_timestamps() {
+        let stdout = " I updated the storage layer.\n It should be faster now.\n Let me know.\n";
+        assert_eq!(
+            parse_transcript(stdout),
+            "I updated the storage layer. It should be faster now. Let me know."
+        );
+    }
+
+    #[test]
+    fn single_segment_is_unchanged() {
+        assert_eq!(parse_transcript(" hello there\n"), "hello there");
+    }
+
+    /// Still correct if -nt is ever removed.
+    #[test]
+    fn strips_timestamps_when_present() {
+        let stdout = "[00:00:00.000 --> 00:00:02.000]   first part\n\
+                      [00:00:02.000 --> 00:00:04.000]   second part\n";
+        assert_eq!(parse_transcript(stdout), "first part second part");
+    }
+
+    #[test]
+    fn skips_diagnostics_and_blank_lines() {
+        let stdout = "whisper_init_from_file_with_params_no_state: loading model\n\
+                      system_info: n_threads = 8\n\
+                      \n\
+                      the actual words\n\
+                      \n";
+        assert_eq!(parse_transcript(stdout), "the actual words");
+    }
+
+    #[test]
+    fn empty_output_yields_empty_string() {
+        assert_eq!(parse_transcript(""), "");
+        assert_eq!(parse_transcript("\n\n"), "");
+    }
+
+    #[test]
+    fn prefers_english_build_only_for_english() {
+        assert_eq!(prefer_english_variant("base", Some("en")), "base.en");
+        assert_eq!(prefer_english_variant("tiny", Some("en-US")), "tiny.en");
+        assert_eq!(prefer_english_variant("base", Some("fr")), "base");
+        assert_eq!(prefer_english_variant("base", None), "base");
+        // Already English-only, and models without a .en build.
+        assert_eq!(prefer_english_variant("base.en", Some("en")), "base.en");
+        assert_eq!(prefer_english_variant("medium", Some("en")), "medium");
+    }
+
+    #[test]
+    fn thread_count_is_sane() {
+        let threads = transcribe_threads();
+        assert!((4..=16).contains(&threads), "unexpected thread count {threads}");
+    }
 }

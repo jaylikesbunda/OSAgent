@@ -570,6 +570,11 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
                 .delete(delete_sessions),
         )
         .route("/api/session-summaries", get(list_session_summaries))
+        .route("/api/session-search", get(search_sessions))
+        .route(
+            "/api/sessions/:id/messages/truncate",
+            post(truncate_session_messages),
+        )
         .route(
             "/api/sessions/:id",
             get(get_session).patch(patch_session).delete(delete_session),
@@ -927,7 +932,14 @@ async fn restart_server(
 ) -> Result<Json<RestartResponse>, (StatusCode, Json<ErrorResponse>)> {
     agent.signal_shutdown();
 
-    std::fs::write(".osagent_restart_flag", "1").map_err(|e| {
+    // Absolute, and alongside the config: a relative path resolved against the
+    // process working directory, which the supervisor does not control.
+    let flag_path = shellexpand::tilde("~/.osagent/restart_flag").to_string();
+    if let Some(parent) = std::path::Path::new(&flag_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    std::fs::write(&flag_path, "1").map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -1784,6 +1796,59 @@ async fn list_session_summaries(
     Ok(Json(summaries))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SessionSearchQuery {
+    pub q: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+async fn search_sessions(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Query(params): Query<SessionSearchQuery>,
+) -> Result<Json<Vec<crate::storage::SessionSearchHit>>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let hits = agent
+        .search_messages(&params.q, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(hits))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TruncateMessagesRequest {
+    /// Index of the first message to drop. Everything from here on goes.
+    pub from: usize,
+}
+
+async fn truncate_session_messages(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    Json(payload): Json<TruncateMessagesRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    agent
+        .truncate_session_messages(&id, payload.from)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_session(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Json(payload): Json<CreateSessionRequest>,
@@ -1876,6 +1941,9 @@ async fn delete_session(
 #[derive(Debug, Deserialize)]
 pub struct PatchSessionRequest {
     pub name: Option<String>,
+    /// Set when the client turns text-to-speech on or off. Stored on the
+    /// session so the turn loop can add speech-shaped output instructions.
+    pub voice_mode: Option<bool>,
 }
 
 async fn patch_session(
@@ -1904,6 +1972,9 @@ async fn patch_session(
     let mut updated_session = session;
     if let Some(name) = payload.name {
         updated_session.metadata["name"] = serde_json::json!(name);
+    }
+    if let Some(voice_mode) = payload.voice_mode {
+        updated_session.metadata["voice_mode"] = serde_json::json!(voice_mode);
     }
 
     agent.update_session(&updated_session).await.map_err(|e| {
@@ -2841,7 +2912,10 @@ async fn voice_status() -> Json<serde_json::Value> {
         "whisper_model": status.whisper_model,
         "piper_installed": status.piper_installed,
         "piper_voice": status.piper_voice,
-        "models_dir": status.models_dir
+        "models_dir": status.models_dir,
+        // Drives streaming partial transcripts in the UI: without a resident
+        // model each partial would reload the whole thing from disk.
+        "whisper_server_available": crate::voice::whisper_server::is_available()
     }))
 }
 

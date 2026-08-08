@@ -268,6 +268,14 @@ pub struct VoiceConfig {
     pub language: String,
     pub auto_send: bool,
     pub auto_speak: bool,
+    /// Narrate each tool call while the agent works. Off by default: a turn with
+    /// a dozen tool calls queues two dozen utterances, and the final answer
+    /// interrupts the queue anyway.
+    pub speak_tool_progress: bool,
+    /// End the recording automatically after a pause, so a hands-free turn does
+    /// not need a second click to stop. Local Whisper only: the browser's own
+    /// recogniser already ends on silence.
+    pub silence_auto_stop: bool,
     pub voice_speed: f32,
     pub whisper_model: Option<String>,
     pub piper_voice: Option<String>,
@@ -500,6 +508,8 @@ impl Default for VoiceConfig {
             language: "en".to_string(),
             auto_send: false,
             auto_speak: false,
+            speak_tool_progress: false,
+            silence_auto_stop: true,
             voice_speed: 1.0,
             whisper_model: None,
             piper_voice: None,

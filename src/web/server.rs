@@ -205,12 +205,27 @@ pub async fn run_with_agent(
     );
 
     let bind_addr = format!("{}:{}", config.server.bind, config.server.port);
-    info!("OSA web server listening on http://{}", bind_addr);
 
     let bind_start = Instant::now();
+    // Bind before announcing. This used to log "listening on ..." first, so a
+    // port conflict produced a confident success line immediately followed by a
+    // raw OS error, which reads like the server started and then broke.
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .map_err(|e| crate::error::OSAgentError::Unknown(e.to_string()))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                crate::error::OSAgentError::Unknown(format!(
+                    "Port {} is already in use. Another OSA instance may still be running, \
+                     or a leftover child process is holding the port. Stop it, or start with \
+                     a different port using `osagent start -p <port>`.",
+                    config.server.port
+                ))
+            } else {
+                crate::error::OSAgentError::Unknown(format!("Could not bind {bind_addr}: {e}"))
+            }
+        })?;
+
+    info!("OSA web server listening on http://{}", bind_addr);
     info!(
         target: "osagent::startup",
         "phase=web_listener_bind elapsed_ms={:.2}",

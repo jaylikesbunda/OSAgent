@@ -21,7 +21,7 @@ tower-http = { version = "0.5", features = ["fs", "cors", "trace", "compression-
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "builder", "http"], optional = true }
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 reqwest-eventsource = "0.6"
 
 # Serialization

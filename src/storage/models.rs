@@ -470,3 +470,12 @@ impl ScheduledJob {
             .and_then(|s| s.parse().ok())
     }
 }
+
+/// A message that matched a search, with enough context to render a result row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub seq: usize,
+    pub role: String,
+    pub snippet: String,
+}
