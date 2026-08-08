@@ -756,7 +756,8 @@ impl ToolRegistry {
                 // Plan mode is read-only by contract; an MCP tool that
                 // does not claim `readOnlyHint` has to be assumed to
                 // mutate something.
-                if profile != ToolProfile::Plan || !tool.function.name.starts_with(MCP_TOOL_PREFIX) {
+                if profile != ToolProfile::Plan || !tool.function.name.starts_with(MCP_TOOL_PREFIX)
+                {
                     return true;
                 }
                 manager

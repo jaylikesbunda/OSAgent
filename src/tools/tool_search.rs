@@ -168,7 +168,10 @@ impl Tool for ToolSearchTool {
             .collect();
         let newly_activated = manager.activate(&names);
 
-        let payload: Vec<Value> = matches.iter().map(|entry| entry.to_search_result()).collect();
+        let payload: Vec<Value> = matches
+            .iter()
+            .map(|entry| entry.to_search_result())
+            .collect();
         let rendered = serde_json::to_string_pretty(&payload).unwrap_or_default();
 
         let activation_note = if newly_activated.is_empty() {

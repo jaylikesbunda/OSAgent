@@ -46,7 +46,7 @@ impl McpClient {
                         config.name
                     ))
                 })?;
-                Transport::Stdio(
+                Transport::Stdio(Box::new(
                     StdioTransport::spawn(
                         &config.name,
                         command,
@@ -56,7 +56,7 @@ impl McpClient {
                         frame_tx,
                     )
                     .await?,
-                )
+                ))
             }
             crate::config::McpTransport::Http => {
                 let url = config.url.as_deref().ok_or_else(|| {

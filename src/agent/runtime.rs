@@ -5683,9 +5683,7 @@ impl AgentRuntime {
                 .servers
                 .iter_mut()
                 .find(|server| server.name == name)
-                .ok_or_else(|| {
-                    OSAgentError::Config(format!("No MCP server named '{}'", name))
-                })?;
+                .ok_or_else(|| OSAgentError::Config(format!("No MCP server named '{}'", name)))?;
             server.enabled = enabled;
             config.save_to_current_path()?;
         }

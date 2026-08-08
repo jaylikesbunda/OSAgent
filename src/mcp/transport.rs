@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 
 pub enum Transport {
-    Stdio(StdioTransport),
+    Stdio(Box<StdioTransport>),
     Http(HttpTransport),
 }
 
@@ -115,7 +115,10 @@ impl StdioTransport {
                     }
                     Ok(None) => break,
                     Err(error) => {
-                        warn!("MCP server '{}': stdout read failed: {}", stdout_server, error);
+                        warn!(
+                            "MCP server '{}': stdout read failed: {}",
+                            stdout_server, error
+                        );
                         break;
                     }
                 }
@@ -198,7 +201,10 @@ impl HttpTransport {
             .post(&self.url)
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", crate::mcp::protocol::PROTOCOL_VERSION);
+            .header(
+                "mcp-protocol-version",
+                crate::mcp::protocol::PROTOCOL_VERSION,
+            );
 
         for (key, value) in &self.headers {
             request = request.header(key.as_str(), value.as_str());

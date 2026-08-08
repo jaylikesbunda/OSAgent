@@ -93,7 +93,9 @@ fn tool_search_is_absent_when_no_mcp_server_is_connected() {
     let registry = registry();
     for (label, profile) in PROFILES {
         assert!(
-            !names(&registry, *profile).iter().any(|n| n == "tool_search"),
+            !names(&registry, *profile)
+                .iter()
+                .any(|n| n == "tool_search"),
             "{} persona was offered tool_search with an empty catalog",
             label
         );
@@ -139,10 +141,7 @@ async fn every_persona_that_can_search_can_also_call_what_it_finds() {
     for (label, profile) in PROFILES {
         let visible = names(&registry, *profile);
         let can_search = visible.iter().any(|n| n == "tool_search");
-        let reachable: Vec<&String> = visible
-            .iter()
-            .filter(|n| n.starts_with("mcp__"))
-            .collect();
+        let reachable: Vec<&String> = visible.iter().filter(|n| n.starts_with("mcp__")).collect();
 
         // The invariant: discovery and callable tools are all-or-nothing.
         assert_eq!(
@@ -197,6 +196,8 @@ fn native_tool_block_is_stable_across_activations() {
     let before = names(&registry, ToolProfile::Default);
     let after = names(&registry, ToolProfile::Default);
     assert_eq!(before, after);
-    assert!(before.windows(2).all(|pair| pair[0] <= pair[1]),
-        "native tools must stay sorted so the cached prefix is byte-stable");
+    assert!(
+        before.windows(2).all(|pair| pair[0] <= pair[1]),
+        "native tools must stay sorted so the cached prefix is byte-stable"
+    );
 }

@@ -217,8 +217,14 @@ mod tests {
 
     #[test]
     fn splits_camel_case_and_snake_case_alike() {
-        assert_eq!(tokenize("listPullRequests"), vec!["list", "pull", "requests"]);
-        assert_eq!(tokenize("list_pull_requests"), vec!["list", "pull", "requests"]);
+        assert_eq!(
+            tokenize("listPullRequests"),
+            vec!["list", "pull", "requests"]
+        );
+        assert_eq!(
+            tokenize("list_pull_requests"),
+            vec!["list", "pull", "requests"]
+        );
     }
 
     #[test]

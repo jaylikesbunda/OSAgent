@@ -295,11 +295,7 @@ pub async fn run_script(context: ScriptContext, args: &Value) -> Result<ToolResu
 
     Ok(ToolResult {
         output: truncated,
-        title: Some(format!(
-            "{} script · {} tool call(s)",
-            language,
-            calls
-        )),
+        title: Some(format!("{} script · {} tool call(s)", language, calls)),
         metadata: json!({
             "language": language,
             "tool_calls": calls,
@@ -602,7 +598,12 @@ async fn run_interpreter(
 /// becomes `tools.linear.create_issue`. Building this in Rust rather
 /// than guessing at runtime means an unknown attribute fails immediately
 /// with a list of what does exist.
-fn namespace_map(allowlist: &HashSet<String>) -> (Vec<(String, String)>, HashMap<String, Vec<(String, String)>>) {
+fn namespace_map(
+    allowlist: &HashSet<String>,
+) -> (
+    Vec<(String, String)>,
+    HashMap<String, Vec<(String, String)>>,
+) {
     let mut flat: Vec<(String, String)> = Vec::new();
     let mut nested: HashMap<String, Vec<(String, String)>> = HashMap::new();
 
@@ -844,7 +845,10 @@ mod tests {
             "mcp__linear__list_issues",
         ]));
 
-        assert_eq!(flat, vec![("read_file".to_string(), "read_file".to_string())]);
+        assert_eq!(
+            flat,
+            vec![("read_file".to_string(), "read_file".to_string())]
+        );
         let linear = nested.get("linear").expect("linear namespace");
         assert_eq!(linear.len(), 2);
         assert!(linear

@@ -264,11 +264,17 @@ async fn tool_level_errors_are_reported_not_swallowed() {
     let manager = McpManager::connect(&fixture.config).await;
 
     let (output, is_error) = manager
-        .call("mcp__tracker__delete_project", serde_json::json!({"id": "1"}))
+        .call(
+            "mcp__tracker__delete_project",
+            serde_json::json!({"id": "1"}),
+        )
         .await
         .expect("transport should succeed even when the tool fails");
 
-    assert!(is_error, "server set isError and the client must surface it");
+    assert!(
+        is_error,
+        "server set isError and the client must surface it"
+    );
     assert!(output.contains("refusing"));
 
     manager.shutdown().await;

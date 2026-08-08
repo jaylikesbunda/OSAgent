@@ -3506,9 +3506,7 @@ impl McpServerRequest {
     }
 }
 
-async fn mcp_status(
-    Extension(agent): Extension<Arc<AgentRuntime>>,
-) -> Json<serde_json::Value> {
+async fn mcp_status(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<serde_json::Value> {
     Json(agent.mcp_status().await)
 }
 

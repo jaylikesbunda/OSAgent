@@ -147,10 +147,9 @@ impl McpManager {
                             qualified_name: qualified,
                             server: server.name.clone(),
                             tool: spec.name.clone(),
-                            title: spec
-                                .title
-                                .clone()
-                                .or_else(|| spec.annotations.as_ref().and_then(|a| a.title.clone())),
+                            title: spec.title.clone().or_else(|| {
+                                spec.annotations.as_ref().and_then(|a| a.title.clone())
+                            }),
                             description: spec.description.clone().unwrap_or_default(),
                             read_only: spec
                                 .annotations
@@ -173,7 +172,11 @@ impl McpManager {
                     );
                     summaries.push(ServerSummary {
                         name: server.name.clone(),
-                        blurb: derive_blurb(server, client.instructions().as_deref(), &server_entries),
+                        blurb: derive_blurb(
+                            server,
+                            client.instructions().as_deref(),
+                            &server_entries,
+                        ),
                         tool_count: server_entries.len(),
                         connected: true,
                         error: None,
@@ -446,8 +449,7 @@ impl McpManager {
     }
 
     pub async fn shutdown(&self) {
-        let clients: Vec<Arc<McpClient>> =
-            self.clients.read().unwrap().values().cloned().collect();
+        let clients: Vec<Arc<McpClient>> = self.clients.read().unwrap().values().cloned().collect();
         for client in clients {
             client.shutdown().await;
         }
@@ -680,7 +682,7 @@ mod tests {
         let first = qualified_name("linear", "create_issue");
         let second = qualified_name("linear", "list_issues");
 
-        manager.activate(&[first.clone()]);
+        manager.activate(std::slice::from_ref(&first));
         manager.activate(&[first.clone(), second.clone()]);
 
         assert_eq!(manager.activated_names(), vec![first, second]);
@@ -705,10 +707,7 @@ mod tests {
             max_activated: 1,
         };
         manager.install_catalog(
-            vec![
-                entry("linear", "a", "a"),
-                entry("linear", "b", "b"),
-            ],
+            vec![entry("linear", "a", "a"), entry("linear", "b", "b")],
             Vec::new(),
         );
         manager.activate(&[qualified_name("linear", "a"), qualified_name("linear", "b")]);

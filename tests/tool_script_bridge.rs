@@ -40,8 +40,7 @@ fn harness() -> Harness {
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_path = workspace.path().to_string_lossy().to_string();
 
-    std::fs::write(workspace.path().join("hello.txt"), "line one\nline two\n")
-        .expect("seed file");
+    std::fs::write(workspace.path().join("hello.txt"), "line one\nline two\n").expect("seed file");
 
     let mut config = Config::default_config();
     config.agent.workspace = workspace_path.clone();
@@ -144,7 +143,10 @@ async fn intermediate_results_never_reach_the_output() {
     .await
     .expect("script should run");
 
-    assert!(!result.output.contains("line one"), "raw tool output leaked into the result");
+    assert!(
+        !result.output.contains("line one"),
+        "raw tool output leaked into the result"
+    );
 }
 
 #[tokio::test]
@@ -167,7 +169,10 @@ async fn undeclared_tools_are_rejected_at_the_bridge() {
     .await
     .expect("script should run");
 
-    assert!(!result.output.contains("BREACH"), "undeclared tool was reachable");
+    assert!(
+        !result.output.contains("BREACH"),
+        "undeclared tool was reachable"
+    );
     assert!(result.output.contains("BLOCKED"), "got: {}", result.output);
     assert!(
         !harness._workspace.path().join("evil.txt").exists(),
@@ -276,7 +281,11 @@ async fn script_errors_surface_with_their_traceback() {
     .expect("a failing script is a result, not a transport error");
 
     assert_ne!(result.metadata["exit_code"], 0);
-    assert!(result.output.contains("deliberate"), "got: {}", result.output);
+    assert!(
+        result.output.contains("deliberate"),
+        "got: {}",
+        result.output
+    );
 }
 
 #[tokio::test]
