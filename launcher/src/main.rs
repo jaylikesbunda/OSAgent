@@ -23,7 +23,7 @@ use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewWindow,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -404,6 +404,62 @@ impl LauncherOAuthStorage {
 }
 
 const OPENAI_OAUTH_PORT: u16 = 1455;
+const WEBUI_URL: &str = "http://localhost:8765";
+
+const TITLEBAR_INJECTION_SCRIPT: &str = r#"(function () {
+  var BAR_ID = 'osagent-native-titlebar';
+  function init() {
+    if (document.getElementById(BAR_ID)) return;
+    var root = document.body && document.body.firstElementChild;
+    if (!root) { setTimeout(init, 100); return; }
+    var bar = document.createElement('div');
+    bar.id = BAR_ID;
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;height:36px;background:#0f0f0f;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;padding:0 8px;z-index:2147483647;user-select:none;-webkit-user-select:none;font-family:"Segoe UI",system-ui,sans-serif;color:#e8e8e8;font-size:12px;';
+    var brand = document.createElement('div');
+    brand.textContent = 'OSAgent';
+    brand.style.cssText = 'font-weight:600;letter-spacing:.3px;padding:0 8px;';
+    var controls = document.createElement('div');
+    controls.id = 'osagent-titlebar-controls';
+    controls.style.cssText = 'display:flex;gap:2px;margin-left:auto;height:28px;';
+    function btn(svg, title, hoverBg, handler) {
+      var b = document.createElement('button');
+      b.innerHTML = svg;
+      b.title = title;
+      b.style.cssText = 'width:34px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:0;border-radius:4px;cursor:pointer;color:#b0b0b0;padding:0;';
+      b.addEventListener('mouseenter', function () { b.style.background = hoverBg; b.style.color = '#ffffff'; });
+      b.addEventListener('mouseleave', function () { b.style.background = 'transparent'; b.style.color = '#b0b0b0'; });
+      b.addEventListener('click', handler);
+      return b;
+    }
+    var win = (window.__TAURI__ && (window.__TAURI__.window || window.__TAURI__)) || {};
+    var appWindow = win.getCurrentWindow ? win.getCurrentWindow() : (win.appWindow || null);
+    var minimize = btn('<svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.4"/></svg>', 'Minimize', '#262626', function () {
+      if (appWindow) { appWindow.minimize().catch(function () {}); }
+    });
+    var close = btn('<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>', 'Close to tray', '#c0392b', function () {
+      if (appWindow) { appWindow.hide().catch(function () {}); }
+    });
+    controls.appendChild(minimize);
+    controls.appendChild(close);
+    bar.appendChild(brand);
+    bar.appendChild(controls);
+    bar.addEventListener('mousedown', function (e) {
+      if (e.target.closest('button')) return;
+      if (appWindow) { appWindow.startDragging().catch(function () {}); }
+    });
+    document.body.appendChild(bar);
+    root.style.height = 'calc(100vh - 36px)';
+    root.style.marginTop = '36px';
+    var overlayStyle = document.createElement('style');
+    overlayStyle.textContent = '.voice-mode,.modal,.image-preview-modal,.workflow-run-modal,.workflow-run-modal-backdrop,.question-modal,.context-modal,.workflow-editor,#app-view > .sidebar-backdrop{top:36px !important;height:calc(100vh - 36px) !important;}';
+    (document.head || document.body).appendChild(overlayStyle);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();"#;
 
 fn oauth_storage_path(config_path: &Path) -> PathBuf {
     config_path
@@ -3023,7 +3079,73 @@ fn restart_osagent(window: WebviewWindow, app_handle: AppHandle) -> Result<Agent
 
 #[tauri::command]
 fn open_web_ui() {
-    let _ = open::that("http://localhost:8765");
+    let _ = open::that(WEBUI_URL);
+}
+
+fn ensure_osagent_running(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let running = *state.osagent_running.lock().unwrap();
+    if running {
+        return Ok(());
+    }
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Launcher window is not available".to_string())?;
+    match start_osagent(window, state, None) {
+        Ok(_) => Ok(()),
+        Err(e) if e.contains("already running") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+async fn wait_for_webui_ready() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("Could not create HTTP client: {}", e))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if let Ok(response) = client.get(WEBUI_URL).send().await {
+            if response.status().is_success() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Err(format!(
+        "Web UI did not become available at {} in time",
+        WEBUI_URL
+    ))
+}
+
+async fn open_native_webui_impl(app: AppHandle) -> Result<(), String> {
+    ensure_osagent_running(&app)?;
+    wait_for_webui_ready().await?;
+
+    let url = reqwest::Url::parse(WEBUI_URL).map_err(|e| e.to_string())?;
+    if let Some(window) = app.get_webview_window("webui") {
+        let _ = window.navigate(url);
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    } else {
+        WebviewWindowBuilder::new(&app, "webui", WebviewUrl::External(url))
+            .title("OSAgent Web UI")
+            .inner_size(1280.0, 820.0)
+            .min_inner_size(800.0, 600.0)
+            .decorations(false)
+            .center()
+            .initialization_script(TITLEBAR_INJECTION_SCRIPT)
+            .build()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_native_webui(app: AppHandle) -> Result<(), String> {
+    open_native_webui_impl(app).await
 }
 
 #[tauri::command]
@@ -3801,8 +3923,22 @@ fn update_tray_menu(app_handle: &AppHandle, running: bool) {
         None::<&str>,
     )
     .unwrap();
-    let open_ui =
-        MenuItem::with_id(app_handle, "open_ui", "Open Web UI", true, None::<&str>).unwrap();
+    let open_native_ui = MenuItem::with_id(
+        app_handle,
+        "open_native_ui",
+        "Open Native Web UI",
+        true,
+        None::<&str>,
+    )
+    .unwrap();
+    let open_ui = MenuItem::with_id(
+        app_handle,
+        "open_ui",
+        "Open Web UI in Browser",
+        true,
+        None::<&str>,
+    )
+    .unwrap();
     let toggle = if running {
         MenuItem::with_id(
             app_handle,
@@ -3828,7 +3964,15 @@ fn update_tray_menu(app_handle: &AppHandle, running: bool) {
 
     if let Ok(menu) = Menu::with_items(
         app_handle,
-        &[&open_launcher, &open_ui, &sep1, &toggle, &sep2, &exit_item],
+        &[
+            &open_launcher,
+            &open_native_ui,
+            &open_ui,
+            &sep1,
+            &toggle,
+            &sep2,
+            &exit_item,
+        ],
     ) {
         if let Some(tray) = app_handle.tray_by_id("main-tray") {
             let _ = tray.set_menu(Some(menu));
@@ -4358,6 +4502,13 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(app_state)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -4384,6 +4535,7 @@ fn main() {
             stop_osagent,
             restart_osagent,
             open_web_ui,
+            open_native_webui,
             hide_to_tray,
             show_window,
             minimize_window,
@@ -4397,7 +4549,14 @@ fn main() {
             // Build tray menu
             let open_launcher =
                 MenuItem::with_id(app, "open_launcher", "Open Launcher", true, None::<&str>)?;
-            let open_ui = MenuItem::with_id(app, "open_ui", "Open Web UI", true, None::<&str>)?;
+            let open_native_ui = MenuItem::with_id(
+                app,
+                "open_native_ui",
+                "Open Native Web UI",
+                true,
+                None::<&str>,
+            )?;
+            let open_ui = MenuItem::with_id(app, "open_ui", "Open Web UI in Browser", true, None::<&str>)?;
             let start =
                 MenuItem::with_id(app, "start_osagent", "Start OSAgent", true, None::<&str>)?;
             let exit_item = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
@@ -4405,7 +4564,15 @@ fn main() {
             let sep2 = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
-                &[&open_launcher, &open_ui, &sep1, &start, &sep2, &exit_item],
+                &[
+                    &open_launcher,
+                    &open_native_ui,
+                    &open_ui,
+                    &sep1,
+                    &start,
+                    &sep2,
+                    &exit_item,
+                ],
             )?;
 
             let _tray = TrayIconBuilder::with_id("main-tray")
@@ -4452,6 +4619,19 @@ fn main() {
                     "open_ui" => {
                         open_web_ui();
                     }
+                    "open_native_ui" => {
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = open_native_webui_impl(handle.clone()).await {
+                                let state = handle.state::<AppState>();
+                                add_log(
+                                    &state,
+                                    "error",
+                                    format!("Failed to open Native Web UI: {}", e),
+                                );
+                            }
+                        });
+                    }
                     "start_osagent" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = start_osagent(window, app.state(), None);
@@ -4481,6 +4661,24 @@ fn main() {
                     "info",
                     "Launcher is ready to guide first-time setup".into(),
                 );
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            } else {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = open_native_webui_impl(handle.clone()).await {
+                        let state = handle.state::<AppState>();
+                        add_log(
+                            &state,
+                            "error",
+                            format!("Could not open Web UI automatically: {}", e),
+                        );
+                    }
+                });
             }
 
             Ok(())

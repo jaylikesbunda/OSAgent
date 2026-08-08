@@ -90,8 +90,27 @@ OSA.handleAgentEvent = function(event) {
     }
 
     const chain = OSA.getMessageChain();
+    // The sequence counter is per-session. A counter left over from another
+    // session must not filter this one: the server resumes the live channel
+    // from it, and a stale high value makes the server drop every event
+    // (endless "thinking"), while a zeroed one replays the whole history.
+    const eventSessionId = event.session_id || '';
+    if (eventSessionId && chain.eventSessionId !== eventSessionId) {
+        chain.eventSessionId = eventSessionId;
+        chain.eventSeqNumber = 0;
+    }
     const hasServerSeq = Number.isFinite(event.sequence);
     const seq = hasServerSeq ? Number(event.sequence) : (chain.eventSeqNumber + 1);
+    // Drop anything already seen within this session: reconnect replays,
+    // overlapping transports and mid-turn session snapshots can redeliver an
+    // event, and without this the duplicate chunks leak into thinking and
+    // content as stuttered words. Sequence 0 is the connection-local "session
+    // is processing" placeholder, which is never replayed, so it is exempt.
+    if (hasServerSeq && seq > 0 && seq <= chain.eventSeqNumber) {
+        return;
+    }
+    // Never lower the counter: events can arrive out of order across a
+    // reconnect, and the synthetic sequence-0 event must not wipe it.
     chain.eventSeqNumber = Math.max(chain.eventSeqNumber, seq);
     const prevType = chain.lastEventType;
 

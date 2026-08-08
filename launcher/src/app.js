@@ -152,6 +152,7 @@
     btnStop: $('#btn-stop'),
     btnRestart: $('#btn-restart'),
     btnOpenUi: $('#btn-open-ui'),
+    btnOpenUiBrowser: $('#btn-open-ui-browser'),
     btnOpenSetup: $('#btn-open-setup'),
     btnBuild: $('#btn-build'),
     buildProfileToggle: $('#build-profile-toggle'),
@@ -161,6 +162,7 @@
     buildProgressFill: $('#build-progress-fill'),
     buildProgressStats: $('#build-progress-stats'),
     btnFinishOpenUi: $('#btn-finish-open-ui'),
+    btnFinishOpenBrowser: $('#btn-finish-open-browser'),
     btnFinishDashboard: $('#btn-finish-dashboard'),
     btnMinimize: $('#btn-minimize'),
     btnClose: $('#btn-close'),
@@ -1030,6 +1032,10 @@
     await invoke('open_web_ui');
   }
 
+  async function openNativeWebUi() {
+    await invoke('open_native_webui');
+  }
+
   async function startAgent() {
     addLog('info', 'Starting OSA (' + state.runProfile + ')...');
     try {
@@ -1129,10 +1135,10 @@
         await startAgent();
         showView('finish');
         try {
-          await openWebUi();
-          addLog('info', 'Setup complete. Opened the Web UI in your browser.');
+          await openNativeWebUi();
+          addLog('info', 'Setup complete. Opened the Web UI app.');
         } catch (_error) {
-          addLog('warn', 'OSA started, but the browser did not open automatically.');
+          addLog('warn', 'OSA started, but the Web UI did not open automatically.');
         }
       } catch (_error) {
         showView('dashboard');
@@ -1644,9 +1650,17 @@
 
     els.btnOpenUi.addEventListener('click', async () => {
       try {
-        await openWebUi();
+        await openNativeWebUi();
       } catch (error) {
         addLog('error', 'Failed to open Web UI: ' + error);
+      }
+    });
+
+    els.btnOpenUiBrowser.addEventListener('click', async () => {
+      try {
+        await openWebUi();
+      } catch (error) {
+        addLog('error', 'Failed to open browser: ' + error);
       }
     });
 
@@ -1695,9 +1709,17 @@
 
     els.btnFinishOpenUi.addEventListener('click', async () => {
       try {
-        await openWebUi();
+        await openNativeWebUi();
       } catch (error) {
         addLog('error', 'Failed to open Web UI: ' + error);
+      }
+    });
+
+    els.btnFinishOpenBrowser.addEventListener('click', async () => {
+      try {
+        await openWebUi();
+      } catch (error) {
+        addLog('error', 'Failed to open browser: ' + error);
       }
     });
 

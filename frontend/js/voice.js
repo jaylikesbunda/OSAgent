@@ -273,10 +273,14 @@ OSA.applyTranscriptToInput = function(text) {
     const transcript = (text || '').trim();
     if (!input || !transcript) return;
 
-    const wasPartial = input.dataset.partialTranscript === '1';
+    // Replace only when the composer still holds exactly the partial we showed
+    // for this recording. Anything else in there — text the user typed, or an
+    // earlier dictation that already committed — must survive, so append.
+    const isShownPartial = !!OSA._partialShownText && input.value === OSA._partialShownText;
+    OSA._partialShownText = '';
     delete input.dataset.partialTranscript;
 
-    const current = wasPartial ? '' : input.value.trim();
+    const current = isShownPartial ? '' : input.value.trim();
     input.value = current ? `${current} ${transcript}`.trim() : transcript;
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.focus();
@@ -695,6 +699,10 @@ OSA.stopPartialTranscription = function() {
     }
     // Invalidate anything still in flight.
     OSA._partialGeneration = (OSA._partialGeneration || 0) + 1;
+    // The composer no longer holds a provisional transcript.
+    OSA._partialShownText = '';
+    const input = document.getElementById('message-input');
+    if (input) delete input.dataset.partialTranscript;
 };
 
 OSA.renderPartialTranscript = function(text) {
@@ -703,10 +711,15 @@ OSA.renderPartialTranscript = function(text) {
 
     // Mirror into the composer so the inline mic shows progress too. Marked as
     // provisional so the final transcript replaces it rather than appending.
+    // Never clobber text the user typed or an earlier dictation: only mirror
+    // when the composer is empty or still holds exactly the partial we showed.
     const input = document.getElementById('message-input');
-    if (input) {
+    if (!input) return;
+    const holdsPartial = !!OSA._partialShownText && input.value === OSA._partialShownText;
+    if (holdsPartial || !input.value.trim()) {
         input.value = text;
         input.dataset.partialTranscript = '1';
+        OSA._partialShownText = text;
     }
 };
 
@@ -780,6 +793,10 @@ OSA.stopLocalWhisperRecording = function() {
         OSA.updateMicButton();
         return;
     }
+
+    // Authoritative stop: clears the interval and invalidates any partial still
+    // in flight, so a late partial can never land after the final transcript.
+    OSA.stopPartialTranscription();
 
     OSA.setIsRecording(false);
     OSA.setIsTranscribing(true);
@@ -1241,20 +1258,32 @@ OSA.pumpSpeechQueue = function() {
     const finish = () => {
         // A cancel bumps the generation; that run no longer owns the pipeline.
         if (generation !== OSA.getSpeechPlaybackGeneration()) return;
+        // Free the blob URL now that playback ended; streaming TTS allocates
+        // one per sentence and without this they accumulate for the session.
+        if (OSA.getCurrentAudioUrl()) {
+            URL.revokeObjectURL(OSA.getCurrentAudioUrl());
+            OSA.setCurrentAudioUrl(null);
+        }
         OSA._speechBusy = false;
         OSA.pumpSpeechQueue();
     };
 
     if (voiceConfig?.tts_provider === 'piper-local') {
+        // A wedged Piper process must not stall the queue forever: a timeout
+        // guarantees finish runs and the next utterance gets its turn.
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
         fetch('/api/tts/synthesize', {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${OSA.getToken()}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ text: payload })
+            body: JSON.stringify({ text: payload }),
+            signal: controller.signal
         })
         .then(res => {
+            clearTimeout(timeout);
             if (!res.ok) throw new Error('TTS failed');
             return res.blob();
         })
@@ -1275,6 +1304,7 @@ OSA.pumpSpeechQueue = function() {
             OSA.updateGlobalPlaybackBar();
         })
         .catch(e => {
+            clearTimeout(timeout);
             console.error('Piper TTS error:', e);
             finish();
         });
@@ -1322,7 +1352,9 @@ OSA.feedSpeechStream = function(chunk) {
             OSA._speechBlockComplete = true;
         } else {
             // Still streaming inside the block: speak what has arrived so far.
-            buffer = (raw.match(OSA.SPEAK_OPEN_RE) || [null, ''])[1];
+            // The closing tag may be half-arrived; cut it off so its letters
+            // ("</speak" -> "speak") never reach the synthesizer.
+            buffer = (raw.match(OSA.SPEAK_OPEN_RE) || [null, ''])[1].replace(/<\/speak[\s\S]*$/i, '');
         }
     } else if (OSA._speechBlockComplete) {
         // Block already finished; the rest of the response is screen-only.
@@ -1369,6 +1401,28 @@ OSA.speechStreamHandledTurn = function() {
     return (OSA._speechStreamSpoken || 0) > 0;
 };
 
+/// The unspoken remainder of the stream, on the same tag-free coordinates
+/// feedSpeechStream advances `_speechStreamSpoken` by. The raw buffer must not
+/// be sliced directly: the <speak> block makes its length differ from the
+/// spoken content, so the tail would restart mid-sentence, re-read the half
+/// arrived closing tag ("speak"), and spill into the screen-only text after
+/// the block.
+OSA.unspokenSpeechTail = function() {
+    const raw = OSA._speechStreamBuffer || '';
+    const closed = OSA.extractSpeakBlock(raw);
+    let buffer;
+    if (closed !== null) {
+        // A finished block is flushed whole by feedSpeechStream.
+        if (OSA._speechBlockComplete && (OSA._speechStreamSpoken || 0) >= closed.length) return '';
+        buffer = closed;
+    } else if (/<speak>/i.test(raw)) {
+        buffer = (raw.match(OSA.SPEAK_OPEN_RE) || [null, ''])[1].replace(/<\/speak[\s\S]*$/i, '');
+    } else {
+        buffer = raw;
+    }
+    return buffer.slice(OSA._speechStreamSpoken || 0);
+};
+
 // Speaks one specific message on demand, independent of whether TTS is on for
 // the session. Speech used to be fire-and-forget: miss a sentence and your only
 // option was to go back and read it.
@@ -1378,7 +1432,8 @@ OSA.speakMessageElement = function(button) {
 
     const contentEl = messageEl.querySelector('.message-content');
     const raw = contentEl?.dataset.rawText || contentEl?.innerText || '';
-    const text = OSA.sanitizeSpeechText(raw);
+    // Legacy messages may have stored the raw reply with its <speak> block.
+    const text = OSA.sanitizeSpeechText(OSA.stripSpeakBlock ? OSA.stripSpeakBlock(raw) : raw);
     if (!text) return;
 
     // Clicking the button of the message currently playing acts as stop.

@@ -401,6 +401,15 @@
     white-space: nowrap;
 }
 
+/* Workspace permission colouring: green = read-write, red = read-only. */
+.perm-rw {
+    color: var(--success, #22c55e);
+}
+
+.perm-ro {
+    color: var(--error, #ff4444);
+}
+
 .context-chevron {
     color: var(--text-muted);
     font-size: 11px;

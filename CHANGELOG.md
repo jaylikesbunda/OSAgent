@@ -1,3 +1,33 @@
+v0.4.0 changes:
+
+## Launcher & native app
+
+* Added a native Web UI window (Tauri 2, rendering via the OS WebView2 runtime — no bundled Electron/Chromium): the web UI now opens in its own app window instead of only in a browser, and the launcher and tray offer both targets — "Open Web UI" (native window) and "Open in Browser"
+* The native Web UI window is frameless with a dark custom titlebar matching the launcher (drag to move, minimize, and close-to-tray via an injected titlebar that shrinks the page content to fit beneath it)
+* Starting the launcher when setup is complete now auto-starts OSAgent, waits for the web server to come up, opens the native Web UI window, and keeps the launcher minimized in the tray (tray icon click reopens it); first-run setup still shows the launcher window so onboarding is not skipped
+* The launcher now enforces a single instance: launching again from the Start Menu shortcut focuses the running launcher instead of spawning a second copy
+* Added a Tauri capability for the remote Web UI origin so the embedded page may drag, minimize and hide its own window (Tauri denies IPC from remote origins by default), with the launcher window's default permissions preserved explicitly so nothing regressed
+* Closing either window now hides it to the tray instead of exiting the app; the tray "Exit" item terminates OSAgent and quits cleanly
+
+## Voice mode & streaming STT
+
+* Added a hands-free voice mode: the agent is told (via a dedicated system message) to write a short `<speak>` spoken summary first and the full written answer second; the frontend reads the `<speak>` block aloud as it streams, strips it before rendering for the reader, and every assistant message gains a "Speak" button (click again to stop)
+* Voice mode is stored per-session (session metadata, so it survives reloads) and applies to every surface; finished transcripts send straight to the agent in voice mode, and interim words are shown live while speaking
+* Added a persistent whisper.cpp server (`whisper-server`): the model stays resident instead of being reloaded from disk (148MB–488MB) for every two-second utterance, with a 90s model-load timeout, dynamic port, best-effort startup, and automatic fallback to the one-shot CLI path when the binary is missing or the port is taken
+* Partial/streaming transcription is enabled only when the resident server is available — without it every partial would reload the model from disk per chunk
+* Whisper now prefers English-only model builds (`tiny.en`/`base.en`/`small.en`) when the configured language is English, and threads are capped based on physical cores to avoid thread-overhead dominating inference
+* New config: `speak_tool_progress` (narrate each tool call while working, default off) and `silence_auto_stop` (end recording after a pause, default on; voice mode always auto-stops on silence)
+* Mic capture is now resampled and downmixed to 16 kHz mono on the client (up to ~3× less upload, no server-side resample), has a live input level monitor so a muted or wrong-device mic is visible immediately, supports explicit device selection (kept in localStorage since device IDs are browser-scoped), and recording is cancelled when TTS starts so the agent never hears its own speech
+* Session storage now runs on a pooled SQLite connection with an explicit transcript table and a backfill migration for existing sessions, plus message search and message truncation (truncate refuses while a turn is in flight) backing the new `/api/session-search` and `/api/sessions/:id/messages/truncate` endpoints
+
+## CLI
+
+* Running the binary bare now defaults to `start` instead of printing a usage error
+* Added `-p/--port` to override the web UI port, with precedence: flag > `OSAGENT_PORT` env var > config file
+* Fixed `-v`/verbose logging never taking effect (the log level was fixed before the flag was parsed)
+* The restart sentinel now lives at an absolute `~/.osagent/restart_flag` instead of a relative path that dropped a dotfile into whatever directory the process was launched from
+* On startup the agent kills stale `whisper-server` processes, which could otherwise hold the listen socket open on Windows after a hard kill
+
 v0.3.0 changes:
 
 ## Provider error handling

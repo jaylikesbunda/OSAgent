@@ -171,11 +171,12 @@ OSA.connectWebSocket = function(sessionId) {
             return;
         }
 
-        const chain = OSA.getMessageChain ? OSA.getMessageChain() : null;
-        if (chain && Number.isFinite(payload.sequence)) {
-            chain.eventSeqNumber = Math.max(chain.eventSeqNumber || 0, payload.sequence);
-        }
-
+        // Do not touch chain.eventSeqNumber here: the envelope sequence is the
+        // event's own sequence, and handleAgentEvent drops anything at or below
+        // the counter as an already-seen replay. Advancing it first would make
+        // every live event look like a duplicate of itself, so nothing renders
+        // and the UI sits on "thinking" until the session is reloaded from
+        // history. handleAgentEvent owns the counter.
         if (typeof OSA.handleAgentEvent === 'function') {
             OSA.handleAgentEvent(payload.event);
         }

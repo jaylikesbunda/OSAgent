@@ -404,7 +404,7 @@ OSA.prepareAssistantMessageElementForStreaming = function(messageEl, sourceMessa
 
     const contentEl = messageEl.querySelector('.message-content');
     if (contentEl && !contentEl.dataset.rawText) {
-        contentEl.dataset.rawText = sourceMessage?.content || '';
+        contentEl.dataset.rawText = OSA.stripSpeakBlock(sourceMessage?.content || '');
     }
 
     const thinkingEl = messageEl.querySelector('.thinking-body');
@@ -480,10 +480,15 @@ OSA.resetStreamingMessage = function() {
 };
 
 OSA.resetMessageChain = function() {
+    // Carry the session the counter belongs to across the reset. Dropping it
+    // makes the next event look like it came from a different session, which
+    // zeroes the sequence counter the caller just restored.
+    const eventSessionId = OSA.messageChain?.eventSessionId || null;
     OSA.messageChain = {
         lastEventType: null,
         lastAssistantDomId: null,
         pendingToolCallIds: [],
+        eventSessionId,
         eventSeqNumber: 0,
         lastThinkingEndSeq: 0,
         lastToolStartSeq: 0,
@@ -544,7 +549,7 @@ OSA.commitStreamingAssistantSegment = function() {
         if (!rawText && sessionContent) {
             rawText = sessionContent;
             if (contentEl) {
-                contentEl.dataset.rawText = rawText;
+                contentEl.dataset.rawText = OSA.stripSpeakBlock(rawText);
                 contentEl.innerHTML = rawText.trim() ? OSA.formatMessage(rawText) : '';
             }
         }
@@ -1164,7 +1169,8 @@ OSA.appendThinkingChunk = function(content) {
     const body = container ? container.querySelector('.thinking-body') : null;
     if (!body) return;
 
-    const nextText = (body.dataset.rawText || '') + content;
+    const nextText = (last && last.role === 'assistant' ? (last.thinking || '') : '')
+        || (body.dataset.rawText || '') + content;
     const messagesDiv = document.getElementById('messages');
     OSA.scheduleFormattedRender(body, nextText, () => {
         OSA.setThinkingPreview(container, nextText);
@@ -1204,7 +1210,12 @@ OSA.appendAssistantChunk = function(content) {
     const message = OSA.ensureStreamingAssistantMessage();
     if (!message) return;
     const contentEl = message.querySelector('.message-content');
-    const nextText = (contentEl.dataset.rawText || '') + content;
+    // Render from the full raw accumulation, never from the already-stripped
+    // DOM text. stripSpeakBlock needs the opening tag present to remove the
+    // block; appending to the stripped text would leak the block content and
+    // a stray </speak> into the chat.
+    const nextText = (last && last.role === 'assistant' ? (last.content || '') : '')
+        || (contentEl.dataset.rawText || '') + content;
     const messagesDiv = document.getElementById('messages');
     OSA.scheduleFormattedRender(contentEl, nextText, () => {
         if (messagesDiv) {
@@ -1239,7 +1250,10 @@ OSA.completeAssistantResponse = function(usage) {
             if (!rawText && sessionContent) {
                 rawText = sessionContent;
                 if (contentEl) {
-                    contentEl.dataset.rawText = rawText;
+                    // The <speak> block is speech channel, not reader content:
+                    // keep the stored raw text display-shaped so the copy and
+                    // Speak buttons never hand it to the user or the TTS.
+                    contentEl.dataset.rawText = OSA.stripSpeakBlock(rawText);
                     contentEl.innerHTML = rawText.trim() ? OSA.formatMessage(rawText) : '';
                 }
             }
@@ -1299,24 +1313,34 @@ OSA.completeAssistantResponse = function(usage) {
             const activePersona = OSA.getActivePersona();
             const isRoleplay = activePersona?.id === 'custom';
 
-            const speakBlock = OSA.extractSpeakBlock?.(OSA._speechStreamBuffer || '');
+            // The full raw reply, tags and all: the streaming buffer when the
+            // turn streamed, otherwise the session message still carries the
+            // <speak> block that was stripped from the DOM.
+            const rawFull = OSA._speechStreamBuffer || sourceMessage?.content || rawText;
+            const speakBlock = OSA.extractSpeakBlock?.(rawFull);
 
             if (speakBlock && !isRoleplay) {
                 // The model wrote the spoken version itself; say only what has
                 // not already been spoken while streaming.
                 if (!OSA.speechStreamHandledTurn?.()) {
                     OSA.speakText(speakBlock, { interrupt: false });
+                } else {
+                    const tail = OSA.sanitizeSpeechText(OSA.unspokenSpeechTail?.() || '');
+                    if (tail) {
+                        OSA.speakText(tail, { interrupt: false });
+                    }
                 }
             } else if (OSA.speechStreamHandledTurn?.() && !isRoleplay) {
                 // Sentences were spoken as they streamed; only the trailing
                 // fragment after the last terminator is still unspoken.
-                const tail = (OSA._speechStreamBuffer || '').slice(OSA._speechStreamSpoken || 0);
-                const spokenTail = OSA.sanitizeSpeechText(tail);
-                if (spokenTail) {
-                    OSA.speakText(spokenTail, { interrupt: false });
+                const tail = OSA.sanitizeSpeechText(OSA.unspokenSpeechTail?.() || '');
+                if (tail) {
+                    OSA.speakText(tail, { interrupt: false });
                 }
             } else {
-                const speechText = OSA.prepareSpeechText(rawText, isRoleplay);
+                // No block and nothing streamed: fall back to the written
+                // reply, minus the speak block that is not reader content.
+                const speechText = OSA.prepareSpeechText(OSA.stripSpeakBlock(rawFull), isRoleplay);
                 if (speechText) {
                     OSA.speakText(speechText);
                 }
@@ -1415,6 +1439,10 @@ OSA.formatInlineMarkdown = function(line) {
 };
 
 OSA.formatMessage = function(text) {
+    // The <speak> block is for the synthesizer, not the reader. Strip it here so
+    // every path that renders raw text (history restore, tool cards, previews)
+    // is covered, not just the streaming renderer.
+    text = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(text) : text;
     const escaped = OSA.escapeHtml((text || '').replace(/\n+$/, ''));
     const lines = escaped.split('\n');
     let html = '';
@@ -2304,7 +2332,7 @@ OSA.patchMessageElement = function(element, message, originalIndex, force = fals
         const rawContent = message.content || '';
         const bestContent = existingContentRaw.length > rawContent.length ? existingContentRaw : rawContent;
         contentEl.innerHTML = bestContent.trim() ? OSA.formatMessage(bestContent) : '';
-        contentEl.dataset.rawText = bestContent;
+        contentEl.dataset.rawText = OSA.stripSpeakBlock(bestContent);
     } else {
         contentEl.textContent = message.content || '';
     }

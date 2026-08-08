@@ -1,0 +1,7 @@
+{
+  "identifier": "launcher-local-default",
+  "description": "Default permissions for the launcher window (replaces the implicit default since a capabilities directory is now present)",
+  "windows": ["main"],
+  "local": true,
+  "permissions": ["core:default"]
+}

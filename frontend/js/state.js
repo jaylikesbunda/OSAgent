@@ -242,6 +242,7 @@ OSA.messageChain = {
     lastAssistantDomId: null,
     pendingToolCallIds: [],
     eventSeqNumber: 0,
+    eventSessionId: null,
     lastThinkingEndSeq: 0,
     lastToolStartSeq: 0,
 };

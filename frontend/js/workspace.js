@@ -7,14 +7,20 @@ OSA.updateWorkspaceChip = function(workspaceId, workspacePath) {
     const workspace = ws.workspaces.find(w => w.id === (workspaceId || 'default'));
     const effectivePath = workspacePath || OSA.primaryWorkspacePath(workspace);
     const perm = OSA.workspacePaths(workspace)[0]?.permission;
+    const name = workspace?.name || workspaceId || 'default';
+    // Permission is signalled by colour instead of an [RO]/[RW] tag: green for
+    // read-write, red for read-only. The workspace menu header keeps the tag.
     const permTag = perm === 'read_only' ? ' [RO]' : perm === 'read_write' ? ' [RW]' : '';
-    const name = (workspace?.name || workspaceId || 'default') + permTag;
     if (label) {
         label.textContent = name;
+        label.classList.toggle('perm-ro', perm === 'read_only');
+        label.classList.toggle('perm-rw', perm !== 'read_only');
         label.title = effectivePath || workspace?.name || workspaceId || 'default';
     }
     if (wsLabel) {
-        wsLabel.textContent = name;
+        wsLabel.textContent = name + permTag;
+        wsLabel.classList.toggle('perm-ro', perm === 'read_only');
+        wsLabel.classList.toggle('perm-rw', perm !== 'read_only');
     }
 };
 

@@ -617,6 +617,24 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
 
         const session = await res.json();
         if (!OSA.getCurrentSession() || OSA.getCurrentSession().id !== sessionId) return;
+
+        // Mid-turn the live stream is the authoritative state: the snapshot
+        // fetch lags it, so replacing the session would revert the assistant
+        // text and make the next streamed chunks duplicate the overlap. Keep
+        // the local session when it is already ahead.
+        const local = OSA.getCurrentSession();
+        const localMsgs = local?.messages || [];
+        const snapMsgs = session.messages || [];
+        const localTail = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
+        const snapTail = snapMsgs.length ? snapMsgs[snapMsgs.length - 1] : null;
+        const localAhead = session.task_status === 'running'
+            && localTail?.role === 'assistant'
+            && snapTail?.role === 'assistant'
+            && (localTail.content || '').length > (snapTail.content || '').length;
+        if (localAhead) {
+            local.task_status = session.task_status;
+            return;
+        }
         OSA.setCurrentSession(session);
 
         if (session.task_status !== 'running') {
@@ -1171,7 +1189,17 @@ OSA.sendMessage = async function() {
     if (!shouldQueueLocally) {
         OSA.hideThinkingIndicator();
         OSA.releaseStreamingAssistantMessage();
+        // Preserve the session's event sequence across turns: it is the
+        // monotonic counter the live channel resumes from, and the websocket
+        // subscribe / SSE last_seq are derived from it. Zeroing it here would
+        // make a mid-turn reconnect replay the whole history (duplicating
+        // chunks) or, when the counter belongs to another session, make the
+        // server filter out every event — the UI then sits on "thinking"
+        // forever even though the reply was generated.
+        const prevEventSeq = OSA.getMessageChain()?.eventSeqNumber || 0;
         OSA.resetMessageChain();
+        const chain = OSA.getMessageChain();
+        if (chain) chain.eventSeqNumber = prevEventSeq;
         OSA.setProcessing(true);
         OSA.setHasReceivedResponse(false);
         OSA.setSendButtonStopMode(true);
