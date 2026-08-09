@@ -920,50 +920,57 @@ impl UpdateInstaller {
         Ok(staged_launcher)
     }
 
-    /// Stage an installer/package payload. The launcher can only execute these
-    /// on Windows, so elsewhere we report the path instead of pretending the
-    /// update was applied.
+    /// Stage an installer/package payload.
+    ///
+    /// Only the Windows launcher can run one of these unattended, so this is
+    /// defined per platform rather than as one function with `cfg` blocks —
+    /// a `cfg`'d block that ends the function body reads as a needless `return`
+    /// on the platforms where the rest is compiled out.
+    #[cfg(not(target_os = "windows"))]
     fn stage_package(
         &self,
         payload: &Path,
         tag: &str,
         format: PayloadFormat,
     ) -> Result<PathBuf, String> {
-        #[cfg(not(target_os = "windows"))]
-        {
+        Err(format!(
+            "Release {} ships a {} ({}) for your platform, which cannot be applied \
+             automatically. Install it manually: {}",
+            tag,
+            format.describe(),
+            payload
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            payload.display()
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn stage_package(
+        &self,
+        payload: &Path,
+        tag: &str,
+        format: PayloadFormat,
+    ) -> Result<PathBuf, String> {
+        if format != PayloadFormat::WindowsExecutable {
             return Err(format!(
-                "This release ships a {} ({}) for your platform, which cannot be applied \
-                 automatically. Install it manually: {}",
-                format.describe(),
-                payload
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                payload.display()
+                "Downloaded update is a {}, which cannot be installed on Windows",
+                format.describe()
             ));
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            if format != PayloadFormat::WindowsExecutable {
-                return Err(format!(
-                    "Downloaded update is a {}, which cannot be installed on Windows",
-                    format.describe()
-                ));
-            }
-
-            let update_dir = self.update_dir()?;
-            let staged_dir = update_dir.join(tag);
-            std::fs::create_dir_all(&staged_dir)
-                .map_err(|e| format!("Failed to create installer staging directory: {}", e))?;
-            let staged_installer =
-                staged_dir.join(payload.file_name().ok_or("Installer filename missing")?);
-            if payload != staged_installer {
-                std::fs::copy(payload, &staged_installer)
-                    .map_err(|e| format!("Failed to stage installer: {}", e))?;
-            }
-            Ok(staged_installer)
+        let update_dir = self.update_dir()?;
+        let staged_dir = update_dir.join(tag);
+        std::fs::create_dir_all(&staged_dir)
+            .map_err(|e| format!("Failed to create installer staging directory: {}", e))?;
+        let staged_installer =
+            staged_dir.join(payload.file_name().ok_or("Installer filename missing")?);
+        if payload != staged_installer {
+            std::fs::copy(payload, &staged_installer)
+                .map_err(|e| format!("Failed to stage installer: {}", e))?;
         }
+        Ok(staged_installer)
     }
 
     pub fn mark_update_pending(
