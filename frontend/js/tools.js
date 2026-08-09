@@ -852,12 +852,20 @@ OSA.createToolCard = function(event, insertBefore = null) {
     const toolName = event.tool_name;
     const callId = event.tool_call_id;
 
+    // `event.message_index` indexes the *server's* session.messages. The client
+    // array is optimistic — it pushes its own segment placeholders and tool
+    // boundary rows — so the two drift apart within a turn and the server index
+    // resolves to some earlier bubble, or to none at all (an invisible card that
+    // only appears on reload). A live card always belongs at the end of the
+    // transcript, so anchor it there. Restores from history still use the server
+    // index, and there the two arrays do agree.
+    const messageIndex = OSA.getLatestAnchorMessageIndex();
+
     if (OSA.debug) {
-        OSA.debug.log('tool.start', { tool: toolName, call: callId, idx: event.message_index !== undefined ? event.message_index : 0, isContext: OSA.isContextTool(toolName) });
+        OSA.debug.log('tool.start', { tool: toolName, call: callId, idx: messageIndex, serverIdx: event.message_index, isContext: OSA.isContextTool(toolName) });
     }
 
     if (OSA.isContextTool(toolName)) {
-        const messageIndex = event.message_index !== undefined ? event.message_index : 0;
         OSA.addContextToolToGroup(event, false, false, messageIndex);
         return;
     }
@@ -871,7 +879,7 @@ OSA.createToolCard = function(event, insertBefore = null) {
         completed: false,
         success: false,
         output: '',
-        message_index: event.message_index !== undefined ? event.message_index : 0,
+        message_index: messageIndex,
     }, insertBefore);
 
     const domId = `tool-${callId}`;

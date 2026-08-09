@@ -1017,6 +1017,33 @@ OSA.restoreCheckpoint = async function(checkpointId, button) {
     }
 };
 
+/// Index of the assistant message the running turn is streaming into, i.e. the
+/// last non-tool row of the session. Returns -1 when the tail is not an
+/// assistant message.
+OSA.getActiveTurnAssistantIndex = function(session) {
+    const list = session && Array.isArray(session.messages) ? session.messages : [];
+    for (let i = list.length - 1; i >= 0; i--) {
+        const message = list[i];
+        if (!message || message.role === 'tool') continue;
+        return message.role === 'assistant' ? i : -1;
+    }
+    return -1;
+};
+
+/// The rendered bubble for a specific session index. Picking the trailing
+/// `.message.assistant` in the DOM instead would hand back a *previous* turn's
+/// bubble whenever this turn's entry is not rendered, so the reply would stream
+/// in above the user message that asked for it.
+OSA.getRenderedAssistantElementForIndex = function(messageIndex) {
+    if (!Number.isInteger(messageIndex) || messageIndex < 0) return null;
+    const view = OSA.getTranscriptView();
+    const root = view && view.listRoot ? view.listRoot : document.getElementById('messages');
+    if (!root) return null;
+    const wrapper = root.querySelector(`.transcript-entry[data-message-index="${messageIndex}"]`);
+    if (!wrapper) return null;
+    return wrapper.querySelector(':scope > .message.assistant');
+};
+
 OSA.createAssistantMessageShell = function() {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return null;
@@ -1028,9 +1055,21 @@ OSA.createAssistantMessageShell = function() {
         preferTail: true,
     });
 
-    const candidates = Array.from(document.querySelectorAll('#messages .message.assistant'));
-    const message = candidates.at(-1) || null;
-    if (!message) return null;
+    const activeIndex = OSA.getActiveTurnAssistantIndex(session);
+    let message = OSA.getRenderedAssistantElementForIndex(activeIndex);
+    if (!message && activeIndex >= 0) {
+        // The sync above can no-op (re-entrant render, stale window). Force the
+        // window onto the tail once rather than falling back to the trailing
+        // assistant bubble in the DOM, which may belong to an earlier turn.
+        OSA.renderMessages((session && session.messages) || [], { reason: 'stream-shell' });
+        message = OSA.getRenderedAssistantElementForIndex(activeIndex);
+    }
+    if (!message) {
+        if (OSA.debug) {
+            OSA.debug.warn('stream.shell-missing', String(activeIndex), 'the running turn has no rendered assistant entry; refusing to stream into an earlier bubble');
+        }
+        return null;
+    }
 
     const domId = message.id || `assistant-stream-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     message.id = domId;
@@ -2182,35 +2221,43 @@ OSA.attachAnchoredNodesForEntry = function(wrapper, messageIndex) {
     }
 };
 
-OSA.getVisibleMessages = function(messages) {
-    const list = Array.isArray(messages) ? messages : [];
-    const currentSession = OSA.getCurrentSession();
-    const running = currentSession && currentSession.task_status === 'running';
-    const lastIdx = list.length - 1;
+/// True when nothing but tool boundary rows follow this index. The empty
+/// assistant placeholder of a running turn is the transcript slot every live
+/// tool card anchors into, and `insertCurrentSessionToolBoundary` pushes a
+/// role:'tool' row right after it on the first tool_start. Testing "is the very
+/// last message" would retire that slot mid-turn, which detaches every card
+/// already mounted under it and leaves the next chunk of assistant text hunting
+/// for a bubble further up the transcript.
+/// True when tool cards, subagent cards or other anchored artifacts are parked
+/// at this index. Such a row must keep rendering even when the message itself
+/// is empty — retiring it drops its extras slot and every card inside it, and
+/// nothing puts them back until the session is reloaded.
+OSA.transcriptIndexHasAnchoredNodes = function(originalIndex) {
+    const view = OSA.getTranscriptView();
+    if (!view || !view.anchoredNodesByIndex) return false;
+    const nodes = view.anchoredNodesByIndex.get(originalIndex);
+    return Array.isArray(nodes) && nodes.length > 0;
+};
 
-    return list
-        .map((message, originalIndex) => ({ message, originalIndex }))
-        .filter(({ message }) => {
-            if (message.role === 'tool') return false;
-            if (OSA.isHiddenSyntheticMessage(message)) return false;
-            if (message.role !== 'assistant') return true;
-            const hasContent = !!(message.content || '').trim();
-            const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
-            const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
-            if (hasContent || hasVisibleThinking || hasToolCalls) return true;
-            return running && list[lastIdx] === message;
-        });
+OSA.isTrailingTurnPlaceholder = function(list, originalIndex) {
+    for (let i = list.length - 1; i > originalIndex; i--) {
+        if (list[i] && list[i].role !== 'tool') return false;
+    }
+    return true;
 };
 
 OSA.getVisibleMessages = function(messages) {
     const list = Array.isArray(messages) ? messages : [];
     const currentSession = OSA.getCurrentSession();
-    const running = currentSession && currentSession.task_status === 'running';
-    const lastIdx = list.length - 1;
+    // `task_status` lags the socket: chunks can arrive before the event that
+    // flips it to 'running'. Fall back to the local processing flag so the
+    // placeholder is never filtered out from under an in-flight stream.
+    const running = (currentSession && currentSession.task_status === 'running')
+        || (typeof OSA.isAgentProcessing === 'function' && OSA.isAgentProcessing());
 
     return list
         .map((message, originalIndex) => ({ message, originalIndex }))
-        .filter(({ message }) => {
+        .filter(({ message, originalIndex }) => {
             if (message.role === 'tool') return false;
             if (OSA.isHiddenSyntheticMessage(message)) return false;
             if (message.role !== 'assistant') return true;
@@ -2218,7 +2265,8 @@ OSA.getVisibleMessages = function(messages) {
             const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
             const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
             if (hasContent || hasVisibleThinking || hasToolCalls) return true;
-            return running && list[lastIdx] === message;
+            if (OSA.transcriptIndexHasAnchoredNodes(originalIndex)) return true;
+            return !!running && OSA.isTrailingTurnPlaceholder(list, originalIndex);
         });
 };
 
