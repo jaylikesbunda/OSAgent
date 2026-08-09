@@ -145,6 +145,30 @@ jobs:
           cp "$DEB_FILE" "$GITHUB_WORKSPACE/osagent-linux-x86_64.deb"
           (cd "$GITHUB_WORKSPACE" && sha256sum osagent-linux-x86_64.deb > osagent-linux-x86_64.deb.sha256)
 
+      - name: Build Linux OTA archive
+        shell: bash
+        run: |
+          # The launcher embeds the core and updater binaries, so a tarball
+          # holding just the launcher is a complete in-place update payload.
+          LAUNCHER_BIN="$GITHUB_WORKSPACE/launcher/target/x86_64-unknown-linux-gnu/release/osagent-launcher"
+          if [ ! -f "$LAUNCHER_BIN" ]; then
+            echo "Launcher binary not found at $LAUNCHER_BIN"
+            exit 1
+          fi
+          STAGE="$GITHUB_WORKSPACE/ota-staging"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp "$LAUNCHER_BIN" "$STAGE/osagent-launcher"
+          chmod +x "$STAGE/osagent-launcher"
+          tar -czf "$GITHUB_WORKSPACE/osagent-linux-x86_64.tar.gz" -C "$STAGE" osagent-launcher
+          (cd "$GITHUB_WORKSPACE" && sha256sum osagent-linux-x86_64.tar.gz > osagent-linux-x86_64.tar.gz.sha256)
+
+      - name: Verify Linux OTA archive
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          chmod +x ./verify-ota-archive.sh && ./verify-ota-archive.sh osagent-linux-x86_64.tar.gz
+
       - name: Upload Linux release artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -152,6 +176,8 @@ jobs:
           path: |
             osagent-linux-x86_64.deb
             osagent-linux-x86_64.deb.sha256
+            osagent-linux-x86_64.tar.gz
+            osagent-linux-x86_64.tar.gz.sha256
 
   release-windows-installer:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
@@ -281,6 +307,26 @@ jobs:
             exit 1
           fi
           (cd "$GITHUB_WORKSPACE" && shasum -a 256 osagent-macos-arm64.dmg > osagent-macos-arm64.dmg.sha256)
+          echo "==> Building OTA archive from the signed .app binary..."
+          # Ship the same binary that went into the DMG. The launcher embeds the
+          # core and updater, so this single file is a complete update payload.
+          OTA_BIN="$APP_BUNDLE/Contents/MacOS/osagent-launcher"
+          if [ ! -f "$OTA_BIN" ]; then
+            echo "Launcher binary not found at $OTA_BIN"
+            exit 1
+          fi
+          STAGE="$GITHUB_WORKSPACE/ota-staging"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp "$OTA_BIN" "$STAGE/osagent-launcher"
+          chmod +x "$STAGE/osagent-launcher"
+          tar -czf "$GITHUB_WORKSPACE/osagent-macos-arm64.tar.gz" -C "$STAGE" osagent-launcher
+          (cd "$GITHUB_WORKSPACE" && shasum -a 256 osagent-macos-arm64.tar.gz > osagent-macos-arm64.tar.gz.sha256)
+
+      - name: Verify macOS OTA archive
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          chmod +x ./verify-ota-archive.sh && ./verify-ota-archive.sh osagent-macos-arm64.tar.gz
 
       - name: Verify DMG
         run: |
@@ -330,6 +376,8 @@ jobs:
           path: |
             osagent-macos-arm64.dmg
             osagent-macos-arm64.dmg.sha256
+            osagent-macos-arm64.tar.gz
+            osagent-macos-arm64.tar.gz.sha256
 
   publish-r2:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
@@ -385,22 +433,40 @@ jobs:
       RELEASE_TAG: ${{ inputs['release-tag'] }}
       PRERELEASE: ${{ inputs.prerelease }}
     steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+
+      - name: Flatten downloaded artifacts
+        shell: bash
+        run: |
+          mkdir -p release-flat
+          find release -type f -exec cp {} release-flat/ \;
+          echo "--- Assets to attach ---"
+          ls -la release-flat
+
       - name: Create or update GitHub release
         shell: bash
         run: |
-          RELEASE_DIR_URL="${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/${RELEASE_TAG}"
+          # Assets are attached to the GitHub release itself so they are
+          # downloadable straight from the releases page. The CDN copy exists
+          # for the in-app updater, not for humans.
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           BODY=$(cat <<EOF
-          Installer release for Windows, Linux, and macOS with bundled core and updater. Auto-updates are served from Cloudflare R2 via ${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json.
+          Installer release for Windows, Linux, and macOS with bundled core and updater.
 
-          Assets:
-          - [osagent-linux-x86_64.deb](${RELEASE_DIR_URL}/osagent-linux-x86_64.deb)
-          - [osagent-linux-x86_64.deb.sha256](${RELEASE_DIR_URL}/osagent-linux-x86_64.deb.sha256)
-          - [osagent-macos-arm64.dmg](${RELEASE_DIR_URL}/osagent-macos-arm64.dmg)
-          - [osagent-macos-arm64.dmg.sha256](${RELEASE_DIR_URL}/osagent-macos-arm64.dmg.sha256)
-          - [osagent-windows-x86_64-setup.exe](${RELEASE_DIR_URL}/osagent-windows-x86_64-setup.exe)
-          - [osagent-windows-x86_64-setup.exe.sha256](${RELEASE_DIR_URL}/osagent-windows-x86_64-setup.exe.sha256)
-          - [release-manifest.json](${RELEASE_DIR_URL}/release-manifest.json)
-          - [latest.json](${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json)
+          Installers (manual download):
+          - [osagent-windows-x86_64-setup.exe](${DOWNLOAD_URL}/osagent-windows-x86_64-setup.exe) ([sha256](${DOWNLOAD_URL}/osagent-windows-x86_64-setup.exe.sha256))
+          - [osagent-linux-x86_64.deb](${DOWNLOAD_URL}/osagent-linux-x86_64.deb) ([sha256](${DOWNLOAD_URL}/osagent-linux-x86_64.deb.sha256))
+          - [osagent-macos-arm64.dmg](${DOWNLOAD_URL}/osagent-macos-arm64.dmg) ([sha256](${DOWNLOAD_URL}/osagent-macos-arm64.dmg.sha256))
+
+          OTA archives (what the in-app updater downloads):
+          - [osagent-linux-x86_64.tar.gz](${DOWNLOAD_URL}/osagent-linux-x86_64.tar.gz) ([sha256](${DOWNLOAD_URL}/osagent-linux-x86_64.tar.gz.sha256))
+          - [osagent-macos-arm64.tar.gz](${DOWNLOAD_URL}/osagent-macos-arm64.tar.gz) ([sha256](${DOWNLOAD_URL}/osagent-macos-arm64.tar.gz.sha256))
+          - [release-manifest.json](${DOWNLOAD_URL}/release-manifest.json)
+
+          Auto-updates are served to installed clients from ${CDN_BASE_URL}/${R2_RELEASE_PREFIX}/latest.json.
           EOF
           )
 
@@ -429,3 +495,32 @@ jobs:
               -f body="$BODY" \
               -F prerelease="$PRERELEASE_JSON"
           fi
+
+      - name: Attach assets to GitHub release
+        shell: bash
+        run: |
+          # --clobber so re-running the release job replaces assets instead of
+          # failing on the ones already uploaded.
+          gh release upload "$RELEASE_TAG" release-flat/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Verify release assets are downloadable
+        shell: bash
+        run: |
+          # Every link in the release body must resolve, otherwise the release
+          # page advertises downloads that 404.
+          for asset in \
+            osagent-windows-x86_64-setup.exe \
+            osagent-linux-x86_64.deb \
+            osagent-macos-arm64.dmg \
+            osagent-linux-x86_64.tar.gz \
+            osagent-macos-arm64.tar.gz \
+            release-manifest.json; do
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${asset}"
+            if ! curl -fsSIL --retry 5 --retry-delay 3 --max-time 60 "$url" >/dev/null; then
+              echo "Release asset is not downloadable: $url"
+              exit 1
+            fi
+            echo "OK: $url"
+          done

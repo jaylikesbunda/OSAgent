@@ -2,6 +2,7 @@ mod backends;
 mod cache;
 mod normalize;
 mod rank;
+mod structured;
 mod types;
 
 use crate::config::SearchConfig;
@@ -26,6 +27,8 @@ use tokio::time::{sleep, timeout, Instant as TokioInstant};
 use types::{
     BackendError, BackendErrorKind, SearchBackend, SearchRequest, SearchResponse, SearchResult,
 };
+
+pub use types::TimeRange;
 
 const DEFAULT_SEARCH_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_RESULTS: usize = 10;
@@ -120,6 +123,15 @@ impl SearchService {
     }
 
     pub async fn search(&self, query: &str, num_results: usize) -> Result<SearchResponse> {
+        self.search_with_options(query, num_results, None).await
+    }
+
+    pub async fn search_with_options(
+        &self,
+        query: &str,
+        num_results: usize,
+        time_range: Option<TimeRange>,
+    ) -> Result<SearchResponse> {
         let query = normalize_query(query);
         if query.is_empty() {
             return Err(OSAgentError::ToolExecution(
@@ -127,18 +139,49 @@ impl SearchService {
             ));
         }
 
-        let request = SearchRequest {
+        let mut request = SearchRequest {
             query: query.clone(),
             num_results: num_results.clamp(1, self.config.max_results.clamp(1, MAX_RESULTS)),
+            time_range,
         };
         let cache_key = format!(
-            "{}::{}",
+            "{}::{}::{}",
             request.query.to_ascii_lowercase(),
-            request.num_results
+            request.num_results,
+            time_range.map(|r| r.as_word()).unwrap_or("any")
         );
         if let Some(mut cached) = self.cache.get(&cache_key) {
             cached.cached = true;
             return Ok(cached);
+        }
+
+        // An explicit `site:` filter pointing at a site we have a real API for
+        // is answered by that API. It is both more reliable and more accurate
+        // than asking a general engine to filter by domain.
+        if let Some((route, cleaned)) = structured::route_for_query(&request.query) {
+            request.query = cleaned;
+            match structured::search_route(route, &self.client, &request).await {
+                Ok(results) if !results.is_empty() => {
+                    let response = SearchResponse {
+                        query: request.query.clone(),
+                        backend: route.id().to_string(),
+                        fallback_used: false,
+                        cached: false,
+                        tried_backends: vec![route.id().to_string()],
+                        results: rank_results(normalize_results(results), request.num_results),
+                    };
+                    self.cache.insert(cache_key, response.clone());
+                    return Ok(response);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        "structured route {} failed: {}, falling back to general search",
+                        route.id(),
+                        error.message
+                    );
+                }
+            }
         }
 
         let now = Instant::now();
@@ -220,6 +263,27 @@ impl SearchService {
             .await;
         }
 
+        // Every general backend failed — they are the ones that get challenged
+        // and rate limited. Before giving up, ask the key-less structured APIs,
+        // which answer when the scrapers cannot.
+        if merged_results.is_empty() {
+            for route in structured::FALLBACK_ROUTES {
+                if TokioInstant::now() >= global_deadline {
+                    break;
+                }
+                tried_backends.push(route.id().to_string());
+                match structured::search_route(route, &self.client, &request).await {
+                    Ok(results) if !results.is_empty() => {
+                        merged_results.extend(normalize_results(results));
+                        successful_backends.push(route.id().to_string());
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => errors.push(format!("{}: {}", route.id(), error.message)),
+                }
+            }
+        }
+
         if merged_results.is_empty() {
             let backend_info = if errors.is_empty() {
                 tried_backends.join(", ")
@@ -227,7 +291,7 @@ impl SearchService {
                 errors.join(" | ")
             };
             return Err(OSAgentError::ToolExecution(format!(
-                "No search results found. Tried backends: {}. Consider using web_fetch with a direct URL or site-specific endpoint (e.g., reddit.com/.json, wikipedia.org/api) as an alternative.",
+                "No search results found. Tried backends: {}. Consider narrowing the query, adding a `site:` filter for a site with a public API (github.com, stackoverflow.com, wikipedia.org, news.ycombinator.com, reddit.com, crates.io, npmjs.com, arxiv.org), or using web_fetch with a direct URL.",
                 backend_info
             )));
         }
@@ -547,20 +611,54 @@ pub(crate) async fn fetch_search_page(
     Err(last_error.unwrap_or_else(|| BackendError::network("unknown search error")))
 }
 
+/// Detect an interstitial/challenge page.
+///
+/// Matching loose words like "challenge" against the whole document flags any
+/// result page whose snippets happen to use them — a real problem for security
+/// and CTF queries, where a good page of results was reported as a block.
+/// Unambiguous phrases are matched anywhere; single words only count inside the
+/// `<title>`, and only when the body is too short to be a page of results.
 pub(crate) fn is_probable_block_page(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
-    [
-        "captcha",
+
+    const DEFINITE: [&str; 7] = [
         "verify you are human",
         "verify you're human",
         "unusual traffic",
         "automated requests",
+        "enable javascript and cookies to continue",
+        "checking your browser before",
+        "why have i been blocked",
+    ];
+    if DEFINITE.iter().any(|needle| lower.contains(needle)) {
+        return true;
+    }
+
+    // A genuine SERP is large; challenge pages are small. Below this, weaker
+    // signals in the title are trustworthy.
+    const SMALL_PAGE_BYTES: usize = 32 * 1024;
+    if lower.len() > SMALL_PAGE_BYTES {
+        return false;
+    }
+
+    let title = extract_html_title(&lower).unwrap_or_default();
+    const TITLE_SIGNALS: [&str; 7] = [
+        "captcha",
         "challenge",
-        "bot detection",
         "access denied",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+        "attention required",
+        "just a moment",
+        "are you a robot",
+        "forbidden",
+    ];
+    TITLE_SIGNALS.iter().any(|needle| title.contains(needle))
+}
+
+fn extract_html_title(lower_html: &str) -> Option<String> {
+    let start = lower_html.find("<title")?;
+    let open_end = lower_html[start..].find('>')? + start + 1;
+    let end = lower_html[open_end..].find("</title>")? + open_end;
+    Some(lower_html[open_end..end].trim().to_string())
 }
 
 pub(crate) fn looks_like_no_results_page(html: &str) -> bool {
@@ -577,11 +675,43 @@ pub(crate) fn looks_like_no_results_page(html: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::SearchService;
+    use super::{is_probable_block_page, SearchService};
     use crate::config::SearchConfig;
     use crate::tools::web_search::types::{
         BackendError, SearchBackend, SearchRequest, SearchResult,
     };
+
+    #[test]
+    fn detects_real_challenge_pages() {
+        assert!(is_probable_block_page(
+            "<html><head><title>Just a moment...</title></head><body>Checking your browser before accessing.</body></html>"
+        ));
+        assert!(is_probable_block_page(
+            "<html><body>Please verify you are human to continue</body></html>"
+        ));
+        assert!(is_probable_block_page(
+            "<html><head><title>Attention Required! | Cloudflare</title></head><body>x</body></html>"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_results_that_merely_mention_blocking_words() {
+        // A results page for a security query legitimately contains words like
+        // "challenge" and "captcha" in its snippets. Treating those as a block
+        // discarded good results for exactly the queries this agent runs most.
+        let mut html =
+            String::from("<html><head><title>ghostesp ctf challenge - Search</title></head><body>");
+        for index in 0..400 {
+            html.push_str(&format!(
+                "<div class=\"result\"><a href=\"https://example.com/{index}\">Result {index}</a>\
+                 <p>Solving the captcha challenge, access denied errors and bot detection</p></div>"
+            ));
+        }
+        html.push_str("</body></html>");
+
+        assert!(html.len() > 32 * 1024);
+        assert!(!is_probable_block_page(&html));
+    }
     use async_trait::async_trait;
     use reqwest::Client;
     use std::sync::{Arc, Mutex};

@@ -33,10 +33,13 @@ impl SearchBackend for StartpageBackend {
         client: &Client,
         request: &SearchRequest,
     ) -> BackendResult<Vec<SearchResult>> {
-        let url = format!(
+        let mut url = format!(
             "https://www.startpage.com/sp/search?query={}&cat=web&segment=startpage.udog&page=1",
             urlencoding::encode(&request.query)
         );
+        if let Some(range) = request.time_range {
+            url.push_str(&format!("&with_date={}", range.as_letter()));
+        }
         let html = fetch_search_page(
             client,
             &url,

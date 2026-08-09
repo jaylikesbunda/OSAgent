@@ -1,5 +1,35 @@
 v0.4.0 changes:
 
+## Auto-updates (OTA)
+
+* Fixed OTA updates failing on Linux and macOS with a "Failed to extract tar.gz" error: the release manifest advertised a `.deb`/`.dmg` while the client saved it under a hardcoded `.tar.gz` filename and fed a package to the gzip decoder. The download filename now comes from the manifest instead of a per-platform guess
+* The release pipeline now builds and publishes real `osagent-linux-x86_64.tar.gz` and `osagent-macos-arm64.tar.gz` OTA archives alongside the `.deb`/`.dmg`/`.exe` installers, so in-place updates work on every platform
+* Downloaded payloads are identified by their magic bytes rather than their file extension, so a package, an HTML error page, or a truncated body is reported for what it is instead of failing deep inside an archive decoder
+* Update downloads are now verified against the manifest SHA-256 before anything is staged, and a mismatched or corrupt payload is discarded rather than installed
+* Downloads retry up to 4 times with exponential backoff and resume from the bytes already on disk via HTTP range requests, and are checked against `Content-Length` so a silently truncated body is caught while retrying is still cheap
+* Downloads are written to a `.part` file and only renamed into place after the size and checksum pass, so a crash mid-download can never leave a corrupt payload for the next run to pick up; an already-downloaded payload whose hash still matches is reused instead of re-fetched
+* Archive extraction now rejects entries that escape the destination directory (zip-slip / tar traversal), preserves the executable bit from zip archives, and unpacks into a wiped subdirectory so leftovers from a failed attempt cannot be picked up
+* The pending/prepared update marker files are written atomically, arming an update whose staged file is missing is refused, and stale payloads from earlier attempts are cleaned up before a new download starts
+* Update download timeout raised from 5 to 30 minutes, with a separate 30s connect timeout, so a large installer on a slow link no longer fails partway through
+* On macOS the updater now clears the quarantine attribute and re-signs the app bundle ad-hoc after swapping the launcher binary — without this the modified bundle fails its signature check and macOS refuses to launch it
+* Platforms that ship only an installer now report the verified file and its path instead of silently staging something the launcher cannot apply
+
+## Release pipeline
+
+* Release archives are validated before publishing: gzip integrity, entry paths, presence and executable mode of the launcher, native binary format, minimum size, and checksum agreement (`verify-ota-archive.sh`)
+* `upload-to-r2.sh` re-verifies every checksum, confirms the OTA archives really are gzip, validates the generated manifest JSON, and HEAD-checks every published payload before flipping `latest.json`, so the manifest can never point at a missing or broken file
+* The release manifest now distinguishes the OTA archive (`assets.<platform>.url`) from the manual installer (`assets.<platform>.installer`), with separate `sha256.<platform>` and `sha256.<platform>-installer` entries
+* GitHub releases now host the built binaries as release assets and the release notes link to `github.com` download URLs instead of the CDN, which is not intended for direct downloads; a post-publish step fails the job if any advertised asset is not downloadable
+
+## Web search
+
+* Added structured search over free, key-less JSON APIs — Wikipedia, Hacker News (Algolia), GitHub, Stack Exchange, crates.io, npm, Reddit and arXiv. A `site:` filter naming one of those hosts is answered by its API directly, which neither gets challenged nor breaks when markup changes
+* When every general backend fails, the structured APIs are now tried as a last resort instead of returning "No search results found", and the error message lists the sites that can be targeted with `site:`
+* Reddit is queried through its RSS endpoint: anonymous `/search.json` now returns HTTP 403, while the feed still answers requests that carry a real user agent
+* Added a `time_range` parameter (`day`/`week`/`month`/`year`) plumbed into every backend that supports recency filtering, so "what happened in the past month" can actually be expressed
+* Fixed a results page being discarded as a bot challenge whenever its text merely contained words like "challenge", "captcha" or "access denied" — which hit security-related queries the hardest. Detection now relies on unambiguous phrases, or on those words appearing in the title of a page too small to be a page of results
+* Raised search timeouts from 2s per backend / 4.5s overall to 8s / 15s: public SearXNG instances routinely need several seconds and were being timed out before they could ever answer
+
 ## Launcher & native app
 
 * Added a native Web UI window (Tauri 2, rendering via the OS WebView2 runtime — no bundled Electron/Chromium): the web UI now opens in its own app window instead of only in a browser, and the launcher and tray offer both targets — "Open Web UI" (native window) and "Open in Browser"

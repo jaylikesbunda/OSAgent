@@ -34,10 +34,13 @@ impl SearchBackend for DuckDuckGoHtmlBackend {
         client: &Client,
         request: &SearchRequest,
     ) -> BackendResult<Vec<SearchResult>> {
-        let url = format!(
+        let mut url = format!(
             "https://html.duckduckgo.com/html/?q={}",
             urlencoding::encode(&request.query)
         );
+        if let Some(range) = request.time_range {
+            url.push_str(&format!("&df={}", range.as_letter()));
+        }
         let html = fetch_search_page(
             client,
             &url,

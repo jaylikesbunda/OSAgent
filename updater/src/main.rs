@@ -327,6 +327,64 @@ fn copy_windows_runtime_files(new_path: &str, old_path: &str) -> bool {
     true
 }
 
+/// Find the `.app` bundle a path lives inside, if any.
+#[cfg(target_os = "macos")]
+fn enclosing_app_bundle(path: &str) -> Option<PathBuf> {
+    PathBuf::from(path)
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("app"))
+                .unwrap_or(false)
+        })
+        .map(|p| p.to_path_buf())
+}
+
+/// Overwriting the main executable of a signed .app invalidates the bundle
+/// signature, and macOS refuses to start a bundle whose signature does not
+/// match its contents — on Apple Silicon that is a hard kill, not a warning.
+/// Re-sign ad-hoc so the swapped binary is launchable.
+#[cfg(target_os = "macos")]
+fn resign_app_bundle(binary_path: &str) -> bool {
+    let Some(bundle) = enclosing_app_bundle(binary_path) else {
+        log_msg("Swapped binary is not inside an .app bundle; no re-signing needed");
+        return true;
+    };
+
+    let bundle_str = bundle.to_string_lossy().to_string();
+    log_msg(&format!("Re-signing app bundle: {}", bundle_str));
+
+    // A stale quarantine flag on the freshly written binary would trigger
+    // Gatekeeper on the next launch; clear it before signing.
+    let _ = Command::new("/usr/bin/xattr")
+        .args(["-d", "-r", "com.apple.quarantine", &bundle_str])
+        .output();
+
+    match Command::new("/usr/bin/codesign")
+        .args(["--force", "--deep", "--sign", "-", &bundle_str])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            log_msg("App bundle re-signed successfully");
+            true
+        }
+        Ok(output) => {
+            log_msg(&format!(
+                "codesign failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+            false
+        }
+        Err(e) => {
+            log_msg(&format!("Failed to run codesign: {}", e));
+            false
+        }
+    }
+}
+
 fn launch_new(launch_path: &str) -> bool {
     log_msg(&format!("Launching new binary: {}", launch_path));
     let result = Command::new(launch_path).spawn();
@@ -544,6 +602,19 @@ fn main() {
             log_msg(&err);
             write_failure(&err, old_path, new_path);
             process::exit(1);
+        }
+
+        // Record the signing failure but still try to launch: the swap has
+        // already happened, so refusing to continue leaves the user with
+        // nothing running at all.
+        #[cfg(target_os = "macos")]
+        if !resign_app_bundle(old_path) {
+            let err = format!(
+                "Failed to re-sign app bundle after swapping {}; macOS may refuse to launch it",
+                old_path
+            );
+            log_msg(&err);
+            write_failure(&err, old_path, new_path);
         }
     }
 

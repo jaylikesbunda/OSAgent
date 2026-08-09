@@ -224,61 +224,81 @@ OSA.McpUI = {
             <div class="mcp-editor-card">
                 <h3>${e.isNew ? 'Add MCP server' : `Edit ${OSA.escapeHtml(e.name)}`}</h3>
 
-                <label class="settings-label">Name</label>
-                <input class="settings-input" id="mcp-f-name" value="${this.attr(e.name)}"
-                       ${e.isNew ? '' : 'disabled'} placeholder="linear">
-                <div class="settings-hint">Letters, numbers, dashes and underscores. Used to namespace its tools.</div>
+                <div class="settings-field">
+                    <label>Name</label>
+                    <input id="mcp-f-name" value="${this.attr(e.name)}"
+                           ${e.isNew ? '' : 'disabled'} placeholder="linear">
+                    <span class="settings-field-hint">Letters, numbers, dashes and underscores. Used to namespace its tools.</span>
+                </div>
 
-                <label class="settings-label">Transport</label>
-                <select class="settings-input" id="mcp-f-transport" onchange="OSA.McpUI.setField('transport', this.value)">
-                    <option value="stdio" ${isHttp ? '' : 'selected'}>Local command (stdio)</option>
-                    <option value="http" ${isHttp ? 'selected' : ''}>Remote (HTTP)</option>
-                </select>
+                <div class="settings-field">
+                    <label>Transport</label>
+                    <select id="mcp-f-transport" onchange="OSA.McpUI.setField('transport', this.value)">
+                        <option value="stdio" ${isHttp ? '' : 'selected'}>Local command (stdio)</option>
+                        <option value="http" ${isHttp ? 'selected' : ''}>Remote (HTTP)</option>
+                    </select>
+                </div>
 
                 ${isHttp ? `
-                    <label class="settings-label">URL</label>
-                    <input class="settings-input" id="mcp-f-url" value="${this.attr(e.url)}"
-                           placeholder="https://example.com/mcp">
+                    <div class="settings-field">
+                        <label>URL</label>
+                        <input id="mcp-f-url" value="${this.attr(e.url)}"
+                               placeholder="https://example.com/mcp">
+                    </div>
 
-                    <label class="settings-label">Headers</label>
-                    <textarea class="settings-input" id="mcp-f-headers" rows="3"
-                              placeholder="Authorization=Bearer sk-...">${OSA.escapeHtml(e.headers)}</textarea>
-                    <div class="settings-hint">One <code>Key=Value</code> per line. Stored in your config file.</div>
+                    <div class="settings-field">
+                        <label>Headers</label>
+                        <textarea id="mcp-f-headers" rows="3"
+                                  placeholder="Authorization=Bearer sk-...">${OSA.escapeHtml(e.headers)}</textarea>
+                        <span class="settings-field-hint">One <code>Key=Value</code> per line. Stored in your config file.</span>
+                    </div>
                 ` : `
-                    <label class="settings-label">Command</label>
-                    <input class="settings-input" id="mcp-f-command" value="${this.attr(e.command)}"
-                           placeholder="npx">
+                    <div class="settings-field">
+                        <label>Command</label>
+                        <input id="mcp-f-command" value="${this.attr(e.command)}"
+                               placeholder="npx">
+                    </div>
 
-                    <label class="settings-label">Arguments</label>
-                    <input class="settings-input" id="mcp-f-args" value="${this.attr(e.args)}"
-                           placeholder="-y @modelcontextprotocol/server-filesystem ~/notes">
-                    <div class="settings-hint">Space separated. Quote arguments containing spaces.</div>
+                    <div class="settings-field">
+                        <label>Arguments</label>
+                        <input id="mcp-f-args" value="${this.attr(e.args)}"
+                               placeholder="-y @modelcontextprotocol/server-filesystem ~/notes">
+                        <span class="settings-field-hint">Space separated. Quote arguments containing spaces.</span>
+                    </div>
 
-                    <label class="settings-label">Environment</label>
-                    <textarea class="settings-input" id="mcp-f-env" rows="3"
-                              placeholder="API_KEY=...">${OSA.escapeHtml(e.env)}</textarea>
-                    <div class="settings-hint">One <code>KEY=value</code> per line.</div>
+                    <div class="settings-field">
+                        <label>Environment</label>
+                        <textarea id="mcp-f-env" rows="3"
+                                  placeholder="API_KEY=...">${OSA.escapeHtml(e.env)}</textarea>
+                        <span class="settings-field-hint">One <code>KEY=value</code> per line.</span>
+                    </div>
                 `}
 
-                <label class="settings-label">Description <span class="settings-optional">(optional)</span></label>
-                <input class="settings-input" id="mcp-f-description" value="${this.attr(e.description)}"
-                       placeholder="Issue tracking for the core team">
-                <div class="settings-hint">
-                    One line telling the agent what this server is for. This is the only thing
-                    about the server that is always in context, so it is worth writing.
+                <div class="settings-field">
+                    <label>Description <span class="settings-optional">(optional)</span></label>
+                    <input id="mcp-f-description" value="${this.attr(e.description)}"
+                           placeholder="Issue tracking for the core team">
+                    <span class="settings-field-hint">
+                        One line telling the agent what this server is for. This is the only thing
+                        about the server that is always in context, so it is worth writing.
+                    </span>
                 </div>
 
-                <label class="settings-label">Always load these tools <span class="settings-optional">(optional)</span></label>
-                <input class="settings-input" id="mcp-f-always" value="${this.attr(e.always_active)}"
-                       placeholder="create_issue, list_issues">
-                <div class="settings-hint">
-                    Comma separated tool names, loaded at startup so the agent skips the search
-                    step. Each one costs context in every request — keep the list short.
+                <div class="settings-field">
+                    <label>Always load these tools <span class="settings-optional">(optional)</span></label>
+                    <input id="mcp-f-always" value="${this.attr(e.always_active)}"
+                           placeholder="create_issue, list_issues">
+                    <span class="settings-field-hint">
+                        Comma separated tool names, loaded at startup so the agent skips the search
+                        step. Each one costs context in every request — keep the list short.
+                    </span>
                 </div>
 
-                <label class="settings-label">Timeout (seconds)</label>
-                <input class="settings-input" id="mcp-f-timeout" type="number" min="1" max="600"
-                       value="${e.timeout_seconds}">
+                <div class="settings-field settings-field-narrow">
+                    <label>Timeout (seconds)</label>
+                    <input id="mcp-f-timeout" type="number" min="1" max="600"
+                           value="${e.timeout_seconds}">
+                </div>
 
                 ${this.testResult ? this.renderTestResult() : ''}
 

@@ -1122,6 +1122,11 @@ impl Tool for WebSearchTool {
                 "num_results": {
                     "type": "integer",
                     "description": "Number of results to return (default: 5)"
+                },
+                "time_range": {
+                    "type": "string",
+                    "enum": ["day", "week", "month", "year"],
+                    "description": "Only return results published within this window. Use for questions about recent activity."
                 }
             },
             "required": ["query"]
@@ -1134,7 +1139,13 @@ impl Tool for WebSearchTool {
             .ok_or_else(|| OSAgentError::ToolExecution("Missing 'query' parameter".to_string()))?;
 
         let num_results = args["num_results"].as_u64().unwrap_or(5) as usize;
-        let response = self.service.search(query, num_results).await?;
+        let time_range = args["time_range"]
+            .as_str()
+            .and_then(crate::tools::web_search::TimeRange::parse);
+        let response = self
+            .service
+            .search_with_options(query, num_results, time_range)
+            .await?;
         serde_json::to_string(&response).map_err(|e| {
             OSAgentError::ToolExecution(format!("Failed to encode search results: {}", e))
         })

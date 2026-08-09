@@ -812,11 +812,13 @@ impl Default for SearchConfig {
             enabled: true,
             index_on_startup: true,
             max_results: 20,
-            global_timeout_ms: 4500,
-            per_backend_timeout_ms: 2000,
+            // Public search frontends routinely take several seconds; the old
+            // 2s/4.5s budget timed them out before they could ever answer.
+            global_timeout_ms: 15_000,
+            per_backend_timeout_ms: 8_000,
             max_parallel_backends: 5,
             searxng_instance_refresh_minutes: 30,
-            searxng_max_instances: 2,
+            searxng_max_instances: 3,
         }
     }
 }

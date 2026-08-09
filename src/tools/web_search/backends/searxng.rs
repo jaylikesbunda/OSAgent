@@ -83,6 +83,9 @@ impl SearxngBackend {
         if request.num_results > 0 {
             url.push_str(&format!("&max_results={}", request.num_results));
         }
+        if let Some(range) = request.time_range {
+            url.push_str(&format!("&time_range={}", range.as_word()));
+        }
 
         let response = timeout(
             timeout_duration,

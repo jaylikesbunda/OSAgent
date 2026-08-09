@@ -5995,7 +5995,7 @@ async fn download_update(
 
     let installer = crate::update::UpdateInstaller::new();
 
-    let (tag, archive_name, download_url) = installer
+    let asset = installer
         .find_release_for_platform(channel)
         .await
         .map_err(|e| {
@@ -6013,8 +6013,11 @@ async fn download_update(
             )
         })?;
 
+    // Free space taken by earlier attempts before pulling a fresh payload.
+    let _ = installer.cleanup_stale_updates(Some(&asset.tag));
+
     let archive_path = installer
-        .download_release(&download_url, &tag, &archive_name, |downloaded, total| {
+        .download_release(&asset, |downloaded, total| {
             tracing::debug!(
                 "Download progress: {}/{} bytes ({:.1}%)",
                 downloaded,
@@ -6037,9 +6040,12 @@ async fn download_update(
         })?;
 
     let staged_update = installer
-        .prepare_update(&archive_path, &tag)
+        .prepare_update(&archive_path, &asset.tag)
         .await
         .map_err(|e| {
+            // Leave the verified payload on disk: for platforms that ship a
+            // package the user can still install it by hand, and the next
+            // attempt reuses it instead of re-downloading.
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -6053,7 +6059,7 @@ async fn download_update(
     }
 
     installer
-        .mark_prepared_update(&tag, &staged_update)
+        .mark_prepared_update(&asset.tag, &staged_update)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -6063,15 +6069,13 @@ async fn download_update(
             )
         })?;
 
-    let version = tag.trim_start_matches('v').to_string();
-
     Ok(Json(UpdateStatusResponse {
         status: "ready".to_string(),
         progress: Some(100.0),
         bytes_downloaded: None,
         total_bytes: None,
-        tag: Some(tag),
-        version: Some(version),
+        tag: Some(asset.tag),
+        version: Some(asset.version),
         message: Some("Update ready to install".to_string()),
     }))
 }
