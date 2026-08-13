@@ -1,3 +1,22 @@
+v0.6.0 changes:
+
+## Tool execution
+
+* Per-tool timeout budgets: tools declare a `timeout_ms` and the registry enforces it at every dispatch site, returning a structured "tool timed out" error instead of whatever was in flight
+* Oversized plain-text tool results are spilled to session-scoped files and replaced with a bounded head/tail preview plus a "read with offset/limit" hint, instead of being silently truncated
+* Advisory repeat-tool-call reminders: identical calls trigger escalating nudges at 3/5/8 repeats (canonicalized args, wildcard include/exclude) without the hard loop guard blocking
+
+## Context compaction
+
+* Compaction summaries are now framed in a single `<compacted-summary>` block with structured sections, and a summary that is not smaller than what it replaces is rejected in favor of the deterministic fallback
+* Model-free pre-compaction pruning rewrites over-budget tool results to a bounded head/tail slice before any summarization pass
+* Compaction trigger ratio, prune thresholds, and transcript cap are configurable under `[compaction]`
+
+## Feedback & goals
+
+* Per-message thumbs up/down feedback with a compare-and-set version token, stored in a sidecar table invisible to the model, with UI buttons on assistant replies
+* Goal system: `get_goal`/`create_goal`/`update_goal` tools with revision-fenced updates, active/paused/blocked/complete phases, round accounting, and auto-continued goal rounds that never restart after a process restart
+
 v0.4.0 changes:
 
 ## Auto-updates (OTA)

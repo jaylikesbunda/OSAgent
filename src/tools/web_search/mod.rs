@@ -85,6 +85,10 @@ pub struct SearchService {
 }
 
 impl SearchService {
+    pub fn config(&self) -> &SearchConfig {
+        &self.config
+    }
+
     pub fn new(client: Client, config: SearchConfig) -> Self {
         let refresh_ttl = Duration::from_secs(config.searxng_instance_refresh_minutes.max(1) * 60);
         let searxng_timeout = Duration::from_millis(config.per_backend_timeout_ms.max(900));

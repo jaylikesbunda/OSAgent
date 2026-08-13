@@ -651,8 +651,115 @@ OSA.renderAssistantActionButtons = function(checkpoint) {
 
     html += '<button class="msg-action-btn msg-action-retry" onclick="OSA.regenerateFromMessage(this)" title="Discard this reply and run the turn again">Retry</button>';
     html += '<button class="msg-action-btn msg-action-speak" onclick="OSA.speakMessageElement(this)" title="Read this message aloud (click again to stop)">Speak</button>';
+    html += '<button class="msg-action-btn msg-action-feedback-up" onclick="OSA.toggleMessageFeedback(this, \'positive\')" title="Rate this reply as helpful">Good</button>';
+    html += '<button class="msg-action-btn msg-action-feedback-down" onclick="OSA.toggleMessageFeedback(this, \'negative\')" title="Rate this reply as unhelpful">Bad</button>';
 
     return html;
+};
+
+OSA.messageFeedbackCache = {};
+
+OSA.feedbackKey = function(sessionId, seq) {
+    return sessionId + ':' + seq;
+};
+
+OSA.feedbackSeqForButton = function(button) {
+    const messageEl = button.closest('.message') || button.closest('.transcript-entry');
+    if (!messageEl) return NaN;
+    const raw = messageEl.dataset.messageIndex;
+    const parsed = Number.parseInt(raw || '', 10);
+    return Number.isInteger(parsed) ? parsed : NaN;
+};
+
+OSA.applyMessageFeedbackState = function(actionsEl, feedback) {
+    if (!actionsEl) return;
+    const up = actionsEl.querySelector('.msg-action-feedback-up');
+    const down = actionsEl.querySelector('.msg-action-feedback-down');
+    if (up) up.classList.toggle('active', feedback && feedback.rating === 'positive');
+    if (down) down.classList.toggle('active', feedback && feedback.rating === 'negative');
+};
+
+OSA.applyCachedFeedbackToMessage = function(messageEl) {
+    const session = OSA.getCurrentSession();
+    if (!session || !session.id) return;
+    const seq = OSA.feedbackSeqForButton(messageEl);
+    if (!Number.isInteger(seq)) return;
+    const actionsEl = messageEl.querySelector('.message-actions');
+    if (!actionsEl) return;
+    const feedback = OSA.messageFeedbackCache[OSA.feedbackKey(session.id, seq)];
+    OSA.applyMessageFeedbackState(actionsEl, feedback);
+};
+
+OSA.toggleMessageFeedback = async function(button, rating) {
+    const session = OSA.getCurrentSession();
+    if (!session || !session.id) return;
+    const seq = OSA.feedbackSeqForButton(button);
+    if (!Number.isInteger(seq)) return;
+
+    const key = OSA.feedbackKey(session.id, seq);
+    const current = OSA.messageFeedbackCache[key];
+
+    if (current && current.rating === rating) {
+        try {
+            const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(session.id)}/feedback`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ seq }),
+            });
+            if (res.ok) {
+                delete OSA.messageFeedbackCache[key];
+                const messageEl = button.closest('.message');
+                if (messageEl) OSA.applyCachedFeedbackToMessage(messageEl);
+            }
+        } catch (err) {
+            OSA.debug.warn('feedback.delete', String(err));
+        }
+        return;
+    }
+
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(session.id)}/feedback`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                seq,
+                rating,
+                if_version: current ? current.version : null,
+            }),
+        });
+        const outcome = await res.json().catch(() => ({}));
+        const feedback = outcome.feedback || (outcome.status === 'conflict' ? outcome.current : null);
+        if (feedback) {
+            OSA.messageFeedbackCache[key] = feedback;
+        } else if (!res.ok) {
+            throw new Error(outcome.error || 'Failed to save feedback');
+        }
+        const messageEl = button.closest('.message');
+        if (messageEl) OSA.applyCachedFeedbackToMessage(messageEl);
+    } catch (err) {
+        OSA.debug.warn('feedback.put', String(err));
+    }
+};
+
+OSA.lastFeedbackSessionId = null;
+
+OSA.refreshMessageFeedback = async function() {
+    const session = OSA.getCurrentSession();
+    if (!session || !session.id || OSA.lastFeedbackSessionId === session.id) return;
+    OSA.lastFeedbackSessionId = session.id;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(session.id)}/feedback`);
+        if (!res.ok) return;
+        const rows = await res.json().catch(() => []);
+        (rows || []).forEach(function(item) {
+            OSA.messageFeedbackCache[OSA.feedbackKey(session.id, item.seq)] = item;
+        });
+    } catch (err) {
+        OSA.debug.warn('feedback.list', String(err));
+    }
+    document.querySelectorAll('#messages .message.assistant').forEach(function(messageEl) {
+        OSA.applyCachedFeedbackToMessage(messageEl);
+    });
 };
 
 /// Finds the index of a rendered message within the current session.
@@ -2413,7 +2520,15 @@ OSA.patchMessageElement = function(element, message, originalIndex, force = fals
         delete element.dataset.clientMessageId;
     }
 
+    if (Number.isInteger(originalIndex)) {
+        element.dataset.messageIndex = String(originalIndex);
+    }
+
     element.replaceChildren(...children);
+
+    if (message.role === 'assistant') {
+        OSA.applyCachedFeedbackToMessage(element);
+    }
 };
 
 OSA.resetTranscriptView = function() {
@@ -2785,6 +2900,7 @@ OSA.renderMessages = function(messages, options = {}) {
         forceFullWindowReset: true,
         reason: options.reason || '',
     });
+    OSA.refreshMessageFeedback();
 };
 
 OSA.renderQueuedMessages = function(queueItems) {

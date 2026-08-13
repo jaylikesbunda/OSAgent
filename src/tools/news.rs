@@ -325,6 +325,10 @@ impl Tool for NewsTool {
         "news"
     }
 
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(20_000)
+    }
+
     fn description(&self) -> &str {
         "Fetch latest news headlines from multiple RSS sources (BBC, Al Jazeera, NPR, Google News). Supports topic filtering and category selection."
     }

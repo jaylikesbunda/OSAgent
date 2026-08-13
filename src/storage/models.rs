@@ -479,3 +479,110 @@ pub struct SessionSearchHit {
     pub role: String,
     pub snippet: String,
 }
+
+/// Host-owned, editable per-message feedback. Kept in a sidecar table
+/// separate from the immutable session transcript: invisible to the
+/// model, never enters the prompt, and safe against concurrent edits
+/// through the `version` compare-and-set token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageFeedback {
+    pub session_id: String,
+    pub seq: i64,
+    pub rating: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub version: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl MessageFeedback {
+    pub fn new(session_id: String, seq: i64, rating: String, note: Option<String>) -> Self {
+        Self {
+            session_id,
+            seq,
+            rating,
+            note,
+            version: Uuid::new_v4().to_string(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    pub fn with_trimmed_note(mut self) -> Self {
+        self.note = self
+            .note
+            .map(|note| note.trim().to_string())
+            .filter(|note| !note.is_empty());
+        self
+    }
+}
+
+/// Result of a compare-and-set feedback write. `Conflict` hands back the
+/// authoritative current row so a caller can reconcile instead of
+/// blindly overwriting; `Unchanged` is a matching-version no-op.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FeedbackPutOutcome {
+    Stored { feedback: MessageFeedback },
+    Conflict { current: MessageFeedback },
+    Unchanged { feedback: MessageFeedback },
+}
+
+/// Goal phase. "Blocked" subsumes all stop reasons (provider limits,
+/// budgets, errors, human input) into one durable phase with a policy
+/// code and explanation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalPhase {
+    Active,
+    Paused,
+    Blocked,
+    Complete,
+}
+
+impl GoalPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Blocked => "blocked",
+            Self::Complete => "complete",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "paused" => Some(Self::Paused),
+            "blocked" => Some(Self::Blocked),
+            "complete" => Some(Self::Complete),
+            _ => None,
+        }
+    }
+}
+
+/// The single current objective for a session, fenced by revision so
+/// concurrent mutators can detect staleness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Goal {
+    pub session_id: String,
+    pub id: String,
+    pub revision: i64,
+    pub objective: String,
+    pub phase: GoalPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_code: Option<String>,
+    pub rounds_started: i64,
+    pub max_rounds: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum GoalCasOutcome {
+    Stored { goal: Goal },
+    Conflict { current: Goal },
+    Missing,
+}

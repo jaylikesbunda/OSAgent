@@ -448,6 +448,10 @@ impl GrepTool {
 
 #[async_trait]
 impl Tool for GrepTool {
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(self.timeout_seconds.saturating_mul(1_000).max(1_000))
+    }
+
     fn name(&self) -> &str {
         "grep"
     }
@@ -833,6 +837,10 @@ impl GlobTool {
 
 #[async_trait]
 impl Tool for GlobTool {
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(self.timeout_seconds.saturating_mul(1_000).max(1_000))
+    }
+
     fn name(&self) -> &str {
         "glob"
     }

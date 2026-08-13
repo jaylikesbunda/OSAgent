@@ -444,6 +444,21 @@ pub struct RejectSuggestionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PutFeedbackRequest {
+    pub seq: i64,
+    pub rating: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub if_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteFeedbackRequest {
+    pub seq: i64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SetPersonaRequest {
     pub persona_id: String,
     pub roleplay_character: Option<String>,
@@ -598,6 +613,16 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/ws", get(ws::ws_upgrade))
         .route("/api/sessions/:id/history", get(session_history))
         .route("/api/sessions/:id/todos", get(session_todos))
+        .route(
+            "/api/sessions/:id/feedback",
+            get(session_feedback)
+                .put(put_session_feedback)
+                .delete(delete_session_feedback),
+        )
+        .route(
+            "/api/sessions/:id/goal",
+            get(session_goal).delete(clear_session_goal),
+        )
         .route("/api/sessions/:id/snapshots", get(list_file_snapshots))
         .route(
             "/api/sessions/:id/snapshots/revert",
@@ -2547,6 +2572,116 @@ async fn session_todos(
     })?;
 
     Ok(Json(todos))
+}
+
+async fn session_feedback(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<crate::storage::MessageFeedback>>, (StatusCode, Json<ErrorResponse>)> {
+    let feedback = agent
+        .list_message_feedback(&session_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(feedback))
+}
+
+async fn session_goal(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let goal = agent
+        .get_session_goal(&session_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "goal": goal })))
+}
+
+async fn clear_session_goal(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let cleared = agent
+        .clear_session_goal(&session_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "cleared": cleared })))
+}
+
+async fn put_session_feedback(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<PutFeedbackRequest>,
+) -> Result<Json<crate::storage::FeedbackPutOutcome>, (StatusCode, Json<ErrorResponse>)> {
+    if payload.seq < 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "seq must be non-negative".to_string(),
+            }),
+        ));
+    }
+
+    let outcome = agent
+        .put_message_feedback(
+            &session_id,
+            payload.seq,
+            &payload.rating,
+            payload.note.as_deref(),
+            payload.if_version.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(outcome))
+}
+
+async fn delete_session_feedback(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<DeleteFeedbackRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let deleted = agent
+        .delete_message_feedback(&session_id, payload.seq)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 async fn list_file_snapshots(
@@ -6201,7 +6336,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let mut config = test_config(temp_dir.path());
         let secret = Arc::new(config.server.jwt_secret.clone());
-        let agent = Arc::new(AgentRuntime::new(config.clone()).unwrap());
+        let agent = AgentRuntime::new(config.clone()).unwrap();
 
         config.server.password_enabled = false;
         agent.replace_config(config).await;
@@ -6224,7 +6359,7 @@ mod tests {
     async fn auth_status_uses_runtime_config() {
         let temp_dir = tempdir().unwrap();
         let mut config = test_config(temp_dir.path());
-        let agent = Arc::new(AgentRuntime::new(config.clone()).unwrap());
+        let agent = AgentRuntime::new(config.clone()).unwrap();
 
         config.server.password_enabled = false;
         agent.replace_config(config).await;

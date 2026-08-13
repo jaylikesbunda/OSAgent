@@ -99,6 +99,10 @@ impl Tool for WebFetchTool {
         "web_fetch"
     }
 
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(45_000)
+    }
+
     fn description(&self) -> &str {
         "Fetch a known URL and normalize readable HTML, site-aware JSON, XML, feeds, or raw page content; also supports page exploration and CSS extraction"
     }
@@ -1087,6 +1091,10 @@ impl WebSearchTool {
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
         "web_search"
+    }
+
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(self.service.config().global_timeout_ms + 5_000)
     }
 
     fn description(&self) -> &str {

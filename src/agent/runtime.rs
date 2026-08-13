@@ -46,26 +46,31 @@ use tokio::sync::{watch, Mutex, Notify};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-const COMPACTION_PROMPT: &str = r#"Provide a continuation summary for the earlier conversation so another pass can continue the work.
+const COMPACTION_PROMPT: &str = r#"Provide a continuation summary of the earlier conversation below so that another pass can continue the work.
 
-Use this template:
-## Goal
-- What the user wants
+Follow this structure exactly:
+## Primary Request and Intent
+- What the user wants, in their own words when possible
 
-## Instructions
-- Important constraints, preferences, and safety notes
+## Key Technical Concepts
+- Technologies, constraints, and conventions in play
 
-## Discoveries
-- Key findings, failures, and open questions
+## Errors and Fixes
+- Failures encountered and how they were resolved (or why unresolved)
 
-## Progress
-- What is finished
-- What remains
+## Files and Code Sections
+- Files or directory areas that matter most, and what is known about them
 
-## Relevant files
-- Files or directories that matter most
+## Problem Solving
+- What was tried, what is known not to work, and why
 
-Keep it concrete, repo-specific, and optimized for continuing the task rather than retelling everything."#;
+## Next Step
+- The concrete next action for the continuation pass
+
+Rules:
+- Be concrete and repo-specific; optimize for continuing the task, not retelling it.
+- If the transcript already contains earlier compacted summaries, merge them into your output instead of repeating them.
+- Wrap your output in a single <compacted-summary> block. Do not acknowledge this summary explicitly in your reply."#;
 
 pub struct AgentRuntime {
     config: Arc<tokio::sync::RwLock<Config>>,
@@ -91,6 +96,18 @@ pub struct AgentRuntime {
     session_cancellation: DashMap<String, Arc<Notify>>,
     session_cancel_flags: DashMap<String, Arc<std::sync::atomic::AtomicBool>>,
     active_runs: Arc<DashMap<String, ActiveRunInfo>>,
+    /// Per-session advisory repeat-tool-call chains. A user message
+    /// resets the chain; identical (tool, canonical args) calls count
+    /// toward the `[tools].repeat_reminder.thresholds` nudge ladder.
+    repeat_reminders: DashMap<String, std::sync::Mutex<crate::tools::repeat_reminder::RepeatReminderState>>,
+    /// Session-scoped storage for oversized tool results. See
+    /// `crate::tools::spill`.
+    spill_store: Arc<crate::tools::spill::SpillStore>,
+    /// Durable goal state + in-memory arming. See `crate::agent::goal`.
+    goal_store: Arc<crate::agent::goal::GoalStore>,
+    /// Weak handle back to this runtime, set during construction so
+    /// `&self` methods can dispatch follow-up queue runs.
+    self_arc: std::sync::OnceLock<std::sync::Weak<AgentRuntime>>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     restart_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     scheduler: Arc<Scheduler>,
@@ -208,7 +225,7 @@ impl AgentRuntime {
         self.provider.read().await.clone()
     }
 
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(config: Config) -> Result<Arc<Self>> {
         let startup_profile = std::env::var("OSAGENT_STARTUP_PROFILE")
             .map(|v| {
                 let s = v.trim().to_ascii_lowercase();
@@ -437,6 +454,9 @@ impl AgentRuntime {
 
         tool_registry_instance.register_coordinator(coordinator.clone());
 
+        let goal_store = Arc::new(crate::agent::goal::GoalStore::new(storage.clone()));
+        tool_registry_instance.register_goals(goal_store.clone());
+
         let mut scheduler = Scheduler::new(storage.clone(), event_bus.clone());
 
         let (run_prompt_tx, mut run_prompt_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -510,7 +530,11 @@ impl AgentRuntime {
             );
         }
 
-        Ok(Self {
+        let spill_store = Arc::new(crate::tools::spill::SpillStore::new(
+            crate::tools::spill::resolve_spill_root(&config.spill.root)?,
+        ));
+
+        let runtime = Arc::new(Self {
             config: Arc::new(tokio::sync::RwLock::new(config)),
             agent_settings,
             provider: Arc::new(tokio::sync::RwLock::new(provider)),
@@ -534,11 +558,19 @@ impl AgentRuntime {
             session_cancellation: DashMap::new(),
             session_cancel_flags: DashMap::new(),
             active_runs: Arc::new(DashMap::new()),
+            repeat_reminders: DashMap::new(),
+            spill_store,
+            goal_store,
+            self_arc: std::sync::OnceLock::new(),
             shutdown_tx: Arc::new(watch::channel(false).0),
             restart_tx: Arc::new(std::sync::Mutex::new(None)),
             scheduler,
             run_prompt_rx: tokio::sync::Mutex::new(Some(run_prompt_rx)),
-        })
+        });
+        let _ = runtime
+            .self_arc
+            .set(std::sync::Arc::downgrade(&runtime));
+        Ok(runtime)
     }
 
     pub async fn create_session(&self) -> Result<Session> {
@@ -718,6 +750,7 @@ impl AgentRuntime {
                 }
             }
             drop(run_guard);
+            runtime.dispatch_queued_messages(&session_id, &user);
         });
 
         Ok(())
@@ -825,9 +858,10 @@ impl AgentRuntime {
     ) -> Result<String> {
         let run_guard = self.try_start_run(session_id, &user)?;
         let result = self
-            .process_message_internal(session_id, user_message, user, None, None, None, None, None)
+            .process_message_internal(session_id, user_message, user.clone(), None, None, None, None, None)
             .await;
         drop(run_guard);
+        self.dispatch_queued_messages(session_id, &user);
         result
     }
 
@@ -1023,6 +1057,23 @@ impl AgentRuntime {
         let mut recent_tool_intents: Vec<String> = Vec::new();
         let mut recent_tool_signatures: Vec<String> = Vec::new();
         let mut recent_tool_outcomes: Vec<(String, bool, String)> = Vec::new();
+
+        // A fresh user prompt resets the advisory repeat-tool-call chain:
+        // the loop the reminder was watching is over once a human steers.
+        {
+            let state = self
+                .repeat_reminders
+                .entry(session_id.to_string())
+                .or_insert_with(|| {
+                    std::sync::Mutex::new(
+                        crate::tools::repeat_reminder::RepeatReminderState::new(),
+                    )
+                });
+            let lock_result = state.lock();
+            if let Ok(mut guard) = lock_result {
+                guard.reset();
+            }
+        }
         let mut total_input_tokens: usize = 0;
         let mut total_output_tokens: usize = 0;
         let mut total_tokens: usize = 0;
@@ -1258,7 +1309,12 @@ impl AgentRuntime {
 
                 let reserved_output = std::cmp::min(output_limit, 8192);
                 let usable = input_limit.unwrap_or(window.saturating_sub(reserved_output));
-                let budget = ((usable as f32) * 0.8) as usize;
+                let threshold_ratio = if runtime_config.compaction.enabled {
+                    runtime_config.compaction.threshold_ratio.clamp(0.5, 0.99)
+                } else {
+                    0.99
+                };
+                let budget = ((usable as f32) * threshold_ratio) as usize;
 
                 if pre_tokens > budget {
                     self.emit_reasoning_event(
@@ -1270,7 +1326,11 @@ impl AgentRuntime {
                     );
 
                     if let Some((pruned, compacted, replayed)) = self
-                        .compact_session_history(&mut session, &active_workspace)
+                        .compact_session_history(
+                            &mut session,
+                            &active_workspace,
+                            &runtime_config.compaction,
+                        )
                         .await?
                     {
                         if let Some(ref mut cs) = session.context_state {
@@ -1816,13 +1876,22 @@ impl AgentRuntime {
 
                     for (tool_call, result) in tool_calls.iter().zip(parallel_results) {
                         let (
-                            tool_result,
+                            mut tool_result,
                             success,
                             duration_ms,
                             tool_sig,
                             tool_intent,
                             error_detail,
                         ) = result;
+                        if success {
+                            crate::tools::spill::maybe_spill_tool_result(
+                                &self.spill_store,
+                                &session.id,
+                                &tool_call.name,
+                                &mut tool_result,
+                                &runtime_config.spill,
+                            );
+                        }
                         let output = tool_result.output.clone();
                         if success {
                             tool_success_count += 1;
@@ -2036,6 +2105,23 @@ impl AgentRuntime {
                             continue;
                         }
 
+                        let repeat_reminder = {
+                            let state = self.repeat_reminders.entry(session_id.to_string()).or_insert_with(
+                                || {
+                                    std::sync::Mutex::new(
+                                        crate::tools::repeat_reminder::RepeatReminderState::new(),
+                                    )
+                                },
+                            );
+                            state.lock().ok().and_then(|mut guard| {
+                                guard.note_tool_call(
+                                    &tool_call.name,
+                                    &tool_call.arguments,
+                                    &runtime_config.tools.repeat_reminder,
+                                )
+                            })
+                        };
+
                         let start = Instant::now();
 
                         // Emit tool progress - preparing
@@ -2135,6 +2221,9 @@ impl AgentRuntime {
                                 || tool_call.name == "coordinator"
                                 || tool_call.name == "todowrite"
                                 || tool_call.name == "todoread"
+                                || tool_call.name == "get_goal"
+                                || tool_call.name == "create_goal"
+                                || tool_call.name == "update_goal"
                             {
                                 tool_args["session_id"] = serde_json::json!(session_id);
                             }
@@ -2231,6 +2320,20 @@ impl AgentRuntime {
                                     }
                                 }
                             }
+                        }
+
+                        // Oversized plain-text results are spilled to a
+                        // session-scoped file and replaced with a bounded
+                        // preview, so the truncation below never has to
+                        // silently drop content.
+                        if success {
+                            crate::tools::spill::maybe_spill_tool_result(
+                                &self.spill_store,
+                                &session.id,
+                                &tool_call.name,
+                                &mut tool_result,
+                                &runtime_config.spill,
+                            );
                         }
 
                         let output = tool_result.output.clone();
@@ -2358,6 +2461,15 @@ impl AgentRuntime {
                                         });
                                     }
                                 }
+                            }
+
+                            // Advisory repeat-call nudge travels as its
+                            // own user-role message so the tool result
+                            // above stays the tool's auditable output.
+                            if let Some(reminder) = repeat_reminder {
+                                session
+                                    .messages
+                                    .push(Message::synthetic_user(reminder, "repeat_tool_reminder"));
                             }
                         }
                     }
@@ -2649,7 +2761,73 @@ impl AgentRuntime {
             );
         }
 
+        // Goal round continuation: when an armed active goal has rounds
+        // left, reserve the next round and queue it. The queue is
+        // dispatched by the caller once this run's guard drops.
+        if let Err(error) = self.maybe_queue_goal_round(&session).await {
+            warn!("Goal round driver failed for session {}: {}", session_id, error);
+        }
+
         Ok(result)
+    }
+
+    /// Reserve and enqueue the next goal round, if one is due. Mirrors
+    /// DSH's goal-round-driver: the reservation is CAS-fenced on the
+    /// goal revision and rounds run as separate queued turns, never
+    /// auto-continuing after a process restart (arming is in-memory).
+    async fn maybe_queue_goal_round(&self, session: &Session) -> Result<()> {
+        if session.agent_type != "primary" {
+            return Ok(());
+        }
+        let Some((round, goal)) = self.goal_store.reserve_round(&session.id)? else {
+            return Ok(());
+        };
+        let objective = serde_json::to_string(&goal.objective)
+            .unwrap_or_else(|_| format!("\"{}\"", goal.objective));
+        let message = format!(
+            "<goal_round>\nObjective: {}\nRound: {} of {}\nContinue working toward the objective. \
+             When the objective is met, call update_goal with action=\"complete\". If you cannot \
+             make progress, report the blocker to the user.\n</goal_round>",
+            objective, round, goal.max_rounds
+        );
+        self.enqueue_message(
+            &session.id,
+            &format!("goal-round-{}", round),
+            &message,
+            &[],
+            None,
+            &[],
+        )
+        .await?;
+        info!(
+            "Goal round driver: reserved round {} of {} for session {}",
+            round, goal.max_rounds, session.id
+        );
+        Ok(())
+    }
+
+    /// Dispatch pending queued messages for a session, if any. Safe to
+    /// call after every run; the queue claim is a no-op when empty.
+    fn dispatch_queued_messages(&self, session_id: &str, user: &str) {
+        let Some(runtime) = self
+            .self_arc
+            .get()
+            .and_then(|weak| weak.upgrade())
+        else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        let user = user.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Err(error) = runtime.spawn_next_queued_message_run(session_id.clone(), user) {
+                tracing::error!(
+                    "Failed to dispatch queued messages for session {}: {}",
+                    session_id,
+                    error
+                );
+            }
+        });
     }
 
     fn emit_chunked_text<F>(&self, text: &str, chunk_size: usize, mut emit: F)
@@ -3167,8 +3345,24 @@ impl AgentRuntime {
         }
     }
 
-    fn prune_old_tool_messages(session: &mut Session, preserve_from: usize) -> usize {
+    /// Model-free pre-compaction pass: rewrite over-budget tool results
+    /// to a bounded head/tail slice with a fixed middle marker. No LLM
+    /// call; a second pass over already-pruned content is provably a
+    /// no-op because `head + marker + tail <= threshold` is clamped.
+    /// Ported from DSH's `compaction-tool-result-pruner`.
+    fn prune_old_tool_messages(
+        session: &mut Session,
+        preserve_from: usize,
+        compaction: &crate::config::CompactionConfig,
+    ) -> usize {
+        const MIDDLE_MARKER: &str = "\n[... tool result middle pruned ...]\n";
+
         let mut pruned = 0usize;
+        let threshold = compaction.prune_threshold_chars;
+        let head = compaction.prune_head_chars;
+        let tail = compaction
+            .prune_tail_chars
+            .min(threshold.saturating_sub(head + MIDDLE_MARKER.len()));
 
         for message in session.messages.iter_mut().take(preserve_from) {
             if message.role != "tool" {
@@ -3182,15 +3376,22 @@ impl AgentRuntime {
             {
                 continue;
             }
-            if message.content.chars().count() <= 240 {
+            let chars = message.content.chars().count();
+            if chars <= threshold {
                 continue;
             }
 
-            let preview = message.content.chars().take(220).collect::<String>();
-            message.content = format!(
-                "{}\n...[older tool output pruned for context; inspect audit/session history if needed]",
-                preview
-            );
+            let head_text: String = message.content.chars().take(head).collect();
+            let tail_text: String = message
+                .content
+                .chars()
+                .rev()
+                .take(tail)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            message.content = format!("{}{}{}", head_text, MIDDLE_MARKER, tail_text);
             message.metadata["pruned_for_context"] = serde_json::json!(true);
             pruned += 1;
         }
@@ -3226,17 +3427,33 @@ impl AgentRuntime {
         compacted_count
     }
 
+    /// Frame a compaction summary the way DSH does: a single
+    /// `<compacted-summary>` block plus a preamble telling the model not
+    /// to acknowledge it, so the replacement reads as a continuation
+    /// checkpoint rather than a fresh message to respond to.
+    fn frame_compacted_summary(summary: &str) -> String {
+        format!(
+            "<compacted-summary>\n{}\n</compacted-summary>\n\nDo not acknowledge the compacted summary explicitly in your reply.",
+            summary.trim()
+        )
+    }
+
     async fn compact_session_history(
         &self,
         session: &mut Session,
         active_workspace: &WorkspaceConfig,
+        compaction: &crate::config::CompactionConfig,
     ) -> Result<Option<(usize, usize, bool)>> {
         if session.messages.len() < 8 {
             return Ok(None);
         }
 
         let replay_start = Self::replay_start_index(&session.messages);
-        let pruned = Self::prune_old_tool_messages(session, replay_start);
+        let pruned = if compaction.prune_enabled {
+            Self::prune_old_tool_messages(session, replay_start, compaction)
+        } else {
+            0
+        };
         let compact_end = replay_start.max(session.messages.len().saturating_sub(6));
         if compact_end == 0 {
             return Ok(if pruned > 0 {
@@ -3271,7 +3488,7 @@ impl AgentRuntime {
         }
         compact_messages.push(Message::user(format!(
             "Earlier conversation transcript:\n{}",
-            Self::transcript_for_compaction(&prefix, 24_000)
+            Self::transcript_for_compaction(&prefix, compaction.max_transcript_chars)
         )));
 
         let provider = self.active_provider().await;
@@ -3288,8 +3505,24 @@ impl AgentRuntime {
             }
         };
 
+        // Shrink validation: a summary must cost fewer tokens than the
+        // region it shadows, or the compaction is a loss. Fall back to
+        // the deterministic summarizer, which is always smaller.
+        let framed = Self::frame_compacted_summary(&summary);
+        let framed_tokens = framed.chars().count().div_ceil(4).max(1);
+        let prefix_tokens: usize = prefix.iter().map(Self::message_tokens).sum();
+        let final_summary = if framed_tokens >= prefix_tokens {
+            warn!(
+                "Compaction summary did not shrink ({} est. tokens vs {}): using deterministic fallback",
+                framed_tokens, prefix_tokens
+            );
+            Self::frame_compacted_summary(&Self::summarize_for_context(&prefix, 2_500))
+        } else {
+            framed
+        };
+
         let mut compacted_messages = vec![Message::synthetic_assistant(
-            format!("Compaction summary:\n{}", summary.trim()),
+            final_summary,
             "compaction_summary",
         )];
         compacted_messages.extend(tail);
@@ -4756,6 +4989,37 @@ impl AgentRuntime {
         session_id: &str,
     ) -> Result<Vec<crate::tools::todo::TodoItem>> {
         self.storage.list_todo_items(session_id)
+    }
+
+    pub async fn list_message_feedback(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::storage::MessageFeedback>> {
+        self.storage.list_message_feedback(session_id)
+    }
+
+    pub async fn put_message_feedback(
+        &self,
+        session_id: &str,
+        seq: i64,
+        rating: &str,
+        note: Option<&str>,
+        if_version: Option<&str>,
+    ) -> Result<crate::storage::FeedbackPutOutcome> {
+        self.storage
+            .put_message_feedback(session_id, seq, rating, note, if_version)
+    }
+
+    pub async fn delete_message_feedback(&self, session_id: &str, seq: i64) -> Result<bool> {
+        self.storage.delete_message_feedback(session_id, seq)
+    }
+
+    pub async fn get_session_goal(&self, session_id: &str) -> Result<Option<crate::storage::Goal>> {
+        self.goal_store.get(session_id)
+    }
+
+    pub async fn clear_session_goal(&self, session_id: &str) -> Result<bool> {
+        self.goal_store.clear(session_id)
     }
 
     pub async fn revert_file_snapshot(

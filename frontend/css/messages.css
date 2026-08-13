@@ -407,6 +407,18 @@
     border-color: var(--accent);
 }
 
+.msg-action-feedback-up.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.msg-action-feedback-down.active {
+    background: var(--danger, #e5484d);
+    border-color: var(--danger, #e5484d);
+    color: #fff;
+}
+
 .turn-duration {
     font-size: 11px;
     color: var(--text-muted);

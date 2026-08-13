@@ -36,6 +36,10 @@ pub struct Config {
     pub scheduler: SchedulerConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub spill: SpillConfig,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +298,38 @@ pub struct ToolsConfig {
     pub grep: GrepToolConfig,
     pub glob: GrepToolConfig,
     pub skills: SkillsConfig,
+    pub repeat_reminder: RepeatReminderConfig,
+}
+
+/// Advisory loop-breaker: escalates reminders into the conversation when
+/// the same tool is called repeatedly with identical (canonicalized)
+/// arguments. Unlike the hard loop guard, it never blocks — it nudges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepeatReminderConfig {
+    pub enabled: bool,
+    /// Consecutive-identical-call counts at which a reminder is injected.
+    /// Escalates: the first threshold gets a gentle nudge, later ones a
+    /// detailed message with the argument preview.
+    pub thresholds: Vec<u32>,
+    pub arguments_preview_chars: usize,
+    /// `*`-wildcard include/exclude patterns over tool names, evaluated
+    /// at call time. Excluded calls are transparent: they neither count
+    /// nor reset the chain.
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+impl Default for RepeatReminderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            thresholds: vec![3, 5, 8],
+            arguments_preview_chars: 500,
+            include: vec!["*".to_string()],
+            exclude: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,12 +487,71 @@ impl Default for McpConfig {
     }
 }
 
+/// Tool-result spill: oversized plain-text tool results are persisted
+/// verbatim to a session-scoped file and replaced in context with a
+/// bounded head/tail preview plus a retrieval hint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpillConfig {
+    pub enabled: bool,
+    /// Root directory for spill files. `~` is expanded. The default
+    /// lands under `~/.osagent/spill`, grouped per session.
+    pub root: String,
+    /// Model-facing context cap for a single plain-text tool result, in
+    /// UTF-8 bytes. Results larger than this are spilled.
+    pub max_inline_bytes: usize,
+}
+
+impl Default for SpillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            root: "~/.osagent/spill".to_string(),
+            max_inline_bytes: 24_000,
+        }
+    }
+}
+
+/// Context-window compaction policy: when the request approaches the
+/// model's context window, older history is summarized into a
+/// `<compacted-summary>` frame instead of being dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactionConfig {
+    pub enabled: bool,
+    /// Fraction of the usable context window at which compaction
+    /// triggers (0.8 = at 80%).
+    pub threshold_ratio: f32,
+    /// Model-free tool-result pruning: results over
+    /// `prune_threshold_chars` are rewritten to a head/tail slice before
+    /// any summarization attempt.
+    pub prune_enabled: bool,
+    pub prune_threshold_chars: usize,
+    pub prune_head_chars: usize,
+    pub prune_tail_chars: usize,
+    /// Cap on the transcript fed to the summarization pass.
+    pub max_transcript_chars: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold_ratio: 0.8,
+            prune_enabled: true,
+            prune_threshold_chars: 8_192,
+            prune_head_chars: 4_096,
+            prune_tail_chars: 1_024,
+            max_transcript_chars: 24_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpTransport {
     #[default]
-    Stdio,
-    Http,
+    Stdio,    Http,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -899,6 +994,8 @@ impl Config {
             experimental: ExperimentalConfig::default(),
             scheduler: SchedulerConfig::default(),
             mcp: McpConfig::default(),
+            spill: SpillConfig::default(),
+            compaction: CompactionConfig::default(),
         };
         cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();

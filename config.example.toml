@@ -146,6 +146,16 @@ subagent_depth = 1
 [tools]
 denied = []
 
+[tools.repeat_reminder]
+# Advisory loop nudge: escalating reminders when the same tool is called
+# repeatedly with identical arguments. Unlike the hard loop guard this
+# never blocks, it only injects user-role reminders.
+enabled = true
+thresholds = [3, 5, 8]        # consecutive identical calls that trigger a reminder
+arguments_preview_chars = 500
+include = ["*"]               # wildcard tool-name patterns that count
+exclude = []                  # wildcard tool-name patterns that are transparent
+
 [tools.bash]
 allowed_commands = ["ls", "cat", "grep", "git", "npm", "cargo", "python", "node"]
 timeout_seconds = 30
@@ -170,6 +180,27 @@ timeout_seconds = 60
 
 [tools.glob]
 timeout_seconds = 60
+
+[spill]
+# Oversized plain-text tool results are persisted verbatim to a
+# session-scoped file and replaced in context with a bounded preview
+# plus a retrieval hint, instead of being silently truncated.
+enabled = true
+root = "~/.osagent/spill"
+max_inline_bytes = 24000
+
+[compaction]
+# Context-window compaction: when the request approaches the model's
+# context window, older history is summarized into a
+# <compacted-summary> frame (or pruned with a model-free head/tail
+# pass first).
+enabled = true
+threshold_ratio = 0.8        # trigger at this fraction of the usable window
+prune_enabled = true
+prune_threshold_chars = 8192
+prune_head_chars = 4096
+prune_tail_chars = 1024
+max_transcript_chars = 24000
 
 [search]
 enabled = true

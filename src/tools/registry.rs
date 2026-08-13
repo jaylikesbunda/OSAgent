@@ -165,6 +165,16 @@ pub trait Tool: Send + Sync {
         self.execute(args).await.map(ToolResult::from)
     }
 
+    /// Per-tool execution budget in milliseconds. `None` means no
+    /// registry-enforced deadline; the tool owns its own timing.
+    /// When set, the registry wraps every dispatch site (sequential,
+    /// parallel, batch sub-calls, per-workspace rebuilds) in a fused
+    /// timeout and reports a structured `ToolTimeout` error instead of
+    /// whatever the tool was doing when the deadline hit.
+    fn timeout_ms(&self) -> Option<u64> {
+        None
+    }
+
     #[allow(dead_code)]
     fn when_to_use(&self) -> &str {
         "See tool description"
@@ -834,6 +844,29 @@ impl ToolRegistry {
         Ok(result.output)
     }
 
+    /// Execute a native tool under its declared `timeout_ms` budget, if
+    /// any. The deadline is fused with the tool's own timing: whichever
+    /// fires first wins, and a registry timeout replaces the result with
+    /// a structured `ToolTimeout` error so the runtime's retry and
+    /// loop-detection logic treats it as a failure.
+    async fn run_tool_with_timeout(tool: &Arc<dyn Tool>, args: Value) -> Result<ToolResult> {
+        match tool.timeout_ms() {
+            Some(ms) if ms > 0 => {
+                match tokio::time::timeout(std::time::Duration::from_millis(ms), async {
+                    tool.execute_result(args).await
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(OSAgentError::ToolTimeout {
+                        seconds: ms.div_ceil(1_000).max(1),
+                    }),
+                }
+            }
+            _ => tool.execute_result(args).await,
+        }
+    }
+
     pub async fn execute_result(&self, tool_name: &str, args: Value) -> Result<ToolResult> {
         if Self::is_mcp_tool(tool_name) {
             return self.execute_mcp(tool_name, args).await;
@@ -848,7 +881,7 @@ impl ToolRegistry {
             return Err(OSAgentError::ToolNotAllowed(tool_name.to_string()));
         }
 
-        tool.execute_result(args)
+        Self::run_tool_with_timeout(tool, args)
             .await
             .map_err(Self::with_rewrite_guidance)
     }
@@ -966,14 +999,12 @@ impl ToolRegistry {
             if let Some(tool) =
                 Self::build_tool(tool_name, config, self.storage.clone(), &self.file_cache)
             {
-                return tool
-                    .execute_result(args)
+                return Self::run_tool_with_timeout(&tool, args)
                     .await
                     .map_err(Self::with_rewrite_guidance);
             }
             if let Some(tool) = self.tools.get(tool_name) {
-                return tool
-                    .execute_result(args)
+                return Self::run_tool_with_timeout(tool, args)
                     .await
                     .map_err(Self::with_rewrite_guidance);
             }
@@ -1017,6 +1048,22 @@ impl ToolRegistry {
             self.scheduler = Some(scheduler);
             *self.cached_tool_definitions.write().unwrap() = None;
         }
+    }
+
+    pub fn register_goals(&mut self, goals: Arc<crate::agent::goal::GoalStore>) {
+        self.tools.insert(
+            "get_goal".to_string(),
+            Arc::new(crate::tools::goal::GetGoalTool::new(goals.clone())),
+        );
+        self.tools.insert(
+            "create_goal".to_string(),
+            Arc::new(crate::tools::goal::CreateGoalTool::new(goals.clone())),
+        );
+        self.tools.insert(
+            "update_goal".to_string(),
+            Arc::new(crate::tools::goal::UpdateGoalTool::new(goals)),
+        );
+        *self.cached_tool_definitions.write().unwrap() = None;
     }
 }
 

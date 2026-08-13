@@ -461,6 +461,10 @@ impl Tool for BashTool {
         "bash"
     }
 
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(self.config.timeout_seconds.saturating_mul(1_000).max(1_000))
+    }
+
     fn description(&self) -> &str {
         &self.description
     }

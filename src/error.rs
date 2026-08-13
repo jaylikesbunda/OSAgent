@@ -67,7 +67,6 @@ pub enum OSAgentError {
     #[error("Invalid parameters: expected {expected}, got {got}")]
     InvalidParameters { expected: String, got: String },
 
-    #[allow(dead_code)]
     #[error("Tool timeout after {seconds}s")]
     ToolTimeout { seconds: u64 },
 

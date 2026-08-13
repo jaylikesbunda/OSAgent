@@ -2,6 +2,7 @@ use crate::error::{OSAgentError, Result};
 use crate::storage::models::*;
 use chrono::Utc;
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use uuid::Uuid;
@@ -519,6 +520,41 @@ impl SqliteStorage {
 
                 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_enabled ON scheduled_jobs(enabled, next_run_at);
                 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session ON scheduled_jobs(session_id);
+
+                -- Per-message thumbs-up/down feedback. A sidecar to the
+                -- immutable transcript: the model never sees these rows.
+                -- `version` is an opaque CAS token regenerated on every
+                -- write so concurrent editors can detect staleness.
+                CREATE TABLE IF NOT EXISTS message_feedback (
+                    session_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    rating TEXT NOT NULL,
+                    note TEXT,
+                    version TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (session_id, seq),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_message_feedback_session ON message_feedback(session_id, seq);
+
+                -- Durable per-session goal state: the single current
+                -- objective, its phase, and round accounting. Mutations
+                -- are compare-and-set fenced on `revision`.
+                CREATE TABLE IF NOT EXISTS goals (
+                    session_id TEXT PRIMARY KEY,
+                    id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    objective TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    blocked_reason TEXT,
+                    policy_code TEXT,
+                    rounds_started INTEGER NOT NULL DEFAULT 0,
+                    max_rounds INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
                 "#,
             )
             .map_err(OSAgentError::Storage)?;
@@ -1347,6 +1383,303 @@ impl SqliteStorage {
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(OSAgentError::Storage)?;
             Ok(entries)
+        })
+    }
+
+    pub fn list_message_feedback(&self, session_id: &str) -> Result<Vec<MessageFeedback>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT seq, rating, note, version, updated_at FROM message_feedback WHERE session_id = ?1 ORDER BY seq",
+                )
+                .map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map(params![session_id], |row| {
+                    Ok(MessageFeedback {
+                        session_id: session_id.to_string(),
+                        seq: row.get(0)?,
+                        rating: row.get(1)?,
+                        note: row.get(2)?,
+                        version: row.get(3)?,
+                        updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(4)?, 0)
+                            .unwrap_or_else(Utc::now),
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(rows)
+        })
+    }
+
+    /// Compare-and-set feedback write. `if_version: None` is create-only
+    /// (an existing row yields `Conflict`); a matching version rewrites
+    /// the row (or no-ops as `Unchanged` when the payload is identical);
+    /// a stale version yields `Conflict` with the authoritative current
+    /// row. The check-and-write runs in one transaction so two editors
+    /// can never interleave between read and write.
+    pub fn put_message_feedback(
+        &self,
+        session_id: &str,
+        seq: i64,
+        rating: &str,
+        note: Option<&str>,
+        if_version: Option<&str>,
+    ) -> Result<FeedbackPutOutcome> {
+        let rating = if rating == "negative" {
+            "negative"
+        } else {
+            "positive"
+        };
+        let note = note
+            .map(|note| note.trim().to_string())
+            .filter(|note| !note.is_empty());
+
+        let row_from = |row: &rusqlite::Row<'_>| -> std::result::Result<MessageFeedback, rusqlite::Error> {
+            Ok(MessageFeedback {
+                session_id: session_id.to_string(),
+                seq,
+                rating: row.get(0)?,
+                note: row.get(1)?,
+                version: row.get(2)?,
+                updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
+                    .unwrap_or_else(Utc::now),
+            })
+        };
+
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+            let current = tx
+                .query_row(
+                    "SELECT rating, note, version, updated_at FROM message_feedback WHERE session_id = ?1 AND seq = ?2",
+                    params![session_id, seq],
+                    row_from,
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+
+            match current {
+                None => {
+                    let feedback =
+                        MessageFeedback::new(session_id.to_string(), seq, rating.to_string(), note);
+                    tx.execute(
+                        "INSERT INTO message_feedback (session_id, seq, rating, note, version, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            session_id,
+                            seq,
+                            feedback.rating,
+                            feedback.note,
+                            feedback.version,
+                            feedback.updated_at.timestamp(),
+                        ],
+                    )
+                    .map_err(OSAgentError::Storage)?;
+                    tx.commit().map_err(OSAgentError::Storage)?;
+                    Ok(FeedbackPutOutcome::Stored { feedback })
+                }
+                Some(current) => match if_version {
+                    None => {
+                        drop(tx);
+                        Ok(FeedbackPutOutcome::Conflict { current })
+                    }
+                    Some(version) if version == current.version => {
+                        if current.rating == rating && current.note == note {
+                            drop(tx);
+                            return Ok(FeedbackPutOutcome::Unchanged { feedback: current });
+                        }
+                        let feedback = MessageFeedback::new(
+                            session_id.to_string(),
+                            seq,
+                            rating.to_string(),
+                            note,
+                        );
+                        let updated = tx
+                            .execute(
+                                "UPDATE message_feedback SET rating = ?1, note = ?2, version = ?3, updated_at = ?4 WHERE session_id = ?5 AND seq = ?6 AND version = ?7",
+                                params![
+                                    feedback.rating,
+                                    feedback.note,
+                                    feedback.version,
+                                    feedback.updated_at.timestamp(),
+                                    session_id,
+                                    seq,
+                                    version,
+                                ],
+                            )
+                            .map_err(OSAgentError::Storage)?;
+                        if updated == 0 {
+                            drop(tx);
+                            return Ok(FeedbackPutOutcome::Conflict { current });
+                        }
+                        tx.commit().map_err(OSAgentError::Storage)?;
+                        Ok(FeedbackPutOutcome::Stored { feedback })
+                    }
+                    Some(_) => {
+                        drop(tx);
+                        Ok(FeedbackPutOutcome::Conflict { current })
+                    }
+                },
+            }
+        })
+    }
+
+    pub fn delete_message_feedback(&self, session_id: &str, seq: i64) -> Result<bool> {
+        self.with_conn(|conn| {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM message_feedback WHERE session_id = ?1 AND seq = ?2",
+                    params![session_id, seq],
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok(deleted > 0)
+        })
+    }
+
+    fn goal_from_row(row: &rusqlite::Row<'_>) -> std::result::Result<Goal, rusqlite::Error> {
+        let phase: String = row.get(5)?;
+        Ok(Goal {
+            session_id: row.get(0)?,
+            id: row.get(1)?,
+            revision: row.get(2)?,
+            objective: row.get(3)?,
+            phase: GoalPhase::from_str(&phase).unwrap_or(GoalPhase::Active),
+            blocked_reason: row.get(4)?,
+            policy_code: row.get(6)?,
+            rounds_started: row.get(7)?,
+            max_rounds: row.get(8)?,
+            created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(9)?, 0)
+                .unwrap_or_else(Utc::now),
+            updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(10)?, 0)
+                .unwrap_or_else(Utc::now),
+        })
+    }
+
+    pub fn load_goal(&self, session_id: &str) -> Result<Option<Goal>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT session_id, id, revision, objective, blocked_reason, phase, policy_code, rounds_started, max_rounds, created_at, updated_at FROM goals WHERE session_id = ?1",
+                params![session_id],
+                Self::goal_from_row,
+            )
+            .optional()
+            .map_err(OSAgentError::Storage)
+        })
+    }
+
+    /// Create the goal row; fails with `None` when one already exists
+    /// (the caller surfaces the current goal as a conflict).
+    pub fn create_goal_row(
+        &self,
+        session_id: &str,
+        objective: &str,
+        max_rounds: i64,
+    ) -> Result<Option<Goal>> {
+        let goal = Goal {
+            session_id: session_id.to_string(),
+            id: Uuid::new_v4().to_string(),
+            revision: 1,
+            objective: objective.to_string(),
+            phase: GoalPhase::Active,
+            blocked_reason: None,
+            policy_code: None,
+            rounds_started: 0,
+            max_rounds,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        self.with_conn(|conn| {
+            let inserted = conn
+                .execute(
+                    "INSERT INTO goals (session_id, id, revision, objective, phase, blocked_reason, policy_code, rounds_started, max_rounds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        goal.session_id,
+                        goal.id,
+                        goal.revision,
+                        goal.objective,
+                        goal.phase.as_str(),
+                        goal.blocked_reason,
+                        goal.policy_code,
+                        goal.rounds_started,
+                        goal.max_rounds,
+                        goal.created_at.timestamp(),
+                        goal.updated_at.timestamp(),
+                    ],
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok(if inserted > 0 { Some(goal) } else { None })
+        })
+    }
+
+    /// Compare-and-set goal mutation. `expected_revision` must match the
+    /// stored row; `mutate` receives the current goal and returns the
+    /// updated one (or an error string to surface verbatim). Returns
+    /// `Conflict` with the authoritative current goal when the fence is
+    /// stale.
+    pub fn update_goal_cas(
+        &self,
+        session_id: &str,
+        expected_revision: i64,
+        mutate: impl FnOnce(&mut Goal) -> std::result::Result<(), String>,
+    ) -> Result<GoalCasOutcome> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+            let current = tx
+                .query_row(
+                    "SELECT session_id, id, revision, objective, blocked_reason, phase, policy_code, rounds_started, max_rounds, created_at, updated_at FROM goals WHERE session_id = ?1",
+                    params![session_id],
+                    Self::goal_from_row,
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+
+            let Some(mut current) = current else {
+                drop(tx);
+                return Ok(GoalCasOutcome::Missing);
+            };
+            if current.revision != expected_revision {
+                drop(tx);
+                return Ok(GoalCasOutcome::Conflict { current });
+            }
+
+            mutate(&mut current).map_err(OSAgentError::ToolExecution)?;
+            let before = current.revision;
+            current.revision = before + 1;
+            current.updated_at = Utc::now();
+
+            let updated = tx
+                .execute(
+                    "UPDATE goals SET revision = ?1, objective = ?2, phase = ?3, blocked_reason = ?4, policy_code = ?5, rounds_started = ?6, max_rounds = ?7, updated_at = ?8 WHERE session_id = ?9 AND revision = ?10",
+                    params![
+                        current.revision,
+                        current.objective,
+                        current.phase.as_str(),
+                        current.blocked_reason,
+                        current.policy_code,
+                        current.rounds_started,
+                        current.max_rounds,
+                        current.updated_at.timestamp(),
+                        session_id,
+                        before,
+                    ],
+                )
+                .map_err(OSAgentError::Storage)?;
+            if updated == 0 {
+                drop(tx);
+                return Ok(GoalCasOutcome::Conflict { current });
+            }
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(GoalCasOutcome::Stored { goal: current })
+        })
+    }
+
+    /// Remove the goal row entirely (a revisioned tombstone is not
+    /// needed here — absence is the terminal state).
+    pub fn clear_goal(&self, session_id: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let deleted = conn
+                .execute("DELETE FROM goals WHERE session_id = ?1", params![session_id])
+                .map_err(OSAgentError::Storage)?;
+            Ok(deleted > 0)
         })
     }
 

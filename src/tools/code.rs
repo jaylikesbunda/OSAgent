@@ -148,6 +148,10 @@ impl CodeInterpreterTool {
 
 #[async_trait]
 impl Tool for CodeInterpreterTool {
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(self.config.timeout_seconds.saturating_mul(1_000).max(1_000))
+    }
+
     fn name(&self) -> &str {
         match self.language.as_str() {
             "python" => "code_python",

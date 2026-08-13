@@ -1322,7 +1322,7 @@ mod tests {
 
     fn build_executor(temp_root: &Path) -> (Arc<WorkflowExecutor>, Arc<WorkflowDb>) {
         let config = test_config(temp_root);
-        let runtime = Arc::new(AgentRuntime::new(config).expect("create runtime"));
+        let runtime = AgentRuntime::new(config).expect("create runtime");
 
         let workflow_db_path = temp_root.join("workflow.db");
         let workflow_db = Arc::new(WorkflowDb::new(workflow_db_path));
@@ -1555,7 +1555,7 @@ mod tests {
     async fn approval_node_resumes_after_answer() {
         let temp_dir = tempdir().expect("temp dir");
         let config = test_config(temp_dir.path());
-        let runtime = Arc::new(AgentRuntime::new(config).expect("create runtime"));
+        let runtime = AgentRuntime::new(config).expect("create runtime");
 
         let workflow_db_path = temp_dir.path().join("workflow.db");
         let workflow_db = Arc::new(WorkflowDb::new(workflow_db_path));

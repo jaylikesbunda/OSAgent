@@ -4,6 +4,7 @@ pub mod context_window;
 pub mod coordinator;
 pub mod decision_memory;
 pub mod events;
+pub mod goal;
 pub mod instruction;
 pub mod memory;
 pub mod model_catalog;

@@ -180,6 +180,10 @@ impl Tool for WeatherTool {
         "weather"
     }
 
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(30_000)
+    }
+
     fn description(&self) -> &str {
         "Fetch current weather and a short forecast for a city, region, or your current location"
     }

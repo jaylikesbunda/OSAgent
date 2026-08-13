@@ -259,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
                     && config.discord.as_ref().map(|d| d.enabled).unwrap_or(false);
 
                 let runtime_start = Instant::now();
-                let agent = std::sync::Arc::new(agent::AgentRuntime::new(config.clone())?);
+                let agent = agent::AgentRuntime::new(config.clone())?;
                 info!(
                     target: "osagent::startup",
                     "phase=main_agent_runtime_construct elapsed_ms={:.2}",
