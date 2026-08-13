@@ -44,9 +44,7 @@ impl RepeatReminderState {
                     entries.sort_by(|a, b| a.0.cmp(&b.0));
                     Value::Object(entries.into_iter().collect())
                 }
-                Value::Array(items) => {
-                    Value::Array(items.into_iter().map(sort_value).collect())
-                }
+                Value::Array(items) => Value::Array(items.into_iter().map(sort_value).collect()),
                 other => other,
             }
         }
@@ -101,13 +99,11 @@ impl RepeatReminderState {
             return None;
         }
 
-        let hit = thresholds.iter().position(|threshold| *threshold == count);
-        let index = match hit {
-            Some(index) => index,
-            None => return None,
-        };
+        let hit = thresholds
+            .iter()
+            .position(|threshold| *threshold == count)?;
 
-        let gentle = index == 0;
+        let gentle = hit == 0;
         if gentle {
             Some(format!(
                 "Reminder: you have called the tool \"{tool_name}\" with the same arguments \
@@ -115,7 +111,10 @@ impl RepeatReminderState {
                  instead of retrying the same call."
             ))
         } else {
-            let preview = canonical.chars().take(config.arguments_preview_chars).collect::<String>();
+            let preview = canonical
+                .chars()
+                .take(config.arguments_preview_chars)
+                .collect::<String>();
             let overflow = canonical.chars().count() > config.arguments_preview_chars;
             let suffix = if overflow {
                 format!(
@@ -141,12 +140,9 @@ pub fn wildcard_matches(pattern: &str, name: &str) -> bool {
         match pattern.split_first() {
             None => name.is_empty(),
             Some(('*', rest)) => {
-                inner(rest, name)
-                    || (!name.is_empty() && inner(pattern, &name[1..]))
+                inner(rest, name) || (!name.is_empty() && inner(pattern, &name[1..]))
             }
-            Some((ch, rest)) => {
-                name.first() == Some(ch) && inner(rest, &name[1..])
-            }
+            Some((ch, rest)) => name.first() == Some(ch) && inner(rest, &name[1..]),
         }
     }
 
@@ -205,16 +201,16 @@ mod tests {
     #[test]
     fn excluded_tools_are_transparent() {
         let mut state = RepeatReminderState::new();
-        let mut config = config();
-        config.exclude = vec!["todo*".to_string()];
+        let mut cfg = config();
+        cfg.exclude = vec!["todo*".to_string()];
 
         for _ in 0..5 {
             assert!(state
-                .note_tool_call("todowrite", &json!({}), &config)
+                .note_tool_call("todowrite", &json!({}), &cfg)
                 .is_none());
         }
         // Excluded calls neither count nor reset.
-        let reminder = state.note_tool_call("bash", &json!({"command": "x"}), &config());
+        let reminder = state.note_tool_call("bash", &json!({"command": "x"}), &cfg);
         assert!(reminder.is_none());
     }
 

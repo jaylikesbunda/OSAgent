@@ -33,54 +33,7 @@ impl std::str::FromStr for UpdateChannel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateChannelSource {
-    Config,
-    GitTag,
-    GitBranch,
-    Default,
-}
-
 pub fn is_beta_tag(tag: &str) -> bool {
     let lower = tag.to_lowercase();
     lower.contains("beta") || lower.contains("rc") || lower.contains("alpha")
-}
-
-pub fn resolve_effective_channel(
-    config_channel: Option<UpdateChannel>,
-    install_kind: InstallKind,
-    git_tag: Option<&str>,
-    git_branch: Option<&str>,
-) -> (UpdateChannel, UpdateChannelSource) {
-    if let Some(channel) = config_channel {
-        return (channel, UpdateChannelSource::Config);
-    }
-
-    match install_kind {
-        InstallKind::Git => {
-            if let Some(tag) = git_tag {
-                let channel = if is_beta_tag(tag) {
-                    UpdateChannel::Beta
-                } else {
-                    UpdateChannel::Stable
-                };
-                return (channel, UpdateChannelSource::GitTag);
-            }
-            if let Some(branch) = git_branch {
-                if branch != "HEAD" {
-                    return (UpdateChannel::Dev, UpdateChannelSource::GitBranch);
-                }
-            }
-            (UpdateChannel::Dev, UpdateChannelSource::Default)
-        }
-        InstallKind::Package => (UpdateChannel::Stable, UpdateChannelSource::Default),
-        InstallKind::Unknown => (UpdateChannel::Stable, UpdateChannelSource::Default),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallKind {
-    Git,
-    Package,
-    Unknown,
 }

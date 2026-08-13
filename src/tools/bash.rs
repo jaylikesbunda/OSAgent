@@ -2,7 +2,7 @@ use crate::config::{BashMode, BashToolConfig, Config};
 use crate::error::{OSAgentError, Result};
 use crate::tools::guard::{command_touches_backups, ensure_relative_path_not_backups};
 use crate::tools::output::maybe_store_large_output_result;
-use crate::tools::registry::{Tool, ToolExample, ToolResult};
+use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -678,6 +678,11 @@ impl Tool for BashTool {
 
                 Ok(ToolResult {
                     output: summarized.display_output,
+                    outcome: if exit_code == 0 {
+                        ToolOutcome::Success
+                    } else {
+                        ToolOutcome::Failure
+                    },
                     title: Some(full_command),
                     metadata: json!({
                         "exit_code": exit_code,

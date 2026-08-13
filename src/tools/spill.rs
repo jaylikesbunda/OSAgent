@@ -8,7 +8,7 @@
 /// replacement is always at most `max_inline_bytes` and strictly
 /// smaller than the original result.
 use crate::config::SpillConfig;
-use crate::error::{OSAgentError, Result};
+use crate::error::Result;
 use crate::tools::registry::ToolResult;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -98,22 +98,26 @@ impl SpillStore {
 }
 
 fn build_head_tail_preview(content: &str, head_budget: usize, tail_budget: usize) -> String {
-    let head: String = content.chars().take(head_budget).collect();
-    let tail: String = content
+    const MIDDLE_MARKER: &str =
+        "\n\n[... middle content omitted - full result stored in the spill file ...]\n\n";
+    let budget = head_budget + tail_budget;
+    let marker_budget = budget.min(MIDDLE_MARKER.len());
+    let usable = budget.saturating_sub(marker_budget);
+    let head = usable / 2;
+    let tail = usable - head;
+    if content.chars().count() <= head + tail {
+        return content.to_string();
+    }
+    let head_text: String = content.chars().take(head).collect();
+    let tail_text: String = content
         .chars()
         .rev()
-        .take(tail_budget)
+        .take(tail)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect();
-    if content.chars().count() <= head_budget + tail_budget {
-        return content.to_string();
-    }
-    format!(
-        "{}\n\n[... middle content omitted - full result stored in the spill file ...]\n\n{}",
-        head, tail
-    )
+    format!("{}{}{}", head_text, MIDDLE_MARKER, tail_text)
 }
 
 /// Post-execution spill policy. Returns `true` when the result was
@@ -180,13 +184,6 @@ pub fn resolve_spill_root(root: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(expanded))
 }
 
-pub fn validate_spill_root(root: &PathBuf) -> Result<()> {
-    std::fs::create_dir_all(root).map_err(|error| {
-        OSAgentError::Config(format!("Failed to create spill root {}: {}", root.display(), error))
-    })?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,13 +216,8 @@ mod tests {
     fn spilled_replacement_never_exceeds_cap() {
         let (store, _temp) = store();
         let mut result = ToolResult::new("x".repeat(100_000));
-        let spilled = maybe_spill_tool_result(
-            &store,
-            "session-1",
-            "bash",
-            &mut result,
-            &config(24_000),
-        );
+        let spilled =
+            maybe_spill_tool_result(&store, "session-1", "bash", &mut result, &config(24_000));
         assert!(spilled);
         assert!(result.output.len() <= 24_000);
         assert!(result.output.contains("Omitted"));
@@ -258,8 +250,7 @@ mod tests {
         let mut result = ToolResult::new("x".repeat(100_000));
         let mut cfg = config(100);
         cfg.enabled = false;
-        let spilled =
-            maybe_spill_tool_result(&store, "session-1", "bash", &mut result, &cfg);
+        let spilled = maybe_spill_tool_result(&store, "session-1", "bash", &mut result, &cfg);
         assert!(!spilled);
     }
 

@@ -33,7 +33,7 @@ use crate::tools::bash::BashTool;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::guard::ensure_relative_path_not_backups;
 use crate::tools::output::path_touches_tool_outputs;
-use crate::tools::registry::{ToolProfile, ToolRegistry, ToolResult};
+use crate::tools::registry::{ToolOutcome, ToolProfile, ToolRegistry, ToolResult};
 use crate::tools::truncation::{self, TruncationOptions};
 use chrono::Utc;
 use dashmap::DashMap;
@@ -87,8 +87,6 @@ pub struct AgentRuntime {
     external_manager: Arc<ExternalDirectoryManager>,
     plugin_manager: Arc<PluginManager>,
     subagent_manager: Arc<SubagentManager>,
-    coordinator: Arc<Coordinator>,
-    indexer: Option<Arc<CodeIndexer>>,
     prompt_cache: Arc<std::sync::RwLock<prompt::PromptCache>>,
     last_prompt_refresh: Arc<std::sync::Mutex<chrono::NaiveDate>>,
     event_bus: EventBus,
@@ -99,7 +97,8 @@ pub struct AgentRuntime {
     /// Per-session advisory repeat-tool-call chains. A user message
     /// resets the chain; identical (tool, canonical args) calls count
     /// toward the `[tools].repeat_reminder.thresholds` nudge ladder.
-    repeat_reminders: DashMap<String, std::sync::Mutex<crate::tools::repeat_reminder::RepeatReminderState>>,
+    repeat_reminders:
+        DashMap<String, std::sync::Mutex<crate::tools::repeat_reminder::RepeatReminderState>>,
     /// Session-scoped storage for oversized tool results. See
     /// `crate::tools::spill`.
     spill_store: Arc<crate::tools::spill::SpillStore>,
@@ -445,10 +444,8 @@ impl AgentRuntime {
             shellexpand::tilde(&config.get_active_workspace().resolved_path()).to_string(),
         );
         let coordinator = Arc::new(Coordinator::new(
-            storage.clone(),
             Arc::new(event_bus.clone()),
             subagent_manager.clone(),
-            Arc::new(tokio::sync::RwLock::new(config.clone())),
             workspace_root,
         ));
 
@@ -549,8 +546,6 @@ impl AgentRuntime {
             external_manager,
             plugin_manager,
             subagent_manager,
-            coordinator,
-            indexer,
             prompt_cache: Arc::new(std::sync::RwLock::new(prompt_cache)),
             last_prompt_refresh: Arc::new(std::sync::Mutex::new(today)),
             event_bus,
@@ -567,9 +562,7 @@ impl AgentRuntime {
             scheduler,
             run_prompt_rx: tokio::sync::Mutex::new(Some(run_prompt_rx)),
         });
-        let _ = runtime
-            .self_arc
-            .set(std::sync::Arc::downgrade(&runtime));
+        let _ = runtime.self_arc.set(std::sync::Arc::downgrade(&runtime));
         Ok(runtime)
     }
 
@@ -647,13 +640,6 @@ impl AgentRuntime {
 
     fn clear_cancel_flag(&self, session_id: &str) {
         self.session_cancel_flags.remove(session_id);
-    }
-
-    fn is_cancelled(&self, session_id: &str) -> bool {
-        self.session_cancel_flags
-            .get(session_id)
-            .map(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
-            .unwrap_or(false)
     }
 
     /// Cancel any in-progress operation for a session
@@ -858,7 +844,16 @@ impl AgentRuntime {
     ) -> Result<String> {
         let run_guard = self.try_start_run(session_id, &user)?;
         let result = self
-            .process_message_internal(session_id, user_message, user.clone(), None, None, None, None, None)
+            .process_message_internal(
+                session_id,
+                user_message,
+                user.clone(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await;
         drop(run_guard);
         self.dispatch_queued_messages(session_id, &user);
@@ -1065,9 +1060,7 @@ impl AgentRuntime {
                 .repeat_reminders
                 .entry(session_id.to_string())
                 .or_insert_with(|| {
-                    std::sync::Mutex::new(
-                        crate::tools::repeat_reminder::RepeatReminderState::new(),
-                    )
+                    std::sync::Mutex::new(crate::tools::repeat_reminder::RepeatReminderState::new())
                 });
             let lock_result = state.lock();
             if let Ok(mut guard) = lock_result {
@@ -1960,8 +1953,11 @@ impl AgentRuntime {
                             self.storage.log_audit(audit_entry)?;
                         }
 
-                        let tool_message =
-                            Self::summarize_tool_output_for_context(&tool_call.name, &output);
+                        let tool_message = Self::summarize_tool_output_for_context(
+                            &tool_call.name,
+                            tool_result.outcome,
+                            &output,
+                        );
                         let mut tool_meta = serde_json::json!({
                             "tool_name": tool_call.name,
                             "success": success,
@@ -2106,13 +2102,14 @@ impl AgentRuntime {
                         }
 
                         let repeat_reminder = {
-                            let state = self.repeat_reminders.entry(session_id.to_string()).or_insert_with(
-                                || {
+                            let state = self
+                                .repeat_reminders
+                                .entry(session_id.to_string())
+                                .or_insert_with(|| {
                                     std::sync::Mutex::new(
                                         crate::tools::repeat_reminder::RepeatReminderState::new(),
                                     )
-                                },
-                            );
+                                });
                             state.lock().ok().and_then(|mut guard| {
                                 guard.note_tool_call(
                                     &tool_call.name,
@@ -2283,17 +2280,25 @@ impl AgentRuntime {
 
                         let (mut tool_result, audit_output, success, error_detail) = match result {
                             Ok(tool_result) => {
+                                let success = tool_result.outcome.is_success();
                                 info!(
-                                    "Tool {} executed successfully in {}ms",
-                                    tool_call.name, duration_ms
+                                    "Tool {} completed with outcome {} in {}ms",
+                                    tool_call.name,
+                                    tool_result.outcome.as_str(),
+                                    duration_ms
                                 );
-                                (tool_result.clone(), tool_result.output.clone(), true, None)
+                                (
+                                    tool_result.clone(),
+                                    tool_result.output.clone(),
+                                    success,
+                                    None,
+                                )
                             }
                             Err(e) => {
                                 let error_msg = format!("Error: {}", e);
                                 error!("Tool {} failed: {}", tool_call.name, error_msg);
                                 (
-                                    ToolResult::new(error_msg.clone()),
+                                    ToolResult::failure(error_msg.clone()),
                                     error_msg,
                                     false,
                                     Some(e.to_string()),
@@ -2431,8 +2436,11 @@ impl AgentRuntime {
                         }
 
                         if tool_call.name != "batch" {
-                            let tool_message =
-                                Self::summarize_tool_output_for_context(&tool_call.name, &output);
+                            let tool_message = Self::summarize_tool_output_for_context(
+                                &tool_call.name,
+                                tool_result.outcome,
+                                &output,
+                            );
                             let mut tool_meta = serde_json::json!({
                                 "tool_name": tool_call.name,
                                 "success": success,
@@ -2467,9 +2475,10 @@ impl AgentRuntime {
                             // own user-role message so the tool result
                             // above stays the tool's auditable output.
                             if let Some(reminder) = repeat_reminder {
-                                session
-                                    .messages
-                                    .push(Message::synthetic_user(reminder, "repeat_tool_reminder"));
+                                session.messages.push(Message::synthetic_user(
+                                    reminder,
+                                    "repeat_tool_reminder",
+                                ));
                             }
                         }
                     }
@@ -2765,7 +2774,10 @@ impl AgentRuntime {
         // left, reserve the next round and queue it. The queue is
         // dispatched by the caller once this run's guard drops.
         if let Err(error) = self.maybe_queue_goal_round(&session).await {
-            warn!("Goal round driver failed for session {}: {}", session_id, error);
+            warn!(
+                "Goal round driver failed for session {}: {}",
+                session_id, error
+            );
         }
 
         Ok(result)
@@ -2809,11 +2821,7 @@ impl AgentRuntime {
     /// Dispatch pending queued messages for a session, if any. Safe to
     /// call after every run; the queue claim is a no-op when empty.
     fn dispatch_queued_messages(&self, session_id: &str, user: &str) {
-        let Some(runtime) = self
-            .self_arc
-            .get()
-            .and_then(|weak| weak.upgrade())
-        else {
+        let Some(runtime) = self.self_arc.get().and_then(|weak| weak.upgrade()) else {
             return;
         };
         let session_id = session_id.to_string();
@@ -3892,8 +3900,8 @@ impl AgentRuntime {
                         let duration_ms = start.elapsed().as_millis() as u64;
 
                         let (success, output) = match result {
-                            Ok(out) => (true, out),
-                            Err(e) => (false, ToolResult::new(e.to_string())),
+                            Ok(out) => (out.outcome.is_success(), out),
+                            Err(e) => (false, ToolResult::failure(e.to_string())),
                         };
 
                         event_bus.emit(AgentEvent::ToolComplete {
@@ -3927,7 +3935,7 @@ impl AgentRuntime {
                 "[{}] {}\n{}",
                 if *success { "ok" } else { "error" },
                 tool_name,
-                Self::summarize_tool_output_for_context(tool_name, &output.output)
+                Self::summarize_tool_output_for_context(tool_name, output.outcome, &output.output,)
             ));
         }
 
@@ -4056,11 +4064,11 @@ impl AgentRuntime {
                             &tool_id,
                             &tool_name,
                             false,
-                            ToolResult::new("Cancelled by user"),
+                            ToolResult::failure("Cancelled by user"),
                             0,
                         );
                         return (
-                            ToolResult::new("Cancelled by user"),
+                            ToolResult::failure("Cancelled by user"),
                             false,
                             0,
                             String::new(),
@@ -4089,18 +4097,19 @@ impl AgentRuntime {
 
                 match result {
                     Ok(output) => {
+                        let success = output.outcome.is_success();
                         Self::emit_tool_complete(
                             &event_bus,
                             &session_id,
                             &tool_id,
                             &tool_name,
-                            true,
+                            success,
                             output.clone(),
                             duration_ms,
                         );
                         (
                             output,
-                            true,
+                            success,
                             duration_ms,
                             String::new(),
                             None::<String>,
@@ -4109,7 +4118,7 @@ impl AgentRuntime {
                     }
                     Err(e) => {
                         let error_msg = format!("Error: {}", e);
-                        let error_result = ToolResult::new(error_msg.clone());
+                        let error_result = ToolResult::failure(error_msg.clone());
                         Self::emit_tool_complete(
                             &event_bus,
                             &session_id,
@@ -4341,7 +4350,11 @@ impl AgentRuntime {
         (chars / 4).max(1)
     }
 
-    fn summarize_tool_output_for_context(tool_name: &str, output: &str) -> String {
+    fn summarize_tool_output_for_context(
+        tool_name: &str,
+        outcome: ToolOutcome,
+        output: &str,
+    ) -> String {
         const MAX_CHARS: usize = 4_000;
         const MAX_LINES: usize = 80;
 
@@ -4368,7 +4381,7 @@ impl AgentRuntime {
             compact = "(no output)".to_string();
         }
 
-        match tool_name {
+        let rendered = match tool_name {
             "read_file" => format!(
                 "Tool: {}\nOutput summary (trimmed file content for context):\n{}",
                 tool_name, compact
@@ -4378,7 +4391,9 @@ impl AgentRuntime {
                 tool_name, compact
             ),
             _ => format!("Tool: {}\nOutput:\n{}", tool_name, compact),
-        }
+        };
+
+        format!("[tool outcome: {}]\n{}", outcome.as_str(), rendered)
     }
 
     fn stable_json_string(value: &serde_json::Value) -> String {
@@ -6132,7 +6147,7 @@ impl AgentRuntime {
 
 #[cfg(test)]
 mod external_path_scan_tests {
-    use super::AgentRuntime;
+    use super::{AgentRuntime, ToolOutcome};
     use std::path::PathBuf;
 
     fn ws() -> PathBuf {
@@ -6142,6 +6157,17 @@ mod external_path_scan_tests {
     fn scan(cmd: &str) -> Option<String> {
         let args = serde_json::json!({ "command": cmd });
         AgentRuntime::requested_absolute_path("bash", &args, Some(&ws()))
+    }
+
+    #[test]
+    fn tool_context_starts_with_model_visible_outcome() {
+        let rendered = AgentRuntime::summarize_tool_output_for_context(
+            "bash",
+            ToolOutcome::Failure,
+            "Exit code: 1",
+        );
+        assert!(rendered.starts_with("[tool outcome: failure]\nTool: bash"));
+        assert!(rendered.contains("Exit code: 1"));
     }
 
     #[test]

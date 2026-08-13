@@ -1,28 +1,23 @@
 use crate::agent::subagent_manager::SubagentManager;
 use crate::error::{OSAgentError, Result};
-use crate::storage::SqliteStorage;
-use crate::tools::registry::Tool;
+use crate::tools::registry::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::info;
 
+#[derive(Default)]
 pub struct SubagentTool {
-    storage: Arc<SqliteStorage>,
     subagent_manager: Option<Arc<SubagentManager>>,
 }
 
 impl SubagentTool {
-    pub fn new(storage: Arc<SqliteStorage>) -> Self {
-        Self {
-            storage,
-            subagent_manager: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn with_manager(storage: Arc<SqliteStorage>, manager: Arc<SubagentManager>) -> Self {
+    pub fn with_manager(manager: Arc<SubagentManager>) -> Self {
         Self {
-            storage,
             subagent_manager: Some(manager),
         }
     }
@@ -98,6 +93,10 @@ impl Tool for SubagentTool {
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
+        Ok(self.execute_result(args).await?.output)
+    }
+
+    async fn execute_result(&self, args: Value) -> Result<ToolResult> {
         let description = args["description"]
             .as_str()
             .ok_or_else(|| OSAgentError::ToolExecution("Missing description".to_string()))?;
@@ -147,19 +146,22 @@ impl Tool for SubagentTool {
         );
 
         match status.as_str() {
-            "completed" => Ok(format!("{}\n\nsession: {}", result, subagent_session_id)),
-            "cancelled" => Ok(format!(
+            "completed" => Ok(ToolResult::new(format!(
+                "{}\n\nsession: {}",
+                result, subagent_session_id
+            ))),
+            "cancelled" => Ok(ToolResult::failure(format!(
                 "Subagent was cancelled.\nsession: {}",
                 subagent_session_id
-            )),
-            "timeout" => Ok(format!(
+            ))),
+            "timeout" => Ok(ToolResult::retryable(format!(
                 "Subagent timed out.\nsession: {}",
                 subagent_session_id
-            )),
-            _ => Ok(format!(
+            ))),
+            _ => Ok(ToolResult::failure(format!(
                 "Subagent finished with status '{}'.\nResult: {}\nsession: {}",
                 status, result, subagent_session_id
-            )),
+            ))),
         }
     }
 }

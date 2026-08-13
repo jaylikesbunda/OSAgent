@@ -318,10 +318,6 @@ impl LearnedPolicy {
         }
     }
 
-    fn update_long_term_delta(&mut self, _atom: &EditAtom, _delta: f32) {
-        // Deprecated - EMA now calculated inline in record_mutation
-    }
-
     fn pair_key(atom1: &EditAtom, atom2: &EditAtom) -> String {
         if atom1.field < atom2.field {
             format!(

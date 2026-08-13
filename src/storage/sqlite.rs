@@ -1435,17 +1435,18 @@ impl SqliteStorage {
             .map(|note| note.trim().to_string())
             .filter(|note| !note.is_empty());
 
-        let row_from = |row: &rusqlite::Row<'_>| -> std::result::Result<MessageFeedback, rusqlite::Error> {
-            Ok(MessageFeedback {
-                session_id: session_id.to_string(),
-                seq,
-                rating: row.get(0)?,
-                note: row.get(1)?,
-                version: row.get(2)?,
-                updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
-                    .unwrap_or_else(Utc::now),
-            })
-        };
+        let row_from =
+            |row: &rusqlite::Row<'_>| -> std::result::Result<MessageFeedback, rusqlite::Error> {
+                Ok(MessageFeedback {
+                    session_id: session_id.to_string(),
+                    seq,
+                    rating: row.get(0)?,
+                    note: row.get(1)?,
+                    version: row.get(2)?,
+                    updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
+                        .unwrap_or_else(Utc::now),
+                })
+            };
 
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(OSAgentError::Storage)?;
@@ -1590,7 +1591,7 @@ impl SqliteStorage {
         self.with_conn(|conn| {
             let inserted = conn
                 .execute(
-                    "INSERT INTO goals (session_id, id, revision, objective, phase, blocked_reason, policy_code, rounds_started, max_rounds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    "INSERT OR IGNORE INTO goals (session_id, id, revision, objective, phase, blocked_reason, policy_code, rounds_started, max_rounds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         goal.session_id,
                         goal.id,
@@ -1677,7 +1678,10 @@ impl SqliteStorage {
     pub fn clear_goal(&self, session_id: &str) -> Result<bool> {
         self.with_conn(|conn| {
             let deleted = conn
-                .execute("DELETE FROM goals WHERE session_id = ?1", params![session_id])
+                .execute(
+                    "DELETE FROM goals WHERE session_id = ?1",
+                    params![session_id],
+                )
                 .map_err(OSAgentError::Storage)?;
             Ok(deleted > 0)
         })

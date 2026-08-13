@@ -1,8 +1,6 @@
 use crate::agent::events::{AgentEvent, EventBus};
 use crate::error::{OSAgentError, Result};
 use crate::storage::models::ScheduledJob;
-use crate::storage::SqliteStorage;
-use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
@@ -15,15 +13,13 @@ pub struct RunPromptRequest {
 
 #[derive(Clone)]
 pub struct JobExecutor {
-    storage: Arc<SqliteStorage>,
     event_bus: EventBus,
     run_prompt_tx: Option<mpsc::UnboundedSender<RunPromptRequest>>,
 }
 
 impl JobExecutor {
-    pub fn new(storage: Arc<SqliteStorage>, event_bus: EventBus) -> Self {
+    pub fn new(event_bus: EventBus) -> Self {
         Self {
-            storage,
             event_bus,
             run_prompt_tx: None,
         }

@@ -1,6 +1,5 @@
 use crate::agent::subagent_manager::SubagentManager;
 use crate::error::{OSAgentError, Result};
-use crate::workflow::artifact_store::ArtifactStore;
 use crate::workflow::coordination::{
     Capability, CapabilityType, CoordinatedContext, EscalationPolicy, JobCard, JobInput, JobResult,
     JobStatus, MessageType, OutputSchema, ResultType, StructuredMessage, TaskType,
@@ -19,7 +18,6 @@ use uuid::Uuid;
 
 pub struct SafeWorkflowCoordinator {
     db: Arc<WorkflowDb>,
-    artifact_store: Arc<ArtifactStore>,
     subagent_manager: Arc<SubagentManager>,
     event_tx: broadcast::Sender<WorkflowEvent>,
     config: CoordinationConfig,
@@ -49,7 +47,6 @@ impl Default for CoordinationConfig {
 impl SafeWorkflowCoordinator {
     pub fn new(
         db: Arc<WorkflowDb>,
-        artifact_store: Arc<ArtifactStore>,
         subagent_manager: Arc<SubagentManager>,
         config: Option<CoordinationConfig>,
     ) -> (Self, broadcast::Receiver<WorkflowEvent>) {
@@ -57,7 +54,6 @@ impl SafeWorkflowCoordinator {
         (
             Self {
                 db,
-                artifact_store,
                 subagent_manager,
                 event_tx,
                 config: config.unwrap_or_default(),

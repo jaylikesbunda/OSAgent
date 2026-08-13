@@ -404,7 +404,9 @@ impl LauncherOAuthStorage {
 }
 
 const OPENAI_OAUTH_PORT: u16 = 1455;
-const WEBUI_URL: &str = "http://localhost:8765";
+// Match the server's default IPv4 bind. On Linux, localhost may resolve to ::1
+// first even though OSAgent only listens on 127.0.0.1.
+const WEBUI_URL: &str = "http://127.0.0.1:8765";
 
 const TITLEBAR_INJECTION_SCRIPT: &str = r#"(function () {
   var BAR_ID = 'osagent-native-titlebar';
@@ -2285,7 +2287,6 @@ async fn stream_download(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new("powershell")
         .args([
@@ -2322,7 +2323,6 @@ fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> 
     Ok(())
 }
 
-#[allow(dead_code)]
 fn extract_tar_gz(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new("tar")
         .args([
@@ -4058,7 +4058,6 @@ struct LauncherPendingUpdate {
     kind: LauncherPendingUpdateKind,
     #[serde(default = "default_launcher_pending_update_armed")]
     armed: bool,
-    #[allow(dead_code)]
     created_at: chrono::DateTime<chrono::Utc>,
 }
 

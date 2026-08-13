@@ -24,7 +24,6 @@ use std::sync::Arc;
 /// block; see `get_tool_definitions`.
 const TOOL_SEARCH_NAME: &str = "tool_search";
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ToolExample {
     pub description: String,
@@ -41,12 +40,37 @@ pub struct ToolAttachment {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolResult {
     pub output: String,
+    #[serde(default)]
+    pub outcome: ToolOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default = "default_tool_result_metadata")]
     pub metadata: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ToolAttachment>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    #[default]
+    Success,
+    Failure,
+    Retryable,
+}
+
+impl ToolOutcome {
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Success)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Retryable => "retryable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,10 +159,24 @@ impl ToolResult {
     pub fn new(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),
+            outcome: ToolOutcome::Success,
             title: None,
             metadata: default_tool_result_metadata(),
             attachments: Vec::new(),
         }
+    }
+
+    pub fn failure(output: impl Into<String>) -> Self {
+        Self::new(output).with_outcome(ToolOutcome::Failure)
+    }
+
+    pub fn retryable(output: impl Into<String>) -> Self {
+        Self::new(output).with_outcome(ToolOutcome::Retryable)
+    }
+
+    pub fn with_outcome(mut self, outcome: ToolOutcome) -> Self {
+        self.outcome = outcome;
+        self
     }
 }
 
@@ -175,17 +213,14 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    #[allow(dead_code)]
     fn when_to_use(&self) -> &str {
         "See tool description"
     }
 
-    #[allow(dead_code)]
     fn when_not_to_use(&self) -> &str {
         "See tool description"
     }
 
-    #[allow(dead_code)]
     fn examples(&self) -> Vec<ToolExample> {
         vec![]
     }
@@ -196,12 +231,7 @@ pub struct ToolRegistry {
     allowed: HashSet<String>,
     base_config: Config,
     storage: Arc<crate::storage::SqliteStorage>,
-    event_bus: Option<Arc<EventBus>>,
     skill_loader: Option<Arc<SkillLoader>>,
-    subagent_manager: Option<Arc<SubagentManager>>,
-    indexer: Option<Arc<CodeIndexer>>,
-    memory_store: Option<Arc<MemoryStore>>,
-    decision_memory: Option<Arc<DecisionMemory>>,
     file_cache: Arc<FileReadCache>,
     coordinator: Option<Arc<Coordinator>>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
@@ -468,15 +498,12 @@ impl ToolRegistry {
         if let Some(ref sm) = subagent_manager {
             tools.insert(
                 "subagent".to_string(),
-                Arc::new(subagent::SubagentTool::with_manager(
-                    storage.clone(),
-                    sm.clone(),
-                )),
+                Arc::new(subagent::SubagentTool::with_manager(sm.clone())),
             );
         } else {
             tools.insert(
                 "subagent".to_string(),
-                Arc::new(subagent::SubagentTool::new(storage.clone())),
+                Arc::new(subagent::SubagentTool::new()),
             );
         }
 
@@ -559,12 +586,7 @@ impl ToolRegistry {
             allowed: config.tools.denied.iter().cloned().collect(),
             base_config: config,
             storage,
-            event_bus,
             skill_loader,
-            subagent_manager,
-            indexer,
-            memory_store,
-            decision_memory,
             file_cache,
             coordinator: None,
             scheduler: None,
@@ -828,6 +850,7 @@ impl ToolRegistry {
         let entry = manager.entry(tool_name);
         Ok(ToolResult {
             output,
+            outcome: ToolOutcome::Success,
             title: entry
                 .as_ref()
                 .map(|entry| format!("{} · {}", entry.server, entry.tool)),
@@ -1029,10 +1052,7 @@ impl ToolRegistry {
         if self.allowed.is_empty() || !self.allowed.contains("coordinator") {
             self.tools.insert(
                 "coordinator".to_string(),
-                Arc::new(coordinator::CoordinatorTool::new(
-                    self.storage.clone(),
-                    coordinator.clone(),
-                )),
+                Arc::new(coordinator::CoordinatorTool::new(coordinator.clone())),
             );
             self.coordinator = Some(coordinator);
             *self.cached_tool_definitions.write().unwrap() = None;
@@ -1069,7 +1089,7 @@ impl ToolRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolProfile;
+    use super::{ToolOutcome, ToolProfile, ToolResult};
     use crate::agent::provider::{ToolDefinition, ToolFunction};
     use serde_json::json;
 
@@ -1114,6 +1134,26 @@ mod tests {
             .filter(|tool| profile.allows(&tool.function.name))
             .map(|tool| tool.function.name)
             .collect()
+    }
+
+    #[test]
+    fn tool_results_default_to_success_for_compatibility() {
+        let result = ToolResult::new("ok");
+        assert_eq!(result.outcome, ToolOutcome::Success);
+
+        let legacy: ToolResult = serde_json::from_value(json!({
+            "output": "legacy",
+            "metadata": {},
+            "attachments": []
+        }))
+        .expect("legacy result should deserialize");
+        assert_eq!(legacy.outcome, ToolOutcome::Success);
+    }
+
+    #[test]
+    fn tool_result_failure_and_retryable_are_not_success() {
+        assert!(!ToolResult::failure("failed").outcome.is_success());
+        assert!(!ToolResult::retryable("later").outcome.is_success());
     }
 
     #[test]

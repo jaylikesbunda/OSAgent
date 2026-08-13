@@ -1,10 +1,11 @@
-v0.6.0 changes:
+v0.5.0 changes:
 
 ## Tool execution
 
 * Per-tool timeout budgets: tools declare a `timeout_ms` and the registry enforces it at every dispatch site, returning a structured "tool timed out" error instead of whatever was in flight
 * Oversized plain-text tool results are spilled to session-scoped files and replaced with a bounded head/tail preview plus a "read with offset/limit" hint, instead of being silently truncated
 * Advisory repeat-tool-call reminders: identical calls trigger escalating nudges at 3/5/8 repeats (canonicalized args, wildcard include/exclude) without the hard loop guard blocking
+* Tool results now expose success, failure, or retryable outcomes to the agent and runtime
 
 ## Context compaction
 

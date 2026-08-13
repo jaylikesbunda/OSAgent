@@ -1,10 +1,10 @@
 {
   "identifier": "webui-remote-window",
-  "description": "Allows the remote Web UI page (localhost:8765) to drag, minimize, hide and close its own window",
+  "description": "Allows the remote Web UI page (127.0.0.1:8765) to drag, minimize, hide and close its own window",
   "windows": ["webui"],
   "local": false,
   "remote": {
-    "urls": ["http://localhost:8765/*"]
+    "urls": ["http://127.0.0.1:8765/*"]
   },
   "permissions": [
     "core:window:allow-start-dragging",

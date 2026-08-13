@@ -9,7 +9,6 @@ pub struct Claims {
     pub iat: usize,
 }
 
-#[allow(dead_code)]
 pub fn hash_password(password: &str) -> crate::error::Result<String> {
     bcrypt::hash(password, bcrypt::DEFAULT_COST)
         .map_err(|e| crate::error::OSAgentError::Auth(e.to_string()))
@@ -38,7 +37,6 @@ pub fn generate_token(user_id: &str, secret: &str) -> crate::error::Result<Strin
     .map_err(|e| crate::error::OSAgentError::Auth(e.to_string()))
 }
 
-#[allow(dead_code)]
 pub fn verify_token(token: &str, secret: &str) -> crate::error::Result<Claims> {
     let token_data = decode::<Claims>(
         token,

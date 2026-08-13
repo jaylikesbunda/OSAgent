@@ -4,7 +4,7 @@ use crate::tools::guard::{ensure_relative_path_not_backups, path_touches_backups
 use crate::tools::output::{
     maybe_store_large_output_result, path_touches_tool_outputs, LargeOutputResult,
 };
-use crate::tools::registry::{Tool, ToolExample, ToolResult};
+use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
 use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
@@ -542,6 +542,7 @@ impl Tool for GrepTool {
                 Ok((result, matches)) => {
                     return Ok(ToolResult {
                         output: result.display_output,
+                        outcome: ToolOutcome::Success,
                         title: Some(path.to_string()),
                         metadata: json!({
                             "matches": matches,
@@ -574,6 +575,7 @@ impl Tool for GrepTool {
 
         Ok(ToolResult {
             output: result.display_output,
+            outcome: ToolOutcome::Success,
             title: Some(path.to_string()),
             metadata: json!({
                 "matches": matches,
@@ -912,6 +914,7 @@ impl Tool for GlobTool {
                 Ok((result, count)) => {
                     return Ok(ToolResult {
                         output: result.display_output,
+                        outcome: ToolOutcome::Success,
                         title: Some(path.to_string()),
                         metadata: json!({
                             "count": count,
@@ -936,6 +939,7 @@ impl Tool for GlobTool {
             .await?;
         Ok(ToolResult {
             output: result.display_output,
+            outcome: ToolOutcome::Success,
             title: Some(path.to_string()),
             metadata: json!({
                 "count": count,

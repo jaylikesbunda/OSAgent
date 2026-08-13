@@ -63,7 +63,6 @@ pub enum OSAgentError {
     #[error("External path access requires permission: {path}")]
     ExternalPathAccess { path: String },
 
-    #[allow(dead_code)]
     #[error("Invalid parameters: expected {expected}, got {got}")]
     InvalidParameters { expected: String, got: String },
 
@@ -94,7 +93,6 @@ pub enum OSAgentError {
     #[error("Parse error: {0}")]
     Parse(String),
 
-    #[allow(dead_code)]
     #[error("Telegram error: {0}")]
     Telegram(String),
 

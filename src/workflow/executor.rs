@@ -2,7 +2,6 @@ use crate::agent::events::{generate_question_id, AgentEvent, EventBus, QuestionC
 use crate::agent::subagent_manager::SubagentManager;
 use crate::error::{OSAgentError, Result};
 use crate::tools::question::{Question, QuestionOption};
-use crate::workflow::artifact_store::ArtifactStore;
 use crate::workflow::db::WorkflowDb;
 use crate::workflow::events::WorkflowEvent;
 use crate::workflow::graph::{parse_litegraph_json, topological_sort, GraphValidator};
@@ -31,7 +30,6 @@ struct ProcessedAttachment {
 
 pub struct WorkflowExecutor {
     db: Arc<WorkflowDb>,
-    artifact_store: Arc<ArtifactStore>,
     subagent_manager: Arc<SubagentManager>,
     event_tx: broadcast::Sender<WorkflowEvent>,
     event_bus: EventBus,
@@ -40,7 +38,6 @@ pub struct WorkflowExecutor {
 impl WorkflowExecutor {
     pub fn new(
         db: Arc<WorkflowDb>,
-        artifact_store: Arc<ArtifactStore>,
         subagent_manager: Arc<SubagentManager>,
         event_bus: EventBus,
     ) -> (Self, broadcast::Receiver<WorkflowEvent>) {
@@ -48,7 +45,6 @@ impl WorkflowExecutor {
         (
             Self {
                 db,
-                artifact_store,
                 subagent_manager,
                 event_tx,
                 event_bus,
@@ -1280,7 +1276,6 @@ mod tests {
     use crate::agent::events::AgentEvent;
     use crate::agent::runtime::AgentRuntime;
     use crate::config::{Config, WorkspacePath, WorkspacePermission};
-    use crate::workflow::artifact_store::ArtifactStore;
     use crate::workflow::db::WorkflowDb;
     use crate::workflow::graph::to_litegraph_json;
     use crate::workflow::types::{
@@ -1328,12 +1323,8 @@ mod tests {
         let workflow_db = Arc::new(WorkflowDb::new(workflow_db_path));
         workflow_db.init_tables().expect("init workflow tables");
 
-        let artifact_store = Arc::new(ArtifactStore::new(temp_root.join("workflow_artifacts")));
-        artifact_store.init().expect("init artifact store");
-
         let (executor, _event_rx) = WorkflowExecutor::new(
             workflow_db.clone(),
-            artifact_store,
             runtime.get_subagent_manager(),
             runtime.event_bus().clone(),
         );
@@ -1561,15 +1552,9 @@ mod tests {
         let workflow_db = Arc::new(WorkflowDb::new(workflow_db_path));
         workflow_db.init_tables().expect("init workflow tables");
 
-        let artifact_store = Arc::new(ArtifactStore::new(
-            temp_dir.path().join("workflow_artifacts"),
-        ));
-        artifact_store.init().expect("init artifact store");
-
         let event_bus = runtime.event_bus().clone();
         let (executor, _event_rx) = WorkflowExecutor::new(
             workflow_db.clone(),
-            artifact_store,
             runtime.get_subagent_manager(),
             event_bus.clone(),
         );

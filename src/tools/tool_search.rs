@@ -7,7 +7,7 @@
 
 use crate::error::Result;
 use crate::mcp::McpHandle;
-use crate::tools::registry::{Tool, ToolExample, ToolResult};
+use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -189,6 +189,7 @@ impl Tool for ToolSearchTool {
                  `tool_script` to keep intermediate results out of the conversation.",
                 activation_note, rendered
             ),
+            outcome: ToolOutcome::Success,
             title: Some(format!("{} tool(s) for \"{}\"", matches.len(), query)),
             metadata: json!({
                 "query": query,

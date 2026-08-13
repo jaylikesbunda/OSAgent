@@ -1,6 +1,5 @@
 use crate::agent::coordinator::Coordinator;
 use crate::error::{OSAgentError, Result};
-use crate::storage::SqliteStorage;
 use crate::tools::registry::Tool;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -8,16 +7,12 @@ use std::sync::Arc;
 use tracing::info;
 
 pub struct CoordinatorTool {
-    storage: Arc<SqliteStorage>,
     coordinator: Arc<Coordinator>,
 }
 
 impl CoordinatorTool {
-    pub fn new(storage: Arc<SqliteStorage>, coordinator: Arc<Coordinator>) -> Self {
-        Self {
-            storage,
-            coordinator,
-        }
+    pub fn new(coordinator: Arc<Coordinator>) -> Self {
+        Self { coordinator }
     }
 }
 

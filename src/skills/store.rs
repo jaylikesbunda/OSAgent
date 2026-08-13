@@ -22,14 +22,6 @@ pub struct SkillInfo {
     pub config_schema: Vec<ConfigField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub enum ConfigStatus {
-    Complete,
-    Missing,
-    Partial,
-    NotRequired,
-}
-
 pub struct SkillStore {
     skills_dir: PathBuf,
     config_store: SkillConfigStore,
@@ -54,10 +46,6 @@ impl SkillStore {
             icons_dir,
             cache: RwLock::new(HashMap::new()),
         }
-    }
-
-    pub fn get_skills_dir(&self) -> &PathBuf {
-        &self.skills_dir
     }
 
     pub fn skill_dir(&self, name: &str) -> PathBuf {
@@ -192,15 +180,6 @@ impl SkillStore {
         fs::read_to_string(&path)
     }
 
-    pub fn save_skill_content(&self, name: &str, content: &str) -> std::io::Result<()> {
-        let dir = self.skill_dir(name);
-        fs::create_dir_all(&dir)?;
-        let path = self.skill_skill_md_path(name);
-        fs::write(&path, content)?;
-        self.invalidate_cache(name);
-        Ok(())
-    }
-
     pub fn delete_skill(&self, name: &str) -> std::io::Result<()> {
         let dir = self.skill_dir(name);
         if dir.exists() {
@@ -218,14 +197,6 @@ impl SkillStore {
     pub fn get_env_for_skill(&self, name: &str) -> std::io::Result<HashMap<String, String>> {
         let config = self.config_store.load_config(name)?;
         Ok(config.settings)
-    }
-
-    pub fn save_icon(&self, name: &str, icon_data: &[u8]) -> std::io::Result<()> {
-        fs::create_dir_all(&self.icons_dir)?;
-        let path = self.icons_dir.join(format!("{}.png", name));
-        fs::write(&path, icon_data)?;
-        self.invalidate_cache(name);
-        Ok(())
     }
 
     fn invalidate_cache(&self, name: &str) {

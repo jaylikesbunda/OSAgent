@@ -17,7 +17,7 @@ use crate::agent::events::{AgentEvent, EventBus};
 use crate::config::Config;
 use crate::error::{OSAgentError, Result};
 use crate::permission::PermissionAction;
-use crate::tools::registry::{Tool, ToolExample, ToolRegistry, ToolResult};
+use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolRegistry, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -295,6 +295,13 @@ pub async fn run_script(context: ScriptContext, args: &Value) -> Result<ToolResu
 
     Ok(ToolResult {
         output: truncated,
+        outcome: if timed_out {
+            ToolOutcome::Retryable
+        } else if exit_code == 0 {
+            ToolOutcome::Success
+        } else {
+            ToolOutcome::Failure
+        },
         title: Some(format!("{} script · {} tool call(s)", language, calls)),
         metadata: json!({
             "language": language,

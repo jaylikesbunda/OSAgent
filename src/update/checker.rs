@@ -23,20 +23,7 @@ pub struct UpdateCheckResult {
 struct CdnManifest {
     tag: String,
     version: String,
-    released_at: Option<String>,
     channel: Option<String>,
-    #[serde(default)]
-    assets: std::collections::HashMap<String, CdnAssetEntry>,
-    #[serde(default)]
-    sha256: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CdnAssetEntry {
-    #[serde(default)]
-    archive: String,
-    #[serde(default)]
-    url: String,
 }
 
 pub struct UpdateChecker {
@@ -145,8 +132,4 @@ impl UpdateChecker {
             },
         }
     }
-}
-
-pub fn get_current_version() -> String {
-    crate::update::build_version().to_string()
 }

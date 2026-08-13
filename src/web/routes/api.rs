@@ -94,7 +94,6 @@ pub struct DiscordBotActionResponse {
     pub message: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
     pub model: Option<String>,
@@ -102,7 +101,6 @@ pub struct CreateSessionRequest {
     pub workspace_id: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AttachmentRequest {
     pub filename: String,
@@ -110,7 +108,6 @@ pub struct AttachmentRequest {
     pub data_url: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub message: String,
@@ -500,7 +497,6 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
     let subagent_manager = agent.get_subagent_manager();
     let (executor, _event_rx) = WorkflowExecutor::new(
         workflow_db.clone(),
-        artifact_store.clone(),
         subagent_manager,
         agent.event_bus().clone(),
     );
@@ -2419,33 +2415,6 @@ async fn list_session_queue(
     Ok(Json(items))
 }
 
-fn strip_tool_blocks(text: &str) -> String {
-    let mut output = String::new();
-    let mut in_tool_block = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```tool") {
-            in_tool_block = true;
-            continue;
-        }
-        if in_tool_block && trimmed == "```" {
-            in_tool_block = false;
-            continue;
-        }
-        if in_tool_block {
-            continue;
-        }
-        if trimmed == "Tool Results:" {
-            continue;
-        }
-        output.push_str(line);
-        output.push('\n');
-    }
-
-    output.trim().to_string()
-}
-
 async fn cancel_session(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(id): Path<String>,
@@ -2597,17 +2566,14 @@ async fn session_goal(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let goal = agent
-        .get_session_goal(&session_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let goal = agent.get_session_goal(&session_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
     Ok(Json(serde_json::json!({ "goal": goal })))
 }
 
@@ -2615,17 +2581,14 @@ async fn clear_session_goal(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let cleared = agent
-        .clear_session_goal(&session_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let cleared = agent.clear_session_goal(&session_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
     Ok(Json(serde_json::json!({ "cleared": cleared })))
 }
 
@@ -6104,7 +6067,6 @@ async fn check_update(
 
 #[derive(Debug, Deserialize)]
 struct DownloadUpdateRequest {
-    tag: String,
     channel: Option<String>,
 }
 

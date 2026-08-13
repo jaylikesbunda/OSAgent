@@ -5,7 +5,7 @@ use crate::tools::file_cache::FileReadCache;
 use crate::tools::fuzzy_edit::{apply_replacement, fuzzy_find};
 use crate::tools::guard::{ensure_relative_path_not_backups, path_touches_backups};
 use crate::tools::output::path_touches_tool_outputs;
-use crate::tools::registry::{Tool, ToolAttachment, ToolResult};
+use crate::tools::registry::{Tool, ToolAttachment, ToolOutcome, ToolResult};
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::Utc;
@@ -27,12 +27,6 @@ fn workspace_is_read_only(config: &Config) -> bool {
 
 fn path_is_in_workspace(path: &str, config: &Config) -> bool {
     config.is_path_in_workspace(path)
-}
-
-fn get_workspace_path_for(path: &str, config: &Config) -> Option<std::path::PathBuf> {
-    config
-        .get_workspace_for_path(path)
-        .map(|(ws, wp)| std::path::PathBuf::from(&wp.path))
 }
 
 fn ensure_workspace(workspaces: &[PathBuf]) -> Result<()> {
@@ -185,6 +179,7 @@ impl ReadFileTool {
         if formatted.is_empty() {
             return Ok(ToolResult {
                 output: "(empty directory)".to_string(),
+                outcome: ToolOutcome::Success,
                 title: Some(requested_path.to_string()),
                 metadata: json!({
                     "kind": "directory",
@@ -221,6 +216,7 @@ impl ReadFileTool {
 
         Ok(ToolResult {
             output,
+            outcome: ToolOutcome::Success,
             title: Some(requested_path.to_string()),
             metadata: json!({
                 "kind": "directory",
@@ -250,6 +246,7 @@ impl ReadFileTool {
         if bytes.is_empty() {
             return Ok(ToolResult {
                 output: "(empty file)".to_string(),
+                outcome: ToolOutcome::Success,
                 title: Some(requested_path.to_string()),
                 metadata: json!({
                     "kind": "file",
@@ -293,6 +290,7 @@ impl ReadFileTool {
         if total_lines == 0 {
             return Ok(ToolResult {
                 output: "(empty file)".to_string(),
+                outcome: ToolOutcome::Success,
                 title: Some(requested_path.to_string()),
                 metadata: json!({
                     "kind": "file",
@@ -361,6 +359,7 @@ impl ReadFileTool {
 
         Ok(ToolResult {
             output,
+            outcome: ToolOutcome::Success,
             title: Some(requested_path.to_string()),
             metadata: json!({
                 "kind": "file",
@@ -400,6 +399,7 @@ impl ReadFileTool {
                 bytes.len(),
                 mime
             ),
+            outcome: ToolOutcome::Success,
             title: Some(requested_path.to_string()),
             metadata: json!({
                 "kind": "image",
@@ -478,6 +478,7 @@ impl ReadFileTool {
 
         Ok(ToolResult {
             output,
+            outcome: ToolOutcome::Success,
             title: Some(requested_path.to_string()),
             metadata: json!({
                 "kind": "pdf",

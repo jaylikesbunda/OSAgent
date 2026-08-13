@@ -103,9 +103,9 @@ impl Tool for CreateGoalTool {
         let session_id = args["session_id"].as_str().ok_or_else(|| {
             OSAgentError::ToolExecution("Missing 'session_id' parameter".to_string())
         })?;
-        let objective = args["objective"]
-            .as_str()
-            .ok_or_else(|| OSAgentError::ToolExecution("Missing 'objective' parameter".to_string()))?;
+        let objective = args["objective"].as_str().ok_or_else(|| {
+            OSAgentError::ToolExecution("Missing 'objective' parameter".to_string())
+        })?;
         let max_rounds = args["max_rounds"].as_i64().unwrap_or(DEFAULT_MAX_ROUNDS);
         let goal = self.goals.create(session_id, objective, max_rounds)?;
         Ok(format!(
@@ -156,9 +156,9 @@ impl Tool for UpdateGoalTool {
         let revision = args["revision"].as_i64().ok_or_else(|| {
             OSAgentError::ToolExecution("Missing 'revision' parameter".to_string())
         })?;
-        let action = args["action"].as_str().ok_or_else(|| {
-            OSAgentError::ToolExecution("Missing 'action' parameter".to_string())
-        })?;
+        let action = args["action"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("Missing 'action' parameter".to_string()))?;
         let goal = self.goals.apply_action(
             session_id,
             revision,

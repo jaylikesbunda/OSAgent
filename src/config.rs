@@ -551,7 +551,8 @@ impl Default for CompactionConfig {
 #[serde(rename_all = "snake_case")]
 pub enum McpTransport {
     #[default]
-    Stdio,    Http,
+    Stdio,
+    Http,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

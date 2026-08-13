@@ -1,4 +1,4 @@
-use crate::config::Config;
+﻿use crate::config::Config;
 use crate::prompt_eval::memory::{MemoryConfig, SuccessEntry, SuccessMemory, TestScore};
 use crate::prompt_eval::runner::{EvalConfig, EvaluationRunner};
 use crate::prompt_eval::scorer::{AggregateScore, Score, Scorer};
@@ -344,7 +344,7 @@ impl PromptOptimizer {
 
                     print!("\r\x1b[K");
                     println!(
-                        "★ NEW BEST #{:3}: {:.3} (C:{:.2} T:{:.2} E:{:.2} S:{:.2}) [{}s]",
+                        "â˜… NEW BEST #{:3}: {:.3} (C:{:.2} T:{:.2} E:{:.2} S:{:.2}) [{}s]",
                         consecutive_bests,
                         aggregate.avg_score,
                         aggregate.avg_correctness,
@@ -356,7 +356,7 @@ impl PromptOptimizer {
 
                     if let Some(threshold) = config.early_stop_threshold {
                         if aggregate.avg_score >= threshold {
-                            println!("\n✓ Reached early stop threshold {:.3}!", threshold);
+                            println!("\nâœ“ Reached early stop threshold {:.3}!", threshold);
                             break;
                         }
                     }
@@ -371,7 +371,7 @@ impl PromptOptimizer {
                     && iteration < config.max_iterations - 10
                 {
                     println!(
-                        "\n  → Exploring more aggressively after {} no-improves",
+                        "\n  â†’ Exploring more aggressively after {} no-improves",
                         no_improve_count
                     );
                     no_improve_count = 0;
@@ -458,7 +458,7 @@ impl PromptOptimizer {
             let is_best = if Some(r.aggregate_score.avg_score)
                 == sorted.first().map(|x| x.aggregate_score.avg_score)
             {
-                " ★"
+                " â˜…"
             } else {
                 ""
             };
@@ -617,7 +617,7 @@ impl PromptOptimizer {
             out.push_str("| Test | Score | Correct | Tools | Efficiency | Pass |\n");
             out.push_str("|------|-------|---------|-------|-------------|------|\n");
             for score in &best.aggregate_score.individual_scores {
-                let pass = if score.passed { "✓" } else { "✗" };
+                let pass = if score.passed { "âœ“" } else { "âœ—" };
                 out.push_str(&format!(
                     "| {} | {:.2} | {:.2} | {:.2} | {:.2} | {} |\n",
                     score.test_name,
@@ -803,152 +803,6 @@ impl PromptOptimizer {
 
         out
     }
-
-    async fn print_final_summary(&self) {
-        let results_guard = self.results.read().await;
-        let best_guard = self.best_result.read().await;
-
-        println!(
-            "\n╔═══════════════════════════════════════════════════════════════════════════════╗"
-        );
-        println!(
-            "║                            FINAL SUMMARY                                     ║"
-        );
-        println!(
-            "╠═══════════════════════════════════════════════════════════════════════════════╣"
-        );
-        println!(
-            "║                                                                               ║"
-        );
-
-        let mut sorted: Vec<_> = results_guard.iter().cloned().collect();
-        sorted.sort_by(|a, b| {
-            b.aggregate_score
-                .avg_score
-                .partial_cmp(&a.aggregate_score.avg_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let total = sorted.len();
-
-        println!(
-            "║  TOP 10 PROMPTS                                                               ║"
-        );
-        println!(
-            "║                                                                               ║"
-        );
-        println!("║  ┌─────┬────────┬───────────┬───────────┬───────────┬───────────┬───────────┬───────────┬───────────┬─────┐  ║");
-        println!("║  │Rank │ Score │  Correct │   Tool   │  Effic.  │  Safety  │  Format  │  Identity │  Tone    │Iter│  ║");
-        println!("║  ├─────┼────────┼───────────┼───────────┼───────────┼───────────┼───────────┼───────────┼───────────┼─────┤  ║");
-
-        for (i, result) in sorted.iter().take(10).enumerate() {
-            let r = result;
-            let identity_short = match r.config.identity_variant {
-                crate::prompt_eval::variation::IdentityVariant::Gpt5Efficient => "GPT5E",
-                crate::prompt_eval::variation::IdentityVariant::ClaudeStyle => "Claude",
-                crate::prompt_eval::variation::IdentityVariant::Minimal => "Mini",
-                crate::prompt_eval::variation::IdentityVariant::Standard => "Std",
-                crate::prompt_eval::variation::IdentityVariant::Detailed => "Dtl",
-                crate::prompt_eval::variation::IdentityVariant::Technical => "Tech",
-                crate::prompt_eval::variation::IdentityVariant::Casual => "Cas",
-            };
-            let tone_short = match r.config.tone {
-                crate::prompt_eval::variation::Tone::Direct => "Dir",
-                crate::prompt_eval::variation::Tone::Dry => "Dry",
-                crate::prompt_eval::variation::Tone::Friendly => "Frn",
-                crate::prompt_eval::variation::Tone::Witty => "Wit",
-                crate::prompt_eval::variation::Tone::Calm => "Clm",
-                crate::prompt_eval::variation::Tone::Assertive => "Asr",
-            };
-            println!("║  │{:>4} │ {:.3}  │   {:.2}    │   {:.2}    │   {:.2}    │   {:.2}    │   {:.2}    │ {}    │ {}   │{:>4} │  ║",
-                i + 1,
-                r.aggregate_score.avg_score,
-                r.aggregate_score.avg_correctness,
-                r.aggregate_score.avg_tool_accuracy,
-                r.aggregate_score.avg_efficiency,
-                r.aggregate_score.avg_safety,
-                r.aggregate_score.avg_format,
-                identity_short,
-                tone_short,
-                r.iteration
-            );
-        }
-        println!("║  └─────┴────────┴───────────┴───────────┴───────────┴───────────┴───────────┴───────────┴───────────┴─────┘  ║");
-
-        if let Some(best) = best_guard.as_ref() {
-            println!(
-                "║                                                                               ║"
-            );
-            println!(
-                "║  ★ BEST: {:.3} (iteration {})                                              ║",
-                best.aggregate_score.avg_score, best.iteration
-            );
-            println!(
-                "║                                                                               ║"
-            );
-            println!("║  Breakdown: C:{:.2} | T:{:.2} | E:{:.2} | S:{:.2} | F:{:.2}                        ║",
-                best.aggregate_score.avg_correctness,
-                best.aggregate_score.avg_tool_accuracy,
-                best.aggregate_score.avg_efficiency,
-                best.aggregate_score.avg_safety,
-                best.aggregate_score.avg_format
-            );
-            println!(
-                "║                                                                               ║"
-            );
-            println!(
-                "║  Config Variants:                                                            ║"
-            );
-            println!(
-                "║    Identity: {:?}                                              ║",
-                best.config.identity_variant
-            );
-            println!(
-                "║    Priorities: {:?}                                          ║",
-                best.config.priorities_variant
-            );
-            println!(
-                "║    Safety: {:?}                                                ║",
-                best.config.safety_variant
-            );
-            println!(
-                "║    Workflow: {:?}                                              ║",
-                best.config.workflow_variant
-            );
-            println!(
-                "║    Communication: {:?}                                        ║",
-                best.config.communication_variant
-            );
-            println!(
-                "║                                                                               ║"
-            );
-            println!("║  Efficiency Settings:                                                          ║");
-            println!(
-                "║    Strategy: {:?} | Context: {:?} | Validation: {:?}                   ║",
-                best.config.decision_strategy,
-                best.config.context_behavior,
-                best.config.validation_style
-            );
-            println!(
-                "║    Brevity: {:?} | Retry: {:?} | ToolPhil: {:?}                       ║",
-                best.config.response_brevity,
-                best.config.retry_philosophy,
-                best.config.tool_philosophy
-            );
-        }
-
-        println!(
-            "║                                                                               ║"
-        );
-        println!(
-            "║  Total iterations: {}                                                         ║",
-            total
-        );
-        println!(
-            "╚═══════════════════════════════════════════════════════════════════════════════╝"
-        );
-    }
-
     pub async fn get_best(&self) -> Option<OptimizationResult> {
         self.best_result.read().await.clone()
     }

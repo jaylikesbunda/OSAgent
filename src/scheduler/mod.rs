@@ -26,7 +26,7 @@ impl Scheduler {
     pub fn new(storage: Arc<SqliteStorage>, event_bus: crate::agent::events::EventBus) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let parser = CronParser::new();
-        let executor = JobExecutor::new(Arc::clone(&storage), event_bus);
+        let executor = JobExecutor::new(event_bus);
         Self {
             storage,
             executor,

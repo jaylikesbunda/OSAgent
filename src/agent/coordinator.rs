@@ -1,9 +1,7 @@
 use crate::agent::events::{AgentEvent, EventBus};
 use crate::agent::prompt::{self, PromptMode};
 use crate::agent::subagent_manager::SubagentManager;
-use crate::config::Config;
 use crate::error::Result;
-use crate::storage::SqliteStorage;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +10,6 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 300;
-const DEFAULT_PHASE_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_MAX_WORKERS: usize = 3;
 const SCRATCHPAD_DIR_NAME: &str = ".osagent_scratchpad";
 
@@ -140,11 +137,6 @@ impl Scratchpad {
         Ok(path)
     }
 
-    fn read(&self, worker_id: &str, filename: &str) -> Option<String> {
-        let path = self.base_dir.join(worker_id).join(filename);
-        fs::read_to_string(path).ok()
-    }
-
     fn read_all_findings(&self) -> Vec<(String, String)> {
         let mut results = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.base_dir) {
@@ -162,35 +154,23 @@ impl Scratchpad {
         }
         results
     }
-
-    fn cleanup(&self) {
-        if self.base_dir.exists() {
-            let _ = fs::remove_dir_all(&self.base_dir);
-        }
-    }
 }
 
 pub struct Coordinator {
-    storage: Arc<SqliteStorage>,
     event_bus: Arc<EventBus>,
     subagent_manager: Arc<SubagentManager>,
-    config: Arc<tokio::sync::RwLock<Config>>,
     workspace_root: PathBuf,
 }
 
 impl Coordinator {
     pub fn new(
-        storage: Arc<SqliteStorage>,
         event_bus: Arc<EventBus>,
         subagent_manager: Arc<SubagentManager>,
-        config: Arc<tokio::sync::RwLock<Config>>,
         workspace_root: PathBuf,
     ) -> Self {
         Self {
-            storage,
             event_bus,
             subagent_manager,
-            config,
             workspace_root,
         }
     }

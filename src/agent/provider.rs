@@ -60,7 +60,6 @@ pub trait Provider: Send + Sync {
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse>;
 
-    #[allow(dead_code)]
     async fn complete_stream(
         &self,
         session_id: Option<&str>,
@@ -118,7 +117,6 @@ pub struct TokenUsage {
     pub reasoning: Option<usize>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamToolCallDelta {
     pub index: usize,
@@ -130,7 +128,6 @@ pub struct StreamToolCallDelta {
     pub arguments: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamEvent {
     #[serde(rename = "type")]

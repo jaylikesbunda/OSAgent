@@ -35,7 +35,6 @@ pub struct CodeIndexer {
     client: Client,
     index: Index,
     workspace: PathBuf,
-    #[allow(dead_code)]
     meilisearch_process: Option<Arc<tokio::sync::Mutex<Child>>>,
 }
 
@@ -652,7 +651,6 @@ impl CodeIndexer {
         Ok(search_results)
     }
 
-    #[allow(dead_code)]
     pub async fn stop(&self) -> Result<()> {
         if let Some(ref process) = self.meilisearch_process {
             let mut proc = process.lock().await;
@@ -663,7 +661,6 @@ impl CodeIndexer {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn get_stats(&self) -> Result<IndexStats> {
         let stats = self.index.get_stats().await.map_err(|e| {
             OSAgentError::ToolExecution(format!("Failed to get index stats: {}", e))

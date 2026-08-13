@@ -13,7 +13,6 @@ mod ui;
 use crate::agent::events::AgentEvent;
 use crate::agent::runtime::AgentRuntime;
 use crate::config::DiscordConfig;
-use crate::workflow::artifact_store::ArtifactStore;
 use crate::workflow::db::WorkflowDb;
 use crate::workflow::executor::WorkflowExecutor;
 use dashmap::DashMap;
@@ -445,14 +444,8 @@ impl Handler {
             .init_tables()
             .map_err(|e| format!("Failed to initialize workflow db: {e}"))?;
 
-        let artifact_store = Arc::new(ArtifactStore::new(artifact_path));
-        artifact_store
-            .init()
-            .map_err(|e| format!("Failed to initialize workflow artifacts: {e}"))?;
-
         let (executor, _event_rx) = WorkflowExecutor::new(
             workflow_db.clone(),
-            artifact_store,
             self.agent.get_subagent_manager(),
             self.agent.event_bus().clone(),
         );

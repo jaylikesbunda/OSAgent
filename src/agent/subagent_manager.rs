@@ -83,7 +83,6 @@ pub struct SubagentManager {
 struct SubagentHandle {
     task_id: String,
     parent_session_id: String,
-    session_id: String,
     handle: JoinHandle<()>,
     cancel_tx: mpsc::Sender<()>,
 }
@@ -455,7 +454,6 @@ impl SubagentManager {
         let subagent_handle = SubagentHandle {
             task_id: task.id.clone(),
             parent_session_id: parent_session_id.clone(),
-            session_id: subagent_session.id.clone(),
             handle,
             cancel_tx,
         };

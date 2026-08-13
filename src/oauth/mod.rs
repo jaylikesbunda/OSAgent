@@ -105,12 +105,6 @@ pub fn extract_account_id(id_token: Option<&str>, access_token: Option<&str>) ->
         })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EncryptedStorage {
-    pub entries: HashMap<String, String>,
-    pub nonce: String,
-}
-
 pub struct OAuthStorage {
     storage_path: PathBuf,
     encryption_key: Option<[u8; 32]>,

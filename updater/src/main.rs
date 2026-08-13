@@ -18,7 +18,6 @@ mod platform {
     pub const CREATE_NO_WINDOW: u32 = 0x08000000;
     pub const DETACHED_PROCESS: u32 = 0x00000008;
 
-    #[allow(dead_code)]
     pub fn spawn_detached(cmd: &mut process::Command) -> std::io::Result<process::Child> {
         cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn()

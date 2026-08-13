@@ -221,7 +221,6 @@ impl CheckpointManager {
             .replace_checkpoint_diffs(checkpoint_id, checkpoint_diffs.as_slice())
     }
 
-    #[allow(dead_code)]
     pub async fn get_checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
         self.storage.get_checkpoint(id)
     }

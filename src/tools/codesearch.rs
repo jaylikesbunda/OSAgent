@@ -1,6 +1,6 @@
 use crate::error::{OSAgentError, Result};
 use crate::indexer::{CodeIndexer, SearchResult};
-use crate::tools::registry::{Tool, ToolExample};
+use crate::tools::registry::{Tool, ToolExample, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -77,6 +77,10 @@ impl Tool for CodeSearchTool {
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
+        Ok(self.execute_result(args).await?.output)
+    }
+
+    async fn execute_result(&self, args: Value) -> Result<ToolResult> {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| OSAgentError::ToolExecution("Missing 'query' parameter".to_string()))?;
@@ -92,21 +96,24 @@ impl Tool for CodeSearchTool {
         let is_indexing = stats.as_ref().map(|s| s.is_indexing).unwrap_or(false);
 
         if !is_indexed && !is_indexing {
-            return Ok("Code search index is empty or MeiliSearch is not running. \
+            return Ok(ToolResult::failure(
+                "Code search index is empty or MeiliSearch is not running. \
                 The workspace may not have been indexed yet, or MeiliSearch failed to start. \
-                Check that MeiliSearch is installed and the search feature is enabled in config."
-                .to_string());
+                Check that MeiliSearch is installed and the search feature is enabled in config.",
+            ));
         }
 
         if is_indexing {
-            return Ok("Indexing in progress. Please wait a moment and try again.".to_string());
+            return Ok(ToolResult::retryable(
+                "Indexing in progress. Please wait a moment and try again.",
+            ));
         }
 
         if let Err(e) = self.indexer.ensure_index_ready().await {
             warn!("Index not ready: {}", e);
-            return Ok(
-                "Index is still being prepared. Please wait a moment and try again.".to_string(),
-            );
+            return Ok(ToolResult::retryable(
+                "Index is still being prepared. Please wait a moment and try again.",
+            ));
         }
 
         let results: Vec<SearchResult> = if let Some(lang) = language {
@@ -118,7 +125,7 @@ impl Tool for CodeSearchTool {
         };
 
         if results.is_empty() {
-            return Ok("No results found. Try different keywords or check if the files contain your search terms.".to_string());
+            return Ok(ToolResult::new("No results found. Try different keywords or check if the files contain your search terms."));
         }
 
         let mut output = String::new();
@@ -147,6 +154,6 @@ impl Tool for CodeSearchTool {
             output.push_str(&format!("```\n{}\n```\n\n", content_preview));
         }
 
-        Ok(output)
+        Ok(ToolResult::new(output))
     }
 }
