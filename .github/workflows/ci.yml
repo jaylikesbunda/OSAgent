@@ -461,7 +461,7 @@ jobs:
           - [osagent-linux-x86_64.deb](${DOWNLOAD_URL}/osagent-linux-x86_64.deb) ([sha256](${DOWNLOAD_URL}/osagent-linux-x86_64.deb.sha256))
           - [osagent-macos-arm64.dmg](${DOWNLOAD_URL}/osagent-macos-arm64.dmg) ([sha256](${DOWNLOAD_URL}/osagent-macos-arm64.dmg.sha256))
 
-          OTA archives (what the in-app updater downloads):
+          OTA archives (for the in-app updater only; these are not first-time installers):
           - [osagent-linux-x86_64.tar.gz](${DOWNLOAD_URL}/osagent-linux-x86_64.tar.gz) ([sha256](${DOWNLOAD_URL}/osagent-linux-x86_64.tar.gz.sha256))
           - [osagent-macos-arm64.tar.gz](${DOWNLOAD_URL}/osagent-macos-arm64.tar.gz) ([sha256](${DOWNLOAD_URL}/osagent-macos-arm64.tar.gz.sha256))
           - [release-manifest.json](${DOWNLOAD_URL}/release-manifest.json)

@@ -101,6 +101,16 @@ body {
 
 input, textarea, select, button {
     font-family: inherit;
+    color: var(--text-primary);
+}
+
+input, textarea, select {
+    background-color: var(--bg-tertiary);
+}
+
+select option {
+    color: var(--text-primary);
+    background-color: var(--bg-secondary);
 }
 
 code, pre, .mono {

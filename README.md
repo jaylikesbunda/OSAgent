@@ -35,6 +35,8 @@ Nothing is sent anywhere you didn't configure. Point it at a local Ollama instan
 
 Download the installer, pick a provider (OAuth or API key), pick a workspace, done. Your browser opens to `http://localhost:8765`.
 
+On Debian or Ubuntu, you can also run `./install.sh`. The Linux `.tar.gz` release contains only the launcher used by in-app updates; it is not a first-time installer. Use the `.deb` for a normal installation.
+
 Prefer the terminal:
 
 ```bash

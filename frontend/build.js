@@ -143,7 +143,8 @@ async function build() {
     bundle: true,
     sourcemap: isDev || isWatch,
     minify: !isDev && !isWatch,
-    target: ["es2020"],
+    // Linux uses the distribution's WebKitGTK, which can be older than WebView2.
+    target: ["es2017"],
     logLevel: "info",
   };
 
