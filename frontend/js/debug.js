@@ -316,6 +316,22 @@ window.OSA = window.OSA || {};
         }
         syncCheckbox();
         log('debug.init', { enabled });
+
+        window.addEventListener('error', event => {
+            warn('window.error', event.filename || 'unknown', {
+                message: event.message,
+                line: event.lineno,
+                column: event.colno,
+            });
+        });
+        window.addEventListener('unhandledrejection', event => {
+            const reason = event.reason;
+            warn(
+                'window.unhandledrejection',
+                reason?.name || 'promise',
+                reason?.stack || reason?.message || String(reason)
+            );
+        });
     }
 
     OSA.debug = {

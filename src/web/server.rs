@@ -13,7 +13,6 @@ use tokio::sync::watch;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
 
 #[derive(RustEmbed)]
@@ -186,15 +185,9 @@ pub async fn run_with_agent(
         router_start.elapsed().as_secs_f64() * 1000.0
     );
 
-    let keep_alive = SetResponseHeaderLayer::if_not_present(
-        header::CONNECTION,
-        HeaderValue::from_static("keep-alive"),
-    );
-
     let app_build_start = Instant::now();
     let app = api_routes
         .fallback(serve_static_handler)
-        .layer(keep_alive)
         .layer(CompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(50 * 1024 * 1024))
         .layer(build_cors_layer(&config));

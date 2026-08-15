@@ -925,7 +925,7 @@ OSA.toggleTTS = function() {
     OSA.syncVoiceModeToSession(OSA.getTtsEnabled());
 
     if (!OSA.getTtsEnabled()) {
-        if (window.speechSynthesis.speaking) {
+        if (window.speechSynthesis?.speaking) {
             window.speechSynthesis.cancel();
         }
         OSA.stopAudioPlayback();
@@ -976,7 +976,7 @@ OSA.cancelSpeechOutput = function() {
 };
 
 OSA.isAudioPlaying = function() {
-    return (OSA.getCurrentAudio() && !OSA.getCurrentAudio().paused) || window.speechSynthesis.speaking;
+    return !!((OSA.getCurrentAudio() && !OSA.getCurrentAudio().paused) || window.speechSynthesis?.speaking);
 };
 
 // Retained for callers outside the pipeline; the pump owns scheduling now.
@@ -1319,7 +1319,9 @@ OSA.pumpSpeechQueue = function() {
             // Piper being unreachable used to mean silence with nothing but a
             // console line. The browser voice is always available, so use it
             // rather than dropping the utterance.
-            if (generation === OSA.getSpeechPlaybackGeneration() && window.speechSynthesis) {
+            if (generation === OSA.getSpeechPlaybackGeneration()
+                && window.speechSynthesis
+                && window.SpeechSynthesisUtterance) {
                 const utterance = new SpeechSynthesisUtterance(payload);
                 utterance.lang = voiceConfig?.language || 'en';
                 utterance.rate = voiceConfig?.voice_speed || 1.0;
@@ -1332,6 +1334,11 @@ OSA.pumpSpeechQueue = function() {
             finish();
         });
     } else {
+        if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+            console.warn('Browser speech synthesis is not available in this WebView');
+            finish();
+            return;
+        }
         const utterance = new SpeechSynthesisUtterance(payload);
         utterance.lang = voiceConfig?.language || 'en';
         utterance.rate = voiceConfig?.voice_speed || 1.0;

@@ -259,8 +259,33 @@ mod snowflake {
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
+    /// Enables separate restricted community and full-access trusted policies.
+    /// Off preserves the original allowed_users behavior for existing installs.
+    pub community_mode: bool,
+    pub community_context: String,
+    pub docs_url: String,
+    pub github_repo: String,
+    pub github_token: String,
+    #[serde(with = "snowflake::optional")]
+    pub github_tracking_channel: Option<u64>,
+    pub github_poll_seconds: u64,
     #[serde(with = "snowflake::list")]
     pub allowed_users: Vec<u64>,
+    #[serde(with = "snowflake::list")]
+    pub allowed_roles: Vec<u64>,
+    #[serde(with = "snowflake::list")]
+    pub allowed_guilds: Vec<u64>,
+    #[serde(with = "snowflake::list")]
+    pub allowed_channels: Vec<u64>,
+    pub allow_dms: bool,
+    #[serde(with = "snowflake::list")]
+    pub trusted_users: Vec<u64>,
+    #[serde(with = "snowflake::list")]
+    pub trusted_roles: Vec<u64>,
+    #[serde(with = "snowflake::list")]
+    pub trusted_guilds: Vec<u64>,
+    #[serde(with = "snowflake::list")]
+    pub trusted_channels: Vec<u64>,
     #[serde(with = "snowflake::optional")]
     pub last_channel_id: Option<u64>,
 }
@@ -1797,7 +1822,22 @@ last_channel_id = 1478327393205882900
         let discord = DiscordConfig {
             enabled: true,
             token: "t".to_string(),
+            community_mode: false,
+            community_context: String::new(),
+            docs_url: String::new(),
+            github_repo: String::new(),
+            github_token: String::new(),
+            github_tracking_channel: None,
+            github_poll_seconds: 300,
             allowed_users: vec![420155234833268737],
+            allowed_roles: vec![],
+            allowed_guilds: vec![],
+            allowed_channels: vec![],
+            allow_dms: false,
+            trusted_users: vec![],
+            trusted_roles: vec![],
+            trusted_guilds: vec![],
+            trusted_channels: vec![],
             last_channel_id: None,
         };
 

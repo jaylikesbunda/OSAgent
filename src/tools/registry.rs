@@ -80,6 +80,8 @@ pub enum ToolProfile {
     Plan,
     Creative,
     Custom,
+    /// Public Discord support: public web reads only, with no host capabilities.
+    Community,
 }
 
 impl ToolProfile {
@@ -93,7 +95,7 @@ impl ToolProfile {
         }
     }
 
-    fn allows(self, tool_name: &str) -> bool {
+    pub(crate) fn allows(self, tool_name: &str) -> bool {
         // Discovery and the tools it yields travel together. A profile
         // that can call `tool_search` but not the tools it activates
         // sends the agent down a dead end: it searches, is told the tool
@@ -147,6 +149,7 @@ impl ToolProfile {
                 tool_name,
                 "web_fetch" | "web_search" | "question" | "skill" | "skill_list" | "persona"
             ),
+            Self::Community => matches!(tool_name, "web_search" | "public_web_fetch"),
         }
     }
 }
@@ -467,6 +470,10 @@ impl ToolRegistry {
             "web_search".to_string(),
             Arc::new(web::WebSearchTool::new(config.clone())),
         );
+        tools.insert(
+            "public_web_fetch".to_string(),
+            Arc::new(web::PublicWebFetchTool::new()),
+        );
 
         if let Some(ref eb) = event_bus {
             tools.insert(
@@ -636,6 +643,7 @@ impl ToolRegistry {
             "glob" => Some(Arc::new(search::GlobTool::new(config))),
             "web_fetch" => Some(Arc::new(web::WebFetchTool::new(config))),
             "web_search" => Some(Arc::new(web::WebSearchTool::new(config))),
+            "public_web_fetch" => Some(Arc::new(web::PublicWebFetchTool::new())),
             "process" => Some(Arc::new(process::ProcessTool::new(config))),
             "calendar" => Some(Arc::new(calendar::CalendarTool::new(config.clone()))),
             "weather" => Some(Arc::new(weather::WeatherTool::new(config.clone()))),
@@ -1111,6 +1119,7 @@ mod tests {
             "news",
             "web_search",
             "web_fetch",
+            "public_web_fetch",
             "process",
             "system_status",
             "persona",
@@ -1205,5 +1214,11 @@ mod tests {
         assert!(names.iter().any(|name| name == "web_search"));
         assert!(!names.iter().any(|name| name == "bash"));
         assert!(!names.iter().any(|name| name == "write_file"));
+    }
+
+    #[test]
+    fn community_profile_cannot_access_the_host() {
+        let names = selected_names(ToolProfile::Community);
+        assert_eq!(names, vec!["web_search", "public_web_fetch"]);
     }
 }

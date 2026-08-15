@@ -4472,6 +4472,14 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
 // --- Main Entry ---
 
 fn main() {
+    // WebKitGTK accelerated compositing can render white layers with broken
+    // hit-testing on some Linux Intel/NVIDIA drivers. Tauri must inherit this
+    // before GTK/WebKit is initialized.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+
     tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))

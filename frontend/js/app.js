@@ -499,17 +499,20 @@ OSA.loadSessions = async function() {
 OSA.createSession = async function() {
     const ws = OSA.getWorkspaceState();
     const workspaceId = ws.activeWorkspace || 'default';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     
     try {
-        const res = await fetch('/api/sessions', {
+        const res = await OSA.fetchWithAuth('/api/sessions', {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OSA.getToken()}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ workspace_id: workspaceId })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspace_id: workspaceId }),
+            signal: controller.signal,
         });
-        const session = await res.json();
+        const session = await res.json().catch(() => ({}));
+        if (!res.ok || !session.id) {
+            throw new Error(session.error || `Could not create session (HTTP ${res.status})`);
+        }
         OSA.setCurrentSession(session);
         OSA.setSessionCheckpoints(session.id, []);
         OSA.getActiveTools().clear();
@@ -531,8 +534,16 @@ OSA.createSession = async function() {
         OSA.loadSessions();
         OSA.loadSessionWorkspace();
         OSA.loadSessionPersona();
+        return session;
     } catch (error) {
         console.error('Failed to create session:', error);
+        const message = error.name === 'AbortError'
+            ? 'Session creation timed out. Please try again.'
+            : error.message;
+        OSA.showErrorCard?.(message);
+        return null;
+    } finally {
+        clearTimeout(timeout);
     }
 };
 
@@ -906,6 +917,7 @@ OSA.selectSession = async function(sessionId) {
             return;
         }
         console.error('Failed to load session:', error);
+        OSA.showErrorCard?.(`Failed to load session: ${error.message}`);
     } finally {
         if (OSA.getSessionSelectionAbortController?.() === selectionController) {
             OSA.setSessionSelectionAbortController(null);
@@ -1134,6 +1146,11 @@ OSA.clearSessions = async function() {
 OSA.sendMessage = async function() {
     const inputEl = document.getElementById('message-input');
     const draftMessage = inputEl ? inputEl.value.trim() : '';
+    OSA.debug?.log('send.start', {
+        hasSession: !!OSA.getCurrentSession()?.id,
+        chars: draftMessage.length,
+        attachments: OSA.getAttachments().length,
+    });
 
     if (draftMessage && OSA.getAttachments().length === 0) {
         const match = OSA.SLASH_COMMANDS.find(c => c.cmd === draftMessage.toLowerCase());
@@ -1147,10 +1164,11 @@ OSA.sendMessage = async function() {
 
     let currentSession = OSA.getCurrentSession();
     if (!currentSession) {
-        await OSA.createSession();
-        currentSession = OSA.getCurrentSession();
-        if (!currentSession) return;
+        OSA.debug?.log('send.session.create', {});
+        currentSession = await OSA.createSession();
+        if (!currentSession?.id) return;
     }
+    OSA.debug?.log('send.session.ready', { sessionId: currentSession.id });
 
     const input = document.getElementById('message-input');
     const message = input.value.trim();
@@ -1168,11 +1186,15 @@ OSA.sendMessage = async function() {
     // next question, and stops replies accumulating across turns.
     OSA.resetVoiceModeReply?.();
 
-    // Assert voice_mode before the turn runs, and await it: the agent reads the
-    // flag off the session when building the prompt, so a fire-and-forget PATCH
-    // could lose the race and the reply would come back screen-shaped.
+    // Voice metadata improves response shaping, but a stalled PATCH must never
+    // block the primary send path. The next turn can safely use the previous
+    // value while this best-effort update completes in the background.
     if (typeof OSA.ensureVoiceModeSynced === 'function') {
-        await OSA.ensureVoiceModeSynced();
+        OSA.debug?.log('send.voice-sync.start', {});
+        Promise.resolve().then(() => OSA.ensureVoiceModeSynced()).then(
+            () => OSA.debug?.log('send.voice-sync.complete', {}),
+            error => OSA.debug?.warn('send.voice-sync', 'failed', error?.message || String(error))
+        );
     }
 
     const clientMessageId = OSA.generateClientMessageId();
@@ -1229,6 +1251,10 @@ OSA.sendMessage = async function() {
         OSA.clearAttachmentStatus();
         const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
         const useWs = ws && ws.readyState === WebSocket.OPEN && !hasAttachments && OSA.wsRequest;
+        OSA.debug?.log('send.dispatch', {
+            transport: useWs ? 'websocket' : (hasAttachments ? 'multipart' : 'http'),
+            sessionId: currentSession.id,
+        });
 
         let data;
         if (useWs) {
@@ -1305,6 +1331,10 @@ OSA.sendMessage = async function() {
         } else {
             OSA.refreshCurrentSessionQueue();
         }
+        OSA.debug?.log('send.accepted', {
+            queued: !!data.queued,
+            status: data.status || '',
+        });
 
         if (!shouldQueueLocally || !data.queued) {
             const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
@@ -1316,6 +1346,7 @@ OSA.sendMessage = async function() {
         }
     } catch (error) {
         console.error('Failed to send message:', error);
+        OSA.debug?.warn('send.failed', 'dispatch', error?.message || String(error));
         if ((error.message || '').toLowerCase().includes('attachment')) {
             OSA.setAttachmentStatus(error.message, 'error');
         }
@@ -1336,6 +1367,16 @@ OSA.sendMessage = async function() {
             OSA.hideThinkingIndicator();
         }
     }
+};
+
+OSA.runSendMessage = function() {
+    return Promise.resolve()
+        .then(() => OSA.sendMessage())
+        .catch(error => {
+            console.error('Message send failed before dispatch:', error);
+            OSA.debug?.warn('send.failed', 'pre-dispatch', error?.stack || error?.message || String(error));
+            OSA.showErrorCard?.(error?.message || 'Could not send message');
+        });
 };
 
 OSA.stopGeneration = async function() {
@@ -1402,12 +1443,12 @@ window.handleSendButtonClick = function() {
     if (OSA.isAgentProcessing()) {
         const input = document.getElementById('message-input');
         if (input && input.value.trim()) {
-            OSA.sendMessage();
+            OSA.runSendMessage();
         } else {
             OSA.stopGeneration();
         }
     } else {
-        OSA.sendMessage();
+        OSA.runSendMessage();
     }
 };
 
@@ -2043,7 +2084,7 @@ window.logout = OSA.logout;
 window.createSession = OSA.createSession;
 window.clearSessions = OSA.clearSessions;
 window.selectSession = OSA.selectSession;
-window.sendMessage = OSA.sendMessage;
+window.sendMessage = OSA.runSendMessage;
 window.toggleSidebar = OSA.toggleSidebar;
 window.closeSidebar = OSA.closeSidebar;
 window.updateModel = OSA.updateModel;

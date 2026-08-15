@@ -176,7 +176,21 @@ OSA.loadSettings = async function() {
         const discord = config.discord || {};
         document.getElementById('setting-discord-enabled').value = discord.enabled ? 'true' : 'false';
         document.getElementById('setting-discord-token').value = discord.token || '';
+        document.getElementById('setting-discord-community-mode').checked = discord.community_mode === true;
+        document.getElementById('setting-discord-community-context').value = discord.community_context || '';
+        document.getElementById('setting-discord-docs-url').value = discord.docs_url || '';
+        document.getElementById('setting-discord-github-repo').value = discord.github_repo || '';
+        document.getElementById('setting-discord-github-token').value = discord.github_token || '';
+        document.getElementById('setting-discord-github-channel').value = discord.github_tracking_channel || '';
         document.getElementById('setting-discord-allowed-users').value = (discord.allowed_users || []).join('\n');
+        document.getElementById('setting-discord-allowed-roles').value = (discord.allowed_roles || []).join('\n');
+        document.getElementById('setting-discord-allowed-guilds').value = (discord.allowed_guilds || []).join('\n');
+        document.getElementById('setting-discord-allowed-channels').value = (discord.allowed_channels || []).join('\n');
+        document.getElementById('setting-discord-allow-dms').checked = discord.allow_dms === true;
+        document.getElementById('setting-discord-trusted-users').value = (discord.trusted_users || []).join('\n');
+        document.getElementById('setting-discord-trusted-roles').value = (discord.trusted_roles || []).join('\n');
+        document.getElementById('setting-discord-trusted-guilds').value = (discord.trusted_guilds || []).join('\n');
+        document.getElementById('setting-discord-trusted-channels').value = (discord.trusted_channels || []).join('\n');
         document.getElementById('setting-max-tokens').value = config.agent?.max_tokens || 4096;
         document.getElementById('setting-temperature').value = config.agent?.temperature || 0.7;
         document.getElementById('setting-show-thinking-blocks').checked = OSA.getShowThinkingBlocks();
@@ -275,6 +289,13 @@ OSA.saveSettings = async function() {
     
     const newConfig = { ...cachedConfig };
     let allowedDiscordUsers = [];
+    let allowedDiscordRoles = [];
+    let allowedDiscordGuilds = [];
+    let allowedDiscordChannels = [];
+    let trustedDiscordUsers = [];
+    let trustedDiscordRoles = [];
+    let trustedDiscordGuilds = [];
+    let trustedDiscordChannels = [];
     
     try {
         allowedDiscordUsers = (document.getElementById('setting-discord-allowed-users').value || '')
@@ -288,6 +309,25 @@ OSA.saveSettings = async function() {
                 // (420155234833268737 becomes 420155234833268740).
                 return v;
             });
+        const parseDiscordIds = (id, label) => (document.getElementById(id).value || '')
+            .split(/[\n,]/)
+            .map(v => v.trim())
+            .filter(Boolean)
+            .map(v => {
+                if (!/^\d+$/.test(v)) throw new Error(`Invalid Discord ${label} ID: ${v}`);
+                return v;
+            });
+        allowedDiscordRoles = parseDiscordIds('setting-discord-allowed-roles', 'role');
+        allowedDiscordGuilds = parseDiscordIds('setting-discord-allowed-guilds', 'server');
+        allowedDiscordChannels = parseDiscordIds('setting-discord-allowed-channels', 'channel');
+        trustedDiscordUsers = parseDiscordIds('setting-discord-trusted-users', 'trusted user');
+        trustedDiscordRoles = parseDiscordIds('setting-discord-trusted-roles', 'trusted role');
+        trustedDiscordGuilds = parseDiscordIds('setting-discord-trusted-guilds', 'trusted server');
+        trustedDiscordChannels = parseDiscordIds('setting-discord-trusted-channels', 'trusted channel');
+        const trackingChannel = document.getElementById('setting-discord-github-channel').value.trim();
+        if (trackingChannel && !/^\d+$/.test(trackingChannel)) {
+            throw new Error(`Invalid Discord announcement channel ID: ${trackingChannel}`);
+        }
     } catch (error) {
         errorDiv.textContent = error.message;
         errorDiv.classList.remove('hidden');
@@ -319,7 +359,21 @@ OSA.saveSettings = async function() {
         ...(newConfig.discord || {}),
         enabled: document.getElementById('setting-discord-enabled').value === 'true',
         token: document.getElementById('setting-discord-token').value || '',
-        allowed_users: allowedDiscordUsers
+        community_mode: document.getElementById('setting-discord-community-mode').checked,
+        community_context: document.getElementById('setting-discord-community-context').value || '',
+        docs_url: document.getElementById('setting-discord-docs-url').value || '',
+        github_repo: document.getElementById('setting-discord-github-repo').value.trim(),
+        github_token: document.getElementById('setting-discord-github-token').value || '',
+        github_tracking_channel: document.getElementById('setting-discord-github-channel').value.trim() || null,
+        allowed_users: allowedDiscordUsers,
+        allowed_roles: allowedDiscordRoles,
+        allowed_guilds: allowedDiscordGuilds,
+        allowed_channels: allowedDiscordChannels,
+        allow_dms: document.getElementById('setting-discord-allow-dms').checked,
+        trusted_users: trustedDiscordUsers,
+        trusted_roles: trustedDiscordRoles,
+        trusted_guilds: trustedDiscordGuilds,
+        trusted_channels: trustedDiscordChannels
     };
     // Process custom priorities: split by newline and filter empty lines
     const customPrioritiesText = document.getElementById('setting-custom-priorities').value || '';

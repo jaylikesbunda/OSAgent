@@ -4,10 +4,12 @@ use crate::tools::output::maybe_store_large_output;
 use crate::tools::registry::Tool;
 use crate::tools::web_search::SearchService;
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, RETRY_AFTER};
+use futures::StreamExt;
+use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION, RETRY_AFTER};
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::{json, Value};
+use std::net::IpAddr;
 use std::time::Duration;
 use tracing::warn;
 
@@ -1068,6 +1070,233 @@ impl WebFetchTool {
     }
 }
 
+/// HTTPS-only page reader for untrusted community sessions. Unlike the full
+/// web_fetch tool, this cannot set headers, invoke curl, or reach local/private
+/// network addresses. Large results spill only into the community sandbox.
+pub struct PublicWebFetchTool {
+    storage_dir: std::path::PathBuf,
+}
+
+impl PublicWebFetchTool {
+    const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_REDIRECTS: usize = 5;
+
+    pub fn new() -> Self {
+        let storage_dir = dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".osagent")
+            .join("community")
+            .join("web-fetch");
+        Self { storage_dir }
+    }
+
+    fn is_public_ip(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ip) => {
+                let [a, b, c, _] = ip.octets();
+                !(a == 0
+                    || a == 10
+                    || a == 127
+                    || a >= 224
+                    || (a == 100 && (64..=127).contains(&b))
+                    || (a == 169 && b == 254)
+                    || (a == 172 && (16..=31).contains(&b))
+                    || (a == 192 && b == 168)
+                    || (a == 192 && b == 0 && c == 0)
+                    || (a == 198 && (b == 18 || b == 19)))
+            }
+            IpAddr::V6(ip) => {
+                let segments = ip.segments();
+                !(ip.is_unspecified()
+                    || ip.is_loopback()
+                    || ip.is_multicast()
+                    || segments[0] & 0xfe00 == 0xfc00
+                    || segments[0] & 0xffc0 == 0xfe80
+                    || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                    || ip
+                        .to_ipv4_mapped()
+                        .is_some_and(|mapped| !Self::is_public_ip(IpAddr::V4(mapped))))
+            }
+        }
+    }
+
+    async fn validate_url(url: &reqwest::Url) -> Result<std::net::SocketAddr> {
+        if url.scheme() != "https" {
+            return Err(OSAgentError::ToolExecution(
+                "Community web access requires an HTTPS URL".to_string(),
+            ));
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("URL must include a host".to_string()))?;
+        if host.eq_ignore_ascii_case("localhost") {
+            return Err(OSAgentError::ToolExecution(
+                "Local and private network URLs are blocked".to_string(),
+            ));
+        }
+        let port = url.port_or_known_default().unwrap_or(443);
+        let addresses = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|error| OSAgentError::ToolExecution(format!("DNS lookup failed: {error}")))?
+            .collect::<Vec<_>>();
+        if addresses.is_empty()
+            || addresses
+                .iter()
+                .any(|address| !Self::is_public_ip(address.ip()))
+        {
+            return Err(OSAgentError::ToolExecution(
+                "Local and private network URLs are blocked".to_string(),
+            ));
+        }
+        Ok(addresses[0])
+    }
+
+    async fn fetch(&self, initial_url: reqwest::Url) -> Result<(reqwest::Url, String, String)> {
+        let mut url = initial_url;
+        for redirect_count in 0..=Self::MAX_REDIRECTS {
+            let address = Self::validate_url(&url).await?;
+            let host = url.host_str().expect("validated URL has a host");
+            let client = Client::builder()
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent("OSAgent Community Web Reader/1.0")
+                .resolve(host, address)
+                .build()
+                .map_err(|error| {
+                    OSAgentError::ToolExecution(format!("Could not create web client: {error}"))
+                })?;
+            let response = client
+                .get(url.clone())
+                .header(
+                    ACCEPT,
+                    "text/html,application/json,text/plain,application/xml;q=0.9,*/*;q=0.1",
+                )
+                .send()
+                .await
+                .map_err(|error| OSAgentError::ToolExecution(format!("Fetch failed: {error}")))?;
+
+            if response.status().is_redirection() {
+                if redirect_count == Self::MAX_REDIRECTS {
+                    return Err(OSAgentError::ToolExecution(
+                        "Too many redirects".to_string(),
+                    ));
+                }
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        OSAgentError::ToolExecution("Redirect has no valid location".to_string())
+                    })?;
+                url = url.join(location).map_err(|error| {
+                    OSAgentError::ToolExecution(format!("Invalid redirect URL: {error}"))
+                })?;
+                continue;
+            }
+
+            if !response.status().is_success() {
+                return Err(OSAgentError::ToolExecution(format!(
+                    "HTTP {} while fetching {}",
+                    response.status(),
+                    url
+                )));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > Self::MAX_RESPONSE_BYTES as u64)
+            {
+                return Err(OSAgentError::ToolExecution(
+                    "Page is larger than the 2 MiB community limit".to_string(),
+                ));
+            }
+
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("text/plain")
+                .to_string();
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| {
+                    OSAgentError::ToolExecution(format!("Failed to read page: {error}"))
+                })?;
+                if bytes.len() + chunk.len() > Self::MAX_RESPONSE_BYTES {
+                    return Err(OSAgentError::ToolExecution(
+                        "Page is larger than the 2 MiB community limit".to_string(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            return Ok((url, content_type, body));
+        }
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl Tool for PublicWebFetchTool {
+    fn name(&self) -> &str {
+        "public_web_fetch"
+    }
+
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(45_000)
+    }
+
+    fn description(&self) -> &str {
+        "Read a public HTTPS page such as documentation, GitHub, or a public JSON endpoint; private and local network addresses are blocked"
+    }
+
+    fn when_to_use(&self) -> &str {
+        "Use after web_search or when the user provides a direct public HTTPS URL and page contents are needed"
+    }
+
+    fn when_not_to_use(&self) -> &str {
+        "Do not use for localhost, private networks, authenticated pages, file operations, or command execution"
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Public HTTPS URL to read"
+                }
+            },
+            "required": ["url"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<String> {
+        let raw_url = args["url"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("Missing 'url' parameter".to_string()))?;
+        let url = reqwest::Url::parse(raw_url)
+            .map_err(|error| OSAgentError::ToolExecution(format!("Invalid URL: {error}")))?;
+        let (final_url, content_type, body) = self.fetch(url).await?;
+        let rendered = if content_type.to_ascii_lowercase().contains("html") {
+            WebFetchTool::extract_readable_html(&body)
+        } else if content_type.to_ascii_lowercase().contains("json") {
+            serde_json::from_str::<Value>(&body)
+                .and_then(|value| serde_json::to_string_pretty(&value))
+                .unwrap_or(body)
+        } else {
+            body
+        };
+        let output = format!("Source: {final_url}\n\n{rendered}");
+        Ok(maybe_store_large_output(
+            &self.storage_dir,
+            true,
+            "public_web_fetch",
+            &output,
+        ))
+    }
+}
+
 pub struct WebSearchTool {
     service: SearchService,
 }
@@ -1162,8 +1391,27 @@ impl Tool for WebSearchTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DetectedContentKind, WebFetchTool};
+    use super::{DetectedContentKind, PublicWebFetchTool, WebFetchTool};
     use serde_json::json;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn community_fetch_blocks_non_public_addresses() {
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            "fd00::1".parse().unwrap(),
+        ] {
+            assert!(!PublicWebFetchTool::is_public_ip(ip), "{ip}");
+        }
+        assert!(PublicWebFetchTool::is_public_ip("1.1.1.1".parse().unwrap()));
+        assert!(PublicWebFetchTool::is_public_ip(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
+    }
 
     #[test]
     fn detects_json_and_feed_content() {

@@ -186,6 +186,49 @@ async fn status_loop(
 }
 
 impl Handler {
+    async fn turn_response_segments(
+        &self,
+        session_id: &str,
+        from_message_index: usize,
+        fallback: String,
+    ) -> Vec<String> {
+        let mut segments = self
+            .agent
+            .get_session(session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|session| {
+                session
+                    .messages
+                    .into_iter()
+                    .skip(from_message_index)
+                    .filter(|message| {
+                        message.role == "assistant" && !message.content.trim().is_empty()
+                    })
+                    .filter(|message| {
+                        let synthetic = message
+                            .metadata
+                            .get("synthetic")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(false);
+                        let kind = message
+                            .metadata
+                            .get("kind")
+                            .and_then(|value| value.as_str());
+                        !synthetic || kind == Some("tool_prelude")
+                    })
+                    .map(|message| message.content.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        segments.dedup();
+        if segments.is_empty() && !fallback.trim().is_empty() {
+            segments.push(fallback);
+        }
+        segments
+    }
+
     /// Footer shown under every response: what answered, and how much it took.
     async fn turn_footer(&self, session_id: &str, elapsed: Duration, state: &TurnState) -> String {
         let provider = self.agent.active_provider().await;
@@ -278,6 +321,15 @@ impl Handler {
             started,
         ));
 
+        let initial_message_count = self
+            .agent
+            .get_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|session| session.messages.len())
+            .unwrap_or_default();
+
         let result = tokio::time::timeout(
             Duration::from_secs(TURN_TIMEOUT_SECS),
             self.agent
@@ -336,7 +388,24 @@ impl Handler {
             Ok(Ok(response)) => {
                 clear_status(None).await;
                 let footer = self.turn_footer(&session_id, elapsed, &final_state).await;
-                ui::send_chunks(&ctx.http, channel_id, &response, Some(&footer)).await;
+                let segments = self
+                    .turn_response_segments(&session_id, initial_message_count, response)
+                    .await;
+                let last = segments.len().saturating_sub(1);
+                for (index, segment) in segments.iter().enumerate() {
+                    ui::send_chunks(
+                        &ctx.http,
+                        channel_id,
+                        segment,
+                        (index == last).then_some(footer.as_str()),
+                    )
+                    .await;
+                }
+                info!(
+                    "Discord: delivered {} response segment(s) for session {}",
+                    segments.len(),
+                    session_id
+                );
                 info!("Discord: turn complete for session {session_id} in {elapsed:?}");
             }
             Ok(Err(e)) => {

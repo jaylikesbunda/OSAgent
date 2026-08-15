@@ -1139,6 +1139,20 @@ async fn update_config(
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
         discord.allowed_users.dedup();
+        discord.allowed_roles.sort_unstable();
+        discord.allowed_roles.dedup();
+        discord.allowed_guilds.sort_unstable();
+        discord.allowed_guilds.dedup();
+        discord.allowed_channels.sort_unstable();
+        discord.allowed_channels.dedup();
+        discord.trusted_users.sort_unstable();
+        discord.trusted_users.dedup();
+        discord.trusted_roles.sort_unstable();
+        discord.trusted_roles.dedup();
+        discord.trusted_guilds.sort_unstable();
+        discord.trusted_guilds.dedup();
+        discord.trusted_channels.sort_unstable();
+        discord.trusted_channels.dedup();
     } else {
         new_config.discord = Some(DiscordConfig::default());
     }
@@ -1887,17 +1901,25 @@ async fn create_session(
     })?;
 
     if let Some(workspace_id) = payload.workspace_id {
-        agent
-            .set_session_workspace(&session.id, &workspace_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?;
+        let current_workspace = session
+            .metadata
+            .get("workspace_id")
+            .and_then(serde_json::Value::as_str);
+        if current_workspace != Some(workspace_id.as_str()) {
+            agent
+                .set_session_workspace(&session.id, &workspace_id)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: e.to_string(),
+                        }),
+                    )
+                })?;
+        } else {
+            return Ok(Json(session));
+        }
     }
 
     let fresh = agent

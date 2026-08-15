@@ -18,6 +18,11 @@ v0.5.0 changes:
 * Per-message thumbs up/down feedback with a compare-and-set version token, stored in a sidecar table invisible to the model, with UI buttons on assistant replies
 * Goal system: `get_goal`/`create_goal`/`update_goal` tools with revision-fenced updates, active/paused/blocked/complete phases, round accounting, and auto-continued goal rounds that never restart after a process restart
 
+v0.4.3 changes:
+
+* Fixed native WebUI chat when speech synthesis is unavailable
+* Added secure Discord community chat and multi-part replies
+
 v0.4.0 changes:
 
 ## Auto-updates (OTA)
@@ -293,4 +298,3 @@ v0.1.0-rc2 changes:
 * Expanded parallel safe tools list
 * Added updater logic
 * Support for workspaces with multiple allowed dirs
-

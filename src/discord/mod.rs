@@ -30,7 +30,7 @@ use serenity::{
     },
     prelude::*,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -49,11 +49,18 @@ static LAST_DISCORD_CHANNEL: std::sync::OnceLock<tokio::sync::RwLock<u64>> =
 
 /// Set once the gateway hands us the bot's identity; used for mention gating.
 static BOT_USER_ID: AtomicU64 = AtomicU64::new(0);
+static GITHUB_TRACKER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 static DISCORD_BOT_STATE: std::sync::OnceLock<tokio::sync::Mutex<DiscordBotState>> =
     std::sync::OnceLock::new();
 
 const MAX_TRACKED_CHANNEL_LOCKS: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccessLevel {
+    Community,
+    Trusted,
+}
 
 fn session_to_channel() -> &'static tokio::sync::RwLock<HashMap<String, u64>> {
     SESSION_TO_CHANNEL.get_or_init(|| tokio::sync::RwLock::new(HashMap::new()))
@@ -129,15 +136,179 @@ impl Handler {
     // authorization
     // -----------------------------------------------------------------------
 
-    /// An empty allow-list means "nobody has been granted access yet".
-    ///
-    /// This bot can read and write the filesystem and run commands, so an
-    /// unconfigured allow-list fails closed rather than open.
-    async fn is_authorized(&self, user_id: u64) -> bool {
-        match self.agent.discord_config().await {
-            Some(discord) => discord.allowed_users.contains(&user_id),
-            None => false,
+    /// User and role grants are additive. Guild and channel lists are optional
+    /// location restrictions. With no user or role grants, access fails closed.
+    pub(super) async fn access_level(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+    ) -> Option<AccessLevel> {
+        let Some(discord) = self.agent.discord_config().await else {
+            return None;
+        };
+
+        if !discord.community_mode {
+            return discord
+                .allowed_users
+                .contains(&user_id)
+                .then_some(AccessLevel::Trusted);
         }
+
+        let in_location = |guilds: &[u64], channels: &[u64]| {
+            guild_id.is_some_and(|guild_id| {
+                (guilds.is_empty() || guilds.contains(&guild_id))
+                    && (channels.is_empty() || channels.contains(&channel_id))
+            })
+        };
+        let trusted_identity = discord.trusted_users.contains(&user_id)
+            || role_ids
+                .iter()
+                .any(|role_id| discord.trusted_roles.contains(role_id));
+        if trusted_identity
+            && (guild_id.is_none() && discord.allow_dms && discord.trusted_users.contains(&user_id)
+                || !discord.trusted_guilds.is_empty()
+                    && in_location(&discord.trusted_guilds, &discord.trusted_channels))
+        {
+            return Some(AccessLevel::Trusted);
+        }
+
+        let identity_allowed = discord.allowed_users.contains(&user_id)
+            || role_ids
+                .iter()
+                .any(|role_id| discord.allowed_roles.contains(role_id));
+        if !identity_allowed {
+            return None;
+        }
+
+        let Some(guild_id) = guild_id else {
+            return (discord.allow_dms && discord.allowed_users.contains(&user_id))
+                .then_some(AccessLevel::Community);
+        };
+
+        ((discord.allowed_guilds.is_empty() || discord.allowed_guilds.contains(&guild_id))
+            && (discord.allowed_channels.is_empty()
+                || discord.allowed_channels.contains(&channel_id)))
+        .then_some(AccessLevel::Community)
+    }
+
+    pub(super) async fn has_explicit_trusted_user(&self, user_id: u64) -> bool {
+        self.agent
+            .discord_config()
+            .await
+            .is_some_and(|discord| discord.trusted_users.contains(&user_id))
+    }
+
+    async fn is_authorized(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+    ) -> bool {
+        self.access_level(user_id, guild_id, channel_id, role_ids)
+            .await
+            == Some(AccessLevel::Trusted)
+    }
+
+    fn community_owner_key(user_id: u64, guild_id: Option<u64>) -> String {
+        format!(
+            "discord-community:{}:{user_id}",
+            guild_id.unwrap_or_default()
+        )
+    }
+
+    async fn get_active_community_session_id(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+    ) -> Option<String> {
+        self.agent
+            .get_session_id_for_user(&Self::community_owner_key(user_id, guild_id))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub(super) async fn archive_community_session(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+    ) -> Result<Option<String>, String> {
+        let Some(session_id) = self
+            .get_active_community_session_id(user_id, guild_id)
+            .await
+        else {
+            return Ok(None);
+        };
+        self.agent
+            .archive_session(&session_id)
+            .await
+            .map_err(|error| format!("Failed to archive session: {error}"))?;
+        Ok(Some(session_id))
+    }
+
+    pub(super) async fn start_new_community_session(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+    ) -> Result<String, String> {
+        self.archive_community_session(user_id, guild_id).await?;
+        self.get_or_create_community_session(user_id, guild_id)
+            .await
+    }
+
+    pub(super) async fn delete_community_session(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+    ) -> Result<bool, String> {
+        let Some(session_id) = self
+            .get_active_community_session_id(user_id, guild_id)
+            .await
+        else {
+            return Ok(false);
+        };
+        self.agent
+            .delete_session(&session_id)
+            .await
+            .map_err(|error| format!("Failed to delete session: {error}"))?;
+        Ok(true)
+    }
+
+    async fn get_or_create_community_session(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+    ) -> Result<String, String> {
+        let owner = Self::community_owner_key(user_id, guild_id);
+        let session_id = match self.agent.get_session_id_for_user(&owner).await {
+            Ok(Some(session_id)) => session_id,
+            Ok(None) => {
+                self.agent
+                    .create_session_for_user(&owner, "discord-community")
+                    .await
+                    .map_err(|e| format!("Failed to create community session: {e}"))?
+                    .id
+            }
+            Err(e) => return Err(format!("Failed to load community session: {e}")),
+        };
+        let discord = self.agent.discord_config().await.unwrap_or_default();
+        let context = format!(
+            "{}\n\nYou are operating in Discord community support mode. Never claim to access the host machine or private data. Help with the project, use public web research when useful, and cite sources.{}",
+            discord.community_context.trim(),
+            if discord.docs_url.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" The canonical documentation starts at {}.", discord.docs_url.trim())
+            }
+        );
+        self.agent
+            .set_discord_community_profile(&session_id, context)
+            .await
+            .map_err(|e| format!("Failed to apply community safety profile: {e}"))?;
+        Ok(session_id)
     }
 
     async fn send_unauthorized_response_command(
@@ -482,7 +653,26 @@ impl Handler {
 
         // Anyone can see an approval prompt in a channel; only allow-listed
         // users may act on it.
-        if !self.is_authorized(component.user.id.get()).await {
+        let roles = component
+            .member
+            .as_ref()
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(|role| role.get())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !self
+            .is_authorized(
+                component.user.id.get(),
+                component.guild_id.map(|id| id.get()),
+                component.channel_id.get(),
+                &roles,
+            )
+            .await
+        {
             let _ = component
                 .create_response(
                     &ctx.http,
@@ -734,6 +924,131 @@ impl Handler {
             }
         });
     }
+
+    fn spawn_github_tracking_task(&self, http: Arc<serenity::http::Http>) {
+        let agent = self.agent.clone();
+        let generation = GITHUB_TRACKER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        tokio::spawn(async move {
+            let client = match reqwest::Client::builder()
+                .user_agent("OSAgent Discord GitHub tracker")
+                .timeout(Duration::from_secs(20))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    warn!("Discord: could not create GitHub tracking client: {error}");
+                    return;
+                }
+            };
+            let mut active_repo = String::new();
+            let mut seen = HashSet::new();
+            let mut initialized = false;
+
+            loop {
+                if GITHUB_TRACKER_GENERATION.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                let discord = agent.discord_config().await.unwrap_or_default();
+                let repo = discord.github_repo.trim();
+                let channel = discord.github_tracking_channel;
+                if repo != active_repo {
+                    active_repo = repo.to_string();
+                    seen.clear();
+                    initialized = false;
+                }
+
+                let valid_repo = repo.split_once('/').is_some_and(|(owner, name)| {
+                    !owner.is_empty()
+                        && !name.is_empty()
+                        && owner
+                            .chars()
+                            .chain(name.chars())
+                            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+                });
+                if valid_repo {
+                    if let Some(channel_id) = channel {
+                        let url = format!(
+                            "https://api.github.com/repos/{repo}/issues?state=all&sort=created&direction=desc&per_page=30"
+                        );
+                        let mut request = client
+                            .get(url)
+                            .header("Accept", "application/vnd.github+json");
+                        if !discord.github_token.trim().is_empty() {
+                            request = request.bearer_auth(discord.github_token.trim());
+                        }
+                        match request.send().await {
+                            Ok(response) if response.status().is_success() => {
+                                match response.json::<Vec<serde_json::Value>>().await {
+                                    Ok(items) => {
+                                        let current = items
+                                            .iter()
+                                            .filter_map(|item| {
+                                                item.get("id").and_then(|id| id.as_u64())
+                                            })
+                                            .collect::<HashSet<_>>();
+                                        if initialized {
+                                            for item in items.iter().rev() {
+                                                let Some(id) =
+                                                    item.get("id").and_then(|id| id.as_u64())
+                                                else {
+                                                    continue;
+                                                };
+                                                if seen.contains(&id) {
+                                                    continue;
+                                                }
+                                                let is_pr = item.get("pull_request").is_some();
+                                                let kind =
+                                                    if is_pr { "Pull Request" } else { "Issue" };
+                                                let number = item
+                                                    .get("number")
+                                                    .and_then(|value| value.as_u64())
+                                                    .unwrap_or_default();
+                                                let title = item
+                                                    .get("title")
+                                                    .and_then(|value| value.as_str())
+                                                    .unwrap_or("Untitled");
+                                                let author = item
+                                                    .pointer("/user/login")
+                                                    .and_then(|value| value.as_str())
+                                                    .unwrap_or("unknown");
+                                                let link = item
+                                                    .get("html_url")
+                                                    .and_then(|value| value.as_str())
+                                                    .unwrap_or("https://github.com");
+                                                let embed = CreateEmbed::new()
+                                                    .title(format!("New {kind} #{number}"))
+                                                    .description(ui::truncate_chars(title, 1000))
+                                                    .url(link)
+                                                    .field("Repository", repo, true)
+                                                    .field("Author", author, true)
+                                                    .colour(ui::COLOR_INFO);
+                                                send_notification(&http, channel_id, embed, None)
+                                                    .await;
+                                            }
+                                        }
+                                        seen = current;
+                                        initialized = true;
+                                    }
+                                    Err(error) => {
+                                        warn!("Discord: invalid GitHub tracking response: {error}")
+                                    }
+                                }
+                            }
+                            Ok(response) => {
+                                warn!("Discord: GitHub tracking returned {}", response.status())
+                            }
+                            Err(error) => warn!("Discord: GitHub tracking request failed: {error}"),
+                        }
+                    }
+                }
+
+                sleep(Duration::from_secs(
+                    discord.github_poll_seconds.clamp(60, 3600),
+                ))
+                .await;
+            }
+        });
+    }
 }
 
 async fn resolve_channel(preferred: Option<u64>) -> Option<u64> {
@@ -775,6 +1090,7 @@ impl EventHandler for Handler {
         info!("Discord: connected as {}", ready.user.name);
         self.register_commands(&ctx.http).await;
         self.spawn_notification_task(ctx.http.clone());
+        self.spawn_github_tracking_task(ctx.http.clone());
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -816,18 +1132,49 @@ impl EventHandler for Handler {
             return;
         }
 
-        if !self.is_authorized(user_id).await {
+        let roles = msg
+            .member
+            .as_ref()
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(|role| role.get())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let access = self
+            .access_level(
+                user_id,
+                msg.guild_id.map(|id| id.get()),
+                msg.channel_id.get(),
+                &roles,
+            )
+            .await;
+        let Some(access) = access else {
             return;
-        }
+        };
 
         let content = strip_mention(&msg.content, bot_id);
         if content.is_empty() || content.starts_with('!') || content.starts_with('/') {
             return;
         }
 
-        self.remember_channel(msg.channel_id.get()).await;
+        if access == AccessLevel::Trusted {
+            self.remember_channel(msg.channel_id.get()).await;
+        }
 
-        let session_id = match self.get_or_create_session(user_id).await {
+        let session_result = match access {
+            AccessLevel::Trusted => self.get_or_create_session(user_id).await,
+            AccessLevel::Community => {
+                self.get_or_create_community_session(
+                    user_id,
+                    msg.guild_id.map(|guild_id| guild_id.get()),
+                )
+                .await
+            }
+        };
+        let session_id = match session_result {
             Ok(session_id) => session_id,
             Err(e) => {
                 error!("Discord: {e}");
@@ -893,10 +1240,13 @@ async fn run_discord_bot(
         }
     }
 
-    if discord_config.allowed_users.is_empty() {
+    if discord_config.allowed_users.is_empty()
+        && discord_config.allowed_roles.is_empty()
+        && discord_config.trusted_users.is_empty()
+        && discord_config.trusted_roles.is_empty()
+    {
         warn!(
-            "Discord: allowed_users is empty — the bot will refuse every request. \
-             Add your Discord user id to discord.allowed_users to enable it."
+            "Discord: allowed_users and allowed_roles are empty — the bot will refuse every request."
         );
     }
 
@@ -964,6 +1314,7 @@ pub async fn spawn_discord_bot(
 }
 
 pub async fn stop_discord_bot() -> bool {
+    GITHUB_TRACKER_GENERATION.fetch_add(1, Ordering::SeqCst);
     let stop_tx = bot_state().lock().await.stop_tx.take();
 
     let Some(stop_tx) = stop_tx else {

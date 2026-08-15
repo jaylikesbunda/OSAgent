@@ -20,6 +20,7 @@ use serenity::model::application::{
 };
 use serenity::prelude::*;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{error, warn};
 
 const CHOICE_LIMIT: usize = 25;
@@ -193,6 +194,34 @@ impl Handler {
                         .add_string_choice("explore", "explore"),
                 )
                 .add_option(str_opt("prompt", "What the subagent should do", true)),
+            CreateCommand::new("discord-setup")
+                .description("Configure community and trusted Discord access")
+                .add_option(sub("status", "Show the active access policy"))
+                .add_option(sub("trust-here", "Make this server and channel trusted"))
+                .add_option(sub(
+                    "community-here",
+                    "Enable restricted support in this server and channel",
+                ))
+                .add_option(
+                    sub("context", "Set the community bot instructions").add_sub_option(str_opt(
+                        "text",
+                        "Project and support instructions",
+                        true,
+                    )),
+                )
+                .add_option(
+                    sub("docs", "Set the canonical documentation URL").add_sub_option(str_opt(
+                        "url",
+                        "Documentation URL",
+                        true,
+                    )),
+                )
+                .add_option(
+                    sub("github-here", "Post new issues and pull requests here")
+                        .add_sub_option(str_opt("repo", "GitHub owner/repository", true)),
+                ),
+            CreateCommand::new("server-info")
+                .description("Show this server's OSAgent access tier and IDs"),
             CreateCommand::new("help").description("Show available commands"),
         ];
 
@@ -216,6 +245,45 @@ impl Handler {
             return;
         }
 
+        if name == "discord-setup" && self.discord_setup_is_authorized(command).await {
+            self.handle_discord_setup(ctx, command).await;
+            return;
+        }
+
+        if name == "server-info" {
+            self.handle_server_info(ctx, command).await;
+            return;
+        }
+
+        if name == "chat" {
+            let Some(access) = self.command_access_level(command).await else {
+                Self::send_unauthorized_response_command(ctx, command).await;
+                return;
+            };
+            self.handle_chat(ctx, command, access).await;
+            return;
+        }
+
+        if name == "session" {
+            let Some(access) = self.command_access_level(command).await else {
+                Self::send_unauthorized_response_command(ctx, command).await;
+                return;
+            };
+            self.handle_session(ctx, command, access).await;
+            return;
+        }
+
+        if matches!(name, "model" | "provider")
+            && self.has_explicit_trusted_user(command.user.id.get()).await
+        {
+            match name {
+                "model" => self.handle_model(ctx, command).await,
+                "provider" => self.handle_provider(ctx, command).await,
+                _ => unreachable!(),
+            }
+            return;
+        }
+
         if !self.ensure_authorized(ctx, command).await {
             return;
         }
@@ -226,8 +294,6 @@ impl Handler {
 
         match name {
             "settings" => self.open_settings_panel(ctx, command).await,
-            "chat" => self.handle_chat(ctx, command).await,
-            "session" => self.handle_session(ctx, command).await,
             "model" => self.handle_model(ctx, command).await,
             "provider" => self.handle_provider(ctx, command).await,
             "persona" => self.handle_persona(ctx, command).await,
@@ -238,12 +304,13 @@ impl Handler {
             "mode" => self.handle_mode(ctx, command).await,
             "lsp" => self.handle_lsp(ctx, command).await,
             "subagent" => self.handle_subagent(ctx, command).await,
+            "discord-setup" => self.handle_discord_setup(ctx, command).await,
             other => warn!("Discord: unknown command: {other}"),
         }
     }
 
     pub(super) async fn dispatch_autocomplete(&self, ctx: &Context, command: &CommandInteraction) {
-        if !self.is_authorized(command.user.id.get()).await {
+        if !self.command_is_authorized(command).await {
             let _ = command
                 .create_response(
                     &ctx.http,
@@ -282,11 +349,165 @@ impl Handler {
     }
 
     async fn ensure_authorized(&self, ctx: &Context, command: &CommandInteraction) -> bool {
-        if self.is_authorized(command.user.id.get()).await {
+        if self.command_is_authorized(command).await {
             return true;
         }
         Self::send_unauthorized_response_command(ctx, command).await;
         false
+    }
+
+    async fn discord_setup_is_authorized(&self, command: &CommandInteraction) -> bool {
+        let Some(discord) = self.agent.discord_config().await else {
+            return false;
+        };
+        if !discord.community_mode {
+            return discord.allowed_users.contains(&command.user.id.get());
+        }
+        discord.trusted_users.contains(&command.user.id.get())
+    }
+
+    pub(super) async fn command_is_authorized(&self, command: &CommandInteraction) -> bool {
+        self.command_access_level(command).await == Some(super::AccessLevel::Trusted)
+    }
+
+    async fn command_access_level(
+        &self,
+        command: &CommandInteraction,
+    ) -> Option<super::AccessLevel> {
+        let roles = command
+            .member
+            .as_ref()
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(|role| role.get())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.access_level(
+            command.user.id.get(),
+            command.guild_id.map(|id| id.get()),
+            command.channel_id.get(),
+            &roles,
+        )
+        .await
+    }
+
+    async fn handle_server_info(&self, ctx: &Context, command: &CommandInteraction) {
+        let Some(access) = self.command_access_level(command).await else {
+            Self::send_unauthorized_response_command(ctx, command).await;
+            return;
+        };
+        let tier = match access {
+            super::AccessLevel::Community => "Community (restricted support)",
+            super::AccessLevel::Trusted => "Trusted (full OSAgent)",
+        };
+        let server = command
+            .guild_id
+            .map(|id| format!("`{}`", id.get()))
+            .unwrap_or_else(|| "Direct message".to_string());
+        self.reply(
+            ctx,
+            command,
+            ui::embed(
+                "OSAgent Server Info",
+                format!(
+                    "Access tier: **{tier}**\nServer: {server}\nChannel: `{}`\nUser: `{}`",
+                    command.channel_id.get(),
+                    command.user.id.get()
+                ),
+                ui::COLOR_INFO,
+            ),
+        )
+        .await;
+    }
+
+    async fn handle_discord_setup(&self, ctx: &Context, command: &CommandInteraction) {
+        let (action, options) = subcommand(command);
+        let guild_id = command.guild_id.map(|id| id.get());
+        let channel_id = command.channel_id.get();
+        let config = self.agent.config();
+        let mut cfg = config.write().await;
+        let discord = cfg.discord.get_or_insert_with(Default::default);
+
+        let (title, description, changed) = match action {
+            "trust-here" => match guild_id {
+                Some(guild_id) => {
+                    discord.community_mode = true;
+                    if !discord.trusted_guilds.contains(&guild_id) {
+                        discord.trusted_guilds.push(guild_id);
+                    }
+                    if !discord.trusted_channels.contains(&channel_id) {
+                        discord.trusted_channels.push(channel_id);
+                    }
+                    if !discord.trusted_users.contains(&command.user.id.get()) {
+                        discord.trusted_users.push(command.user.id.get());
+                    }
+                    ("Trusted Access Enabled", "This server, channel, and your user are trusted for full OSAgent access.".to_string(), true)
+                }
+                None => ("Server Required", "Run this command in your private server.".to_string(), false),
+            },
+            "community-here" => match guild_id {
+                Some(guild_id) => {
+                    discord.community_mode = true;
+                    if !discord.allowed_guilds.contains(&guild_id) {
+                        discord.allowed_guilds.push(guild_id);
+                    }
+                    if !discord.allowed_channels.contains(&channel_id) {
+                        discord.allowed_channels.push(channel_id);
+                    }
+                    ("Community Support Enabled", "This server and channel now use the restricted support profile. Add community role IDs in the web UI to grant members access.".to_string(), true)
+                }
+                None => ("Server Required", "Run this command in the community server.".to_string(), false),
+            },
+            "context" => {
+                let value = opt_str(options, "text").unwrap_or_default();
+                discord.community_context = value.to_string();
+                ("Instructions Updated", "Community bot instructions will apply on the next request.".to_string(), true)
+            }
+            "docs" => {
+                let value = opt_str(options, "url").unwrap_or_default();
+                discord.docs_url = value.to_string();
+                ("Documentation Updated", format!("Canonical docs: {value}"), true)
+            }
+            "github-here" => {
+                let value = opt_str(options, "repo").unwrap_or_default();
+                discord.github_repo = value.to_string();
+                discord.github_tracking_channel = Some(channel_id);
+                (
+                    "GitHub Tracking Updated",
+                    format!("New issues and pull requests for `{value}` will be posted in this channel."),
+                    true,
+                )
+            }
+            _ => (
+                "Discord Access Policy",
+                format!(
+                    "Community mode: **{}**\nCommunity servers: **{}** · channels: **{}** · roles: **{}**\nTrusted servers: **{}** · channels: **{}** · users: **{}** · roles: **{}**\nDocs: {}",
+                    if discord.community_mode { "enabled" } else { "disabled" },
+                    discord.allowed_guilds.len(), discord.allowed_channels.len(), discord.allowed_roles.len(),
+                    discord.trusted_guilds.len(), discord.trusted_channels.len(), discord.trusted_users.len(), discord.trusted_roles.len(),
+                    if discord.docs_url.is_empty() { "not set" } else { discord.docs_url.as_str() },
+                ),
+                false,
+            ),
+        };
+        drop(cfg);
+
+        if changed {
+            if let Err(e) = self.agent.save_config(&self.config_path).await {
+                self.reply(
+                    ctx,
+                    command,
+                    ui::embed("Save Failed", e.to_string(), ui::COLOR_ERROR),
+                )
+                .await;
+                return;
+            }
+        }
+        self.reply(ctx, command, ui::embed(title, description, ui::COLOR_INFO))
+            .await;
     }
 
     // -----------------------------------------------------------------------
@@ -404,13 +625,32 @@ impl Handler {
     // chat
     // -----------------------------------------------------------------------
 
-    async fn handle_chat(&self, ctx: &Context, command: &CommandInteraction) {
+    async fn handle_chat(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        access: super::AccessLevel,
+    ) {
         let Some(message) = opt_str(&command.data.options, "message") else {
             return;
         };
         let user_id = command.user.id.get();
 
-        let session_id = match self.get_or_create_session(user_id).await {
+        if access == super::AccessLevel::Trusted {
+            self.remember_channel(command.channel_id.get()).await;
+        }
+
+        let session_result = match access {
+            super::AccessLevel::Trusted => self.get_or_create_session(user_id).await,
+            super::AccessLevel::Community => {
+                self.get_or_create_community_session(
+                    user_id,
+                    command.guild_id.map(|guild_id| guild_id.get()),
+                )
+                .await
+            }
+        };
+        let session_id = match session_result {
             Ok(session_id) => session_id,
             Err(e) => {
                 self.reply(ctx, command, ui::embed("Session Error", e, ui::COLOR_ERROR))
@@ -419,29 +659,54 @@ impl Handler {
             }
         };
 
-        // Acknowledge inside the 3s interaction window, then work in the channel
-        // where everyone can follow along.
+        // Acknowledge inside the 3s interaction window. The final answer edits
+        // this response, so /chat still works where the bot cannot post normal
+        // channel messages but can receive application commands.
         self.reply(
             ctx,
             command,
             ui::embed(
                 "Sent",
-                "Working on it — I'll post the reply in this channel.",
+                "Working on it — the reply will appear here.",
                 ui::COLOR_INFO,
             ),
         )
         .await;
 
-        self.run_turn(
-            ctx,
-            Turn {
-                channel_id: command.channel_id,
-                session_id,
-                user_id,
-                prompt: message.to_string(),
-            },
+        let lock = self.get_channel_lock(command.channel_id.get());
+        let _guard = lock.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(3600),
+            self.agent.process_message(
+                &session_id,
+                message.to_string(),
+                format!("discord:{user_id}"),
+            ),
         )
         .await;
+
+        let embed = match result {
+            Ok(Ok(response)) if response.trim().is_empty() => ui::embed(
+                "Done",
+                "The agent finished without a text reply.",
+                ui::COLOR_SUCCESS,
+            ),
+            Ok(Ok(response)) => ui::embed(
+                "OSA",
+                ui::truncate_chars(&response, 4000),
+                ui::COLOR_PRIMARY,
+            ),
+            Ok(Err(error)) => {
+                let (title, description) = ui::describe_error(&error.to_string());
+                ui::embed(&title, description, ui::COLOR_ERROR)
+            }
+            Err(_) => ui::embed(
+                "Timed Out",
+                "The agent did not finish within 60 minutes.",
+                ui::COLOR_ERROR,
+            ),
+        };
+        self.edit_reply(ctx, command, embed).await;
     }
 
     /// `/lsp` and `/subagent` are phrasings of a normal agent turn.
@@ -516,13 +781,25 @@ impl Handler {
     // session
     // -----------------------------------------------------------------------
 
-    async fn handle_session(&self, ctx: &Context, command: &CommandInteraction) {
+    async fn handle_session(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        access: super::AccessLevel,
+    ) {
         let user_id = command.user.id.get();
+        let guild_id = command.guild_id.map(|guild_id| guild_id.get());
         let (action, _) = subcommand(command);
 
         match action {
             "new" => {
-                let embed = match self.start_new_session(user_id).await {
+                let result = match access {
+                    super::AccessLevel::Trusted => self.start_new_session(user_id).await,
+                    super::AccessLevel::Community => {
+                        self.start_new_community_session(user_id, guild_id).await
+                    }
+                };
+                let embed = match result {
                     Ok(session_id) => ui::embed(
                         "New Session",
                         format!(
@@ -536,7 +813,15 @@ impl Handler {
                 self.reply(ctx, command, embed).await;
             }
             "archive" => {
-                let embed = match self.archive_current_session_for_user(user_id).await {
+                let result = match access {
+                    super::AccessLevel::Trusted => {
+                        self.archive_current_session_for_user(user_id).await
+                    }
+                    super::AccessLevel::Community => {
+                        self.archive_community_session(user_id, guild_id).await
+                    }
+                };
+                let embed = match result {
                     Ok(Some(_)) => ui::embed(
                         "Session Archived",
                         "Your next message starts a new session.",
@@ -552,6 +837,23 @@ impl Handler {
                 self.reply(ctx, command, embed).await;
             }
             "delete" => {
+                if access == super::AccessLevel::Community {
+                    let embed = match self.delete_community_session(user_id, guild_id).await {
+                        Ok(true) => ui::embed(
+                            "Session Deleted",
+                            "The community conversation was permanently deleted.",
+                            ui::COLOR_SUCCESS,
+                        ),
+                        Ok(false) => ui::embed(
+                            "No Active Session",
+                            "There is nothing to delete.",
+                            ui::COLOR_INFO,
+                        ),
+                        Err(error) => ui::embed("Delete Failed", error, ui::COLOR_ERROR),
+                    };
+                    self.reply(ctx, command, embed).await;
+                    return;
+                }
                 let custom_id = format!("{PANEL_PREFIX}deletesession:{user_id}");
                 let embed = ui::embed(
                     "Delete This Session?",
@@ -578,7 +880,16 @@ impl Handler {
                 }
             }
             _ => {
-                let embed = match self.get_active_session_id_for_user(user_id).await {
+                let active_session = match access {
+                    super::AccessLevel::Trusted => {
+                        self.get_active_session_id_for_user(user_id).await
+                    }
+                    super::AccessLevel::Community => {
+                        self.get_active_community_session_id(user_id, guild_id)
+                            .await
+                    }
+                };
+                let embed = match active_session {
                     Some(session_id) => match self.agent.get_session(&session_id).await {
                         Ok(Some(session)) => {
                             let persona = self
@@ -1244,20 +1555,22 @@ impl Handler {
     // -----------------------------------------------------------------------
 
     async fn handle_help(&self, ctx: &Context, command: &CommandInteraction) {
-        let embed = CreateEmbed::new()
+        let access = self.command_access_level(command).await;
+        let mut embed = CreateEmbed::new()
             .title("OSAgent")
             .description(
-                "Talk to the agent by mentioning the bot in a channel, or by DMing it directly. Everything else is a slash command.",
+                "Mention the bot or reply to one of its messages to ask for help. Access is limited by server, channel, user, and role policy.",
             )
             .colour(ui::COLOR_PRIMARY)
             .field(
-                "Chat",
-                "`/chat` — send a message\n`/answer` — reply to a question the agent asked",
+                "Community Support",
+                "Mention the bot for project and documentation help. `/server-info` shows your active access tier.",
                 false,
-            )
-            .field(
+            );
+        if access == Some(super::AccessLevel::Trusted) {
+            embed = embed.field(
                 "Configure",
-                "`/settings` — provider, model, persona and workspace in one panel\n`/model set` · `/provider use` · `/persona set` · `/workspace set`",
+                "`/discord-setup` configures Discord access\n`/settings` · `/model set` · `/provider use` · `/persona set` · `/workspace set`",
                 false,
             )
             .field(
@@ -1278,6 +1591,7 @@ impl Handler {
             .footer(CreateEmbedFooter::new(
                 "Responses show model · provider · persona in their footer",
             ));
+        }
 
         self.reply(ctx, command, embed).await;
     }

@@ -150,6 +150,13 @@ pub(super) async fn send_chunks(
         if let Err(e) = channel_id.say(http, body).await {
             error!("Discord: failed to send response chunk: {e}");
             break;
+        } else {
+            tracing::info!(
+                "Discord: sent response chunk {}/{} to channel {}",
+                index + 1,
+                chunks.len(),
+                channel_id.get()
+            );
         }
     }
 }

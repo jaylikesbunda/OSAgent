@@ -410,7 +410,7 @@ impl Handler {
     /// `/settings` — open a fresh panel, private to the caller.
     pub(super) async fn open_settings_panel(&self, ctx: &Context, command: &CommandInteraction) {
         let user_id = command.user.id.get();
-        if !self.is_authorized(user_id).await {
+        if !self.command_is_authorized(command).await {
             Self::send_unauthorized_response_command(ctx, command).await;
             return;
         }
@@ -450,7 +450,26 @@ impl Handler {
 
         let user_id = component.user.id.get();
 
-        if !self.is_authorized(user_id).await {
+        let roles = component
+            .member
+            .as_ref()
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(|role| role.get())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !self
+            .is_authorized(
+                user_id,
+                component.guild_id.map(|id| id.get()),
+                component.channel_id.get(),
+                &roles,
+            )
+            .await
+        {
             self.reject_component(ctx, component, "You are not authorized to use this bot.")
                 .await;
             return true;

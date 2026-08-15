@@ -1123,9 +1123,18 @@ impl AgentRuntime {
             }
 
             let active_persona = Self::active_persona_from_session(&session);
-            let tool_profile = ToolProfile::from_persona_id(
-                active_persona.as_ref().map(|persona| persona.id.as_str()),
-            );
+            let is_community = session
+                .metadata
+                .get("discord_community")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let tool_profile = if is_community {
+                ToolProfile::Community
+            } else {
+                ToolProfile::from_persona_id(
+                    active_persona.as_ref().map(|persona| persona.id.as_str()),
+                )
+            };
             let tools = self
                 .tool_registry
                 .get_tool_definitions_for_profile(tool_profile);
@@ -1150,7 +1159,14 @@ impl AgentRuntime {
                 .map(|p| p.id == "custom")
                 .unwrap_or(false);
 
-            let mut api_messages = if is_roleplay {
+            let mut api_messages = if is_community {
+                let context = session
+                    .metadata
+                    .get("discord_community_context")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("You are a restricted community support assistant.");
+                vec![Message::system(context.to_string())]
+            } else if is_roleplay {
                 vec![]
             } else {
                 // Refresh dynamic prompt portions if the date has rolled over
@@ -1185,7 +1201,7 @@ impl AgentRuntime {
                 api_messages.push(Message::system(prompt::build_voice_output_instructions()));
             }
 
-            if !is_roleplay {
+            if !is_roleplay && !is_community {
                 if let Some(decision_block) = self.decision_memory.prompt_block().await? {
                     api_messages.push(Message::system(decision_block));
                 }
@@ -1194,17 +1210,19 @@ impl AgentRuntime {
                 }
             }
 
-            if let Some(ref active_persona) = active_persona {
-                api_messages.push(Message::system(persona::build_persona_system_prompt(
-                    active_persona,
-                )));
+            if !is_community {
+                if let Some(ref active_persona) = active_persona {
+                    api_messages.push(Message::system(persona::build_persona_system_prompt(
+                        active_persona,
+                    )));
+                }
             }
             api_messages.push(Message::system(format!(
                 "# Tool Capability Profile\n- Profile: {:?}\n- The provider tool schemas are the authoritative available tools for this turn.",
                 tool_profile
             )));
 
-            if !is_roleplay {
+            if !is_roleplay && !is_community {
                 let workspace_paths = active_workspace
                     .paths
                     .iter()
@@ -2178,6 +2196,15 @@ impl AgentRuntime {
                             _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
                                 // Continue with tool execution
                             }
+                        }
+
+                        // Tool schemas are not a sufficient security boundary:
+                        // providers can emit calls for tools they were not shown.
+                        if !tool_profile.allows(&tool_call.name) {
+                            return Err(OSAgentError::ToolExecution(format!(
+                                "Tool '{}' is not allowed by the {:?} profile",
+                                tool_call.name, tool_profile
+                            )));
                         }
 
                         let snapshot_id =
@@ -5074,6 +5101,30 @@ impl AgentRuntime {
 
     pub async fn update_session(&self, session: &Session) -> Result<()> {
         self.session_manager.update_session(session).await
+    }
+
+    pub async fn set_discord_community_profile(
+        &self,
+        session_id: &str,
+        context: String,
+    ) -> Result<()> {
+        let mut session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| OSAgentError::Session(format!("Session not found: {session_id}")))?;
+        let metadata = session.metadata.as_object_mut().ok_or_else(|| {
+            OSAgentError::Session("Session metadata is not an object".to_string())
+        })?;
+        metadata.insert(
+            "discord_community".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        metadata.insert(
+            "discord_community_context".to_string(),
+            serde_json::Value::String(context),
+        );
+        self.session_manager.update_session(&session).await
     }
 
     pub async fn delete_all_sessions(&self) -> Result<()> {

@@ -141,7 +141,29 @@ subagent_depth = 1
 # [discord]
 # enabled = true
 # token = "your-discord-bot-token"
-# allowed_users = [123456789012345678]
+# Turn this on to separate public support access from trusted full OSAgent access.
+# Existing installations retain their original behavior while this is false.
+# community_mode = true
+# community_context = "You are the support bot for MyProject. Answer setup and usage questions. Be concise, cite documentation, and send bugs to the issue tracker."
+# docs_url = "https://docs.example.com"
+# Optional new issue and pull request announcements (owner/repository).
+# github_repo = "osagent/osagent"
+# github_token = "" # Optional; raises GitHub API rate limits for private/high-traffic repos.
+# github_tracking_channel = "456789012345678901"
+# github_poll_seconds = 300
+# A user id OR one of the member's role ids must be allowed. Empty means nobody.
+# allowed_users = ["123456789012345678"]
+# allowed_roles = ["234567890123456789"]
+# Optional location restrictions. Empty means any guild/channel.
+# allowed_guilds = ["345678901234567890"]
+# allowed_channels = ["456789012345678901"]
+# DMs require both this flag and an explicit allowed_users entry; roles never grant DM access.
+# allow_dms = false
+# Full machine-capable OSAgent access. Keep these limited to your personal server.
+# trusted_users = ["123456789012345678"]
+# trusted_roles = []
+# trusted_guilds = ["567890123456789012"]
+# trusted_channels = []
 
 [tools]
 denied = []
