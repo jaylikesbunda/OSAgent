@@ -144,6 +144,9 @@ subagent_depth = 1
 # Turn this on to separate public support access from trusted full OSAgent access.
 # Existing installations retain their original behavior while this is false.
 # community_mode = true
+# Allow all members in configured allowed_guilds to use restricted community chat.
+# Requires at least one allowed_guilds entry; allowed_channels can narrow it further.
+# allow_community_members = false
 # community_context = "You are the support bot for MyProject. Answer setup and usage questions. Be concise, cite documentation, and send bugs to the issue tracker."
 # docs_url = "https://docs.example.com"
 # Optional new issue and pull request announcements (owner/repository).
@@ -151,7 +154,8 @@ subagent_depth = 1
 # github_token = "" # Optional; raises GitHub API rate limits for private/high-traffic repos.
 # github_tracking_channel = "456789012345678901"
 # github_poll_seconds = 300
-# A user id OR one of the member's role ids must be allowed. Empty means nobody.
+# A user id OR one of the member's role ids must be allowed unless
+# allow_community_members is enabled for a configured community server.
 # allowed_users = ["123456789012345678"]
 # allowed_roles = ["234567890123456789"]
 # Optional location restrictions. Empty means any guild/channel.

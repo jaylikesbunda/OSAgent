@@ -404,4 +404,13 @@
         padding: 8px 12px;
         font-size: 12px;
     }
+
+    .discord-settings-card {
+        padding: 14px;
+    }
+
+    .discord-settings-grid,
+    .discord-settings-grid-three {
+        grid-template-columns: 1fr;
+    }
 }

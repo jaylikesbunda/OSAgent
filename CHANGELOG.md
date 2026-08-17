@@ -1,27 +1,15 @@
-v0.5.0 changes:
+v0.4.4 changes:
 
-## Tool execution
-
-* Per-tool timeout budgets: tools declare a `timeout_ms` and the registry enforces it at every dispatch site, returning a structured "tool timed out" error instead of whatever was in flight
-* Oversized plain-text tool results are spilled to session-scoped files and replaced with a bounded head/tail preview plus a "read with offset/limit" hint, instead of being silently truncated
-* Advisory repeat-tool-call reminders: identical calls trigger escalating nudges at 3/5/8 repeats (canonicalized args, wildcard include/exclude) without the hard loop guard blocking
-* Tool results now expose success, failure, or retryable outcomes to the agent and runtime
-
-## Context compaction
-
-* Compaction summaries are now framed in a single `<compacted-summary>` block with structured sections, and a summary that is not smaller than what it replaces is rejected in favor of the deterministic fallback
-* Model-free pre-compaction pruning rewrites over-budget tool results to a bounded head/tail slice before any summarization pass
-* Compaction trigger ratio, prune thresholds, and transcript cap are configurable under `[compaction]`
-
-## Feedback & goals
-
-* Per-message thumbs up/down feedback with a compare-and-set version token, stored in a sidecar table invisible to the model, with UI buttons on assistant replies
-* Goal system: `get_goal`/`create_goal`/`update_goal` tools with revision-fenced updates, active/paused/blocked/complete phases, round accounting, and auto-continued goal rounds that never restart after a process restart
+* Added opt-in community-member chat scoped to configured servers and channels
+* Hardened Discord access controls and cleaned up Discord settings
 
 v0.4.3 changes:
 
 * Fixed native WebUI chat when speech synthesis is unavailable
 * Added secure Discord community chat and multi-part replies
+* Added per-tool timeouts, bounded large-result spill files, repeat-call reminders, and structured tool outcomes
+* Added structured context compaction with configurable pruning and transcript limits
+* Added per-message feedback and resumable revision-fenced goals
 
 v0.4.0 changes:
 

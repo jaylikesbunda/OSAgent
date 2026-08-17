@@ -457,7 +457,7 @@ impl Handler {
                     if !discord.allowed_channels.contains(&channel_id) {
                         discord.allowed_channels.push(channel_id);
                     }
-                    ("Community Support Enabled", "This server and channel now use the restricted support profile. Add community role IDs in the web UI to grant members access.".to_string(), true)
+                    ("Community Support Enabled", "This server and channel now use the restricted support profile. Add role IDs, or enable all community members, in the web UI.".to_string(), true)
                 }
                 None => ("Server Required", "Run this command in the community server.".to_string(), false),
             },
@@ -484,8 +484,9 @@ impl Handler {
             _ => (
                 "Discord Access Policy",
                 format!(
-                    "Community mode: **{}**\nCommunity servers: **{}** · channels: **{}** · roles: **{}**\nTrusted servers: **{}** · channels: **{}** · users: **{}** · roles: **{}**\nDocs: {}",
+                    "Community mode: **{}** · all members: **{}**\nCommunity servers: **{}** · channels: **{}** · roles: **{}**\nTrusted servers: **{}** · channels: **{}** · users: **{}** · roles: **{}**\nDocs: {}",
                     if discord.community_mode { "enabled" } else { "disabled" },
+                    if discord.allow_community_members { "enabled" } else { "disabled" },
                     discord.allowed_guilds.len(), discord.allowed_channels.len(), discord.allowed_roles.len(),
                     discord.trusted_guilds.len(), discord.trusted_channels.len(), discord.trusted_users.len(), discord.trusted_roles.len(),
                     if discord.docs_url.is_empty() { "not set" } else { discord.docs_url.as_str() },

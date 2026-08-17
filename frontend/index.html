@@ -608,87 +608,132 @@
                         <h2>Discord</h2>
                         <p class="settings-pane-desc">Configure the Discord bot integration</p>
                     </div>
-                    <div class="settings-group">
-                        <div class="settings-group-title">Bot Configuration</div>
-                        <div class="settings-field">
-                            <label for="setting-discord-enabled">Discord Bot</label>
-                            <select id="setting-discord-enabled">
-                                <option value="true">Enabled</option>
-                                <option value="false">Disabled</option>
-                            </select>
+                    <div class="settings-group discord-settings">
+                        <div class="discord-settings-card">
+                            <div class="settings-group-title">Bot Configuration</div>
+                            <div class="discord-settings-grid">
+                                <div class="settings-field">
+                                    <label for="setting-discord-enabled">Discord Bot</label>
+                                    <select id="setting-discord-enabled">
+                                        <option value="true">Enabled</option>
+                                        <option value="false">Disabled</option>
+                                    </select>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-token">Bot Token</label>
+                                    <input id="setting-discord-token" type="password" placeholder="Discord bot token">
+                                    <span class="settings-field-hint">Saved in the OSAgent config file. Save before starting.</span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-token">Bot Token</label>
-                            <input id="setting-discord-token" type="password" placeholder="Discord bot token">
-                            <span class="settings-field-hint">Saved in the OSAgent config file. Save settings before starting the bot.</span>
+
+                        <div class="discord-settings-card">
+                            <div class="settings-group-title">Community Access</div>
+                            <p class="discord-card-desc">Restricted support sessions can use public tools only. Trusted access stays separate.</p>
+                            <div class="toggle-field discord-toggle-field">
+                                <div class="toggle-info">
+                                    <label class="toggle-label" for="setting-discord-community-mode">Safe community mode</label>
+                                    <span class="toggle-desc">Enable the restricted community policy.</span>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input id="setting-discord-community-mode" type="checkbox">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="toggle-field discord-toggle-field">
+                                <div class="toggle-info">
+                                    <label class="toggle-label" for="setting-discord-allow-community-members">Allow all server members</label>
+                                    <span class="toggle-desc">Allow members in listed community servers to chat without a user or role grant.</span>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input id="setting-discord-allow-community-members" type="checkbox">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-field">
+                                <label for="setting-discord-community-context">Community Bot Instructions</label>
+                                <textarea id="setting-discord-community-context" rows="6" placeholder="Describe the project, support policies, known limitations, tone, and escalation guidance."></textarea>
+                                <span class="settings-field-hint">Applied to restricted community sessions.</span>
+                            </div>
+                            <div class="discord-settings-grid">
+                                <div class="settings-field">
+                                    <label for="setting-discord-docs-url">Documentation URL</label>
+                                    <input id="setting-discord-docs-url" type="url" placeholder="https://docs.example.com">
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-allowed-guilds">Allowed Server IDs</label>
+                                    <textarea id="setting-discord-allowed-guilds" rows="2" placeholder="Community server ID"></textarea>
+                                    <span class="settings-field-hint">Required for all-member access.</span>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-allowed-users">Allowed User IDs</label>
+                                    <textarea id="setting-discord-allowed-users" rows="3" placeholder="One Discord user ID per line or comma-separated"></textarea>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-allowed-roles">Allowed Role IDs</label>
+                                    <textarea id="setting-discord-allowed-roles" rows="3" placeholder="One Discord role ID per line or comma-separated"></textarea>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-allowed-channels">Allowed Channel IDs</label>
+                                    <textarea id="setting-discord-allowed-channels" rows="3" placeholder="Optional channel IDs"></textarea>
+                                </div>
+                            </div>
+                            <div class="toggle-field discord-toggle-field discord-toggle-field-last">
+                                <div class="toggle-info">
+                                    <label class="toggle-label" for="setting-discord-allow-dms">Allow approved-user DMs</label>
+                                    <span class="toggle-desc">Role grants and all-member access never apply to DMs.</span>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input id="setting-discord-allow-dms" type="checkbox">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
                         </div>
-                        <div class="settings-field">
-                            <label><input id="setting-discord-community-mode" type="checkbox"> Enable safe community mode</label>
-                            <span class="settings-field-hint">Separates restricted public support from trusted full OSAgent access.</span>
+
+                        <div class="discord-settings-card">
+                            <div class="settings-group-title">GitHub Updates</div>
+                            <div class="discord-settings-grid discord-settings-grid-three">
+                                <div class="settings-field">
+                                    <label for="setting-discord-github-repo">Repository</label>
+                                    <input id="setting-discord-github-repo" type="text" placeholder="owner/repository">
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-github-token">GitHub Token (optional)</label>
+                                    <input id="setting-discord-github-token" type="password" placeholder="github_pat_...">
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-github-channel">Announcement Channel ID</label>
+                                    <input id="setting-discord-github-channel" type="text" inputmode="numeric" placeholder="Discord channel ID">
+                                    <span class="settings-field-hint">New issues and PRs are announced after startup.</span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-community-context">Community Bot Instructions</label>
-                            <textarea id="setting-discord-community-context" rows="8" placeholder="Describe the project, the bot's role, support policies, known limitations, tone, and escalation guidance."></textarea>
-                            <span class="settings-field-hint">Applied as system context to restricted community sessions. Changes take effect on the next request.</span>
+
+                        <div class="discord-settings-card">
+                            <div class="settings-group-title">Trusted Full Access</div>
+                            <p class="discord-card-desc">Keep this limited to your personal server and private channels.</p>
+                            <div class="discord-settings-grid">
+                                <div class="settings-field">
+                                    <label for="setting-discord-trusted-users">Trusted User IDs</label>
+                                    <textarea id="setting-discord-trusted-users" rows="3" placeholder="Your Discord user ID"></textarea>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-trusted-roles">Trusted Role IDs</label>
+                                    <textarea id="setting-discord-trusted-roles" rows="3" placeholder="Personal admin role IDs"></textarea>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-trusted-guilds">Trusted Server IDs</label>
+                                    <textarea id="setting-discord-trusted-guilds" rows="2" placeholder="Your personal server ID"></textarea>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-trusted-channels">Trusted Channel IDs</label>
+                                    <textarea id="setting-discord-trusted-channels" rows="2" placeholder="Optional private channel IDs"></textarea>
+                                </div>
+                            </div>
                         </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-docs-url">Documentation URL</label>
-                            <input id="setting-discord-docs-url" type="url" placeholder="https://docs.example.com">
-                        </div>
-                        <div class="settings-group-title">GitHub Updates</div>
-                        <div class="settings-field">
-                            <label for="setting-discord-github-repo">Repository</label>
-                            <input id="setting-discord-github-repo" type="text" placeholder="owner/repository">
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-github-token">GitHub Token (optional)</label>
-                            <input id="setting-discord-github-token" type="password" placeholder="github_pat_...">
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-github-channel">Announcement Channel ID</label>
-                            <input id="setting-discord-github-channel" type="text" inputmode="numeric" placeholder="Discord channel ID">
-                            <span class="settings-field-hint">New issues and pull requests are announced after a quiet startup baseline.</span>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-allowed-users">Allowed User IDs</label>
-                            <textarea id="setting-discord-allowed-users" rows="4" placeholder="One Discord user ID per line or comma-separated"></textarea>
-                            <span class="settings-field-hint">A matching user or role is required. Empty user and role lists deny everyone.</span>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-allowed-roles">Allowed Role IDs</label>
-                            <textarea id="setting-discord-allowed-roles" rows="3" placeholder="One Discord role ID per line or comma-separated"></textarea>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-allowed-guilds">Allowed Server IDs</label>
-                            <textarea id="setting-discord-allowed-guilds" rows="2" placeholder="Empty allows any server"></textarea>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-allowed-channels">Allowed Channel IDs</label>
-                            <textarea id="setting-discord-allowed-channels" rows="3" placeholder="Empty allows any channel in an allowed server"></textarea>
-                        </div>
-                        <div class="settings-field">
-                            <label><input id="setting-discord-allow-dms" type="checkbox"> Allow DMs from explicitly allowed users</label>
-                        </div>
-                        <div class="settings-group-title">Trusted Full Access</div>
-                        <div class="settings-field">
-                            <label for="setting-discord-trusted-users">Trusted User IDs</label>
-                            <textarea id="setting-discord-trusted-users" rows="3" placeholder="Your Discord user ID"></textarea>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-trusted-roles">Trusted Role IDs</label>
-                            <textarea id="setting-discord-trusted-roles" rows="3" placeholder="Personal admin role IDs"></textarea>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-trusted-guilds">Trusted Server IDs</label>
-                            <textarea id="setting-discord-trusted-guilds" rows="2" placeholder="Your personal server ID"></textarea>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-discord-trusted-channels">Trusted Channel IDs</label>
-                            <textarea id="setting-discord-trusted-channels" rows="2" placeholder="Empty allows all channels in trusted servers"></textarea>
-                            <span class="settings-field-hint">Trusted access exposes normal OSAgent capabilities. Keep it limited to private servers and channels.</span>
-                        </div>
-                        <div class="settings-field">
-                            <label>Bot Runtime</label>
+
+                        <div class="discord-settings-card discord-runtime-card">
+                            <div class="settings-group-title">Bot Runtime</div>
                             <div id="discord-bot-status" class="discord-bot-status">Checking status...</div>
                             <div class="discord-bot-actions">
                                 <button type="button" class="btn-primary" id="btn-discord-start" onclick="OSA.startDiscordBot()">Start Bot</button>

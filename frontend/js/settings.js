@@ -177,6 +177,7 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-discord-enabled').value = discord.enabled ? 'true' : 'false';
         document.getElementById('setting-discord-token').value = discord.token || '';
         document.getElementById('setting-discord-community-mode').checked = discord.community_mode === true;
+        document.getElementById('setting-discord-allow-community-members').checked = discord.allow_community_members === true;
         document.getElementById('setting-discord-community-context').value = discord.community_context || '';
         document.getElementById('setting-discord-docs-url').value = discord.docs_url || '';
         document.getElementById('setting-discord-github-repo').value = discord.github_repo || '';
@@ -360,6 +361,7 @@ OSA.saveSettings = async function() {
         enabled: document.getElementById('setting-discord-enabled').value === 'true',
         token: document.getElementById('setting-discord-token').value || '',
         community_mode: document.getElementById('setting-discord-community-mode').checked,
+        allow_community_members: document.getElementById('setting-discord-allow-community-members').checked,
         community_context: document.getElementById('setting-discord-community-context').value || '',
         docs_url: document.getElementById('setting-discord-docs-url').value || '',
         github_repo: document.getElementById('setting-discord-github-repo').value.trim(),

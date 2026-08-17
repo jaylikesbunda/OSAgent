@@ -137,7 +137,8 @@ impl Handler {
     // -----------------------------------------------------------------------
 
     /// User and role grants are additive. Guild and channel lists are optional
-    /// location restrictions. With no user or role grants, access fails closed.
+    /// location restrictions. With no user or role grants, access fails closed
+    /// unless explicitly configured to allow all members in a listed guild.
     pub(super) async fn access_level(
         &self,
         user_id: u64,
@@ -149,6 +150,16 @@ impl Handler {
             return None;
         };
 
+        Self::access_level_for_config(&discord, user_id, guild_id, channel_id, role_ids)
+    }
+
+    fn access_level_for_config(
+        discord: &DiscordConfig,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+    ) -> Option<AccessLevel> {
         if !discord.community_mode {
             return discord
                 .allowed_users
@@ -178,7 +189,11 @@ impl Handler {
             || role_ids
                 .iter()
                 .any(|role_id| discord.allowed_roles.contains(role_id));
-        if !identity_allowed {
+        let community_member_allowed = discord.allow_community_members
+            && guild_id.is_some_and(|guild_id| {
+                !discord.allowed_guilds.is_empty() && discord.allowed_guilds.contains(&guild_id)
+            });
+        if !identity_allowed && !community_member_allowed {
             return None;
         }
 
@@ -317,7 +332,7 @@ impl Handler {
     ) {
         let embed = ui::embed(
             "Access Denied",
-            "You are not on this bot's allow-list. The owner can add your user id under `discord.allowed_users` in the config, or from the web UI.",
+            "You are not allowed to use this bot. The owner can add your user or role, or enable community member access for this server in the web UI.",
             ui::COLOR_ERROR,
         );
 
@@ -1240,13 +1255,19 @@ async fn run_discord_bot(
         }
     }
 
-    if discord_config.allowed_users.is_empty()
+    if !discord_config.allow_community_members
+        && discord_config.allowed_users.is_empty()
         && discord_config.allowed_roles.is_empty()
         && discord_config.trusted_users.is_empty()
         && discord_config.trusted_roles.is_empty()
     {
         warn!(
             "Discord: allowed_users and allowed_roles are empty — the bot will refuse every request."
+        );
+    }
+    if discord_config.allow_community_members && discord_config.allowed_guilds.is_empty() {
+        warn!(
+            "Discord: allow_community_members is enabled but allowed_guilds is empty — community member access remains disabled."
         );
     }
 
@@ -1346,5 +1367,43 @@ mod tests {
     #[test]
     fn unknown_bot_id_leaves_content_alone() {
         assert_eq!(strip_mention("  hello <@42>  ", 0), "hello <@42>");
+    }
+
+    #[test]
+    fn community_members_require_an_explicit_server() {
+        let mut discord = DiscordConfig {
+            community_mode: true,
+            allow_community_members: true,
+            ..DiscordConfig::default()
+        };
+
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
+            None
+        );
+
+        discord.allowed_guilds = vec![42];
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
+            Some(AccessLevel::Community)
+        );
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(43), 99, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn unlisted_community_member_is_denied_when_member_access_is_off() {
+        let discord = DiscordConfig {
+            community_mode: true,
+            allowed_guilds: vec![42],
+            ..DiscordConfig::default()
+        };
+
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
+            None
+        );
     }
 }

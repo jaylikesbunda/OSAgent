@@ -366,6 +366,74 @@
     justify-content: space-between;
 }
 
+/* ---- Discord Settings ---- */
+
+.discord-settings {
+    display: grid;
+    gap: 16px;
+    margin-bottom: 0;
+}
+
+.discord-settings-card {
+    padding: 18px;
+    background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+}
+
+.discord-settings-card .settings-group-title {
+    margin-bottom: 12px;
+    color: var(--text-primary);
+}
+
+.discord-card-desc {
+    margin: -4px 0 14px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.discord-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 14px;
+}
+
+.discord-settings-grid-three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.discord-settings-grid .settings-field {
+    min-width: 0;
+}
+
+.discord-toggle-field {
+    margin-bottom: 10px;
+    background: color-mix(in srgb, var(--bg-secondary) 74%, transparent);
+}
+
+.discord-toggle-field-last {
+    margin-top: 2px;
+    margin-bottom: 0;
+}
+
+.discord-runtime-card {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+}
+
+.discord-runtime-card .settings-group-title {
+    width: 100%;
+    margin-bottom: 0;
+}
+
+.discord-runtime-card .settings-field-hint {
+    flex-basis: 100%;
+    margin-top: 0;
+}
+
 /* ---- Fields ---- */
 
 .settings-field {
@@ -2270,5 +2338,4 @@
     font-size: 12px;
     color: var(--text-muted);
     padding: 6px 0;
-}
 }

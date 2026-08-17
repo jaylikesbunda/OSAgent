@@ -262,6 +262,9 @@ pub struct DiscordConfig {
     /// Enables separate restricted community and full-access trusted policies.
     /// Off preserves the original allowed_users behavior for existing installs.
     pub community_mode: bool,
+    /// Allows every member in the configured community servers to use restricted
+    /// chat. This is intentionally opt-in and requires at least one allowed guild.
+    pub allow_community_members: bool,
     pub community_context: String,
     pub docs_url: String,
     pub github_repo: String,
@@ -1823,6 +1826,7 @@ last_channel_id = 1478327393205882900
             enabled: true,
             token: "t".to_string(),
             community_mode: false,
+            allow_community_members: false,
             community_context: String::new(),
             docs_url: String::new(),
             github_repo: String::new(),
