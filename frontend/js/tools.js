@@ -163,36 +163,32 @@ OSA.handleAgentEvent = function(event) {
             if (event.tool_call_id && !chain.pendingToolCallIds.includes(event.tool_call_id)) {
                 chain.pendingToolCallIds.push(event.tool_call_id);
             }
-            OSA.finalizeAssistantSegmentForToolCall(event);
-            OSA.createToolCard(event);
+            OSA.completeThinkingDisplay();
+            OSA.tmodelFinalizeSegmentForToolCall();
+            OSA.tmodelToolStart(event);
             OSA.persistToolStart(event);
             OSA.speakToolStart(event);
             OSA.renderQueuedMessages(OSA.getSessionQueue());
             break;
 
         case 'tool_progress':
-            OSA.updateToolProgress(event);
+            OSA.tmodelToolProgress(event);
             break;
 
         case 'tool_complete':
             if (event.tool_call_id) {
                 chain.pendingToolCallIds = (chain.pendingToolCallIds || []).filter(id => id !== event.tool_call_id);
             }
-            OSA.completeToolCard(event);
+            OSA.tmodelToolComplete(event);
             OSA.persistToolComplete(event);
-            if (event.tool_name === 'task') {
-                OSA.renderTaskMessage(event);
-            }
             if (event.tool_name === 'todowrite' || event.tool_name === 'todoread') {
                 OSA.fetchAndRenderTodos();
-            }
-            if (event.tool_name === 'subagent') {
-                OSA.handleSubagentComplete(event);
             }
             if (['write_file', 'edit_file', 'apply_patch', 'delete_file', 'batch'].includes(event.tool_name)) {
                 OSA.scheduleSessionInspectorRefresh();
             }
             OSA.speakToolComplete(event);
+            OSA.previewReadToolOutput(event);
             break;
 
         case 'response_complete':
@@ -226,6 +222,7 @@ OSA.handleAgentEvent = function(event) {
         case 'context_update':
             OSA.updateContextStatus(event);
             if (event.subagent_session_id) {
+                OSA.tmodelSubagentContextUpdate(event);
                 OSA.updateSubagentContextRing(event.subagent_session_id, event);
             }
             break;
@@ -843,365 +840,6 @@ OSA.openPreviewFromContextButton = function(itemId, event) {
     OSA.openPreviewFromContextItem(itemId);
 };
 
-OSA.createToolCard = function(event, insertBefore = null) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return;
-
-    OSA.pruneEmptyStreamingMessage();
-
-    const toolName = event.tool_name;
-    const callId = event.tool_call_id;
-
-    // `event.message_index` indexes the *server's* session.messages. The client
-    // array is optimistic — it pushes its own segment placeholders and tool
-    // boundary rows — so the two drift apart within a turn and the server index
-    // resolves to some earlier bubble, or to none at all (an invisible card that
-    // only appears on reload). A live card always belongs at the end of the
-    // transcript, so anchor it there. Restores from history still use the server
-    // index, and there the two arrays do agree.
-    const messageIndex = OSA.getLatestAnchorMessageIndex();
-
-    if (OSA.debug) {
-        OSA.debug.log('tool.start', { tool: toolName, call: callId, idx: messageIndex, serverIdx: event.message_index, isContext: OSA.isContextTool(toolName) });
-    }
-
-    if (OSA.isContextTool(toolName)) {
-        OSA.addContextToolToGroup(event, false, false, messageIndex);
-        return;
-    }
-
-    if (toolName === 'subagent') return;
-
-    OSA._renderInlineToolCard({
-        tool_call_id: callId,
-        tool_name: toolName,
-        arguments: event.arguments || {},
-        completed: false,
-        success: false,
-        output: '',
-        message_index: messageIndex,
-    }, insertBefore);
-
-    const domId = `tool-${callId}`;
-    const startTime = Date.now();
-    const parallelTools = OSA.parallelToolGroups;
-    const recentParallelStart = parallelTools.find(g =>
-        g.startTime && (Date.now() - g.startTime) < OSA.parallelToolWindow
-    );
-
-    if (recentParallelStart) {
-        recentParallelStart.callIds.push(callId);
-        recentParallelStart.count++;
-    } else {
-        parallelTools.push({
-            startTime,
-            callIds: [callId],
-            count: 1,
-            groupId: null
-        });
-    }
-
-    OSA.getActiveTools().set(callId, {
-        domId,
-        expanded: false,
-        completed: false,
-        toolName,
-        isPanel: true,
-        startTime,
-        parallelGroupStart: recentParallelStart ? recentParallelStart.startTime : startTime,
-    });
-};
-
-OSA._renderInlineToolCard = function(toolEvent, insertBefore, parent) {
-    const toolName = toolEvent.tool_name;
-    const args = toolEvent.arguments || {};
-    const callId = toolEvent.tool_call_id;
-    const isCompleted = toolEvent.completed === true;
-    const isSuccess = toolEvent.success === true;
-    const output = toolEvent.output || '';
-    const domId = `tool-${callId}`;
-
-    const existing = document.getElementById(domId) || OSA.findAnchoredNodeById(domId);
-    if (existing) {
-        const statusEl = existing.querySelector('.tool-status-badge');
-        if (statusEl) {
-            const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
-            const statusClass = isCompleted ? (isSuccess ? 'done' : 'failed') : 'pending';
-            statusEl.textContent = statusText;
-            statusEl.className = `tool-status-badge ${statusClass}`;
-        }
-        const titleEl = existing.querySelector('.tool-title');
-        if (titleEl) titleEl.classList.toggle('tool-title-pending', !isCompleted);
-        if (isCompleted && output) {
-            const outputEl = existing.querySelector('.tool-output');
-            if (outputEl && outputEl.style.display === 'none') {
-                const formatted = OSA.formatToolOutput(toolName, output);
-                if (formatted) {
-                    outputEl.textContent = formatted;
-                    outputEl.style.display = '';
-                }
-            }
-            OSA.setToolCardPreviewData(domId, toolEvent);
-        }
-        return;
-    }
-
-    const label = OSA.toolLabel(toolName);
-    const icon = OSA.toolIcon(toolName);
-    const subtitle = OSA.summarizeToolArgs(toolName, args);
-
-    const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
-    const statusClass = isCompleted ? (isSuccess ? 'done' : 'failed') : 'pending';
-    const titleClass = isCompleted ? '' : 'tool-title-pending';
-    const chevronOpacity = isCompleted ? '' : 'opacity:0';
-
-    const container = document.createElement('div');
-    container.id = domId;
-    container.className = 'tool-container';
-    container.dataset.messageIndex = toolEvent.message_index !== undefined ? toolEvent.message_index : 0;
-
-    let html = `
-        <div class="tool-card tool-inline" id="card-${domId}" data-tool="${OSA.escapeHtml(toolName)}">
-            <div class="tool-trigger tool-trigger-inline" onclick="OSA.handleToolCardClick('${domId}')">
-                <span class="tool-icon">${icon}</span>
-                <span class="tool-title ${titleClass}" id="title-${domId}">${OSA.escapeHtml(label)}</span>
-                ${subtitle ? `<span class="tool-subtitle" id="subtitle-${domId}">${OSA.escapeHtml(subtitle)}</span>` : ''}
-                <button type="button" class="tool-preview-btn hidden" onclick="OSA.openPreviewFromButton('${domId}', event)" title="Open in preview" aria-label="Open in preview">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M3 5h18"></path>
-                        <path d="M3 12h7"></path>
-                        <path d="M3 19h7"></path>
-                        <rect x="12" y="8" width="9" height="11" rx="1"></rect>
-                    </svg>
-                </button>
-                <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
-                <span class="tool-chevron" id="chevron-${domId}" style="${chevronOpacity}">&#x25B6;</span>
-            </div>
-            <div class="tool-body" id="body-${domId}">
-                <div class="tool-body-inner">
-                    <div class="tool-args" id="args-${domId}">${OSA.escapeHtml(JSON.stringify(args, null, 2))}</div>
-                    <div class="tool-output" id="output-${domId}" style="display:none"></div>
-                </div>
-            </div>
-        </div>`;
-
-    container.innerHTML = html;
-
-    const messagesDiv = document.getElementById('messages');
-    const target = parent || messagesDiv;
-    if (!target) return container;
-
-    if (parent) {
-        if (insertBefore && insertBefore.parentNode === target) {
-            target.insertBefore(container, insertBefore);
-        } else {
-            target.appendChild(container);
-        }
-    } else {
-        OSA.mountAnchoredNode(container, toolEvent.message_index !== undefined ? toolEvent.message_index : 0, insertBefore);
-    }
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
-    if (isCompleted && output) {
-        const outputEl = document.getElementById(`output-${domId}`);
-        if (outputEl) {
-            const renderedDiff = ['write_file', 'edit_file', 'apply_patch'].includes(toolName)
-                ? OSA.renderToolDiff(outputEl, toolEvent)
-                : false;
-            const formatted = OSA.formatToolOutput(toolName, output);
-            if (!renderedDiff && formatted) {
-                outputEl.textContent = formatted;
-                outputEl.style.display = '';
-            } else if (renderedDiff) {
-                outputEl.style.display = '';
-            }
-        }
-        OSA.setToolCardPreviewData(domId, toolEvent);
-
-        if (isSuccess && ['write_file', 'edit_file', 'apply_patch'].includes(toolName)) {
-            const diff = OSA.parseDiffChanges(output);
-            if (diff.additions > 0 || diff.deletions > 0) {
-                const subtitleEl = document.getElementById(`subtitle-${domId}`);
-                if (subtitleEl) {
-                    let badges = subtitleEl.textContent;
-                    badges += ` <span class="diff-add">+${diff.additions}</span><span class="diff-del">-${diff.deletions}</span>`;
-                    subtitleEl.innerHTML = badges;
-                }
-            }
-        }
-
-        if (toolName === 'bash' && isSuccess) {
-            const argsEl = document.getElementById(`args-${domId}`);
-            const body = document.getElementById(`body-${domId}`);
-            if (argsEl) argsEl.style.display = 'none';
-
-            const cmd = (args.command || '').trim();
-            if (cmd) {
-                const cmdLine = document.createElement('div');
-                cmdLine.className = 'shell-command-line';
-                cmdLine.innerHTML = `<span class="shell-prompt">$</span> <span class="shell-cmd">${OSA.escapeHtml(cmd)}</span>`;
-                const bodyInner = body?.querySelector('.tool-body-inner');
-                if (bodyInner) bodyInner.insertBefore(cmdLine, bodyInner.firstChild);
-            }
-        }
-    }
-
-    return container;
-};
-
-OSA.restoreToolCard = function(toolEvent, insertBefore = null, parent = null) {
-    const toolName = toolEvent.tool_name;
-
-    if (OSA.isContextTool(toolName)) {
-        const messageIndex = toolEvent.message_index !== undefined ? toolEvent.message_index : 0;
-        OSA.addContextToolToGroup(toolEvent, toolEvent.completed === true, toolEvent.success === true, messageIndex);
-        return;
-    }
-
-    if (toolName === 'subagent') return;
-
-    OSA._renderInlineToolCard(toolEvent, insertBefore, parent);
-};
-
-OSA.restoreContextToolGroup = function(tools, insertBefore = null) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv || tools.length === 0) return;
-
-    tools.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-
-    const messageIndex = tools.length > 0 ? (tools[0].message_index || 0) : 0;
-    const groupId = `context-tool-group-${messageIndex}`;
-
-    const group = document.createElement('div');
-    group.id = groupId;
-    group.className = 'tool-container context-inline-group';
-    group.dataset.messageIndex = messageIndex;
-
-    tools.forEach(t => {
-        const label = OSA.toolLabel(t.tool_name);
-        const detail = OSA.summarizeToolArgs(t.tool_name, t.arguments || {});
-        const isSuccess = t.success === true;
-        const statusText = isSuccess ? 'done' : 'failed';
-
-        const item = document.createElement('div');
-        item.className = 'context-inline-item';
-        item.id = `ctx-${t.tool_call_id || Math.random().toString(36).slice(2)}`;
-        item.setAttribute('onclick', `OSA.handleContextToolClick('${item.id}')`);
-        item.innerHTML = `
-            <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
-            <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
-            <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton('${item.id}', event)" title="Open in preview" aria-label="Open in preview">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M3 5h18"></path>
-                    <path d="M3 12h7"></path>
-                    <path d="M3 19h7"></path>
-                    <rect x="12" y="8" width="9" height="11" rx="1"></rect>
-                </svg>
-            </button>
-            <span class="context-inline-status">${statusText}</span>
-        `;
-        OSA.setContextToolPreviewData(item, t);
-        group.appendChild(item);
-    });
-
-    OSA.mountAnchoredNode(group, messageIndex, insertBefore);
-
-    return group;
-};
-
-OSA.addContextToolToGroup = function(event, isCompleted = false, isSuccess = false, messageIndex = 0) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return;
-
-    const groupId = `context-tool-group-${messageIndex}`;
-    let group = document.getElementById(groupId);
-
-    if (!group) {
-        group = document.createElement('div');
-        group.id = groupId;
-        group.className = 'tool-container context-inline-group';
-        group.dataset.messageIndex = messageIndex;
-        OSA.mountAnchoredNode(group, messageIndex);
-    }
-
-    const toolName = event.tool_name;
-    const args = event.arguments || {};
-    const callId = event.tool_call_id;
-    const existingItem = document.getElementById(`ctx-${callId}`);
-    if (existingItem) {
-        const statusEl = existingItem.querySelector('.context-inline-status');
-        if (statusEl) {
-            statusEl.textContent = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
-            statusEl.className = `context-inline-status${isCompleted ? (isSuccess ? ' done' : ' failed') : ' pending'}`;
-        }
-        OSA.setContextToolPreviewData(existingItem, event);
-        return;
-    }
-
-    const label = OSA.toolLabel(toolName);
-    const detail = OSA.summarizeToolArgs(toolName, args);
-    const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
-
-    const item = document.createElement('div');
-    item.className = 'context-inline-item';
-    item.id = `ctx-${callId}`;
-    item.setAttribute('onclick', `OSA.handleContextToolClick('${item.id}')`);
-    item.innerHTML = `
-        <span class="context-inline-action">${OSA.escapeHtml(label)}</span>
-        <span class="context-inline-detail">${OSA.escapeHtml(detail)}</span>
-        <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton('${item.id}', event)" title="Open in preview" aria-label="Open in preview">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 5h18"></path>
-                <path d="M3 12h7"></path>
-                <path d="M3 19h7"></path>
-                <rect x="12" y="8" width="9" height="11" rx="1"></rect>
-            </svg>
-        </button>
-        <span class="context-inline-status">${statusText}</span>
-    `;
-    OSA.setContextToolPreviewData(item, event);
-    group.appendChild(item);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
-    if (!isCompleted) {
-        OSA.getActiveTools().set(callId, {
-            contextItem: true,
-            itemId: item.id,
-            toolName,
-            completed: false,
-        });
-    }
-};
-
-OSA.findLastContextGroupBefore = function(messagesDiv) {
-    const groups = messagesDiv.querySelectorAll('.context-inline-group');
-    return groups.length > 0 ? groups[groups.length - 1] : null;
-};
-
-OSA.ensureContextToolGroup = function() {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return null;
-
-    const activeGroupId = OSA._activeContextGroupId;
-    if (activeGroupId) {
-        const existing = document.getElementById(activeGroupId);
-        if (existing) return existing;
-    }
-
-    const group = document.createElement('div');
-    group.id = activeGroupId || `context-tool-group-${Date.now()}`;
-    group.className = 'tool-container context-inline-group';
-    OSA.mountFloatingNode(group);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
-    OSA._contextGroupState = { expanded: false, allDone: false };
-    return group;
-};
-
-OSA.updateContextGroupCounts = function() {};
-
-OSA.toggleContextGroup = function() {};
-
 OSA.toggleToolCard = function(domId) {
     const activeTools = OSA.getActiveTools();
     const toolData = activeTools.get
@@ -1229,184 +867,6 @@ OSA.toggleToolCard = function(domId) {
     if (chevron) chevron.classList.toggle('open', !isOpen);
 };
 
-OSA.updateToolProgress = function(event) {
-    const activeTools = OSA.getActiveTools();
-    const toolData = activeTools.get(event.tool_call_id);
-    if (!toolData) return;
-
-    if (toolData.contextItem) {
-        const item = document.getElementById(toolData.itemId);
-        if (!item) return;
-        const state = item.querySelector('.context-tool-status');
-        if (state && event.status) state.textContent = event.status.toLowerCase();
-        return;
-    }
-
-    const status = document.getElementById(`status-${toolData.domId}`);
-    if (status && event.status) {
-        status.textContent = event.status.toLowerCase();
-    }
-};
-
-OSA.completeToolCard = function(event) {
-    const activeTools = OSA.getActiveTools();
-    const toolData = activeTools.get(event.tool_call_id);
-    if (!toolData) return;
-
-    if (toolData.contextItem) {
-        const item = document.getElementById(toolData.itemId);
-        if (item) {
-            const state = item.querySelector('.context-inline-status');
-            if (state) {
-                state.textContent = event.success ? 'done' : 'failed';
-                state.classList.remove('pending');
-                if (event.success) state.classList.add('done');
-                else state.classList.add('failed');
-            }
-            OSA.setContextToolPreviewData(item, event);
-        }
-        OSA.previewReadToolOutput(event);
-        activeTools.delete(event.tool_call_id);
-        return;
-    }
-
-    const card = document.getElementById(`card-${toolData.domId}`);
-    if (card) {
-        card.classList.add('tool-complete');
-        setTimeout(() => card.classList.remove('tool-complete'), 400);
-
-        card.querySelectorAll('.tool-title-pending').forEach(el => {
-            el.classList.remove('tool-title-pending');
-        });
-    }
-
-    const status = document.getElementById(`status-${toolData.domId}`);
-    const chevron = document.getElementById(`chevron-${toolData.domId}`);
-
-    if (status) {
-        status.textContent = event.success ? 'done' : 'failed';
-        status.classList.remove('pending');
-        if (event.success) status.classList.add('done');
-        else status.classList.add('failed');
-    }
-
-    if (chevron) {
-        chevron.style.opacity = '';
-    }
-
-    if (event.title) {
-        const subtitleEl = document.getElementById(`subtitle-${toolData.domId}`);
-        if (subtitleEl && !subtitleEl.textContent) {
-            subtitleEl.textContent = String(event.title);
-        }
-    }
-
-    if (toolData.isPanel) {
-            const output = document.getElementById(`output-${toolData.domId}`);
-            if (output) {
-            const renderedDiff = ['write_file', 'edit_file', 'apply_patch'].includes(toolData.toolName)
-                ? OSA.renderToolDiff(output, event)
-                : false;
-            const formatted = OSA.formatToolOutput(toolData.toolName, event.output || '');
-            if (!renderedDiff && formatted) {
-                if (toolData.toolName === 'subagent') {
-                    const linkified = OSA.linkifySessionIds(OSA.escapeHtml(formatted));
-                    output.innerHTML = linkified;
-                } else {
-                    output.textContent = formatted;
-                }
-                output.style.display = '';
-            } else if (renderedDiff) {
-                output.style.display = '';
-            }
-        }
-
-        OSA.setToolCardPreviewData(toolData.domId, event);
-
-        if (card && event.success && ['write_file', 'edit_file', 'apply_patch'].includes(toolData.toolName)) {
-            const diff = OSA.parseDiffChanges(event.output || '');
-            if (diff.additions > 0 || diff.deletions > 0) {
-                const subtitle = document.getElementById(`subtitle-${toolData.domId}`);
-                if (subtitle) {
-                    let badges = subtitle.textContent;
-                    badges += ` <span class="diff-add">+${diff.additions}</span><span class="diff-del">-${diff.deletions}</span>`;
-                    subtitle.innerHTML = badges;
-                }
-            }
-        }
-
-        if (toolData.toolName === 'bash' && event.success) {
-            const body = document.getElementById(`body-${toolData.domId}`);
-            const argsEl = card?.querySelector('.tool-args');
-            if (argsEl) argsEl.style.display = 'none';
-
-            const cmd = (event.arguments?.command || '').trim();
-            if (cmd) {
-                const cmdLine = document.createElement('div');
-                cmdLine.className = 'shell-command-line';
-                cmdLine.innerHTML = `<span class="shell-prompt">$</span> <span class="shell-cmd">${OSA.escapeHtml(cmd)}</span>`;
-                const bodyInner = body?.querySelector('.tool-body-inner');
-                if (bodyInner) bodyInner.insertBefore(cmdLine, bodyInner.firstChild);
-            }
-        }
-    }
-
-    const parallelGroup = OSA.parallelToolGroups.find(g =>
-        g.callIds.includes(event.tool_call_id)
-    );
-
-    if (parallelGroup && !parallelGroup.groupId && parallelGroup.count >= 2) {
-        const firstCallId = parallelGroup.callIds[0];
-        const firstToolData = activeTools.get(firstCallId);
-        const firstContainer = firstToolData ? document.getElementById(firstToolData.domId) : null;
-
-        if (firstContainer) {
-            const groupId = `parallel-group-${Date.now()}`;
-            parallelGroup.groupId = groupId;
-
-            const groupDiv = document.createElement('div');
-            groupDiv.className = 'parallel-group';
-            groupDiv.id = groupId;
-            groupDiv.dataset.messageIndex = firstContainer.dataset.messageIndex || '0';
-            groupDiv.innerHTML = `
-                <div class="parallel-group-header">
-                    <span class="parallel-count">${parallelGroup.count} tools running concurrently</span>
-                </div>
-            `;
-
-            OSA.removeStoredAnchoredNode(firstContainer);
-            firstContainer.parentNode.insertBefore(groupDiv, firstContainer);
-            groupDiv.appendChild(firstContainer);
-            OSA.storeAnchoredNode(groupDiv, groupDiv.dataset.messageIndex || 0);
-
-            for (let i = 1; i < parallelGroup.callIds.length; i++) {
-                const callId = parallelGroup.callIds[i];
-                const toolData = activeTools.get(callId);
-                if (toolData) {
-                    const container = document.getElementById(toolData.domId);
-                    if (container && container.parentNode !== groupDiv) {
-                        OSA.removeStoredAnchoredNode(container);
-                        groupDiv.appendChild(container);
-                    }
-                }
-            }
-        }
-    } else if (parallelGroup && parallelGroup.groupId) {
-        const groupDiv = document.getElementById(parallelGroup.groupId);
-        if (groupDiv) {
-            const container = document.getElementById(toolData.domId);
-            if (container && container.parentNode !== groupDiv) {
-                groupDiv.appendChild(container);
-            }
-        }
-    }
-
-    toolData.completed = true;
-    activeTools.delete(event.tool_call_id);
-
-    OSA.previewReadToolOutput(event);
-};
-
 OSA.formatToolOutput = function(toolName, output) {
     if (!output) return '';
 
@@ -1432,28 +892,6 @@ OSA.linkifySessionIds = function(text) {
     return text.replace(uuidRegex, function(match, uuid) {
         return `<a class="subagent-link" href="#session=${uuid}" onclick="event.preventDefault(); event.stopPropagation(); OSA.openSubagentSession('${uuid}')">${uuid}</a>`;
     });
-};
-
-OSA.renderTaskMessage = function(event) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return;
-
-    let content = event.output || '';
-    content = content.replace(/\s{2,}/g, ' ').trim();
-
-    const uuidRegex = /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
-    content = content.replace(uuidRegex, function(match, uuid) {
-        return `<a class="subagent-link" href="#session=${uuid}" onclick="event.preventDefault(); event.stopPropagation(); OSA.openSubagentSession('${uuid}')">${uuid}</a>`;
-    });
-
-    const message = document.createElement('div');
-    message.className = 'message task';
-    message.innerHTML = `
-        <div class="message-role">Tasks</div>
-        <div class="message-content">${OSA.formatMessage(content)}</div>
-    `;
-    OSA.mountFloatingNode(message);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
 };
 
 OSA.showRetryNotice = function(event) {
@@ -1491,15 +929,8 @@ OSA.handleEventError = function(event) {
     OSA.completeAssistantResponse();
     OSA.hideThinkingIndicator();
 
-    const messagesDiv = document.getElementById('messages');
-    const message = document.createElement('div');
-    message.className = 'message error';
-    message.innerHTML = `
-        <div class="message-role">Error</div>
-        <div class="message-content">${OSA.escapeHtml(event.error)}</div>
-    `;
-    OSA.mountAnchoredNode(message, OSA.getLatestAnchorMessageIndex());
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.tmodelAddError(event.error);
+    OSA.tmodelMarkDirty('error');
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
 };
@@ -1519,91 +950,13 @@ OSA.handleEventCancelled = function(event) {
         OSA._stopTimeout = null;
     }
 
-    const messagesDiv = document.getElementById('messages');
-    const message = document.createElement('div');
-    message.className = 'message cancelled';
-    message.innerHTML = `
-        <div class="message-role">Cancelled</div>
-        <div class="message-content">Operation stopped by user</div>
-    `;
-    OSA.mountAnchoredNode(message, OSA.getLatestAnchorMessageIndex());
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.tmodelAddCancelled();
+    OSA.tmodelMarkDirty('cancelled');
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
 };
 
 OSA._activeSubagents = new Map();
-
-OSA.syncSubagentCardState = function(task) {
-    if (!task || !task.session_id) return;
-
-    const subagentId = task.session_id;
-    const status = task.status || 'running';
-    const isRunning = !!task.is_running;
-    const toolCount = task.tool_count || 0;
-    const result = task.result || '';
-
-    const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
-    if (statusBadge) {
-        const badgeStatus = isRunning ? 'running' : status;
-        statusBadge.textContent = badgeStatus;
-        statusBadge.className = `subagent-status-badge ${badgeStatus}`;
-    }
-
-    const countEl = document.getElementById(`subagent-count-${subagentId}`);
-    if (countEl) {
-        countEl.textContent = `${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
-    }
-
-    const promptEl = document.getElementById(`subagent-prompt-${subagentId}`);
-    if (promptEl && task.prompt) {
-        promptEl.textContent = task.prompt;
-    }
-
-    const resultEl = document.getElementById(`subagent-result-${subagentId}`);
-    if (resultEl) {
-        if (result) {
-            resultEl.style.display = 'block';
-            resultEl.innerHTML = `<div class="subagent-result-label">Result:</div><div class="subagent-result-text">${OSA.escapeHtml(result.slice(0, 500))}${result.length > 500 ? '\u2026' : ''}</div>`;
-        } else if (!isRunning) {
-            resultEl.style.display = 'none';
-            resultEl.innerHTML = '';
-        }
-    }
-
-    const cancelBtnId = `subagent-cancel-${subagentId}`;
-    let cancelBtn = document.getElementById(cancelBtnId);
-    if (isRunning) {
-        if (!cancelBtn) {
-            const actions = document.querySelector(`#subagent-${subagentId} .subagent-actions`);
-            if (actions) {
-                cancelBtn = document.createElement('button');
-                cancelBtn.id = cancelBtnId;
-                cancelBtn.className = 'subagent-btn subagent-btn-cancel';
-                cancelBtn.textContent = 'Cancel';
-                cancelBtn.onclick = () => OSA.cancelSubagent(subagentId);
-                actions.appendChild(cancelBtn);
-            }
-        }
-    } else if (cancelBtn) {
-        cancelBtn.remove();
-    }
-
-    OSA.updateSubagentContextRing(subagentId, task.context_state);
-
-    if (isRunning) {
-        OSA._activeSubagents.set(subagentId, {
-            id: subagentId,
-            description: task.description || 'Subagent task',
-            agentType: task.agent_type || 'general',
-            toolCount,
-            status: 'running',
-            result
-        });
-    } else {
-        OSA._activeSubagents.delete(subagentId);
-    }
-};
 
 OSA.updateSubagentContextRing = function(subagentId, contextState) {
     const metrics = OSA.getContextRingMetrics(contextState);
@@ -1641,279 +994,22 @@ OSA.completedDurationMs = function(createdAt, completedAt) {
     return end - start;
 };
 
-OSA.restoreSubagentCards = function(subagentTasks) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv || !subagentTasks || subagentTasks.length === 0) return;
-
-    const sorted = [...subagentTasks].sort((a, b) => {
-        const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
-        const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
-        return ta - tb;
-    });
-
-    sorted.forEach(task => {
-        const anchorIndex = OSA.findAnchorMessageIndexForTimestamp(task.created_at);
-        if (typeof OSA.isMessageIndexInRenderedWindow === 'function' && anchorIndex >= 0 && !OSA.isMessageIndexInRenderedWindow(anchorIndex)) {
-            return;
-        }
-
-        const subagentId = task.session_id;
-        const existingCard = document.getElementById(`subagent-${subagentId}`);
-        if (existingCard) {
-            OSA.syncSubagentCardState(task);
-            return;
-        }
-
-        const description = task.description || 'Subagent task';
-        const agentType = task.agent_type || 'general';
-        const status = task.status || 'running';
-        const toolCount = task.tool_count || 0;
-        const isRunning = task.is_running;
-        const result = task.result || '';
-        const prompt = task.prompt || '';
-        const durationText = OSA.formatSubagentDuration(
-            OSA.completedDurationMs(task.created_at, task.completed_at)
-        );
-        const contextRingHtml = OSA.buildContextRingHtml(task.context_state, subagentId);
-
-        const container = document.createElement('div');
-        container.id = `subagent-${subagentId}`;
-        container.className = 'subagent-card';
-        container.innerHTML = `
-            <div class="subagent-header" onclick="OSA.toggleSubagentCard('${subagentId}')">
-                <div class="subagent-info">
-                    <span class="subagent-icon">A</span>
-                    <span class="subagent-title">${OSA.escapeHtml(description)}</span>
-                    <span class="subagent-type">${OSA.escapeHtml(agentType)}</span>
-                </div>
-                <div class="subagent-status">
-                    ${contextRingHtml}
-                    <span class="subagent-status-badge ${isRunning ? 'running' : status}" id="subagent-status-${subagentId}">${isRunning ? 'running' : status}</span>
-                    <span class="subagent-tool-count" id="subagent-count-${subagentId}">${toolCount} tool${toolCount !== 1 ? 's' : ''}${durationText ? ` · ${durationText}` : ''}</span>
-                    <span class="subagent-chevron" id="subagent-chevron-${subagentId}">&#x25B6;</span>
-                </div>
-            </div>
-            <div class="subagent-live" id="subagent-live-${subagentId}" style="display:none">
-                <span class="subagent-current-tool" id="subagent-current-${subagentId}"></span>
-            </div>
-            <div class="subagent-body" id="subagent-body-${subagentId}" style="display:none">
-                <div class="subagent-body-inner">
-                    ${prompt ? `<div class="subagent-prompt" id="subagent-prompt-${subagentId}">${OSA.escapeHtml(prompt)}</div>` : ''}
-                    <div class="subagent-tools" id="subagent-tools-${subagentId}"></div>
-                    <div class="subagent-result" id="subagent-result-${subagentId}" style="${result ? 'display:block' : 'display:none'}">${result ? `<div class="subagent-result-label">Result:</div><div class="subagent-result-text">${OSA.escapeHtml(result.slice(0, 500))}${result.length > 500 ? '\u2026' : ''}</div>` : ''}</div>
-                    <div class="subagent-actions">
-                        <button class="subagent-btn" onclick="OSA.openSubagentSession('${subagentId}')">Open Session</button>
-                        ${isRunning ? `<button class="subagent-btn subagent-btn-cancel" id="subagent-cancel-${subagentId}" onclick="OSA.cancelSubagent('${subagentId}')">Cancel</button>` : ''}
-                    </div>
-                </div>
-            </div>
-        `;
-
-        OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : OSA.getLatestAnchorMessageIndex());
-
-        if (isRunning) {
-            OSA._activeSubagents.set(subagentId, {
-                id: subagentId,
-                description,
-                agentType,
-                toolCount,
-                status: 'running'
-            });
-        }
-    });
-
-};
-
 OSA.handleSubagentCreated = function(event) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return;
-
-    const subagentId = event.subagent_session_id;
-    if (document.getElementById(`subagent-${subagentId}`)) return;
-    const description = event.description || 'Subagent task';
-    const agentType = event.agent_type || 'general';
-    const prompt = event.prompt || '';
-
-    const container = document.createElement('div');
-    container.id = `subagent-${subagentId}`;
-    container.className = 'subagent-card';
-    container.innerHTML = `
-        <div class="subagent-header" onclick="OSA.toggleSubagentCard('${subagentId}')">
-            <div class="subagent-info">
-                <span class="subagent-icon">A</span>
-                <span class="subagent-title">${OSA.escapeHtml(description)}</span>
-                <span class="subagent-type">${OSA.escapeHtml(agentType)}</span>
-            </div>
-            <div class="subagent-status">
-                <span class="subagent-status-badge running" id="subagent-status-${subagentId}">running</span>
-                <span class="subagent-tool-count" id="subagent-count-${subagentId}">0 tools</span>
-                <span class="subagent-chevron" id="subagent-chevron-${subagentId}">&#x25B6;</span>
-            </div>
-        </div>
-        <div class="subagent-body" id="subagent-body-${subagentId}" style="display:none">
-            <div class="subagent-body-inner">
-                <div class="subagent-prompt" id="subagent-prompt-${subagentId}">${prompt ? OSA.escapeHtml(prompt) : ''}</div>
-                <div class="subagent-tools" id="subagent-tools-${subagentId}"></div>
-                <div class="subagent-result" id="subagent-result-${subagentId}" style="display:none"></div>
-                <div class="subagent-actions">
-                    <button class="subagent-btn" onclick="OSA.openSubagentSession('${subagentId}')">Open Session</button>
-                    <button class="subagent-btn subagent-btn-cancel" id="subagent-cancel-${subagentId}" onclick="OSA.cancelSubagent('${subagentId}')">Cancel</button>
-                </div>
-            </div>
-        </div>
-    `;
-    const liveStrip = document.createElement('div');
-    liveStrip.id = `subagent-live-${subagentId}`;
-    liveStrip.className = 'subagent-live';
-    liveStrip.style.display = 'none';
-    liveStrip.innerHTML = `<span class="subagent-current-tool" id="subagent-current-${subagentId}"></span>`;
-    container.insertBefore(liveStrip, container.querySelector('.subagent-body'));
-    const anchorIndex = OSA.findAnchorMessageIndexForTimestamp(event.timestamp);
-    OSA.mountAnchoredNode(container, anchorIndex >= 0 ? anchorIndex : OSA.getLatestAnchorMessageIndex());
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
-    OSA._activeSubagents.set(subagentId, {
-        id: subagentId,
-        description,
-        agentType,
-        toolCount: 0,
-        status: 'running'
-    });
-
+    OSA.tmodelSubagentCreated(event);
     OSA.loadSessions();
 };
 
 OSA.handleSubagentProgress = function(event) {
-    const subagentId = event.subagent_session_id;
-    const toolCount = event.tool_count || 0;
-    const status = event.status || 'running';
-
-    const countEl = document.getElementById(`subagent-count-${subagentId}`);
-    if (countEl) {
-        countEl.textContent = `${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
-    }
-
-    const currentEl = document.getElementById(`subagent-current-${subagentId}`);
-    const liveStrip = document.getElementById(`subagent-live-${subagentId}`);
-    const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
-    const toolsEl = document.getElementById(`subagent-tools-${subagentId}`);
-
-    if (status === 'executing') {
-        if (liveStrip) liveStrip.style.display = '';
-        if (currentEl) currentEl.textContent = `\u21B3 ${event.tool_name || ''}`;
-        if (statusBadge) {
-            statusBadge.textContent = 'running';
-            statusBadge.className = 'subagent-status-badge running';
-        }
-    } else if (status === 'completed' || status === 'failed') {
-        if (currentEl && currentEl.textContent.trim() === `\u21B3 ${event.tool_name || ''}`) {
-            currentEl.textContent = '';
-        }
-        if (liveStrip && !(currentEl && currentEl.textContent.trim())) {
-            liveStrip.style.display = 'none';
-        }
-        if (toolsEl && event.tool_name) {
-            const toolItem = document.createElement('div');
-            toolItem.className = `subagent-tool-item ${status}`;
-            toolItem.textContent = event.tool_name;
-            toolsEl.appendChild(toolItem);
-            toolsEl.scrollTop = toolsEl.scrollHeight;
-        }
-        if (statusBadge && statusBadge.textContent === 'retrying') {
-            statusBadge.textContent = 'running';
-            statusBadge.className = 'subagent-status-badge running';
-        }
-    } else {
-        if (toolsEl && event.tool_name) {
-            const toolItem = document.createElement('div');
-            toolItem.className = 'subagent-tool-item';
-            toolItem.textContent = event.tool_name;
-            toolsEl.appendChild(toolItem);
-            toolsEl.scrollTop = toolsEl.scrollHeight;
-        }
-    }
-
-    const data = OSA._activeSubagents.get(subagentId);
-    if (data) {
-        data.toolCount = toolCount;
-        data.status = status;
-    }
+    OSA.tmodelSubagentProgress(event);
 };
 
 OSA.handleSubagentRetry = function(event) {
-    const subagentId = event.subagent_session_id;
-    if (!subagentId) return;
-    const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
-    const currentEl = document.getElementById(`subagent-current-${subagentId}`);
-    const liveStrip = document.getElementById(`subagent-live-${subagentId}`);
-    if (statusBadge) {
-        statusBadge.textContent = 'retrying';
-        statusBadge.className = 'subagent-status-badge retrying';
-    }
-    if (liveStrip) liveStrip.style.display = '';
-    if (currentEl) {
-        const delay = event.next_retry_in_ms ? Math.max(1, Math.round(event.next_retry_in_ms / 1000)) : null;
-        const attempt = event.attempt_count || 0;
-        const max = event.max_attempts || 0;
-        let text = `\u21B3 retrying in ~${delay}s`;
-        if (!delay) text = `\u21B3 retrying`;
-        if (attempt && max) text += ` (attempt ${attempt}/${max})`;
-        currentEl.textContent = text;
-    }
+    OSA.tmodelSubagentRetry(event);
 };
 
 OSA.handleSubagentCompleted = function(event) {
-    const subagentId = event.subagent_session_id;
-    const status = event.status || 'completed';
-    const result = event.result || '';
-    const toolCount = event.tool_count || 0;
-    const durationText = OSA.formatSubagentDuration(event.duration_ms);
-
-    const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
-    if (statusBadge) {
-        statusBadge.textContent = status;
-        statusBadge.className = `subagent-status-badge ${status}`;
-    }
-
-    const countEl = document.getElementById(`subagent-count-${subagentId}`);
-    if (countEl) {
-        countEl.textContent = `${toolCount} tool${toolCount !== 1 ? 's' : ''}${durationText ? ` · ${durationText}` : ''}`;
-    }
-
-    const liveStrip = document.getElementById(`subagent-live-${subagentId}`);
-    if (liveStrip) liveStrip.style.display = 'none';
-
-    const cancelBtn = document.getElementById(`subagent-cancel-${subagentId}`);
-    if (cancelBtn) {
-        cancelBtn.style.display = 'none';
-    }
-
-    const resultEl = document.getElementById(`subagent-result-${subagentId}`);
-    if (resultEl && result) {
-        resultEl.style.display = 'block';
-        resultEl.innerHTML = `<div class="subagent-result-label">Result:</div><div class="subagent-result-text">${OSA.escapeHtml(result.slice(0, 500))}${result.length > 500 ? '\u2026' : ''}</div>`;
-    }
-
-    const data = OSA._activeSubagents.get(subagentId);
-    if (data) {
-        data.status = status;
-        data.result = result;
-    }
-
-    OSA._activeSubagents.delete(subagentId);
+    OSA.tmodelSubagentCompleted(event);
     OSA.loadSessions();
-};
-
-OSA.handleSubagentComplete = function(event) {
-    const output = event.output || '';
-    const sessionMatch = output.match(/session:\s*([a-f0-9-]{36})/i) || output.match(/task_id:\s*([a-f0-9-]+)/i) || output.match(/Subagent Session ID:\s*([a-f0-9-]+)/i);
-    if (sessionMatch) {
-        const subagentId = sessionMatch[1];
-        const data = OSA._activeSubagents.get(subagentId);
-        if (data) {
-            return;
-        }
-    }
 };
 
 OSA._activeWorkflows = OSA._activeWorkflows || new Map();
@@ -1955,7 +1051,6 @@ OSA.ensureWorkflowCard = function(runId, workflowName) {
     `;
 
     OSA.mountFloatingNode(card);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
     return card;
 };
 
@@ -2261,6 +1356,8 @@ OSA.syncToolsFromBackend = async function() {
         }
         return;
     }
+    if (OSA._toolSyncInFlight) return;
+    OSA._toolSyncInFlight = true;
     try {
         const res = await fetch(`/api/sessions/${session.id}/tools`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
@@ -2268,52 +1365,47 @@ OSA.syncToolsFromBackend = async function() {
         if (res.ok) {
             const tools = await res.json();
             if (Array.isArray(tools) && tools.length > 0) {
-                const messagesDiv = document.getElementById('messages');
-                if (messagesDiv) {
-                    // Build set of tool call IDs already in the DOM
-                    const existingContextIds = new Set();
-                    messagesDiv.querySelectorAll('.context-inline-item').forEach(el => {
-                        if (el.id && el.id.startsWith('ctx-')) existingContextIds.add(el.id);
-                    });
-                    const existingCardIds = new Set();
-                    messagesDiv.querySelectorAll('.tool-container:not(.context-inline-group)').forEach(el => {
-                        existingCardIds.add(el.id);
-                    });
-                    if (typeof OSA.getTranscriptView === 'function') {
-                        for (const nodes of OSA.getTranscriptView().anchoredNodesByIndex.values()) {
-                            nodes.forEach(n => { if (n.id) existingCardIds.add(n.id); });
-                        }
-                    }
-
-                    let syncCreated = 0;
-                    let syncSkippedWindow = 0;
-                    let syncExisting = 0;
-                    tools.forEach(t => {
-                        if (t.tool_name === 'subagent') return;
-                        if (typeof OSA.isMessageIndexInRenderedWindow === 'function' && !OSA.isMessageIndexInRenderedWindow(t.message_index)) {
-                            syncSkippedWindow++;
-                            return;
-                        }
-                        const callId = t.tool_call_id;
-                        if (OSA.isContextTool(t.tool_name)) {
-                            if (!existingContextIds.has(`ctx-${callId}`)) {
-                                OSA.restoreToolCard(t);
-                                syncCreated++;
-                            } else {
-                                syncExisting++;
-                            }
-                        } else {
-                            if (!existingCardIds.has(`tool-${callId}`)) {
-                                OSA.restoreToolCard(t);
-                                syncCreated++;
-                            } else {
-                                syncExisting++;
+                let changed = false;
+                tools.forEach(t => {
+                    if (!t || !t.tool_call_id || t.tool_name === 'subagent') return;
+                    const key = 'tool:' + t.tool_call_id;
+                    const existing = OSA.tmodelGet(key);
+                    if (existing) {
+                        if (t.completed === true) {
+                            const nextOutput = typeof t.output === 'string' ? t.output : existing.output;
+                            const nextSuccess = t.success === true;
+                            if (!existing.completed
+                                || existing.output !== nextOutput
+                                || existing.success !== nextSuccess
+                                || existing.title !== (t.title || '')) {
+                                existing.output = nextOutput;
+                                existing.success = nextSuccess;
+                                existing.completed = true;
+                                existing.status = nextSuccess ? 'done' : 'failed';
+                                existing.title = typeof t.title === 'string' ? t.title : existing.title;
+                                existing.metadata = t.metadata || existing.metadata;
+                                changed = true;
                             }
                         }
-                    });
-                    if (OSA.debug) {
-                        OSA.debug.log('tool.sync', { total: tools.length, created: syncCreated, existing: syncExisting, skippedOutOfWindow: syncSkippedWindow });
+                        return;
                     }
+                    OSA.tmodelAppend(OSA.tmodelToolItem({
+                        tool_call_id: t.tool_call_id,
+                        tool_name: t.tool_name,
+                        arguments: t.arguments || {},
+                        output: typeof t.output === 'string' ? t.output : '',
+                        title: typeof t.title === 'string' ? t.title : '',
+                        metadata: t.metadata,
+                        message_index: t.message_index,
+                        timestamp: t.timestamp,
+                    }, { completed: t.completed === true, success: t.success === true, live: false }));
+                    changed = true;
+                });
+                if (changed) {
+                    OSA.tmodelMarkDirty('tool-sync');
+                }
+                if (OSA.debug) {
+                    OSA.debug.log('tool.sync', { total: tools.length, changed });
                 }
             }
         }
@@ -2323,6 +1415,8 @@ OSA.syncToolsFromBackend = async function() {
         }
     } catch (e) {
         // swallow - will retry on next tick
+    } finally {
+        OSA._toolSyncInFlight = false;
     }
 };
 

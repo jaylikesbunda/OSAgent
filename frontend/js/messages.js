@@ -38,7 +38,7 @@ OSA.showThinkingIndicator = function() {
     `;
 
     OSA.mountFloatingNode(indicator);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.tmodelMarkDirty('thinking-indicator');
 
     const canvas = document.getElementById('thinking-canvas');
     if (canvas) {
@@ -175,8 +175,6 @@ OSA.clearPendingFormattedRenders = function() {
 
 OSA.scheduleFormattedRender = function(element, rawText, onRendered) {
     if (!element) return;
-    // The <speak> block is for the synthesizer, not the reader. Strip it before
-    // it reaches the DOM so it never flashes into the chat mid-stream.
     rawText = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(rawText) : rawText;
     element.dataset.rawText = rawText;
     if (onRendered) element._onRendered = onRendered;
@@ -190,7 +188,6 @@ OSA.scheduleFormattedRender = function(element, rawText, onRendered) {
         OSA.setPendingFormattedFrame(null);
         const pending = Array.from(OSA.getPendingFormattedElements());
         OSA.getPendingFormattedElements().clear();
-        let didUpdate = false;
         pending.forEach(el => {
             if (!el || !el.isConnected) return;
             const rawText = el.dataset.rawText || '';
@@ -205,26 +202,12 @@ OSA.scheduleFormattedRender = function(element, rawText, onRendered) {
                 el.innerHTML = OSA.formatMessage(rawText);
                 el.dataset.renderedText = rawText;
             }
-            didUpdate = true;
             if (el._onRendered) {
                 el._onRendered();
                 delete el._onRendered;
             }
         });
     }));
-};
-
-OSA.getStreamingAssistantMessage = function() {
-    const domId = OSA.getStreamingAssistantDomId();
-    if (!domId) return null;
-    return document.getElementById(domId);
-};
-
-OSA.transcriptHasBlockingSiblingAfter = function(element) {
-    if (!element) return false;
-    const wrapper = element.closest('.transcript-entry');
-    const slot = wrapper ? wrapper.querySelector(':scope > .transcript-entry-extras') : null;
-    return !!(slot && slot.children.length > 0);
 };
 
 OSA.getThinkingPreview = function(text) {
@@ -256,25 +239,6 @@ OSA.renderThinkingSection = function(thinking, expanded = false) {
     `;
 };
 
-OSA.ensureThinkingContainer = function(message) {
-    if (!message) return null;
-    let container = message.querySelector('.message-thinking');
-    if (!container) {
-        container = document.createElement('div');
-        container.className = 'message-thinking streaming';
-        container.innerHTML = `
-            <button type="button" class="thinking-toggle" onclick="OSA.toggleThinkingBlock(this)">
-                <span class="thinking-toggle-label">Thinking</span>
-                <span class="thinking-preview"></span>
-            </button>
-            <div class="thinking-body"></div>
-        `;
-        const contentEl = message.querySelector('.message-content');
-        message.insertBefore(container, contentEl);
-    }
-    return container;
-};
-
 OSA.setThinkingPreview = function(container, text) {
     if (!container) return;
     const previewEl = container.querySelector('.thinking-preview');
@@ -282,6 +246,24 @@ OSA.setThinkingPreview = function(container, text) {
     const preview = OSA.getThinkingPreview(text);
     previewEl.textContent = preview;
     previewEl.style.display = preview ? '' : 'none';
+};
+
+OSA.resetStreamingMessage = function() {
+    OSA.clearPendingFormattedRenders();
+    OSA.setStreamingAssistantDomId(null);
+};
+
+OSA.resetMessageChain = function() {
+    const eventSessionId = OSA.messageChain?.eventSessionId || null;
+    OSA.messageChain = {
+        lastEventType: null,
+        lastAssistantDomId: null,
+        pendingToolCallIds: [],
+        eventSessionId,
+        eventSeqNumber: 0,
+        lastThinkingEndSeq: 0,
+        lastToolStartSeq: 0,
+    };
 };
 
 OSA.ensureCurrentSessionAssistantMessage = function(forceNew = false) {
@@ -364,62 +346,14 @@ OSA.insertCurrentSessionToolBoundary = function(event) {
     return toolMessage;
 };
 
-OSA.finalizeAssistantSegmentForToolCall = function(event) {
-    OSA.completeThinkingDisplay();
-    OSA.pruneEmptyStreamingMessage();
-    OSA.markStreamingBoundary();
-    OSA.insertCurrentSessionToolBoundary(event);
-};
-
-OSA.markStreamingBoundary = function() {
-    const chain = OSA.getMessageChain();
-    const domId = OSA.getStreamingAssistantDomId();
-    if (domId) {
-        chain.lastAssistantDomId = domId;
-        const message = document.getElementById(domId);
-        if (message) {
-            message.classList.remove('streaming');
-            const thinking = message.querySelector('.message-thinking');
-            if (thinking) {
-                thinking.classList.remove('streaming');
-                if (!thinking.dataset.userToggled) {
-                    thinking.classList.remove('expanded');
-                }
-                delete thinking.dataset.userToggled;
-            }
-            message.dataset.boundaryAfter = 'tool';
-            OSA.finalizeIncrementalRenders(message);
-        }
+OSA.getActiveTurnAssistantIndex = function(session) {
+    const list = session && Array.isArray(session.messages) ? session.messages : [];
+    for (let i = list.length - 1; i >= 0; i--) {
+        const message = list[i];
+        if (!message || message.role === 'tool') continue;
+        return message.role === 'assistant' ? i : -1;
     }
-    OSA.clearPendingFormattedRenders();
-    OSA.setStreamingAssistantDomId(null);
-};
-
-OSA.prepareAssistantMessageElementForStreaming = function(messageEl, sourceMessage, expandThinking = false) {
-    if (!messageEl) return null;
-    if (!messageEl.id) {
-        messageEl.id = `assistant-stream-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    }
-    messageEl.classList.add('streaming');
-
-    const contentEl = messageEl.querySelector('.message-content');
-    if (contentEl && !contentEl.dataset.rawText) {
-        contentEl.dataset.rawText = OSA.stripSpeakBlock(sourceMessage?.content || '');
-    }
-
-    const thinkingEl = messageEl.querySelector('.thinking-body');
-    if (thinkingEl && !thinkingEl.dataset.rawText) {
-        thinkingEl.dataset.rawText = sourceMessage?.thinking || '';
-    }
-
-    const thinkingWrap = messageEl.querySelector('.message-thinking');
-    if (thinkingWrap && OSA.getShowThinkingBlocks()) {
-        thinkingWrap.classList.add('streaming');
-        OSA.setThinkingPreview(thinkingWrap, sourceMessage?.thinking || '');
-    }
-
-    OSA.setStreamingAssistantDomId(messageEl.id);
-    return messageEl;
+    return -1;
 };
 
 OSA.getActiveTurnAssistantMessage = function(session) {
@@ -450,136 +384,148 @@ OSA.getActiveTurnAssistantMessage = function(session) {
     return last;
 };
 
-OSA.adoptStreamingAssistantFromRenderedSession = function(session) {
-    if (!session || session.task_status !== 'running' || !Array.isArray(session.messages)) {
-        return null;
-    }
-
-    const assistant = OSA.getActiveTurnAssistantMessage(session);
-    if (!assistant) return null;
-
-    const candidates = Array.from(document.querySelectorAll('#messages .message.assistant'));
-    const messageEl = candidates.at(-1);
-    if (!messageEl) return null;
-
-    if (messageEl.dataset.boundaryAfter === 'tool' || OSA.transcriptHasBlockingSiblingAfter(messageEl)) {
-        const contentEl = messageEl.querySelector('.message-content');
-        const nextContent = assistant.content || '';
-        if (contentEl && (contentEl.dataset.rawText || '') !== nextContent) {
-            OSA.scheduleFormattedRender(contentEl, nextContent);
-        }
-        return null;
-    }
-
-    return OSA.prepareAssistantMessageElementForStreaming(messageEl, assistant, OSA.getShowThinkingBlocks());
-};
-
-OSA.resetStreamingMessage = function() {
-    OSA.clearPendingFormattedRenders();
-    OSA.setStreamingAssistantDomId(null);
-};
-
-OSA.resetMessageChain = function() {
-    // Carry the session the counter belongs to across the reset. Dropping it
-    // makes the next event look like it came from a different session, which
-    // zeroes the sequence counter the caller just restored.
-    const eventSessionId = OSA.messageChain?.eventSessionId || null;
-    OSA.messageChain = {
-        lastEventType: null,
-        lastAssistantDomId: null,
-        pendingToolCallIds: [],
-        eventSessionId,
-        eventSeqNumber: 0,
-        lastThinkingEndSeq: 0,
-        lastToolStartSeq: 0,
-    };
-};
-
 OSA.releaseStreamingAssistantMessage = function() {
-    const domId = OSA.getStreamingAssistantDomId();
-    if (!domId) return;
-    const message = document.getElementById(domId);
-    if (!message) {
-        OSA.resetStreamingMessage();
-        return;
-    }
-
-    message.classList.remove('streaming');
-    const thinking = message.querySelector('.message-thinking');
-    if (thinking) {
-        thinking.classList.remove('streaming');
-        if (!thinking.dataset.userToggled) {
-            thinking.classList.remove('expanded');
-        }
-        delete thinking.dataset.userToggled;
-    }
-
-    OSA.finalizeIncrementalRenders(message);
-
-    const chain = OSA.getMessageChain();
-    chain.lastAssistantDomId = domId;
-
-    OSA.resetStreamingMessage();
+    OSA.tmodelReleaseStreamingSegment();
 };
 
-OSA.commitStreamingAssistantSegment = function() {
-    const domId = OSA.getStreamingAssistantDomId();
-    if (!domId) return;
+OSA.beginThinkingDisplay = function() {
+    if (!OSA.getShowThinkingBlocks()) return null;
+    OSA.hideThinkingIndicator();
 
-    const message = document.getElementById(domId);
-    if (!message) {
-        OSA.resetStreamingMessage();
-        return;
+    let item = OSA.tmodelStreamingItem();
+    if (item && (item.content || '').trim()) {
+        item.streaming = false;
+        item.thinkingStreaming = false;
+        item = null;
     }
+    if (!item) {
+        item = OSA.tmodelEnsureAssistantSegment();
+    }
+    if (!item) return null;
+    item.thinkingStreaming = true;
+    OSA.tmodelMarkDirty('thinking-start');
+    return item;
+};
 
-    message.classList.remove('streaming');
-    OSA.completeThinkingDisplay();
+OSA.appendThinkingChunk = function(content) {
+    if (!content) return;
+    OSA.appendCurrentSessionAssistantThinking(content);
+    if (!OSA.getShowThinkingBlocks()) return;
 
+    const item = OSA.tmodelEnsureAssistantSegment();
+    if (!item) return;
+    const session = OSA.getCurrentSession();
+    const msgs = session && Array.isArray(session.messages) ? session.messages : [];
+    const mirror = msgs[msgs.length - 1];
+    if (mirror && mirror.role === 'assistant' && (mirror.thinking || '')) {
+        item.thinking = mirror.thinking;
+    } else {
+        item.thinking = (item.thinking || '') + content;
+    }
+    item.thinkingStreaming = true;
+    OSA.tmodelMarkDirty('thinking-delta');
+};
+
+OSA.completeThinkingDisplay = function() {
+    const item = OSA.tmodelStreamingItem();
+    if (item && item.thinkingStreaming) {
+        item.thinkingStreaming = false;
+        OSA.tmodelMarkDirty('thinking-end');
+    }
+};
+
+OSA.beginAssistantResponse = function() {
+    OSA.hideThinkingIndicator();
+
+    let item = OSA.tmodelStreamingItem();
+    if (item && (item.content || '').trim()) {
+        item.streaming = false;
+        item.thinkingStreaming = false;
+        item = null;
+    }
+    if (item) {
+        item.content = '';
+        const session = OSA.getCurrentSession();
+        const msgs = session && Array.isArray(session.messages) ? session.messages : [];
+        const mirror = msgs[msgs.length - 1];
+        if (mirror && mirror.role === 'assistant') mirror.content = '';
+    } else {
+        item = OSA.tmodelEnsureAssistantSegment();
+    }
+    OSA.tmodelMarkDirty('response-start');
+    return item;
+};
+
+OSA.appendAssistantChunk = function(content) {
+    if (!content) return;
+    OSA.feedSpeechStream?.(content);
+    OSA.appendCurrentSessionAssistantContent(content);
+
+    const item = OSA.tmodelEnsureAssistantSegment();
+    if (!item) return;
+    const session = OSA.getCurrentSession();
+    const msgs = session && Array.isArray(session.messages) ? session.messages : [];
+    const mirror = msgs[msgs.length - 1];
+    if (mirror && mirror.role === 'assistant' && (mirror.content || '')) {
+        item.content = mirror.content;
+    } else {
+        item.content = (item.content || '') + content;
+    }
+    OSA.tmodelMarkDirty('response-chunk');
+};
+
+OSA.pruneEmptyStreamingMessage = function() {
+    OSA.tmodelPruneEmptyStreamingSegment();
+};
+
+OSA.completeAssistantResponse = function(usage) {
     const session = OSA.getCurrentSession();
     const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
+    const item = OSA.tmodelFinalizeStreamingSegment(usage);
 
-    const contentEl = message.querySelector('.message-content');
-    let rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
-    const thinkingEl = message.querySelector('.thinking-body');
-    let thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
+    const rawText = item ? (item.content || '') : (sourceMessage?.content || '');
+    const thinkingText = item ? (item.thinking || '') : (sourceMessage?.thinking || '');
 
-    if (sourceMessage) {
-        const sessionContent = sourceMessage.content || '';
-        const sessionThinking = sourceMessage.thinking || '';
-        if (!rawText && sessionContent) {
-            rawText = sessionContent;
-            if (contentEl) {
-                contentEl.dataset.rawText = OSA.stripSpeakBlock(rawText);
-                contentEl.innerHTML = rawText.trim() ? OSA.formatMessage(rawText) : '';
+    if (rawText && OSA.getTurnStartTime() && OSA.getTtsEnabled() && OSA.getVoiceConfig()?.enabled) {
+        const activePersona = OSA.getActivePersona();
+        const isRoleplay = activePersona?.id === 'custom';
+
+        const rawFull = OSA._speechStreamBuffer || sourceMessage?.content || rawText;
+        const speakBlock = OSA.extractSpeakBlock?.(rawFull);
+
+        if (speakBlock && !isRoleplay) {
+            if (!OSA.speechStreamHandledTurn?.()) {
+                OSA.speakText(speakBlock, { interrupt: false });
+            } else {
+                const tail = OSA.sanitizeSpeechText(OSA.unspokenSpeechTail?.() || '');
+                if (tail) {
+                    OSA.speakText(tail, { interrupt: false });
+                }
             }
-        }
-        if (!thinkingText && sessionThinking) {
-            thinkingText = sessionThinking;
-            if (thinkingEl) {
-                thinkingEl.dataset.rawText = thinkingText;
-                thinkingEl.innerHTML = OSA.formatMessage(thinkingText);
+        } else if (OSA.speechStreamHandledTurn?.() && !isRoleplay) {
+            const tail = OSA.sanitizeSpeechText(OSA.unspokenSpeechTail?.() || '');
+            if (tail) {
+                OSA.speakText(tail, { interrupt: false });
+            }
+        } else {
+            const speechText = OSA.prepareSpeechText(OSA.stripSpeakBlock(rawFull), isRoleplay);
+            if (speechText) {
+                OSA.speakText(speechText);
             }
         }
     }
+    OSA.resetSpeechStream?.();
 
-    if (!rawText && !thinkingText) {
-        message.remove();
-        const chain = OSA.getMessageChain();
-        if (chain.lastAssistantDomId === domId) {
-            chain.lastAssistantDomId = null;
-        }
-        OSA.resetStreamingMessage();
-        return;
-    }
-
-    OSA.updateAssistantMessageActions(message, sourceMessage);
-
-    const chain = OSA.getMessageChain();
-    chain.lastAssistantDomId = domId;
-
-    OSA.finalizeIncrementalRenders(message);
-
+    OSA.setTurnStartTime(null);
     OSA.resetStreamingMessage();
+    OSA.updateTodoDock();
+    const currentSession = OSA.getCurrentSession();
+    if (currentSession && currentSession.id && typeof OSA.loadSessionCheckpoints === 'function') {
+        OSA.loadSessionCheckpoints(currentSession.id, { silent: true });
+    }
+    if (!rawText && !thinkingText) {
+        OSA.tmodelMarkDirty('turn-empty');
+    }
 };
 
 OSA.describeCheckpointForUi = function(checkpoint) {
@@ -611,8 +557,6 @@ OSA.findNearestCheckpointForMessage = function(messageTimestamp, messageIndex = 
     }
 
     let fallbackCheckpoint = null;
-    // Assistant checkpoints are created after a turn completes, so match the first
-    // checkpoint that lands after this message and before the next assistant turn.
     for (let idx = checkpoints.length - 1; idx >= 0; idx -= 1) {
         const checkpoint = checkpoints[idx];
         const checkpointTs = OSA.timestampToMs(checkpoint?.created_at);
@@ -762,15 +706,11 @@ OSA.refreshMessageFeedback = async function() {
     });
 };
 
-/// Finds the index of a rendered message within the current session.
 OSA.indexOfRenderedMessage = function(messageEl) {
     const all = Array.from(document.querySelectorAll('#messages .message'));
     return all.indexOf(messageEl);
 };
 
-/// Drops this assistant reply (and anything after it) and re-runs the turn
-/// from the preceding user message. Previously the only recovery from a bad
-/// turn was a follow-up correction, which left the bad turn poisoning context.
 OSA.regenerateFromMessage = async function(button) {
     const messageEl = button.closest('.message');
     const session = OSA.getCurrentSession();
@@ -784,8 +724,6 @@ OSA.regenerateFromMessage = async function(button) {
     const index = OSA.indexOfRenderedMessage(messageEl);
     if (index < 1) return;
 
-    // Walk back to the user message that produced this reply, so the retry
-    // re-sends the original prompt rather than an empty turn.
     const all = Array.from(document.querySelectorAll('#messages .message'));
     let userIndex = index - 1;
     while (userIndex >= 0 && !all[userIndex].classList.contains('user')) {
@@ -798,10 +736,11 @@ OSA.regenerateFromMessage = async function(button) {
         || '';
     if (!prompt.trim()) return;
 
-    await OSA.truncateSessionMessages(session.id, userIndex);
-    for (let i = all.length - 1; i >= userIndex; i -= 1) {
-        all[i].remove();
-    }
+    const sessionUserIndex = Number.parseInt(all[userIndex].dataset.messageIndex || '', 10);
+    await OSA.truncateSessionMessages(
+        session.id,
+        Number.isInteger(sessionUserIndex) ? sessionUserIndex : userIndex,
+    );
 
     const input = document.getElementById('message-input');
     if (input) input.value = prompt.trim();
@@ -822,6 +761,7 @@ OSA.truncateSessionMessages = async function(sessionId, from) {
     if (session && Array.isArray(session.messages)) {
         session.messages.length = Math.min(session.messages.length, from);
     }
+    OSA.rebuildAfterTruncate(from);
 };
 
 OSA.updateAssistantMessageActions = function(messageEl, sourceMessage) {
@@ -839,7 +779,9 @@ OSA.updateAssistantMessageActions = function(messageEl, sourceMessage) {
     const durationEl = actionsEl.querySelector('.turn-duration');
     const tpsEl = actionsEl.querySelector('.turn-tokens');
 
-    const sourceTimestamp = sourceMessage?.timestamp || messageEl.dataset.messageTimestamp || '';
+    const sourceTimestamp = (sourceMessage && sourceMessage.timestamp)
+        || messageEl.dataset.messageTimestamp
+        || '';
     if (sourceTimestamp) {
         messageEl.dataset.messageTimestamp = sourceTimestamp;
     }
@@ -1124,407 +1066,6 @@ OSA.restoreCheckpoint = async function(checkpointId, button) {
     }
 };
 
-/// Index of the assistant message the running turn is streaming into, i.e. the
-/// last non-tool row of the session. Returns -1 when the tail is not an
-/// assistant message.
-OSA.getActiveTurnAssistantIndex = function(session) {
-    const list = session && Array.isArray(session.messages) ? session.messages : [];
-    for (let i = list.length - 1; i >= 0; i--) {
-        const message = list[i];
-        if (!message || message.role === 'tool') continue;
-        return message.role === 'assistant' ? i : -1;
-    }
-    return -1;
-};
-
-/// The rendered bubble for a specific session index. Picking the trailing
-/// `.message.assistant` in the DOM instead would hand back a *previous* turn's
-/// bubble whenever this turn's entry is not rendered, so the reply would stream
-/// in above the user message that asked for it.
-OSA.getRenderedAssistantElementForIndex = function(messageIndex) {
-    if (!Number.isInteger(messageIndex) || messageIndex < 0) return null;
-    const view = OSA.getTranscriptView();
-    const root = view && view.listRoot ? view.listRoot : document.getElementById('messages');
-    if (!root) return null;
-    const wrapper = root.querySelector(`.transcript-entry[data-message-index="${messageIndex}"]`);
-    if (!wrapper) return null;
-    return wrapper.querySelector(':scope > .message.assistant');
-};
-
-OSA.createAssistantMessageShell = function() {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return null;
-
-    const session = OSA.getCurrentSession();
-    OSA.syncRenderedMessages((session && session.messages) || [], {
-        resetStreaming: false,
-        stickToBottom: true,
-        preferTail: true,
-    });
-
-    const activeIndex = OSA.getActiveTurnAssistantIndex(session);
-    let message = OSA.getRenderedAssistantElementForIndex(activeIndex);
-    if (!message && activeIndex >= 0) {
-        // The sync above can no-op (re-entrant render, stale window). Force the
-        // window onto the tail once rather than falling back to the trailing
-        // assistant bubble in the DOM, which may belong to an earlier turn.
-        OSA.renderMessages((session && session.messages) || [], { reason: 'stream-shell' });
-        message = OSA.getRenderedAssistantElementForIndex(activeIndex);
-    }
-    if (!message) {
-        if (OSA.debug) {
-            OSA.debug.warn('stream.shell-missing', String(activeIndex), 'the running turn has no rendered assistant entry; refusing to stream into an earlier bubble');
-        }
-        return null;
-    }
-
-    const domId = message.id || `assistant-stream-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    message.id = domId;
-    OSA.setStreamingAssistantDomId(domId);
-    const chain = OSA.getMessageChain();
-    chain.lastAssistantDomId = domId;
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    return message;
-};
-
-OSA.ensureStreamingAssistantMessage = function() {
-    const existingId = OSA.getStreamingAssistantDomId();
-    if (existingId) {
-        const existing = document.getElementById(existingId);
-        if (existing) {
-            if (!OSA.transcriptHasBlockingSiblingAfter(existing)) {
-                return existing;
-            }
-
-            existing.classList.remove('streaming');
-            const thinking = existing.querySelector('.message-thinking');
-            if (thinking) {
-                thinking.classList.remove('streaming');
-                thinking.classList.remove('expanded');
-            }
-            OSA.setStreamingAssistantDomId(null);
-        }
-    }
-
-    const chain = OSA.getMessageChain();
-    if (chain.lastAssistantDomId && !existingId) {
-        const lastMsg = document.getElementById(chain.lastAssistantDomId);
-        if (lastMsg && lastMsg.isConnected && !lastMsg.classList.contains('streaming')) {
-            if (OSA.transcriptHasBlockingSiblingAfter(lastMsg)) {
-                chain.lastAssistantDomId = null;
-            } else {
-                const session = OSA.getCurrentSession();
-                const sourceMsg = OSA.getActiveTurnAssistantMessage(session);
-                const restored = OSA.prepareAssistantMessageElementForStreaming(lastMsg, sourceMsg, OSA.getShowThinkingBlocks());
-                if (restored) return restored;
-            }
-        }
-    }
-
-    return OSA.createAssistantMessageShell();
-};
-
-OSA.beginAssistantResponse = function() {
-    const existingStreamingId = OSA.getStreamingAssistantDomId();
-    if (existingStreamingId) {
-        OSA.resetCurrentSessionAssistantContent();
-    }
-    OSA.ensureCurrentSessionAssistantMessage();
-    OSA.hideThinkingIndicator();
-    const message = OSA.ensureStreamingAssistantMessage();
-    if (message) {
-        const contentEl = message.querySelector('.message-content');
-        if (contentEl && contentEl.dataset.rawText) {
-            delete contentEl.dataset.rawText;
-            delete contentEl.dataset.renderedText;
-            contentEl.innerHTML = '';
-        }
-        const thinkingEl = message.querySelector('.thinking-body');
-        if (thinkingEl && thinkingEl.dataset.rawText) {
-            delete thinkingEl.dataset.rawText;
-            delete thinkingEl.dataset.renderedText;
-            thinkingEl.innerHTML = '';
-        }
-        const thinkingWrap = message.querySelector('.message-thinking');
-        if (thinkingWrap) {
-            thinkingWrap.classList.remove('streaming', 'expanded');
-            delete thinkingWrap.dataset.userToggled;
-            const preview = thinkingWrap.querySelector('.thinking-preview');
-            if (preview) { preview.textContent = ''; preview.style.display = 'none'; }
-        }
-    }
-    return message;
-};
-
-OSA.beginThinkingDisplay = function() {
-    if (!OSA.getShowThinkingBlocks()) return null;
-
-    const chain = OSA.getMessageChain();
-    const currentMessage = OSA.getStreamingAssistantMessage();
-    const currentContent = currentMessage
-        ? ((currentMessage.querySelector('.message-content')?.dataset.rawText) || '').trim()
-        : '';
-    const session = OSA.getCurrentSession();
-    const last = session && Array.isArray(session.messages)
-        ? session.messages[session.messages.length - 1]
-        : null;
-    const shouldStartNewSegment = !!(
-        currentContent
-        || (last && last.role === 'assistant' && !OSA.isHiddenSyntheticMessage(last) && (last.content || '').trim())
-    );
-
-    if (shouldStartNewSegment) {
-        OSA.commitStreamingAssistantSegment();
-    }
-
-    OSA.ensureCurrentSessionAssistantMessage(shouldStartNewSegment);
-    OSA.hideThinkingIndicator();
-
-    let message = null;
-    if (!shouldStartNewSegment && chain.lastAssistantDomId) {
-        const lastMsg = document.getElementById(chain.lastAssistantDomId);
-        if (lastMsg && lastMsg.isConnected) {
-            const sourceMsg = OSA.getActiveTurnAssistantMessage(session);
-            message = OSA.prepareAssistantMessageElementForStreaming(lastMsg, sourceMsg, true);
-        }
-    }
-    if (!message) {
-        message = OSA.ensureStreamingAssistantMessage();
-    }
-
-    const existingContainer = message ? message.querySelector('.message-thinking') : null;
-    const container = OSA.ensureThinkingContainer(message);
-    if (!container) return null;
-    container.classList.add('streaming');
-    OSA.setThinkingPreview(container, '');
-    return container;
-};
-
-OSA.appendThinkingChunk = function(content) {
-    if (!content) return;
-    const session = OSA.getCurrentSession();
-    const msgs = session && Array.isArray(session.messages) ? session.messages : [];
-    const last = msgs[msgs.length - 1];
-    const sessionText = last && last.role === 'assistant' ? (last.thinking || '') : '';
-    if (content.length >= 4 && sessionText.endsWith(content)) return;
-    OSA.appendCurrentSessionAssistantThinking(content);
-    if (!OSA.getShowThinkingBlocks()) return;
-    const message = OSA.ensureStreamingAssistantMessage();
-    if (!message) return;
-    const container = OSA.ensureThinkingContainer(message);
-    const body = container ? container.querySelector('.thinking-body') : null;
-    if (!body) return;
-
-    const nextText = (last && last.role === 'assistant' ? (last.thinking || '') : '')
-        || (body.dataset.rawText || '') + content;
-    const messagesDiv = document.getElementById('messages');
-    OSA.scheduleFormattedRender(body, nextText, () => {
-        OSA.setThinkingPreview(container, nextText);
-        if (messagesDiv) {
-            const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 140;
-            if (nearBottom) {
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            }
-        }
-    });
-};
-
-OSA.completeThinkingDisplay = function() {
-    if (!OSA.getShowThinkingBlocks()) return;
-    const message = OSA.getStreamingAssistantMessage();
-    if (!message) return;
-    const container = message.querySelector('.message-thinking');
-    if (!container) return;
-    container.classList.remove('streaming');
-    const body = container.querySelector('.thinking-body');
-    const rawText = body ? (body.dataset.rawText || '').trim() : '';
-    if (rawText) {
-        OSA.setThinkingPreview(container, rawText);
-    }
-    if (body) OSA.flushIncrementalMarkdown(body, body.dataset.rawText || '');
-};
-
-OSA.appendAssistantChunk = function(content) {
-    if (!content) return;
-    OSA.feedSpeechStream?.(content);
-    const session = OSA.getCurrentSession();
-    const msgs = session && Array.isArray(session.messages) ? session.messages : [];
-    const last = msgs[msgs.length - 1];
-    const sessionText = last && last.role === 'assistant' ? (last.content || '') : '';
-    if (content.length >= 4 && sessionText.endsWith(content)) return;
-    OSA.appendCurrentSessionAssistantContent(content);
-    const message = OSA.ensureStreamingAssistantMessage();
-    if (!message) return;
-    const contentEl = message.querySelector('.message-content');
-    // Render from the full raw accumulation, never from the already-stripped
-    // DOM text. stripSpeakBlock needs the opening tag present to remove the
-    // block; appending to the stripped text would leak the block content and
-    // a stray </speak> into the chat.
-    const nextText = (last && last.role === 'assistant' ? (last.content || '') : '')
-        || (contentEl.dataset.rawText || '') + content;
-    const messagesDiv = document.getElementById('messages');
-    OSA.scheduleFormattedRender(contentEl, nextText, () => {
-        if (messagesDiv) {
-            const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 140;
-            if (nearBottom) {
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            }
-        }
-    });
-};
-
-OSA.completeAssistantResponse = function(usage) {
-    const domId = OSA.getStreamingAssistantDomId();
-    if (!domId) return;
-    const message = document.getElementById(domId);
-    if (message) {
-        message.classList.remove('streaming');
-        OSA.completeThinkingDisplay();
-        OSA.finalizeIncrementalRenders(message);
-
-        const session = OSA.getCurrentSession();
-        const sourceMessage = OSA.getActiveTurnAssistantMessage(session);
-
-        const contentEl = message.querySelector('.message-content');
-        let rawText = contentEl ? (contentEl.dataset.rawText || '') : '';
-        const thinkingEl = message.querySelector('.thinking-body');
-        let thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '') : '';
-
-        if (sourceMessage) {
-            const sessionContent = sourceMessage.content || '';
-            const sessionThinking = sourceMessage.thinking || '';
-            if (!rawText && sessionContent) {
-                rawText = sessionContent;
-                if (contentEl) {
-                    // The <speak> block is speech channel, not reader content:
-                    // keep the stored raw text display-shaped so the copy and
-                    // Speak buttons never hand it to the user or the TTS.
-                    contentEl.dataset.rawText = OSA.stripSpeakBlock(rawText);
-                    contentEl.innerHTML = rawText.trim() ? OSA.formatMessage(rawText) : '';
-                }
-            }
-            if (!thinkingText && sessionThinking) {
-                thinkingText = sessionThinking;
-                if (thinkingEl) {
-                    thinkingEl.dataset.rawText = thinkingText;
-                    thinkingEl.innerHTML = OSA.formatMessage(thinkingText);
-                }
-            }
-        }
-
-        if (!rawText && !thinkingText) {
-            message.remove();
-            OSA.setTurnStartTime(null);
-            OSA.resetStreamingMessage();
-            OSA.updateTodoDock();
-            return;
-        }
-        OSA.updateAssistantMessageActions(message, sourceMessage);
-        const actionsEl = message.querySelector('.message-actions');
-
-        const startTime = OSA.getTurnStartTime();
-        if (startTime) {
-            const elapsedMs = Date.now() - startTime;
-            const elapsedSec = elapsedMs / 1000;
-            const durationEl = message.querySelector('.turn-duration');
-            if (durationEl) {
-                const elapsed = Math.round(elapsedSec);
-                durationEl.textContent = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-            }
-
-            if (usage && usage.output > 0 && elapsedSec > 0) {
-                const tps = (usage.output / elapsedSec).toFixed(1);
-                let tpsEl = message.querySelector('.turn-tokens');
-                if (!tpsEl) {
-                    tpsEl = document.createElement('span');
-                    tpsEl.className = 'turn-tokens';
-                    const restoreBtn = actionsEl ? actionsEl.querySelector('.msg-action-restore') : null;
-                    const copyBtn = actionsEl ? actionsEl.querySelector('.msg-action-copy') : null;
-                    if (restoreBtn) {
-                        restoreBtn.after(tpsEl);
-                    } else if (copyBtn) {
-                        copyBtn.after(tpsEl);
-                    } else if (durationEl) {
-                        durationEl.after(tpsEl);
-                    } else {
-                        actionsEl.prepend(tpsEl);
-                    }
-                }
-                tpsEl.textContent = `${tps} tok/s`;
-                tpsEl.title = `${usage.total} total tokens`;
-            }
-        }
-
-        if (rawText && startTime && OSA.getTtsEnabled() && OSA.getVoiceConfig()?.enabled) {
-            const activePersona = OSA.getActivePersona();
-            const isRoleplay = activePersona?.id === 'custom';
-
-            // The full raw reply, tags and all: the streaming buffer when the
-            // turn streamed, otherwise the session message still carries the
-            // <speak> block that was stripped from the DOM.
-            const rawFull = OSA._speechStreamBuffer || sourceMessage?.content || rawText;
-            const speakBlock = OSA.extractSpeakBlock?.(rawFull);
-
-            if (speakBlock && !isRoleplay) {
-                // The model wrote the spoken version itself; say only what has
-                // not already been spoken while streaming.
-                if (!OSA.speechStreamHandledTurn?.()) {
-                    OSA.speakText(speakBlock, { interrupt: false });
-                } else {
-                    const tail = OSA.sanitizeSpeechText(OSA.unspokenSpeechTail?.() || '');
-                    if (tail) {
-                        OSA.speakText(tail, { interrupt: false });
-                    }
-                }
-            } else if (OSA.speechStreamHandledTurn?.() && !isRoleplay) {
-                // Sentences were spoken as they streamed; only the trailing
-                // fragment after the last terminator is still unspoken.
-                const tail = OSA.sanitizeSpeechText(OSA.unspokenSpeechTail?.() || '');
-                if (tail) {
-                    OSA.speakText(tail, { interrupt: false });
-                }
-            } else {
-                // No block and nothing streamed: fall back to the written
-                // reply, minus the speak block that is not reader content.
-                const speechText = OSA.prepareSpeechText(OSA.stripSpeakBlock(rawFull), isRoleplay);
-                if (speechText) {
-                    OSA.speakText(speechText);
-                }
-            }
-        }
-        OSA.resetSpeechStream?.();
-    }
-    OSA.setTurnStartTime(null);
-    OSA.resetStreamingMessage();
-    OSA.updateTodoDock();
-    const currentSession = OSA.getCurrentSession();
-    if (currentSession && currentSession.id && typeof OSA.loadSessionCheckpoints === 'function') {
-        OSA.loadSessionCheckpoints(currentSession.id, { silent: true });
-    }
-};
-
-OSA.pruneEmptyStreamingMessage = function() {
-    const domId = OSA.getStreamingAssistantDomId();
-    if (!domId) return;
-    const message = document.getElementById(domId);
-    if (!message) {
-        OSA.resetStreamingMessage();
-        return;
-    }
-    const contentEl = message.querySelector('.message-content');
-    const rawText = contentEl ? (contentEl.dataset.rawText || '').trim() : '';
-    const thinkingEl = message.querySelector('.thinking-body');
-    const thinkingText = thinkingEl ? (thinkingEl.dataset.rawText || '').trim() : '';
-    if (!rawText && !thinkingText) {
-        message.remove();
-        const chain = OSA.getMessageChain();
-        if (chain.lastAssistantDomId === domId) {
-            chain.lastAssistantDomId = null;
-        }
-        OSA.resetStreamingMessage();
-    }
-};
-
 OSA.copyAssistantMessage = function(domId) {
     const message = document.getElementById(domId);
     if (!message) return;
@@ -1571,7 +1112,7 @@ OSA.showErrorCard = function(errorMsg) {
         <button class="error-card-retry" onclick="this.closest('.error-card').remove()">Dismiss</button>
     `;
     OSA.mountFloatingNode(card);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    OSA.tmodelMarkDirty('error-card');
 };
 
 OSA.formatInlineMarkdown = function(line) {
@@ -1585,9 +1126,6 @@ OSA.formatInlineMarkdown = function(line) {
 };
 
 OSA.formatMessage = function(text) {
-    // The <speak> block is for the synthesizer, not the reader. Strip it here so
-    // every path that renders raw text (history restore, tool cards, previews)
-    // is covered, not just the streaming renderer.
     text = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(text) : text;
     const escaped = OSA.escapeHtml((text || '').replace(/\n+$/, ''));
     const lines = escaped.split('\n');
@@ -2012,396 +1550,6 @@ OSA.getAttachmentImageSrc = function(attachment) {
     return attachment?.previewUrl || attachment?.preview_url || attachment?.dataUrl || attachment?.data_url || '';
 };
 
-OSA.ensureMessageLayers = function() {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return null;
-
-    const view = OSA.getTranscriptView();
-    if (view.initialized && view.transcriptRoot?.isConnected && view.floatingRoot?.isConnected) {
-        return view;
-    }
-
-    const transcriptRoot = document.createElement('div');
-    transcriptRoot.className = 'messages-transcript-root';
-
-    const topSpacer = document.createElement('div');
-    topSpacer.className = 'messages-virtual-spacer top';
-
-    const topSentinel = document.createElement('div');
-    topSentinel.className = 'messages-virtual-sentinel top';
-    topSentinel.setAttribute('aria-hidden', 'true');
-
-    const listRoot = document.createElement('div');
-    listRoot.className = 'messages-transcript-list';
-
-    const bottomSentinel = document.createElement('div');
-    bottomSentinel.className = 'messages-virtual-sentinel bottom';
-    bottomSentinel.setAttribute('aria-hidden', 'true');
-
-    const bottomSpacer = document.createElement('div');
-    bottomSpacer.className = 'messages-virtual-spacer bottom';
-
-    transcriptRoot.append(topSpacer, topSentinel, listRoot, bottomSentinel, bottomSpacer);
-
-    const floatingRoot = document.createElement('div');
-    floatingRoot.className = 'messages-floating-root';
-
-    messagesDiv.replaceChildren(transcriptRoot, floatingRoot);
-
-    view.transcriptRoot = transcriptRoot;
-    view.topSpacer = topSpacer;
-    view.topSentinel = topSentinel;
-    view.listRoot = listRoot;
-    view.bottomSentinel = bottomSentinel;
-    view.bottomSpacer = bottomSpacer;
-    view.floatingRoot = floatingRoot;
-
-    if (!view.scrollHandlerAttached) {
-        messagesDiv.addEventListener('scroll', function() {
-            const distance = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight;
-            view.userPinnedToBottom = distance < 120;
-        }, { passive: true });
-        view.scrollHandlerAttached = true;
-    }
-
-    if (!view.ioTop) {
-        view.ioTop = new IntersectionObserver(entries => {
-            if (view.isRendering || view.shiftInProgress) return;
-            if (!view.descriptors || view.descriptors.length <= view.maxWindowSize) return;
-            if ((Date.now() - view.lastShiftAt) < 80) return;
-            if (entries.some(entry => entry.isIntersecting)) {
-                OSA.shiftTranscriptWindow(-1);
-            }
-        }, { root: messagesDiv, threshold: 0.01, rootMargin: '220px 0px 0px 0px' });
-    }
-
-    if (!view.ioBottom) {
-        view.ioBottom = new IntersectionObserver(entries => {
-            if (view.isRendering || view.shiftInProgress) return;
-            if (!view.descriptors || view.descriptors.length <= view.maxWindowSize) return;
-            if ((Date.now() - view.lastShiftAt) < 80) return;
-            entries.forEach(entry => {
-                if (entry.target === view.bottomSentinel) {
-                    view.userPinnedToBottom = entry.isIntersecting;
-                }
-            });
-            if (entries.some(entry => entry.isIntersecting)) {
-                OSA.shiftTranscriptWindow(1);
-            }
-        }, { root: messagesDiv, threshold: 0.01, rootMargin: '0px 0px 220px 0px' });
-    }
-
-    view.ioTop.disconnect();
-    view.ioBottom.disconnect();
-    view.ioTop.observe(topSentinel);
-    view.ioBottom.observe(bottomSentinel);
-    view.initialized = true;
-    return view;
-};
-
-OSA.getFloatingRoot = function() {
-    const view = OSA.ensureMessageLayers();
-    return view ? view.floatingRoot : null;
-};
-
-OSA.getTranscriptSlotForMessageIndex = function(messageIndex) {
-    const view = OSA.getTranscriptView();
-    if (!view.listRoot) return null;
-    const wrapper = view.listRoot.querySelector(`.transcript-entry[data-message-index="${messageIndex}"]`);
-    return wrapper ? wrapper.querySelector('.transcript-entry-extras') : null;
-};
-
-OSA.resolveTranscriptAnchorMessageIndex = function(messageIndex) {
-    const parsed = Number.parseInt(String(messageIndex), 10);
-    if (!Number.isInteger(parsed)) return null;
-
-    const view = OSA.getTranscriptView();
-    const descriptors = Array.isArray(view.descriptors) ? view.descriptors : [];
-    if (!descriptors.length) return parsed;
-
-    let anchor = null;
-    for (const item of descriptors) {
-        if (!item || !Number.isInteger(item.originalIndex)) continue;
-        if (item.originalIndex <= parsed) {
-            anchor = item.originalIndex;
-            continue;
-        }
-        break;
-    }
-
-    if (anchor !== null) return anchor;
-    return Number.isInteger(descriptors[0]?.originalIndex) ? descriptors[0].originalIndex : parsed;
-};
-
-OSA.storeAnchoredNode = function(node, messageIndex) {
-    if (!node) return;
-    const parsedIndex = Number.parseInt(String(messageIndex), 10);
-    if (!Number.isInteger(parsedIndex)) return;
-    OSA.removeStoredAnchoredNode(node);
-    node.dataset.messageIndex = String(parsedIndex);
-    node.dataset.anchorMessageIndex = String(parsedIndex);
-    const view = OSA.getTranscriptView();
-    if (!view.anchoredNodesByIndex.has(parsedIndex)) {
-        view.anchoredNodesByIndex.set(parsedIndex, []);
-    }
-    const list = view.anchoredNodesByIndex.get(parsedIndex);
-    if (node.id) {
-        const dupIdx = list.findIndex((n) => n !== node && n.id === node.id);
-        if (dupIdx !== -1) {
-            list.splice(dupIdx, 1);
-        }
-    }
-    if (!list.includes(node)) {
-        list.push(node);
-    }
-};
-
-OSA.findAnchoredNodeById = function(domId) {
-    if (!domId) return null;
-    const view = OSA.getTranscriptView();
-    for (const nodes of view.anchoredNodesByIndex.values()) {
-        const hit = nodes.find((n) => n.id === domId);
-        if (hit) return hit;
-    }
-    return null;
-};
-
-OSA.removeStoredAnchoredNode = function(node) {
-    if (!node) return;
-    const view = OSA.getTranscriptView();
-    const parsedIndex = Number.parseInt(node.dataset.anchorMessageIndex || '', 10);
-    if (!Number.isInteger(parsedIndex)) return;
-    const nodes = view.anchoredNodesByIndex.get(parsedIndex) || [];
-    const next = nodes.filter(item => item !== node);
-    if (next.length > 0) {
-        view.anchoredNodesByIndex.set(parsedIndex, next);
-    } else {
-        view.anchoredNodesByIndex.delete(parsedIndex);
-    }
-    delete node.dataset.anchorMessageIndex;
-};
-
-OSA.mountAnchoredNode = function(node, messageIndex, insertBefore = null) {
-    const requestedIndex = Number.parseInt(String(messageIndex), 10);
-    const resolvedIndex = OSA.resolveTranscriptAnchorMessageIndex(messageIndex);
-    if (!Number.isInteger(resolvedIndex)) return node;
-    if (OSA.debug) {
-        if (Number.isInteger(requestedIndex) && requestedIndex !== resolvedIndex) {
-            OSA.debug.log('anchor.remap', { node: node.id || String(node.className), requested: requestedIndex, resolved: resolvedIndex });
-        }
-    }
-    OSA.storeAnchoredNode(node, resolvedIndex);
-    if (Number.isInteger(requestedIndex) && requestedIndex !== resolvedIndex) {
-        OSA.storeAnchoredNode(node, requestedIndex);
-    }
-    const slot = OSA.getTranscriptSlotForMessageIndex(resolvedIndex);
-    if (!slot) {
-        if (OSA.debug) {
-            OSA.debug.log('anchor.hidden', { node: node.id || String(node.className), requested: requestedIndex, resolved: resolvedIndex });
-            OSA.debug.warn('anchor.hidden', node.id || String(node.className), 'anchored node has no rendered transcript slot; it stays invisible until the transcript renders this index or the session is reloaded');
-        }
-        return node;
-    }
-    if (insertBefore && insertBefore.parentNode === slot) {
-        slot.insertBefore(node, insertBefore);
-    } else {
-        slot.appendChild(node);
-    }
-    if (OSA.debug) {
-        OSA.debug.log('anchor.mounted', { node: node.id || String(node.className), requested: requestedIndex, resolved: resolvedIndex });
-    }
-    return node;
-};
-
-OSA.mountPendingAnchoredNodes = function() {
-    const view = OSA.getTranscriptView();
-    if (!view || !view.listRoot) return 0;
-    let recovered = 0;
-    for (const [index, nodes] of view.anchoredNodesByIndex.entries()) {
-        const rendered = view.renderedMessageIndices.has(index);
-        const slot = OSA.getTranscriptSlotForMessageIndex(index);
-        for (const node of [...nodes]) {
-            if (node.isConnected) continue;
-            if (!rendered || !slot) {
-                if (OSA.debug) {
-                    OSA.debug.warn('anchor.orphan', node.id || String(node.className), `anchored node stored at index ${index} is detached and not rendered (window ${view.windowStart}..${view.windowEnd}, descriptors ${view.descriptors.length}) — it will only appear on session reload`);
-                }
-                continue;
-            }
-            slot.appendChild(node);
-            recovered++;
-            if (OSA.debug) {
-                OSA.debug.log('anchor.recovered', { node: node.id || String(node.className), index });
-            }
-        }
-    }
-    return recovered;
-};
-
-OSA.mountFloatingNode = function(node, insertBefore = null) {
-    const floatingRoot = OSA.getFloatingRoot();
-    if (!floatingRoot || !node) return node;
-    if (insertBefore && insertBefore.parentNode === floatingRoot) {
-        floatingRoot.insertBefore(node, insertBefore);
-    } else {
-        floatingRoot.appendChild(node);
-    }
-    return node;
-};
-
-OSA.findAnchorMessageIndexForTimestamp = function(timestamp) {
-    const session = OSA.getCurrentSession();
-    if (!session || !Array.isArray(session.messages) || !timestamp) return -1;
-    const targetMs = OSA.timestampToMs(timestamp);
-    if (targetMs === null) return -1;
-
-    let anchor = -1;
-    session.messages.forEach((message, originalIndex) => {
-        if (message.role === 'tool' || OSA.isHiddenSyntheticMessage(message)) return;
-        const messageMs = OSA.timestampToMs(message.timestamp);
-        if (messageMs !== null && messageMs <= targetMs) {
-            anchor = originalIndex;
-        }
-    });
-    return anchor;
-};
-
-// Anchor to use when a timestamp lookup fails. These nodes are created live, so
-// they belong at the current end of the transcript — falling back to index 0
-// would pin them to the very top until a reload recomputed the real anchor.
-OSA.getLatestAnchorMessageIndex = function() {
-    const session = OSA.getCurrentSession();
-    if (!session || !Array.isArray(session.messages) || session.messages.length === 0) return 0;
-    for (let i = session.messages.length - 1; i >= 0; i--) {
-        const message = session.messages[i];
-        if (message.role === 'tool' || OSA.isHiddenSyntheticMessage(message)) continue;
-        return i;
-    }
-    return session.messages.length - 1;
-};
-
-OSA.createTranscriptEntry = function(message, originalIndex) {
-    const key = OSA.getMessageRenderKey(message, originalIndex);
-    const wrapper = document.createElement('div');
-    wrapper.className = 'transcript-entry';
-    wrapper.dataset.messageIndex = String(originalIndex);
-    wrapper.dataset.messageKey = key;
-
-    const messageEl = OSA.createMessageElement(message, originalIndex);
-    const extrasSlot = document.createElement('div');
-    extrasSlot.className = 'transcript-entry-extras';
-
-    wrapper.append(messageEl, extrasSlot);
-    return wrapper;
-};
-
-OSA.patchTranscriptEntry = function(wrapper, message, originalIndex) {
-    if (!wrapper) return;
-    const key = OSA.getMessageRenderKey(message, originalIndex);
-    wrapper.dataset.messageIndex = String(originalIndex);
-    wrapper.dataset.messageKey = key;
-
-    let messageEl = wrapper.querySelector(':scope > .message');
-    if (!messageEl) {
-        messageEl = OSA.createMessageElement(message, originalIndex);
-        wrapper.prepend(messageEl);
-    }
-    OSA.patchMessageElement(messageEl, message, originalIndex);
-
-    let extrasSlot = wrapper.querySelector(':scope > .transcript-entry-extras');
-    if (!extrasSlot) {
-        extrasSlot = document.createElement('div');
-        extrasSlot.className = 'transcript-entry-extras';
-        wrapper.appendChild(extrasSlot);
-    }
-    return wrapper;
-};
-
-OSA.attachAnchoredNodesForEntry = function(wrapper, messageIndex) {
-    const slot = wrapper ? wrapper.querySelector(':scope > .transcript-entry-extras') : null;
-    if (!slot) return;
-    const view = OSA.getTranscriptView();
-    const nodes = view.anchoredNodesByIndex.get(messageIndex) || [];
-    slot.replaceChildren(...nodes);
-    if (OSA.debug && nodes.length > 0) {
-        OSA.debug.log('anchor.attach', { index: messageIndex, nodes: nodes.map(n => n.id || String(n.className)) });
-    }
-};
-
-/// True when nothing but tool boundary rows follow this index. The empty
-/// assistant placeholder of a running turn is the transcript slot every live
-/// tool card anchors into, and `insertCurrentSessionToolBoundary` pushes a
-/// role:'tool' row right after it on the first tool_start. Testing "is the very
-/// last message" would retire that slot mid-turn, which detaches every card
-/// already mounted under it and leaves the next chunk of assistant text hunting
-/// for a bubble further up the transcript.
-/// True when tool cards, subagent cards or other anchored artifacts are parked
-/// at this index. Such a row must keep rendering even when the message itself
-/// is empty — retiring it drops its extras slot and every card inside it, and
-/// nothing puts them back until the session is reloaded.
-OSA.transcriptIndexHasAnchoredNodes = function(originalIndex) {
-    const view = OSA.getTranscriptView();
-    if (!view || !view.anchoredNodesByIndex) return false;
-    const nodes = view.anchoredNodesByIndex.get(originalIndex);
-    return Array.isArray(nodes) && nodes.length > 0;
-};
-
-OSA.isTrailingTurnPlaceholder = function(list, originalIndex) {
-    for (let i = list.length - 1; i > originalIndex; i--) {
-        if (list[i] && list[i].role !== 'tool') return false;
-    }
-    return true;
-};
-
-OSA.getVisibleMessages = function(messages) {
-    const list = Array.isArray(messages) ? messages : [];
-    const currentSession = OSA.getCurrentSession();
-    // `task_status` lags the socket: chunks can arrive before the event that
-    // flips it to 'running'. Fall back to the local processing flag so the
-    // placeholder is never filtered out from under an in-flight stream.
-    const running = (currentSession && currentSession.task_status === 'running')
-        || (typeof OSA.isAgentProcessing === 'function' && OSA.isAgentProcessing());
-
-    return list
-        .map((message, originalIndex) => ({ message, originalIndex }))
-        .filter(({ message, originalIndex }) => {
-            if (message.role === 'tool') return false;
-            if (OSA.isHiddenSyntheticMessage(message)) return false;
-            if (message.role !== 'assistant') return true;
-            const hasContent = !!(message.content || '').trim();
-            const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
-            const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
-            if (hasContent || hasVisibleThinking || hasToolCalls) return true;
-            if (OSA.transcriptIndexHasAnchoredNodes(originalIndex)) return true;
-            return !!running && OSA.isTrailingTurnPlaceholder(list, originalIndex);
-        });
-};
-
-OSA.getMessageRenderKey = function(message, originalIndex) {
-    const clientId = message && message.metadata && message.metadata.client_message_id;
-    if (clientId) return `client:${clientId}`;
-    const ts = message && message.timestamp ? String(message.timestamp) : '';
-    const role = message && message.role ? String(message.role) : 'unknown';
-    const toolId = message && message.tool_call_id ? String(message.tool_call_id) : '';
-    return `idx:${originalIndex}|${role}|${ts}|${toolId}`;
-};
-
-OSA.getMessageRenderSignature = function(message) {
-    const attachments = message && message.metadata && Array.isArray(message.metadata.attachments)
-        ? message.metadata.attachments.length
-        : 0;
-    const images = message && Array.isArray(message.images) ? message.images.length : 0;
-    return [
-        message?.role || '',
-        message?.content || '',
-        message?.thinking || '',
-        message?.timestamp || '',
-        String(attachments),
-        String(images),
-        OSA.getShowThinkingBlocks() ? '1' : '0',
-    ].join('\u0001');
-};
-
 OSA.collectMessageAttachments = function(message) {
     const items = [];
     if (message?.role === 'user' && Array.isArray(message.images)) {
@@ -2411,124 +1559,6 @@ OSA.collectMessageAttachments = function(message) {
         message.metadata.attachments.forEach(att => items.push(att));
     }
     return items;
-};
-
-OSA.createNodeFromHtml = function(html, className = '') {
-    const wrapper = document.createElement('div');
-    if (className) wrapper.className = className;
-    wrapper.innerHTML = html;
-    return wrapper;
-};
-
-OSA.createMessageElement = function(message, originalIndex) {
-    const el = document.createElement('div');
-    OSA.patchMessageElement(el, message, originalIndex, true);
-    return el;
-};
-
-OSA.patchMessageElement = function(element, message, originalIndex, force = false) {
-    if (!element || !message) return;
-
-    const key = OSA.getMessageRenderKey(message, originalIndex);
-    const signature = OSA.getMessageRenderSignature(message);
-    if (!force && element.dataset.renderSignature === signature) {
-        return;
-    }
-
-    const ts = message.timestamp ? new Date(message.timestamp).getTime() : 0;
-    const wasStreaming = element.classList.contains('streaming');
-    element.className = `message ${message.role}`;
-    if (wasStreaming) element.classList.add('streaming');
-    element.dataset.ts = String(ts);
-    element.dataset.messageIndex = String(originalIndex);
-    element.dataset.messageTimestamp = message.timestamp || '';
-    element.dataset.messageKey = key;
-    element.dataset.renderSignature = signature;
-
-    const roleEl = document.createElement('div');
-    roleEl.className = 'message-role';
-    roleEl.textContent = message.role === 'user' ? 'You' : 'OSA';
-
-    const children = [roleEl];
-
-    const existingThinkingContainer = element.querySelector('.message-thinking');
-    const existingThinkingBody = existingThinkingContainer ? existingThinkingContainer.querySelector('.thinking-body') : null;
-    const existingThinkingRaw = existingThinkingBody ? (existingThinkingBody.dataset.rawText || '') : '';
-    const thinkingWasStreaming = existingThinkingContainer ? existingThinkingContainer.classList.contains('streaming') : false;
-    const thinkingWasExpanded = existingThinkingContainer ? existingThinkingContainer.classList.contains('expanded') : false;
-    const thinkingUserToggled = existingThinkingContainer ? existingThinkingContainer.dataset.userToggled : '';
-
-    if (message.role === 'assistant') {
-        const thinkingData = message.thinking || '';
-        const bestThinking = existingThinkingRaw.length > thinkingData.length ? existingThinkingRaw : thinkingData;
-        const thinkingHtml = OSA.renderThinkingSection(bestThinking, false);
-        if (thinkingHtml) {
-            const thinkingWrap = OSA.createNodeFromHtml(thinkingHtml, 'message-thinking-wrap');
-            const newThinkingEl = thinkingWrap.firstElementChild;
-            if (newThinkingEl) {
-                const newThinkingBody = newThinkingEl.querySelector('.thinking-body');
-                if (newThinkingBody) {
-                    newThinkingBody.dataset.rawText = bestThinking;
-                }
-                if (thinkingWasStreaming) newThinkingEl.classList.add('streaming');
-                if (thinkingWasExpanded) newThinkingEl.classList.add('expanded');
-                if (thinkingUserToggled) newThinkingEl.dataset.userToggled = thinkingUserToggled;
-            }
-            if (newThinkingEl) children.push(newThinkingEl);
-        }
-    }
-
-    const existingContentEl = element.querySelector('.message-content');
-    const existingContentRaw = existingContentEl ? (existingContentEl.dataset.rawText || '') : '';
-
-    const contentEl = document.createElement('div');
-    contentEl.className = 'message-content';
-    if (message.role === 'assistant') {
-        const rawContent = message.content || '';
-        const bestContent = existingContentRaw.length > rawContent.length ? existingContentRaw : rawContent;
-        contentEl.innerHTML = bestContent.trim() ? OSA.formatMessage(bestContent) : '';
-        contentEl.dataset.rawText = OSA.stripSpeakBlock(bestContent);
-    } else {
-        contentEl.textContent = message.content || '';
-    }
-    children.push(contentEl);
-
-    const attachments = OSA.collectMessageAttachments(message);
-    if (attachments.length > 0) {
-        const attachmentsHtml = OSA.renderAttachmentMarkup(attachments);
-        if (attachmentsHtml) {
-            const attachmentsWrap = OSA.createNodeFromHtml(attachmentsHtml, 'message-attachments-wrap');
-            while (attachmentsWrap.firstChild) {
-                children.push(attachmentsWrap.firstChild);
-            }
-        }
-    }
-
-    if (message.role === 'assistant') {
-        const actionsEl = document.createElement('div');
-        actionsEl.className = 'message-actions';
-        const hasContent = !!(message.content || '').trim();
-        actionsEl.style.display = hasContent ? '' : 'none';
-        actionsEl.innerHTML = OSA.renderAssistantActionButtons(OSA.findNearestCheckpointForMessage(message.timestamp, originalIndex));
-        children.push(actionsEl);
-    }
-
-    const clientId = message && message.metadata && message.metadata.client_message_id;
-    if (clientId) {
-        element.dataset.clientMessageId = clientId;
-    } else {
-        delete element.dataset.clientMessageId;
-    }
-
-    if (Number.isInteger(originalIndex)) {
-        element.dataset.messageIndex = String(originalIndex);
-    }
-
-    element.replaceChildren(...children);
-
-    if (message.role === 'assistant') {
-        OSA.applyCachedFeedbackToMessage(element);
-    }
 };
 
 OSA.resetTranscriptView = function() {
@@ -2543,8 +1573,11 @@ OSA.resetTranscriptView = function() {
     view.messageSignatures.clear();
     view.windowNodesByKey.clear();
     view.wrapperNodesByKey.clear();
+    if (view.toolNodesByCallId) view.toolNodesByCallId.clear();
+    if (view.ctxNodesByCallId) view.ctxNodesByCallId.clear();
     view.anchoredNodesByIndex.clear();
     view.descriptors = [];
+    view.units = [];
     view.lastDescriptorCount = 0;
     view.renderedMessageIndices = new Set();
     view.windowStart = 0;
@@ -2558,6 +1591,8 @@ OSA.resetTranscriptView = function() {
     view.bottomSentinel = null;
     view.bottomSpacer = null;
     view.floatingRoot = null;
+
+    OSA.tmodelReset();
 
     const messagesDiv = document.getElementById('messages');
     if (messagesDiv) {
@@ -2576,246 +1611,11 @@ OSA.renderEmptyTranscript = function(text = 'Click "New chat" to begin') {
     messagesDiv.appendChild(empty);
 };
 
-OSA.isMessageIndexInRenderedWindow = function(messageIndex) {
-    const resolvedIndex = OSA.resolveTranscriptAnchorMessageIndex(messageIndex);
-    if (!Number.isInteger(resolvedIndex)) return false;
-    const view = OSA.getTranscriptView();
-    return view.renderedMessageIndices.has(resolvedIndex);
-};
-
-OSA.estimateMessageRangeHeight = function(descriptors, start, end, view) {
-    let total = 0;
-    for (let i = start; i < end; i++) {
-        const item = descriptors[i];
-        if (!item) continue;
-        const key = OSA.getMessageRenderKey(item.message, item.originalIndex);
-        total += view.messageHeights.get(key) || view.avgMessageHeight;
-    }
-    return total;
-};
-
-OSA.shiftTranscriptWindow = function(direction) {
-    const view = OSA.getTranscriptView();
-    if (!view.descriptors.length || view.shiftInProgress) return;
-
-    const total = view.descriptors.length;
-    let nextStart = view.windowStart;
-    let nextEnd = view.windowEnd;
-
-    if (direction < 0 && view.windowStart > 0) {
-        nextStart = Math.max(0, view.windowStart - view.windowShiftSize);
-        nextEnd = Math.min(total, nextStart + view.maxWindowSize);
-    } else if (direction > 0 && view.windowEnd < total) {
-        nextEnd = Math.min(total, view.windowEnd + view.windowShiftSize);
-        nextStart = Math.max(0, nextEnd - view.maxWindowSize);
-    } else {
-        return;
-    }
-
-    view.windowStart = nextStart;
-    view.windowEnd = nextEnd;
-    view.shiftInProgress = true;
-    OSA.syncRenderedMessages((OSA.getCurrentSession()?.messages) || [], {
-        keepWindow: true,
-        preserveScroll: true,
-        resetStreaming: false,
-        skipQueueRender: true,
-        stickToBottom: false,
-    });
-    if (typeof OSA.restoreVisibleAnchoredArtifacts === 'function') {
-        OSA.restoreVisibleAnchoredArtifacts();
-    }
-    requestAnimationFrame(() => {
-        view.lastShiftAt = Date.now();
-        view.shiftInProgress = false;
-    });
-};
-
-OSA.syncRenderedMessages = function(messages, options = {}) {
-    const perfStart = OSA.perfNow ? OSA.perfNow() : Date.now();
-    const view = OSA.ensureMessageLayers();
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv || !view || !view.listRoot) return;
-    if (view.isRendering) return;
-    view.isRendering = true;
-
-    const descriptors = OSA.getVisibleMessages(messages);
-    view.descriptors = descriptors;
-
-    const keepKeys = new Set(descriptors.map(item => OSA.getMessageRenderKey(item.message, item.originalIndex)));
-    Array.from(view.messageSignatures.keys()).forEach(key => {
-        if (!keepKeys.has(key)) view.messageSignatures.delete(key);
-    });
-    Array.from(view.messageHeights.keys()).forEach(key => {
-        if (!keepKeys.has(key)) view.messageHeights.delete(key);
-    });
-
-    const total = descriptors.length;
-    const shouldStickBottom = !!(options.stickToBottom || view.userPinnedToBottom);
-
-    if (!options.keepWindow || options.forceFullWindowReset || view.windowEnd <= view.windowStart) {
-        if (total <= view.maxWindowSize) {
-            view.windowStart = 0;
-            view.windowEnd = total;
-        } else if (shouldStickBottom || options.preferTail) {
-            view.windowEnd = total;
-            view.windowStart = Math.max(0, total - view.maxWindowSize);
-        } else {
-            view.windowStart = Math.max(0, Math.min(view.windowStart, total - view.maxWindowSize));
-            view.windowEnd = Math.min(total, view.windowStart + view.maxWindowSize);
-        }
-    } else {
-        view.windowStart = Math.max(0, Math.min(view.windowStart, total));
-        view.windowEnd = Math.max(view.windowStart, Math.min(view.windowEnd, total));
-        if ((view.windowEnd - view.windowStart) > view.maxWindowSize) {
-            view.windowEnd = view.windowStart + view.maxWindowSize;
-        }
-    }
-
-    const anchorWrapper = view.listRoot.querySelector('.transcript-entry');
-    const anchorKey = anchorWrapper ? anchorWrapper.dataset.messageKey : '';
-    const anchorTop = anchorWrapper ? anchorWrapper.getBoundingClientRect().top : 0;
-
-    const renderedDescriptors = descriptors.slice(view.windowStart, view.windowEnd);
-    const renderedKeys = renderedDescriptors.map(item => OSA.getMessageRenderKey(item.message, item.originalIndex));
-    const prevKeys = Array.from(view.wrapperNodesByKey.keys());
-
-    let windowDirty = prevKeys.length !== renderedKeys.length;
-    if (!windowDirty) {
-        for (let i = 0; i < renderedKeys.length; i++) {
-            if (renderedKeys[i] !== prevKeys[i]) {
-                windowDirty = true;
-                break;
-            }
-            const descriptor = renderedDescriptors[i];
-            const signature = OSA.getMessageRenderSignature(descriptor.message);
-            if (view.messageSignatures.get(renderedKeys[i]) !== signature) {
-                windowDirty = true;
-                break;
-            }
-        }
-    }
-
-    const renderedIndices = new Set(renderedDescriptors.map(item => item.originalIndex));
-    view.renderedMessageIndices = renderedIndices;
-
-    if (!windowDirty && view.lastDescriptorCount === total && options.keepWindow) {
-        if (!options.skipQueueRender) {
-            OSA.renderQueuedMessages(OSA.getSessionQueue());
-        }
-        view.lastDescriptorCount = total;
-        view.isRendering = false;
-        if (typeof OSA.mountPendingAnchoredNodes === 'function') {
-            OSA.mountPendingAnchoredNodes();
-        }
-        if (OSA.debug) {
-            OSA.debug.log('render.sync', { reason: options.reason || '', total, windowStart: view.windowStart, windowEnd: view.windowEnd, anchored: Array.from(view.anchoredNodesByIndex.values()).reduce((n, l) => n + l.length, 0) });
-        }
-        const elapsedMs = Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart);
-        if ((options.reason === 'session-switch' || elapsedMs > 24) && OSA.perfLog) {
-            OSA.perfLog('syncRenderedMessages:noop', {
-                reason: options.reason || '',
-                totalMessages: total,
-                renderedMessages: renderedDescriptors.length,
-                elapsedMs,
-            });
-        }
-        return;
-    }
-
-    const nextWrappers = [];
-    const nextMessageMap = new Map();
-    const nextWrapperMap = new Map();
-
-    renderedDescriptors.forEach(item => {
-        const key = OSA.getMessageRenderKey(item.message, item.originalIndex);
-        const signature = OSA.getMessageRenderSignature(item.message);
-        const prevWrapper = view.wrapperNodesByKey.get(key);
-        const wrapper = prevWrapper || OSA.createTranscriptEntry(item.message, item.originalIndex);
-        OSA.patchTranscriptEntry(wrapper, item.message, item.originalIndex);
-        OSA.attachAnchoredNodesForEntry(wrapper, item.originalIndex);
-        const messageEl = wrapper.querySelector(':scope > .message');
-        if (messageEl) nextMessageMap.set(key, messageEl);
-        nextWrapperMap.set(key, wrapper);
-        nextWrappers.push(wrapper);
-        view.messageSignatures.set(key, signature);
-    });
-
-    const heightBefore = OSA.estimateMessageRangeHeight(descriptors, 0, view.windowStart, view);
-    const heightAfter = OSA.estimateMessageRangeHeight(descriptors, view.windowEnd, total, view);
-    view.topSpacer.style.height = `${Math.max(0, Math.round(heightBefore))}px`;
-    view.bottomSpacer.style.height = `${Math.max(0, Math.round(heightAfter))}px`;
-
-    view.listRoot.replaceChildren(...nextWrappers);
-    view.windowNodesByKey = nextMessageMap;
-    view.wrapperNodesByKey = nextWrapperMap;
-
-    let measuredTotal = 0;
-    let measuredCount = 0;
-    renderedDescriptors.forEach(item => {
-        const key = OSA.getMessageRenderKey(item.message, item.originalIndex);
-        const wrapper = nextWrapperMap.get(key);
-        if (!wrapper) return;
-        const height = wrapper.getBoundingClientRect().height;
-        if (height > 0) {
-            view.messageHeights.set(key, height);
-            measuredTotal += height;
-            measuredCount += 1;
-        }
-    });
-    if (measuredCount > 0) {
-        view.avgMessageHeight = measuredTotal / measuredCount;
-    }
-
-    if (shouldStickBottom) {
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    } else if (options.preserveScroll !== false && anchorKey) {
-        const nextAnchor = nextWrapperMap.get(anchorKey) || null;
-        if (nextAnchor) {
-            const nextTop = nextAnchor.getBoundingClientRect().top;
-            messagesDiv.scrollTop += (nextTop - anchorTop);
-        }
-    }
-
-    if (options.resetStreaming !== false) {
-        OSA.resetStreamingMessage();
-    }
-
-    if (!options.skipQueueRender) {
-        OSA.renderQueuedMessages(OSA.getSessionQueue());
-    }
-
-    view.lastDescriptorCount = total;
-
-    view.isRendering = false;
-
-    if (typeof OSA.mountPendingAnchoredNodes === 'function') {
-        OSA.mountPendingAnchoredNodes();
-    }
-    if (OSA.debug) {
-        OSA.debug.log('render.sync', { reason: options.reason || '', total, windowStart: view.windowStart, windowEnd: view.windowEnd, anchored: Array.from(view.anchoredNodesByIndex.values()).reduce((n, l) => n + l.length, 0) });
-    }
-
-    const elapsedMs = Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart);
-    if ((options.reason === 'session-switch' || elapsedMs > 24) && OSA.perfLog) {
-        OSA.perfLog('syncRenderedMessages', {
-            reason: options.reason || '',
-            totalMessages: total,
-            renderedMessages: renderedDescriptors.length,
-            windowStart: view.windowStart,
-            windowEnd: view.windowEnd,
-            elapsedMs,
-        });
-    }
-};
-
 OSA.appendUserMessageToChat = function(content, options = {}) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return null;
-
     const currentSession = OSA.getCurrentSession();
     const clientMessageId = options.clientMessageId || '';
     const attachments = options.attachments || options.images || [];
+    let mirrorIndex = null;
 
     if (currentSession) {
         if (!Array.isArray(currentSession.messages)) currentSession.messages = [];
@@ -2838,29 +1638,49 @@ OSA.appendUserMessageToChat = function(content, options = {}) {
                 images: attachments.filter(att => att.kind === 'image' || (att.mime || '').startsWith('image/')).map(img => ({ filename: img.filename, mime: img.mime, preview_url: OSA.getAttachmentImageSrc(img) })),
             });
         }
+        mirrorIndex = currentSession.messages.length - 1;
     }
 
-    if (clientMessageId) {
-        const existing = Array.from(messagesDiv.querySelectorAll('[data-client-message-id]'))
-            .find(el => el.dataset.clientMessageId === clientMessageId);
-        if (existing) return existing;
+    if (clientMessageId && OSA.tmodelGet('client:' + clientMessageId)) {
+        return OSA.transcriptElementForItemKey('client:' + clientMessageId);
     }
 
-    if (currentSession) {
-        OSA.syncRenderedMessages(currentSession.messages || [], {
-            resetStreaming: false,
-            stickToBottom: true,
-            preferTail: true,
-        });
-    }
+    const messageShape = {
+        role: 'user',
+        content,
+        thinking: null,
+        timestamp: options.timestamp || new Date().toISOString(),
+        metadata: {
+            ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
+            attachments: attachments.filter(att => att.kind !== 'image').map(att => ({
+                filename: att.filename,
+                mime: att.mime,
+                kind: att.kind || 'document',
+                size_bytes: att.sizeBytes || 0,
+                truncated: !!att.truncated,
+            })),
+        },
+        images: attachments.filter(att => att.kind === 'image' || (att.mime || '').startsWith('image/')).map(img => ({ filename: img.filename, mime: img.mime, preview_url: OSA.getAttachmentImageSrc(img) })),
+    };
 
-    if (!clientMessageId) {
-        const allMessages = messagesDiv.querySelectorAll('.message.user');
-        return allMessages.length ? allMessages[allMessages.length - 1] : null;
-    }
+    const item = OSA.tmodelAppend(OSA.tmodelMessageItem(
+        clientMessageId ? 'client:' + clientMessageId : OSA.tmodelLiveKey('user'),
+        messageShape,
+        mirrorIndex,
+        { live: true },
+    ));
+    OSA.tmodelMarkDirty('user-message');
+    return item ? OSA.transcriptElementForItemKey(item.key) : null;
+};
 
-    return Array.from(messagesDiv.querySelectorAll('[data-client-message-id]'))
-        .find(el => el.dataset.clientMessageId === clientMessageId) || null;
+OSA.transcriptElementForItemKey = function(key) {
+    OSA.TModel.dirty = false;
+    const reason = OSA.TModel.pendingReason;
+    OSA.TModel.pendingReason = '';
+    OSA.renderTranscript({ reason: reason });
+    const view = OSA.getTranscriptView();
+    const wrapper = view.wrapperNodesByKey.get(key);
+    return wrapper ? wrapper.querySelector(':scope > .message') : null;
 };
 
 OSA.handleQueuedMessageDispatched = function(event) {
@@ -2893,28 +1713,19 @@ OSA.handleQueuedMessageDispatched = function(event) {
     OSA.renderQueuedMessages(queue);
 };
 
-OSA.renderMessages = function(messages, options = {}) {
-    OSA.syncRenderedMessages(messages, {
-        stickToBottom: true,
-        preferTail: true,
-        forceFullWindowReset: true,
-        reason: options.reason || '',
-    });
-    OSA.refreshMessageFeedback();
-};
-
 OSA.renderQueuedMessages = function(queueItems) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return;
     const floatingRoot = OSA.getFloatingRoot();
     if (!floatingRoot) return;
 
-    const nearBottom = (messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight) < 140;
-
     OSA.removeQueuedMessageElements();
 
     const items = Array.isArray(queueItems) ? queueItems : [];
-    if (items.length === 0) return;
+    if (items.length === 0) {
+        OSA.tmodelMarkDirty('queue');
+        return;
+    }
 
     const emptyState = messagesDiv.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
@@ -2929,9 +1740,7 @@ OSA.renderQueuedMessages = function(queueItems) {
         floatingRoot.appendChild(message);
     });
 
-    if (nearBottom) {
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
+    OSA.tmodelMarkDirty('queue');
 };
 
 OSA.updateTodoDock = function() {

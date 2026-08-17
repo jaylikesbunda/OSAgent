@@ -617,6 +617,8 @@ OSA.refreshCurrentSessionQueue = function() {
 };
 
 OSA.syncRunningSessionSnapshot = async function(sessionId) {
+    const requestId = (OSA._runningSnapshotRequestId || 0) + 1;
+    OSA._runningSnapshotRequestId = requestId;
     try {
         const currentSession = OSA.getCurrentSession();
         if (!currentSession || currentSession.id !== sessionId) return;
@@ -627,63 +629,45 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
         if (!res.ok) return;
 
         const session = await res.json();
+        if (OSA._runningSnapshotRequestId !== requestId) return;
         if (!OSA.getCurrentSession() || OSA.getCurrentSession().id !== sessionId) return;
 
-        // Mid-turn the live stream is the authoritative state: the snapshot
-        // fetch lags it, so replacing the session would revert the assistant
-        // text and make the next streamed chunks duplicate the overlap. Keep
-        // the local session when it is already ahead.
-        const local = OSA.getCurrentSession();
-        const localMsgs = local?.messages || [];
-        const snapMsgs = session.messages || [];
-        const localTail = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
-        const snapTail = snapMsgs.length ? snapMsgs[snapMsgs.length - 1] : null;
-        const localAhead = session.task_status === 'running'
-            && localTail?.role === 'assistant'
-            && snapTail?.role === 'assistant'
-            && (localTail.content || '').length > (snapTail.content || '').length;
-        if (localAhead) {
-            local.task_status = session.task_status;
-            return;
-        }
-        OSA.setCurrentSession(session);
-
+        const hasLiveItems = OSA.TModel.items.some(item => item.live);
         if (session.task_status !== 'running') {
-            OSA.syncRenderedMessages(session.messages || [], {
-                resetStreaming: false,
-                stickToBottom: false,
-                preferTail: true,
-                keepWindow: true,
-                preserveScroll: true,
-            });
+            currentSession.task_status = session.task_status;
 
-            if (OSA.getStreamingAssistantMessage()) {
+            if (hasLiveItems || OSA.isAgentProcessing() || OSA.getStreamingAssistantMessage()) {
+                OSA.completeThinkingDisplay();
                 OSA.completeAssistantResponse();
+                OSA.hideThinkingIndicator();
+                OSA.stopToolSync();
+                OSA.setProcessing(false);
+                OSA.setStopping(false);
+                OSA.resetSendButton();
+                OSA.refreshCurrentSessionQueue();
+                OSA.loadSessions();
             } else {
-                document.querySelectorAll('#messages .message.assistant.streaming').forEach(function(el) {
-                    el.classList.remove('streaming');
-                });
-                document.querySelectorAll('#messages .message-thinking.streaming').forEach(function(el) {
-                    el.classList.remove('streaming');
-                });
+                OSA.setCurrentSession(session);
+                OSA.rebuildTranscriptFromSession(session, OSA.getSessionToolEvents() || [], OSA.getSessionSubagentTasks() || [], { reason: 'snapshot-final' });
+                OSA.hideThinkingIndicator();
+                OSA.stopToolSync();
             }
-
-            OSA.hideThinkingIndicator();
-            OSA.stopToolSync();
-            OSA.setProcessing(false);
-            OSA.setStopping(false);
-            OSA.resetSendButton();
-            OSA.refreshCurrentSessionQueue();
-            OSA.loadSessions();
             return;
         }
 
-        const streamingMessage = OSA.getStreamingAssistantMessage();
-        const latestAssistant = OSA.getActiveTurnAssistantMessage(session);
-        if (!latestAssistant) {
-            if (streamingMessage) {
-                OSA.releaseStreamingAssistantMessage();
-            }
+        // Mid-turn the live event stream owns the transcript; a fetched snapshot
+        // only lags it. Fall back to it exclusively when no live items exist
+        // (fresh page attach to an already-running turn).
+        if (hasLiveItems) {
+            currentSession.task_status = session.task_status;
+            return;
+        }
+
+        OSA.setCurrentSession(session);
+        OSA.rebuildTranscriptFromSession(session, OSA.getSessionToolEvents() || [], OSA.getSessionSubagentTasks() || [], { reason: 'snapshot-adopt' });
+
+        if (!OSA.getActiveTurnAssistantMessage(session)) {
+            OSA.releaseStreamingAssistantMessage();
             if (OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
                 OSA.showThinkingIndicator();
             } else {
@@ -693,35 +677,6 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
         }
 
         OSA.hideThinkingIndicator();
-
-        if (!streamingMessage) {
-            OSA.syncRenderedMessages(session.messages || [], {
-                resetStreaming: false,
-                stickToBottom: false,
-                preferTail: true,
-                keepWindow: true,
-                preserveScroll: true,
-            });
-            OSA.adoptStreamingAssistantFromRenderedSession(session);
-            return;
-        }
-
-        const contentEl = streamingMessage.querySelector('.message-content');
-        const nextContent = latestAssistant.content || '';
-        if (contentEl && (contentEl.dataset.rawText || '') !== nextContent) {
-            OSA.scheduleFormattedRender(contentEl, nextContent);
-        }
-
-        if (OSA.getShowThinkingBlocks() && (latestAssistant.thinking || '').trim()) {
-            const container = OSA.ensureThinkingContainer(streamingMessage);
-            const body = container ? container.querySelector('.thinking-body') : null;
-            if (body && (body.dataset.rawText || '') !== (latestAssistant.thinking || '')) {
-                OSA.scheduleFormattedRender(body, latestAssistant.thinking || '');
-                OSA.setThinkingPreview(container, latestAssistant.thinking || '');
-            }
-        }
-
-        OSA.prepareAssistantMessageElementForStreaming(streamingMessage, latestAssistant, OSA.getShowThinkingBlocks());
     } catch (error) {
         console.error('Failed to sync running session snapshot:', error);
     }
@@ -796,7 +751,6 @@ OSA.selectSession = async function(sessionId) {
         OSA.setSessionToolEvents([]);
         OSA.setSessionSubagentTasks([]);
         
-        document.querySelectorAll('.tool-card, .context-tool-group, .subagent-card, .parallel-group').forEach(el => el.remove());
         OSA.getActiveTools().clear();
         OSA.parallelToolGroups = [];
         OSA._contextGroupState = null;
@@ -819,12 +773,10 @@ OSA.selectSession = async function(sessionId) {
         if (session.messages.length === 0) {
             OSA.renderEmptyTranscript('Type a message below');
         } else {
-            OSA.renderMessages(session.messages, { reason: 'session-switch' });
-            if (session.task_status === 'running') {
-                const adopted = OSA.adoptStreamingAssistantFromRenderedSession(session);
-                if (!adopted && OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
-                    OSA.showThinkingIndicator();
-                }
+            OSA.rebuildTranscriptFromSession(session, [], [], { reason: 'session-switch' });
+            if (session.task_status === 'running' && !OSA.tmodelStreamingItem()
+                && OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
+                OSA.showThinkingIndicator();
             }
         }
 
@@ -840,7 +792,6 @@ OSA.selectSession = async function(sessionId) {
             OSA.resetSendButton();
         }
 
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
         OSA.fetchAndRenderTodos();
         OSA.loadSessionWorkspace();
         OSA.loadSessionPersona();
@@ -875,7 +826,9 @@ OSA.selectSession = async function(sessionId) {
         OSA.setSessionQueue(queueItems);
         OSA.setSessionToolEvents(tools);
         OSA.setSessionSubagentTasks(subagentsData && Array.isArray(subagentsData.subagents) ? subagentsData.subagents : []);
-        OSA.restoreVisibleAnchoredArtifacts();
+        OSA.rebuildTranscriptFromSession(session, tools, subagentsData && Array.isArray(subagentsData.subagents)
+            ? subagentsData.subagents
+            : [], { reason: 'session-artifacts' });
         OSA.perfLog?.('selectSession:artifacts', {
             sessionId,
             requestId,
@@ -906,7 +859,6 @@ OSA.selectSession = async function(sessionId) {
             OSA.showThinkingIndicator();
         }
 
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
     } catch (error) {
         if (error && error.name === 'AbortError') {
             OSA.perfLog?.('selectSession:aborted', {
@@ -964,146 +916,6 @@ OSA.markSessionListSelection = function(sessionId) {
     document.querySelectorAll('.session-item').forEach(item => {
         item.classList.toggle('active', item.dataset.sessionId === sessionId);
     });
-};
-
-OSA.findToolInsertBefore = function(messagesDiv, messageIndex, fallbackTimestampMs = 0) {
-    if (!messagesDiv) return null;
-
-    const allMessages = Array.from(messagesDiv.querySelectorAll('.message'));
-    const parsedMessageIndex = Number.isFinite(messageIndex) ? messageIndex : parseInt(messageIndex, 10);
-
-    if (Number.isFinite(parsedMessageIndex)) {
-        const nextByIndex = allMessages.find(el => {
-            const elIndex = parseInt(el.dataset.messageIndex || '', 10);
-            return Number.isFinite(elIndex) && elIndex > parsedMessageIndex;
-        });
-        if (nextByIndex) return nextByIndex;
-
-        const anchorByIndex = allMessages.find(el => parseInt(el.dataset.messageIndex || '', 10) === parsedMessageIndex);
-        if (anchorByIndex) return null;
-    }
-
-    if (fallbackTimestampMs > 0) {
-        for (let i = allMessages.length - 1; i >= 0; i--) {
-            const msgTs = parseInt(allMessages[i].dataset.ts, 10) || 0;
-            if (msgTs <= fallbackTimestampMs) {
-                let sibling = allMessages[i].nextElementSibling;
-                while (sibling && !sibling.classList.contains('message')) {
-                    sibling = sibling.nextElementSibling;
-                }
-                return sibling;
-            }
-        }
-    }
-
-    return allMessages[0] || null;
-};
-
-OSA.restoreVisibleAnchoredArtifacts = function() {
-    const toolEvents = typeof OSA.getSessionToolEvents === 'function' ? OSA.getSessionToolEvents() : [];
-    if (Array.isArray(toolEvents) && toolEvents.length > 0) {
-        OSA.restoreToolsAtPositions(toolEvents);
-    }
-
-    const subagentTasks = typeof OSA.getSessionSubagentTasks === 'function' ? OSA.getSessionSubagentTasks() : [];
-    if (Array.isArray(subagentTasks) && subagentTasks.length > 0) {
-        OSA.restoreSubagentCards(subagentTasks);
-    }
-};
-
-OSA.restoreToolsAtPositions = function(tools) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv || tools.length === 0) return;
-
-    const filteredTools = tools.filter(t => {
-        if (typeof OSA.isMessageIndexInRenderedWindow !== 'function') return true;
-        return OSA.isMessageIndexInRenderedWindow(t.message_index);
-    });
-
-    if (OSA.debug) {
-        OSA.debug.log('tool.restore', { candidates: tools.length, inWindow: filteredTools.length });
-    }
-
-    if (filteredTools.length === 0) return;
-
-    if (messagesDiv.querySelectorAll('.message').length === 0) {
-        filteredTools.forEach(t => {
-            if (t.tool_name === 'subagent') return;
-            OSA.restoreToolCard(t);
-        });
-        return;
-    }
-
-    const toolTs = (t) => (t.timestamp || 0) * 1000;
-    const toolMessageIndex = (t) => {
-        const parsed = parseInt(t.message_index, 10);
-        return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
-    };
-
-    const PARALLEL_WINDOW_MS = 3000;
-
-    const regularTools = filteredTools
-        .filter(t => t.tool_name !== 'subagent' && !OSA.isContextTool(t.tool_name))
-        .sort((a, b) => {
-            const messageDelta = toolMessageIndex(a) - toolMessageIndex(b);
-            if (messageDelta !== 0) return messageDelta;
-            return toolTs(a) - toolTs(b);
-        });
-
-    const contextTools = filteredTools.filter(t => OSA.isContextTool(t.tool_name));
-
-    const grouped = [];
-    let currentGroup = null;
-
-    for (const tool of regularTools) {
-        if (
-            currentGroup
-            && currentGroup.messageIndex === toolMessageIndex(tool)
-            && toolTs(tool) - currentGroup.startTs < PARALLEL_WINDOW_MS
-        ) {
-            currentGroup.tools.push(tool);
-        } else {
-            currentGroup = {
-                startTs: toolTs(tool),
-                messageIndex: toolMessageIndex(tool),
-                tools: [tool]
-            };
-            grouped.push(currentGroup);
-        }
-    }
-
-    for (const group of grouped) {
-        const firstTs = group.tools[0] ? toolTs(group.tools[0]) : 0;
-        const insertBefore = OSA.findToolInsertBefore(messagesDiv, group.messageIndex, firstTs);
-
-        if (group.tools.length >= 2) {
-            const groupDiv = document.createElement('div');
-            groupDiv.className = 'parallel-group';
-            groupDiv.dataset.messageIndex = group.messageIndex;
-            groupDiv.innerHTML = `
-                <div class="parallel-group-header">
-                    <span class="parallel-count">${group.tools.length} tools executed concurrently</span>
-                </div>
-            `;
-
-            OSA.mountAnchoredNode(groupDiv, group.messageIndex, insertBefore);
-
-            group.tools.forEach(t => {
-                OSA.restoreToolCard(t, null, groupDiv);
-            });
-        } else {
-            OSA.restoreToolCard(group.tools[0], insertBefore);
-        }
-    }
-
-    if (contextTools.length > 0) {
-        contextTools
-            .sort((a, b) => toolTs(a) - toolTs(b))
-            .forEach(t => {
-                const mi = toolMessageIndex(t);
-                OSA.addContextToolToGroup(t, t.completed === true, t.success === true, mi);
-            });
-    }
 };
 
 OSA.clearSessions = async function() {

@@ -1,3 +1,7 @@
+v0.4.5 changes:
+
+* Reworked streamed transcript rendering around one keyed model and renderer, eliminating chat flicker and tool-card ordering issues across thinking, tool, and response segments
+
 v0.4.4 changes:
 
 * Added opt-in community-member chat scoped to configured servers and channels
