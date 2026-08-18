@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       release-tag:
-        description: Release version tag (e.g. v0.1.0)
+        description: Release version tag (e.g. v0.4.5)
         required: true
-        default: v0.1.0
+        default: v0.4.5
         type: string
       prerelease:
         description: Mark the GitHub release as a prerelease
@@ -34,7 +34,7 @@ jobs:
           RELEASE_TAG="${{ inputs['release-tag'] }}"
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
             echo "Invalid release tag: $RELEASE_TAG"
-            echo "Expected format: v0.1.0 or v0.1.0-rc1"
+            echo "Expected format: v0.4.5 or v0.4.5-rc1"
             exit 1
           fi
 
@@ -73,9 +73,23 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --features discord -- -D warnings
 
+  test:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
   release-linux:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    needs: validate-release-tag
+    needs:
+      - validate-release-tag
+      - test
     runs-on: ubuntu-22.04
     env:
       RELEASE_TAG: ${{ inputs['release-tag'] }}
@@ -181,7 +195,9 @@ jobs:
 
   release-windows-installer:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    needs: validate-release-tag
+    needs:
+      - validate-release-tag
+      - test
     runs-on: windows-latest
     env:
       RELEASE_TAG: ${{ inputs['release-tag'] }}
@@ -241,7 +257,9 @@ jobs:
 
   release-macos-arm64:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    needs: validate-release-tag
+    needs:
+      - validate-release-tag
+      - test
     runs-on: macos-14
     env:
       RELEASE_TAG: ${{ inputs['release-tag'] }}

@@ -4,14 +4,16 @@
 
 Please do not open a public GitHub issue for security vulnerabilities.
 
-Instead, contact the maintainers privately with:
+Use GitHub's private vulnerability reporting form:
+
+https://github.com/jaylikesbunda/OSAgent/security/advisories/new
+
+Include:
 
 - a clear description of the issue
 - affected versions or commits
 - reproduction steps or a proof of concept
 - any suggested mitigation if you have one
-
-If the repository later adds a dedicated security contact address, this document should be updated to point to it.
 
 ## Disclosure Guidance
 

@@ -50,7 +50,7 @@ body:
     id: version
     attributes:
       label: Version or commit
-      placeholder: v0.1.0 or commit SHA
+      placeholder: v0.4.5 or commit SHA
   - type: input
     id: os
     attributes:

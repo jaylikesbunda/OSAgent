@@ -979,10 +979,7 @@ async fn restart_server(
 }
 
 async fn get_config(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<Config> {
-    let mut config = agent.get_config().await;
-    config.server.password.clear();
-    config.server.jwt_secret.clear();
-    Json(config)
+    Json(agent.get_config().await.redacted_for_api())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1127,14 +1124,7 @@ async fn update_config(
     Json(mut new_config): Json<Config>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let current_config = agent.get_config().await;
-
-    if new_config.server.password.trim().is_empty() {
-        new_config.server.password = current_config.server.password.clone();
-    }
-
-    if new_config.server.jwt_secret.trim().is_empty() {
-        new_config.server.jwt_secret = current_config.server.jwt_secret.clone();
-    }
+    new_config.preserve_secrets_from(&current_config);
 
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
@@ -6280,9 +6270,9 @@ async fn update_status() -> Json<UpdateStatusResponse> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_status, login, LoginRequest};
+    use super::{auth_status, get_config, login, update_config, LoginRequest};
     use crate::agent::runtime::AgentRuntime;
-    use crate::config::{Config, WorkspacePath, WorkspacePermission};
+    use crate::config::{Config, DiscordConfig, WorkspacePath, WorkspacePermission};
     use crate::web::auth;
     use axum::{extract::Extension, http::StatusCode, response::IntoResponse, Json};
     use std::sync::Arc;
@@ -6350,5 +6340,83 @@ mod tests {
 
         let Json(status) = auth_status(Extension(agent)).await;
         assert!(!status.required);
+    }
+
+    #[tokio::test]
+    async fn config_endpoint_redacts_credentials() {
+        let temp_dir = tempdir().unwrap();
+        let mut config = test_config(temp_dir.path());
+        config.provider.api_key = "provider-api-key".to_string();
+        config.server.password = "password-hash-secret".to_string();
+        config.server.jwt_secret = "jwt-secret".to_string();
+        config.discord = Some(DiscordConfig {
+            token: "discord-bot-token".to_string(),
+            github_token: "github-token".to_string(),
+            ..DiscordConfig::default()
+        });
+
+        let agent = AgentRuntime::new(config).unwrap();
+        let Json(public_config) = get_config(Extension(agent)).await;
+        let serialized = serde_json::to_string(&public_config).unwrap();
+
+        for secret in [
+            "provider-api-key",
+            "password-hash-secret",
+            "jwt-secret",
+            "discord-bot-token",
+            "github-token",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "config endpoint contains {secret}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_update_preserves_redacted_credentials() {
+        let temp_dir = tempdir().unwrap();
+        let mut config = test_config(temp_dir.path());
+        config.provider.api_key = "provider-api-key".to_string();
+        config.server.password = "password-hash-secret".to_string();
+        config.server.jwt_secret = "jwt-secret".to_string();
+        config.discord = Some(DiscordConfig {
+            token: "discord-bot-token".to_string(),
+            github_token: "github-token".to_string(),
+            ..DiscordConfig::default()
+        });
+
+        let config_path = temp_dir.path().join("config.toml");
+        config.save(&config_path).unwrap();
+
+        let agent = AgentRuntime::new(config.clone()).unwrap();
+        let mut redacted = config.redacted_for_api();
+        redacted.agent.temperature = 0.25;
+
+        update_config(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Json(redacted),
+        )
+        .await
+        .unwrap();
+
+        let updated = agent.get_config().await;
+        assert_eq!(updated.server.password, "password-hash-secret");
+        assert_eq!(updated.server.jwt_secret, "jwt-secret");
+        assert_eq!(updated.provider.api_key, "provider-api-key");
+        assert_eq!(updated.discord.as_ref().unwrap().token, "discord-bot-token");
+        assert_eq!(
+            updated.discord.as_ref().unwrap().github_token,
+            "github-token"
+        );
+        assert_eq!(updated.agent.temperature, 0.25);
+
+        let persisted = Config::load(config_path.to_str().unwrap()).unwrap();
+        assert_eq!(persisted.provider.api_key, "provider-api-key");
+        assert_eq!(
+            persisted.discord.as_ref().unwrap().token,
+            "discord-bot-token"
+        );
     }
 }

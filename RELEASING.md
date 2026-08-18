@@ -2,50 +2,70 @@
 
 ## Release Contract
 
-- GitHub runs CI only.
-- GitLab is the release publisher.
-- Cloudflare R2 is the auto-update source.
-- The launcher is the only end-user distributable.
-- The updater only replaces the launcher.
-- The new launcher carries the new embedded core and updater.
+- GitHub Actions is the CI and release pipeline for `jaylikesbunda/OSAgent`.
+- GitHub Releases host the files people download manually.
+- Cloudflare R2 is the auto-update source for installed launchers.
+- The launcher embeds the core agent and updater binaries.
+- OTA `.tar.gz` archives contain only the launcher and are not first-time installers.
+- Checksums are published for every installer and OTA archive.
 
-## Required GitLab Variables
+## Required GitHub Secrets
+
+Configure these repository or release-environment secrets before running the
+release workflow:
 
 - `R2_ACCOUNT_ID`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 
-Optional:
+The workflow uses these defaults:
 
-- `R2_BUCKET` if you do not want the default `osagent-releases`
-- `R2_RELEASE_PREFIX` if you do not want the default `releases`
-- `CDN_BASE_URL` if you do not want the default `https://osa.fuckyourcdn.com`
-- `GITLAB_RELEASE_TOKEN` if your runner cannot create releases with `CI_JOB_TOKEN`
+- `R2_BUCKET`: `osagent-releases`
+- `R2_RELEASE_PREFIX`: `releases`
+- `CDN_BASE_URL`: `https://osa.fuckyourcdn.com`
 
 ## Release Flow
 
-1. Push a tag to GitLab.
-2. GitLab builds Windows and Linux launcher archives.
-3. GitLab publishes archive checksums as separate assets.
-4. GitLab uploads the archives, checksums, and `release-manifest.json` to Cloudflare R2.
-5. GitLab updates `releases/latest.json` on the CDN.
-6. GitLab creates or updates the GitLab Release with links to the R2-hosted assets.
+1. Open the `CI` workflow in GitHub Actions.
+2. Choose `Run workflow` on the `main` branch.
+3. Enter a tag such as `v0.4.5` or `v0.4.5-rc1`.
+4. Choose whether the GitHub Release is a prerelease.
+5. GitHub Actions builds Linux, Windows, and macOS artifacts.
+6. The workflow verifies OTA archives and uploads the release manifest and assets to Cloudflare R2.
+7. The workflow creates or updates the matching GitHub Release and attaches the same assets for manual download.
+8. The workflow verifies that every advertised GitHub download URL resolves.
 
 ## Published Assets
 
-- `osagent-windows-x86_64.zip`
-- `osagent-windows-x86_64.zip.sha256`
+Manual installers:
+
+- `osagent-linux-x86_64.deb`
+- `osagent-windows-x86_64-setup.exe`
+- `osagent-macos-arm64.dmg`
+
+OTA archives:
+
 - `osagent-linux-x86_64.tar.gz`
-- `osagent-linux-x86_64.tar.gz.sha256`
+- `osagent-macos-arm64.tar.gz`
 - `release-manifest.json`
-- `releases/latest.json`
+- `latest.json` at the R2 release prefix
 
 ## Local Validation
 
-Run this before tagging a release:
+On Windows, run this before releasing:
 
 ```powershell
 .\build-launcher.ps1 -Checks
 ```
 
-That validates the same launcher-first build contract the release pipeline uses.
+On Linux, use the same core checks directly:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features --verbose
+```
+
+The authoritative release implementation is
+`.github/workflows/ci.yml`. `upload-to-r2.sh` generates the update manifest,
+and `verify-ota-archive.sh` validates launcher OTA archives before publishing.

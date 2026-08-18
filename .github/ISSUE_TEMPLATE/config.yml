@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security issue
-    url: https://github.com/osagent/osagent/security/policy
+    url: https://github.com/jaylikesbunda/OSAgent/security/policy
     about: Please do not file public issues for security vulnerabilities.

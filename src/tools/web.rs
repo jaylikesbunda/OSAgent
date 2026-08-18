@@ -1236,6 +1236,12 @@ impl PublicWebFetchTool {
     }
 }
 
+impl Default for PublicWebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Tool for PublicWebFetchTool {
     fn name(&self) -> &str {

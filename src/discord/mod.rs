@@ -146,9 +146,7 @@ impl Handler {
         channel_id: u64,
         role_ids: &[u64],
     ) -> Option<AccessLevel> {
-        let Some(discord) = self.agent.discord_config().await else {
-            return None;
-        };
+        let discord = self.agent.discord_config().await?;
 
         Self::access_level_for_config(&discord, user_id, guild_id, channel_id, role_ids)
     }

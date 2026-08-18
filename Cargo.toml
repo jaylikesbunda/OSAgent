@@ -1,12 +1,12 @@
 [package]
 name = "osagent"
-version = "0.0.1"
+version = "0.4.5"
 edition = "2021"
 rust-version = "1.78"
 authors = ["OSA Contributors"]
 license = "MIT"
 description = "Secure local AI agent with a web UI, workspace tools, and optional Discord integration"
-repository = "https://github.com/osagent/osagent"
+repository = "https://github.com/jaylikesbunda/OSAgent"
 
 [dependencies]
 # Async runtime

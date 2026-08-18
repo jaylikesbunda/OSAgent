@@ -40,7 +40,7 @@ Feature requests are welcome! Please open an issue with:
 
 ### Prerequisites
 
-- Rust 1.75 or later
+- Rust 1.78 or later
 - Git
 - PowerShell 5.1 or later for the canonical Windows build flow
 - A code editor (VS Code, IntelliJ, etc.)
@@ -48,8 +48,8 @@ Feature requests are welcome! Please open an issue with:
 ### Building
 
 ```powershell
-git clone https://gitlab.com/YOUR_NAMESPACE/osagent.git
-cd osagent
+git clone https://github.com/jaylikesbunda/OSAgent.git
+cd OSAgent
 .\build-launcher.ps1
 ```
 
@@ -86,7 +86,7 @@ osagent/
 │   ├── config.rs     # Configuration
 │   └── main.rs       # Entry point
 ├── frontend/         # Web UI
-├── docs/             # Setup and usage guides
+├── README.md         # Setup and usage guide
 ├── examples/         # Example bundles and templates
 └── .github/          # CI/CD workflows
 ```
@@ -114,7 +114,8 @@ osagent/
 
 ## Security
 
-If you discover a security vulnerability, please email the maintainers directly instead of opening a public issue.
+If you discover a security vulnerability, use the private reporting process in
+[SECURITY.md](SECURITY.md) instead of opening a public issue.
 
 ## License
 

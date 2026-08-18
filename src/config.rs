@@ -1031,6 +1031,86 @@ impl Config {
         cfg
     }
 
+    /// Return the configuration shape used by the settings UI without exposing
+    /// credentials to the browser.
+    pub(crate) fn redacted_for_api(&self) -> Self {
+        let mut redacted = self.clone();
+
+        redacted.server.password.clear();
+        redacted.server.jwt_secret.clear();
+        redact_provider_config(&mut redacted.provider);
+        for provider in &mut redacted.providers {
+            redact_provider_config(provider);
+        }
+
+        if let Some(telegram) = &mut redacted.telegram {
+            telegram.bot_token.clear();
+        }
+        if let Some(discord) = &mut redacted.discord {
+            discord.token.clear();
+            discord.github_token.clear();
+        }
+        for server in &mut redacted.mcp.servers {
+            server.env.clear();
+            server.headers.clear();
+        }
+
+        redacted
+    }
+
+    /// Restore credentials omitted by `redacted_for_api` during a settings
+    /// round trip. Non-empty incoming values still replace existing values.
+    pub(crate) fn preserve_secrets_from(&mut self, current: &Self) {
+        if self.server.password.trim().is_empty() {
+            self.server.password = current.server.password.clone();
+        }
+        if self.server.jwt_secret.trim().is_empty() {
+            self.server.jwt_secret = current.server.jwt_secret.clone();
+        }
+
+        if provider_identity_matches(&self.provider, &current.provider) {
+            preserve_provider_secrets(&mut self.provider, &current.provider);
+        }
+        for provider in &mut self.providers {
+            if let Some(existing) = current
+                .providers
+                .iter()
+                .find(|existing| provider_identity_matches(existing, provider))
+            {
+                preserve_provider_secrets(provider, existing);
+            }
+        }
+
+        if let (Some(telegram), Some(existing)) = (&mut self.telegram, &current.telegram) {
+            if telegram.bot_token.trim().is_empty() {
+                telegram.bot_token = existing.bot_token.clone();
+            }
+        }
+        if let (Some(discord), Some(existing)) = (&mut self.discord, &current.discord) {
+            if discord.token.trim().is_empty() {
+                discord.token = existing.token.clone();
+            }
+            if discord.github_token.trim().is_empty() {
+                discord.github_token = existing.github_token.clone();
+            }
+        }
+        for server in &mut self.mcp.servers {
+            if let Some(existing) = current
+                .mcp
+                .servers
+                .iter()
+                .find(|existing| existing.name == server.name)
+            {
+                if server.env.is_empty() {
+                    server.env = existing.env.clone();
+                }
+                if server.headers.is_empty() {
+                    server.headers = existing.headers.clone();
+                }
+            }
+        }
+    }
+
     pub fn load(path: &str) -> Result<Self> {
         let expanded = shellexpand::tilde(path).to_string();
         let path_ref = Path::new(&expanded);
@@ -1602,6 +1682,28 @@ impl Config {
     }
 }
 
+fn redact_provider_config(provider: &mut ProviderConfig) {
+    provider.api_key.clear();
+    provider.oauth_client_secret = None;
+    provider.custom_headers = None;
+}
+
+fn provider_identity_matches(left: &ProviderConfig, right: &ProviderConfig) -> bool {
+    left.provider_type == right.provider_type && left.base_url == right.base_url
+}
+
+fn preserve_provider_secrets(incoming: &mut ProviderConfig, current: &ProviderConfig) {
+    if incoming.api_key.trim().is_empty() {
+        incoming.api_key = current.api_key.clone();
+    }
+    if incoming.oauth_client_secret.is_none() {
+        incoming.oauth_client_secret = current.oauth_client_secret.clone();
+    }
+    if incoming.custom_headers.is_none() {
+        incoming.custom_headers = current.custom_headers.clone();
+    }
+}
+
 pub fn setup_wizard(path: &str) -> Result<()> {
     let expanded = shellexpand::tilde(path).to_string();
     let path_ref = Path::new(&expanded);
@@ -1788,7 +1890,8 @@ fn generate_jwt_secret() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DiscordConfig};
+    use super::{Config, DiscordConfig, McpServerConfig, ProviderConfig, TelegramConfig};
+    use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1850,6 +1953,143 @@ last_channel_id = 1478327393205882900
 
         assert_eq!(reloaded.allowed_users, vec![420155234833268737]);
         assert_eq!(reloaded.last_channel_id, None);
+    }
+
+    #[test]
+    fn api_config_redaction_removes_credentials() {
+        let mut config = Config::default_config();
+        config.server.password = "password-hash-secret".to_string();
+        config.server.jwt_secret = "jwt-secret".to_string();
+
+        let provider = ProviderConfig {
+            provider_type: "test-provider".to_string(),
+            api_key: "provider-api-key".to_string(),
+            oauth_client_secret: Some("oauth-client-secret".to_string()),
+            custom_headers: Some(HashMap::from([(
+                "Authorization".to_string(),
+                "provider-header-secret".to_string(),
+            )])),
+            ..ProviderConfig::default()
+        };
+        config.provider = provider.clone();
+        config.providers = vec![provider];
+
+        let telegram = TelegramConfig {
+            bot_token: "telegram-bot-token".to_string(),
+            ..TelegramConfig::default()
+        };
+        config.telegram = Some(telegram);
+
+        let discord = DiscordConfig {
+            token: "discord-bot-token".to_string(),
+            github_token: "github-token".to_string(),
+            ..DiscordConfig::default()
+        };
+        config.discord = Some(discord);
+
+        let mut mcp = McpServerConfig {
+            name: "secret-server".to_string(),
+            ..McpServerConfig::default()
+        };
+        mcp.env
+            .insert("API_TOKEN".to_string(), "mcp-env-secret".to_string());
+        mcp.headers
+            .insert("Authorization".to_string(), "mcp-header-secret".to_string());
+        config.mcp.servers = vec![mcp];
+
+        let redacted = config.redacted_for_api();
+        let serialized = serde_json::to_string(&redacted).unwrap();
+
+        for secret in [
+            "password-hash-secret",
+            "jwt-secret",
+            "provider-api-key",
+            "oauth-client-secret",
+            "provider-header-secret",
+            "telegram-bot-token",
+            "discord-bot-token",
+            "github-token",
+            "mcp-env-secret",
+            "mcp-header-secret",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "redacted config contains {secret}"
+            );
+        }
+
+        assert_eq!(redacted.provider.provider_type, "test-provider");
+        assert_eq!(redacted.mcp.servers[0].name, "secret-server");
+    }
+
+    #[test]
+    fn redacted_config_round_trip_preserves_credentials() {
+        let mut current = Config::default_config();
+        current.server.password = "password-hash-secret".to_string();
+        current.server.jwt_secret = "jwt-secret".to_string();
+
+        let provider = ProviderConfig {
+            provider_type: "test-provider".to_string(),
+            api_key: "provider-api-key".to_string(),
+            oauth_client_secret: Some("oauth-client-secret".to_string()),
+            custom_headers: Some(HashMap::from([(
+                "Authorization".to_string(),
+                "provider-header-secret".to_string(),
+            )])),
+            ..ProviderConfig::default()
+        };
+        current.provider = provider.clone();
+        current.providers = vec![provider];
+
+        let telegram = TelegramConfig {
+            bot_token: "telegram-bot-token".to_string(),
+            ..TelegramConfig::default()
+        };
+        current.telegram = Some(telegram);
+
+        let discord = DiscordConfig {
+            token: "discord-bot-token".to_string(),
+            github_token: "github-token".to_string(),
+            ..DiscordConfig::default()
+        };
+        current.discord = Some(discord);
+
+        let mut mcp = McpServerConfig {
+            name: "secret-server".to_string(),
+            ..McpServerConfig::default()
+        };
+        mcp.env
+            .insert("API_TOKEN".to_string(), "mcp-env-secret".to_string());
+        mcp.headers
+            .insert("Authorization".to_string(), "mcp-header-secret".to_string());
+        current.mcp.servers = vec![mcp];
+
+        let mut incoming = current.redacted_for_api();
+        incoming.agent.temperature = 0.25;
+        incoming.preserve_secrets_from(&current);
+
+        assert_eq!(incoming.server.password, current.server.password);
+        assert_eq!(incoming.server.jwt_secret, current.server.jwt_secret);
+        assert_eq!(incoming.provider.api_key, current.provider.api_key);
+        assert_eq!(incoming.providers[0].api_key, current.providers[0].api_key);
+        assert_eq!(
+            incoming.providers[0].oauth_client_secret,
+            current.providers[0].oauth_client_secret
+        );
+        assert_eq!(
+            incoming.telegram.as_ref().unwrap().bot_token,
+            current.telegram.as_ref().unwrap().bot_token
+        );
+        assert_eq!(
+            incoming.discord.as_ref().unwrap().github_token,
+            current.discord.as_ref().unwrap().github_token
+        );
+        assert_eq!(incoming.mcp.servers[0].env, current.mcp.servers[0].env);
+        assert_eq!(
+            incoming.mcp.servers[0].headers,
+            current.mcp.servers[0].headers
+        );
+        assert_eq!(incoming.agent.temperature, 0.25);
     }
 
     #[test]
