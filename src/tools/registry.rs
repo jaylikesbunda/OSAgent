@@ -12,8 +12,8 @@ use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     bash, batch, calendar, code, codesearch, coordinator, decision_memory, files, lsp, memory,
-    news, patch, persona, plan, process, question, scheduler, search, skill, subagent,
-    system_status, task, todo, tool_script, tool_search, weather, web,
+    native_catalog::NativeToolCatalog, news, patch, persona, plan, process, question, scheduler,
+    search, skill, subagent, system_status, task, todo, tool_script, tool_search, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -111,8 +111,11 @@ impl ToolProfile {
             return matches!(self, Self::Default | Self::Code | Self::Creative);
         }
         match self {
-            Self::Default => true,
-            Self::Code => !matches!(tool_name, "calendar" | "weather" | "news"),
+            Self::Default => !matches!(tool_name, "public_web_fetch"),
+            Self::Code => !matches!(
+                tool_name,
+                "calendar" | "weather" | "news" | "public_web_fetch"
+            ),
             Self::Plan => matches!(
                 tool_name,
                 "read_file"
@@ -144,6 +147,7 @@ impl ToolProfile {
                     | "calendar"
                     | "weather"
                     | "news"
+                    | "public_web_fetch"
             ),
             Self::Custom => matches!(
                 tool_name,
@@ -239,45 +243,52 @@ pub struct ToolRegistry {
     coordinator: Option<Arc<Coordinator>>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
     mcp: McpHandle,
+    /// Deferred low-frequency built-in tools, searched and activated via
+    /// `tool_search`. These stay out of the always-loaded native block.
+    native_catalog: Arc<NativeToolCatalog>,
     /// Native tool definitions only. MCP definitions are appended fresh
     /// on every read so that activating one never reorders or rewrites
     /// this block — the provider's cached prompt prefix survives.
     cached_tool_definitions: std::sync::RwLock<Option<Vec<ToolDefinition>>>,
 }
 
-impl ToolRegistry {
-    fn tool_prompt_description(tool: &Arc<dyn Tool>) -> String {
-        let mut sections = vec![tool.description().trim().to_string()];
+/// Render the model-facing description for a tool: description,
+/// when-to-use, when-not-to-use, and up to two examples. Shared by the
+/// always-loaded block, the deferred built-in catalog, and `tool_search`
+/// results so a tool reads identically wherever the model meets it.
+pub(crate) fn tool_prompt_description(tool: &Arc<dyn Tool>) -> String {
+    let mut sections = vec![tool.description().trim().to_string()];
 
-        let when_to_use = tool.when_to_use().trim();
-        if !when_to_use.is_empty() && when_to_use != "See tool description" {
-            sections.push(format!("Use when: {}", when_to_use));
-        }
-
-        let when_not_to_use = tool.when_not_to_use().trim();
-        if !when_not_to_use.is_empty() && when_not_to_use != "See tool description" {
-            sections.push(format!("Avoid when: {}", when_not_to_use));
-        }
-
-        let examples = tool.examples();
-        if !examples.is_empty() {
-            let rendered_examples = examples
-                .iter()
-                .take(2)
-                .map(|example| {
-                    let payload = serde_json::to_string(&example.input).unwrap_or_default();
-                    format!("{} => {}", example.description.trim(), payload)
-                })
-                .collect::<Vec<_>>()
-                .join(" | ");
-            if !rendered_examples.is_empty() {
-                sections.push(format!("Examples: {}", rendered_examples));
-            }
-        }
-
-        sections.join(" ")
+    let when_to_use = tool.when_to_use().trim();
+    if !when_to_use.is_empty() && when_to_use != "See tool description" {
+        sections.push(format!("Use when: {}", when_to_use));
     }
 
+    let when_not_to_use = tool.when_not_to_use().trim();
+    if !when_not_to_use.is_empty() && when_not_to_use != "See tool description" {
+        sections.push(format!("Avoid when: {}", when_not_to_use));
+    }
+
+    let examples = tool.examples();
+    if !examples.is_empty() {
+        let rendered_examples = examples
+            .iter()
+            .take(2)
+            .map(|example| {
+                let payload = serde_json::to_string(&example.input).unwrap_or_default();
+                format!("{} => {}", example.description.trim(), payload)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if !rendered_examples.is_empty() {
+            sections.push(format!("Examples: {}", rendered_examples));
+        }
+    }
+
+    sections.join(" ")
+}
+
+impl ToolRegistry {
     pub fn new(config: Config, storage: Arc<crate::storage::SqliteStorage>) -> Result<Self> {
         let cache = Arc::new(FileReadCache::with_default_capacity());
         Self::with_deps_and_cache(config, storage, None, None, None, cache)
@@ -367,6 +378,7 @@ impl ToolRegistry {
     ) -> Result<Self> {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         let mcp = McpHandle::new();
+        let native_catalog = Arc::new(NativeToolCatalog::new());
 
         tools.insert("batch".to_string(), Arc::new(batch::BatchTool::new()));
 
@@ -378,6 +390,7 @@ impl ToolRegistry {
             "tool_search".to_string(),
             Arc::new(tool_search::ToolSearchTool::new(
                 mcp.clone(),
+                native_catalog.clone(),
                 config.mcp.search_result_limit,
             )),
         );
@@ -425,24 +438,25 @@ impl ToolRegistry {
             )),
         );
 
-        tools.insert(
-            "code_python".to_string(),
-            Arc::new(code::CodeInterpreterTool::python(config.clone())),
-        );
-        tools.insert(
-            "code_node".to_string(),
-            Arc::new(code::CodeInterpreterTool::node(config.clone())),
-        );
-        tools.insert(
-            "code_bash".to_string(),
-            Arc::new(code::CodeInterpreterTool::bash(config.clone())),
-        );
+        let code_python_tool: Arc<dyn Tool> =
+            Arc::new(code::CodeInterpreterTool::python(config.clone()));
+        tools.insert("code_python".to_string(), code_python_tool.clone());
+        native_catalog.register(code_python_tool);
+        let code_node_tool: Arc<dyn Tool> =
+            Arc::new(code::CodeInterpreterTool::node(config.clone()));
+        tools.insert("code_node".to_string(), code_node_tool.clone());
+        native_catalog.register(code_node_tool);
+        let code_bash_tool: Arc<dyn Tool> =
+            Arc::new(code::CodeInterpreterTool::bash(config.clone()));
+        tools.insert("code_bash".to_string(), code_bash_tool.clone());
+        native_catalog.register(code_bash_tool);
 
-        tools.insert(
-            "task".to_string(),
-            Arc::new(task::TaskTool::new(storage.clone())),
-        );
-        tools.insert("persona".to_string(), Arc::new(persona::PersonaTool::new()));
+        let task_tool: Arc<dyn Tool> = Arc::new(task::TaskTool::new(storage.clone()));
+        tools.insert("task".to_string(), task_tool.clone());
+        native_catalog.register(task_tool);
+        let persona_tool: Arc<dyn Tool> = Arc::new(persona::PersonaTool::new());
+        tools.insert("persona".to_string(), persona_tool.clone());
+        native_catalog.register(persona_tool);
 
         tools.insert(
             "todowrite".to_string(),
@@ -491,16 +505,15 @@ impl ToolRegistry {
                 "skill_list".to_string(),
                 Arc::new(skill::SkillListTool::new(sl.clone())),
             );
-            tools.insert(
-                "skill_action".to_string(),
-                Arc::new(skill::SkillActionTool::new(sl.clone())),
-            );
+            let skill_action_tool: Arc<dyn Tool> =
+                Arc::new(skill::SkillActionTool::new(sl.clone()));
+            tools.insert("skill_action".to_string(), skill_action_tool.clone());
+            native_catalog.register(skill_action_tool);
         }
 
-        tools.insert(
-            "lsp".to_string(),
-            Arc::new(lsp::LspTool::new(config.clone())),
-        );
+        let lsp_tool: Arc<dyn Tool> = Arc::new(lsp::LspTool::new(config.clone()));
+        tools.insert("lsp".to_string(), lsp_tool.clone());
+        native_catalog.register(lsp_tool);
 
         if let Some(ref sm) = subagent_manager {
             tools.insert(
@@ -516,76 +529,62 @@ impl ToolRegistry {
 
         tools.insert("plan_exit".to_string(), Arc::new(plan::PlanExitTool::new()));
 
-        tools.insert(
-            "process".to_string(),
-            Arc::new(process::ProcessTool::new(config.clone())),
-        );
-        tools.insert(
-            "calendar".to_string(),
-            Arc::new(calendar::CalendarTool::new(config.clone())),
-        );
-        tools.insert(
-            "weather".to_string(),
-            Arc::new(weather::WeatherTool::new(config.clone())),
-        );
-        tools.insert(
-            "news".to_string(),
-            Arc::new(news::NewsTool::new(config.clone())),
-        );
-        tools.insert(
-            "system_status".to_string(),
-            Arc::new(system_status::SystemStatusTool::new(config.clone())),
-        );
+        let process_tool: Arc<dyn Tool> = Arc::new(process::ProcessTool::new(config.clone()));
+        tools.insert("process".to_string(), process_tool.clone());
+        native_catalog.register(process_tool);
+        let calendar_tool: Arc<dyn Tool> = Arc::new(calendar::CalendarTool::new(config.clone()));
+        tools.insert("calendar".to_string(), calendar_tool.clone());
+        native_catalog.register(calendar_tool);
+        let weather_tool: Arc<dyn Tool> = Arc::new(weather::WeatherTool::new(config.clone()));
+        tools.insert("weather".to_string(), weather_tool.clone());
+        native_catalog.register(weather_tool);
+        let news_tool: Arc<dyn Tool> = Arc::new(news::NewsTool::new(config.clone()));
+        tools.insert("news".to_string(), news_tool.clone());
+        native_catalog.register(news_tool);
+        let system_status_tool: Arc<dyn Tool> =
+            Arc::new(system_status::SystemStatusTool::new(config.clone()));
+        tools.insert("system_status".to_string(), system_status_tool.clone());
+        native_catalog.register(system_status_tool);
 
         if let Some(ref idx) = indexer {
-            tools.insert(
-                "codesearch".to_string(),
-                Arc::new(codesearch::CodeSearchTool::new(idx.clone())),
-            );
+            let codesearch_tool: Arc<dyn Tool> =
+                Arc::new(codesearch::CodeSearchTool::new(idx.clone()));
+            tools.insert("codesearch".to_string(), codesearch_tool.clone());
+            native_catalog.register(codesearch_tool);
         }
 
         if let Some(ref ms) = memory_store {
-            tools.insert(
-                "record_memory".to_string(),
+            let memory_tools: Vec<Arc<dyn Tool>> = vec![
                 Arc::new(memory::RecordMemoryTool::new(ms.clone())),
-            );
-            tools.insert(
-                "list_memory_suggestions".to_string(),
                 Arc::new(memory::ListMemorySuggestionsTool::new(ms.clone())),
-            );
-            tools.insert(
-                "approve_memory_suggestion".to_string(),
                 Arc::new(memory::ApproveMemorySuggestionTool::new(ms.clone())),
-            );
-            tools.insert(
-                "reject_memory_suggestion".to_string(),
                 Arc::new(memory::RejectMemorySuggestionTool::new(ms.clone())),
-            );
+            ];
+            for tool in memory_tools {
+                let name = tool.name().to_string();
+                tools.insert(name, tool.clone());
+                native_catalog.register(tool);
+            }
         }
 
         if let Some(ref dm) = decision_memory {
-            tools.insert(
-                "record_decision".to_string(),
+            let decision_tools: Vec<Arc<dyn Tool>> = vec![
                 Arc::new(decision_memory::RecordDecisionTool::new(dm.clone())),
-            );
-            tools.insert(
-                "list_decision_suggestions".to_string(),
                 Arc::new(decision_memory::ListDecisionSuggestionsTool::new(
                     dm.clone(),
                 )),
-            );
-            tools.insert(
-                "approve_decision_suggestion".to_string(),
                 Arc::new(decision_memory::ApproveDecisionSuggestionTool::new(
                     dm.clone(),
                 )),
-            );
-            tools.insert(
-                "reject_decision_suggestion".to_string(),
                 Arc::new(decision_memory::RejectDecisionSuggestionTool::new(
                     dm.clone(),
                 )),
-            );
+            ];
+            for tool in decision_tools {
+                let name = tool.name().to_string();
+                tools.insert(name, tool.clone());
+                native_catalog.register(tool);
+            }
         }
 
         Ok(Self {
@@ -598,6 +597,7 @@ impl ToolRegistry {
             coordinator: None,
             scheduler: None,
             mcp,
+            native_catalog,
             cached_tool_definitions: std::sync::RwLock::new(None),
         })
     }
@@ -693,24 +693,28 @@ impl ToolRegistry {
         )
     }
 
-    /// Native tools, then `tool_search`, then every activated MCP tool.
+    /// Always-loaded native tools, then `tool_search`, then every
+    /// activated deferred built-in and MCP tool.
     ///
     /// Order is load-bearing. The native block is sorted and byte-stable
-    /// for the life of the process; everything MCP-related is appended
-    /// after it, so discovering a tool invalidates only the tail of the
-    /// provider's cached prompt prefix instead of the whole block.
+    /// for the life of the process; everything appended after it comes
+    /// from activation, so discovering a tool invalidates only the tail
+    /// of the provider's cached prompt prefix instead of the whole block.
     ///
     /// `tool_search` rides in that tail rather than in the sorted native
-    /// block because it is useless without a catalog: with no MCP server
-    /// connected it would otherwise cost tokens in every request just to
-    /// tell the model there is nothing to search.
-    pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
+    /// block because it is useless without a catalog: with nothing
+    /// deferred and no MCP server connected it would otherwise cost
+    /// tokens in every request just to tell the model there is nothing
+    /// to search.
+    pub fn get_tool_definitions(&self, session: &str) -> Vec<ToolDefinition> {
         let mut definitions = self.native_tool_definitions();
 
-        let Some(manager) = self.mcp_manager() else {
-            return definitions;
-        };
-        if manager.is_empty() {
+        let has_catalog = !self.native_catalog.is_empty()
+            || self
+                .mcp_manager()
+                .map(|manager| !manager.is_empty())
+                .unwrap_or(false);
+        if !has_catalog {
             return definitions;
         }
 
@@ -720,14 +724,17 @@ impl ToolRegistry {
                     tool_type: "function".to_string(),
                     function: crate::agent::provider::ToolFunction {
                         name: search.name().to_string(),
-                        description: Self::tool_prompt_description(search),
+                        description: tool_prompt_description(search),
                         parameters: search.parameters(),
                     },
                 });
             }
         }
 
-        definitions.extend(manager.activated_definitions());
+        definitions.extend(self.native_catalog.activated_definitions(session));
+        if let Some(manager) = self.mcp_manager() {
+            definitions.extend(manager.activated_definitions(session));
+        }
         definitions
     }
 
@@ -743,12 +750,13 @@ impl ToolRegistry {
             .tools
             .values()
             .filter(|tool| tool.name() != TOOL_SEARCH_NAME)
+            .filter(|tool| !self.native_catalog.contains(tool.name()))
             .filter(|tool| self.allowed.is_empty() || !self.allowed.contains(tool.name()))
             .map(|tool| ToolDefinition {
                 tool_type: "function".to_string(),
                 function: crate::agent::provider::ToolFunction {
                     name: tool.name().to_string(),
-                    description: Self::tool_prompt_description(tool),
+                    description: tool_prompt_description(tool),
                     parameters: tool.parameters(),
                 },
             })
@@ -760,36 +768,31 @@ impl ToolRegistry {
         definitions
     }
 
+    /// Compact manifest for installed skills. The full list — names,
+    /// descriptions, runtime actions — lives behind `skill_list`; this is
+    /// just the table of contents so the model knows the capability
+    /// exists, in the same spirit as the MCP and deferred built-in
+    /// manifests. It keeps prompt cost flat no matter how many skills are
+    /// installed.
     pub fn skill_summary_prompt(&self) -> Option<String> {
         let loader = self.skill_loader.as_ref()?;
-        let mut skills = loader.list();
-        skills.sort_by(|left, right| left.name.cmp(&right.name));
+        let skills = loader.list();
         if skills.is_empty() {
             return None;
         }
-        let lines = skills
-            .into_iter()
-            .take(30)
-            .map(|skill| {
-                let normalized = skill
-                    .description
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let description = normalized.chars().take(240).collect::<String>();
-                format!("- {}: {}", skill.name, description)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
         Some(format!(
-            "# Available Skills\nUse the skill tool when one of these specialized workflows clearly matches the task.\n{}",
-            lines
+            "# Available Skills\n{} skill(s) installed. Call `skill_list` to browse them by name and description, then `skill` to run one.\n",
+            skills.len()
         ))
     }
 
-    pub fn get_tool_definitions_for_profile(&self, profile: ToolProfile) -> Vec<ToolDefinition> {
+    pub fn get_tool_definitions_for_profile(
+        &self,
+        profile: ToolProfile,
+        session: &str,
+    ) -> Vec<ToolDefinition> {
         let manager = self.mcp_manager();
-        self.get_tool_definitions()
+        self.get_tool_definitions(session)
             .into_iter()
             .filter(|tool| profile.allows(&tool.function.name))
             .filter(|tool| {
@@ -834,6 +837,28 @@ impl ToolRegistry {
         manager.manifest_prompt()
     }
 
+    /// The always-in-context manifest of deferred built-in tools. Without
+    /// it the model cannot know a specialty tool exists and never thinks
+    /// to search for it.
+    pub fn native_manifest_prompt(&self) -> Option<String> {
+        self.native_catalog.manifest()
+    }
+
+    /// The deferred built-in catalog, for callers that need activation
+    /// state or the catalog itself (e.g. tool_search).
+    pub fn native_catalog(&self) -> Arc<NativeToolCatalog> {
+        self.native_catalog.clone()
+    }
+
+    /// Drop per-session tool activation (native and MCP) when a session
+    /// is deleted, so its loaded tools do not linger in memory.
+    pub fn prune_session_tools(&self, session: &str) {
+        self.native_catalog.prune_session(session);
+        if let Some(manager) = self.mcp_manager() {
+            manager.prune_session(session);
+        }
+    }
+
     pub fn is_mcp_tool(tool_name: &str) -> bool {
         tool_name.starts_with(MCP_TOOL_PREFIX)
     }
@@ -847,7 +872,15 @@ impl ToolRegistry {
             OSAgentError::ToolExecution("No MCP servers are connected".to_string())
         })?;
 
-        let (output, is_error) = manager.call(tool_name, args).await?;
+        // The runtime injects session_id into every tool call; activation
+        // is session-scoped so a direct call auto-activates only for the
+        // session that made it.
+        let session = args
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let (output, is_error) = manager.call(&session, tool_name, args).await?;
         if is_error {
             // The server reported a tool-level failure. Surface it as an
             // error so the runtime's retry and loop-detection logic sees
@@ -1058,10 +1091,10 @@ impl ToolRegistry {
 
     pub fn register_coordinator(&mut self, coordinator: Arc<Coordinator>) {
         if self.allowed.is_empty() || !self.allowed.contains("coordinator") {
-            self.tools.insert(
-                "coordinator".to_string(),
-                Arc::new(coordinator::CoordinatorTool::new(coordinator.clone())),
-            );
+            let tool: Arc<dyn Tool> =
+                Arc::new(coordinator::CoordinatorTool::new(coordinator.clone()));
+            self.tools.insert("coordinator".to_string(), tool.clone());
+            self.native_catalog.register(tool);
             self.coordinator = Some(coordinator);
             *self.cached_tool_definitions.write().unwrap() = None;
         }
@@ -1069,28 +1102,25 @@ impl ToolRegistry {
 
     pub fn register_scheduler(&mut self, scheduler: Arc<crate::scheduler::Scheduler>) {
         if self.allowed.is_empty() || !self.allowed.contains("schedule") {
-            self.tools.insert(
-                "schedule".to_string(),
-                Arc::new(scheduler::ScheduleTool::new(scheduler.clone())),
-            );
+            let tool: Arc<dyn Tool> = Arc::new(scheduler::ScheduleTool::new(scheduler.clone()));
+            self.tools.insert("schedule".to_string(), tool.clone());
+            self.native_catalog.register(tool);
             self.scheduler = Some(scheduler);
             *self.cached_tool_definitions.write().unwrap() = None;
         }
     }
 
     pub fn register_goals(&mut self, goals: Arc<crate::agent::goal::GoalStore>) {
-        self.tools.insert(
-            "get_goal".to_string(),
+        let goal_tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(crate::tools::goal::GetGoalTool::new(goals.clone())),
-        );
-        self.tools.insert(
-            "create_goal".to_string(),
             Arc::new(crate::tools::goal::CreateGoalTool::new(goals.clone())),
-        );
-        self.tools.insert(
-            "update_goal".to_string(),
             Arc::new(crate::tools::goal::UpdateGoalTool::new(goals)),
-        );
+        ];
+        for tool in goal_tools {
+            let name = tool.name().to_string();
+            self.tools.insert(name, tool.clone());
+            self.native_catalog.register(tool);
+        }
         *self.cached_tool_definitions.write().unwrap() = None;
     }
 }
@@ -1166,11 +1196,10 @@ mod tests {
     }
 
     #[test]
-    fn default_profile_keeps_every_configured_tool() {
-        assert_eq!(
-            selected_names(ToolProfile::Default).len(),
-            definitions().len()
-        );
+    fn default_profile_keeps_every_configured_tool_except_community_web_fetch() {
+        let names = selected_names(ToolProfile::Default);
+        assert_eq!(names.len(), definitions().len() - 1);
+        assert!(!names.contains(&"public_web_fetch".to_string()));
     }
 
     #[test]
@@ -1196,6 +1225,7 @@ mod tests {
         assert!(!names.contains(&"weather"));
         assert!(!names.contains(&"calendar"));
         assert!(!names.contains(&"news"));
+        assert!(!names.contains(&"public_web_fetch"));
     }
 
     #[test]

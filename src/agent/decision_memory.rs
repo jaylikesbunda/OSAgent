@@ -691,11 +691,6 @@ impl DecisionMemory {
             lines.push(line);
         }
 
-        lines.push(
-            "If a new conflicting preference appears, ask for explicit approval using: Approved decision: <key>=<value>."
-                .to_string(),
-        );
-
         Ok(Some(lines.join("\n")))
     }
 

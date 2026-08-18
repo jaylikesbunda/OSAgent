@@ -172,6 +172,16 @@ subagent_depth = 1
 [tools]
 denied = []
 
+# Low-frequency built-in tools (code execution, LSP, weather, calendar,
+# news, codesearch, system status, process, persona, task, memory/decision
+# management, goals, coordinator, schedule, skill actions) are NOT loaded
+# into every request. The agent sees a one-line manifest of what exists and
+# calls `tool_search` to load a schema on demand — the same deferred-catalog
+# pattern MCP servers use. Core tools (files, edits, bash, grep/glob, web,
+# subagent, todos, skills, questions) are always loaded.
+# To keep everything always loaded, deny `tool_search` here:
+# denied = ["tool_search"]
+
 [tools.repeat_reminder]
 # Advisory loop nudge: escalating reminders when the same tool is called
 # repeatedly with identical arguments. Unlike the hard loop guard this

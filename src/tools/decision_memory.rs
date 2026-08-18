@@ -23,7 +23,7 @@ impl Tool for RecordDecisionTool {
     }
 
     fn description(&self) -> &str {
-        "Record a durable approved decision that the agent should always follow in future sessions. Use this when the user states a strong preference, chooses a tooling convention, or the conversation makes a durable rule clear. Only record decisions that should be enforced across sessions — do NOT use for one-off facts or general memory."
+        "Record a durable approved decision that the agent should always follow in future sessions. Use this when the user states a strong preference, chooses a tooling convention, or the conversation makes a durable rule clear. Only record decisions that should be enforced across sessions — do NOT use for one-off facts or general memory. When the user states a new preference that conflicts with an existing approved decision, propose it in the conversation as: Approved decision: <key>=<value>, and record it only after the user confirms."
     }
 
     fn parameters(&self) -> Value {

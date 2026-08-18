@@ -186,7 +186,7 @@ async fn tools_stay_out_of_context_until_searched() {
 
     // The whole premise: a connected server costs zero tool schemas.
     assert!(
-        manager.activated_definitions().is_empty(),
+        manager.activated_definitions("s1").is_empty(),
         "connecting a server must not load any schemas"
     );
 
@@ -198,8 +198,8 @@ async fn tools_stay_out_of_context_until_searched() {
     let matches = manager.search("create issue", 5);
     assert_eq!(matches[0].tool, "create_issue");
 
-    manager.activate(&[matches[0].qualified_name.clone()]);
-    let definitions = manager.activated_definitions();
+    manager.activate("s1", &[matches[0].qualified_name.clone()]);
+    let definitions = manager.activated_definitions("s1");
     assert_eq!(definitions.len(), 1);
     assert_eq!(definitions[0].function.name, "mcp__tracker__create_issue");
     assert_eq!(definitions[0].function.parameters["type"], "object");
@@ -220,6 +220,7 @@ async fn calls_a_tool_and_flattens_its_content() {
 
     let (output, is_error) = manager
         .call(
+            "s1",
             "mcp__tracker__create_issue",
             serde_json::json!({"title": "bridge leaks"}),
         )
@@ -231,7 +232,7 @@ async fn calls_a_tool_and_flattens_its_content() {
 
     // Calling a catalogued tool activates it, so the model can keep
     // using it without searching again.
-    assert!(manager.is_activated("mcp__tracker__create_issue"));
+    assert!(manager.is_activated("s1", "mcp__tracker__create_issue"));
 
     manager.shutdown().await;
 }
@@ -245,7 +246,7 @@ async fn structured_content_survives_flattening() {
     let manager = McpManager::connect(&fixture.config).await;
 
     let (output, is_error) = manager
-        .call("mcp__tracker__listProjects", serde_json::json!({}))
+        .call("s1", "mcp__tracker__listProjects", serde_json::json!({}))
         .await
         .expect("call should succeed");
 
@@ -265,6 +266,7 @@ async fn tool_level_errors_are_reported_not_swallowed() {
 
     let (output, is_error) = manager
         .call(
+            "s1",
             "mcp__tracker__delete_project",
             serde_json::json!({"id": "1"}),
         )
@@ -289,7 +291,7 @@ async fn protocol_errors_become_rust_errors() {
     let manager = McpManager::connect(&fixture.config).await;
 
     let result = manager
-        .call("mcp__tracker__does_not_exist", serde_json::json!({}))
+        .call("s1", "mcp__tracker__does_not_exist", serde_json::json!({}))
         .await;
     assert!(result.is_err(), "unknown tools must not silently succeed");
 
@@ -331,7 +333,7 @@ async fn always_active_tools_skip_the_search_round_trip() {
 
     let manager = McpManager::connect(&fixture.config).await;
     assert_eq!(
-        manager.activated_names(),
+        manager.activated_names("s1"),
         vec!["mcp__tracker__create_issue".to_string()]
     );
 

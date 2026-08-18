@@ -139,6 +139,7 @@ impl SubagentManager {
             "process",
             "todowrite",
             "todoread",
+            "tool_search",
         ];
 
         let general_tools: HashSet<String> = all_tools.iter().map(|s| s.to_string()).collect();
@@ -155,6 +156,7 @@ impl SubagentManager {
             "skill_list",
             "skill_action",
             "lsp",
+            "tool_search",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -170,6 +172,7 @@ impl SubagentManager {
             "web_search",
             "reflect",
             "lsp",
+            "tool_search",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -514,14 +517,14 @@ impl SubagentManager {
             None,
             None,
         )?);
-        let available_tool_names: HashSet<String> = tool_registry
-            .get_tool_definitions()
-            .into_iter()
-            .map(|tool| tool.function.name)
-            .collect();
+        // Keep deferred built-ins (code_python, lsp, skill_action, ...) in
+        // the allowed set even though they are not loaded yet: the subagent
+        // can activate them via tool_search, and the shared registry's
+        // activation makes them appear in later iterations. Filter only
+        // against tools that actually exist in this build.
         let allowed_tools: Vec<String> = Self::get_allowed_tools_for_agent_type(&agent_type)
             .into_iter()
-            .filter(|tool| available_tool_names.contains(tool))
+            .filter(|tool| tool_registry.has_tool(tool))
             .collect();
         // Subagents use default identity and priorities (no custom sections)
         let prompt_mode = if agent_type == "explore" {
@@ -539,6 +542,12 @@ impl SubagentManager {
         let git_context = git_workspace_context(&active_root).await;
         let is_git_repo = active_root.join(".git").is_dir() || git_context.is_some();
         let skill_summary = tool_registry.skill_summary_prompt();
+        let native_manifest = tool_registry.native_manifest_prompt();
+        let mcp_manifest = if cfg.mcp.manifest_in_prompt {
+            tool_registry.mcp_manifest_prompt()
+        } else {
+            None
+        };
         let provider_type = provider.provider_type().to_string();
         let model = provider.current_model().await;
         let workspace_paths = parent_workspace
@@ -585,6 +594,12 @@ impl SubagentManager {
             }
             if let Some(skill_summary) = skill_summary {
                 session.messages.push(Message::system(skill_summary));
+            }
+            if let Some(manifest) = native_manifest {
+                session.messages.push(Message::system(manifest));
+            }
+            if let Some(manifest) = mcp_manifest {
+                session.messages.push(Message::system(manifest));
             }
             session.messages.push(Message::user(prompt));
             let _ = storage.update_session(&session);
@@ -716,7 +731,7 @@ impl SubagentManager {
         let api_messages: Vec<Message> = session.messages.clone();
 
         let tools = tool_registry
-            .get_tool_definitions()
+            .get_tool_definitions(&session_id)
             .into_iter()
             .filter(|t| allowed_tools.contains(&t.function.name))
             .collect::<Vec<_>>();
@@ -824,12 +839,10 @@ impl SubagentManager {
 
                 let start = Instant::now();
                 let mut tool_args = tool_call.arguments.clone();
-                if matches!(
-                    tool_call.name.as_str(),
-                    "question" | "todowrite" | "todoread"
-                ) {
-                    tool_args["session_id"] = serde_json::json!(session_id.clone());
-                }
+                // Every tool call carries the subagent's session id so
+                // session-scoped machinery (tool_search activation, MCP
+                // auto-activation, todos) finds its session.
+                tool_args["session_id"] = serde_json::json!(session_id.clone());
                 let result = tool_registry
                     .execute_result(&tool_call.name, tool_args)
                     .await;

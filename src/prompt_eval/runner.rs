@@ -170,7 +170,7 @@ impl EvaluationRunner {
         let mut messages: Vec<Message> = vec![Message::system(system_prompt)];
         messages.push(Message::user(test.input.clone()));
 
-        let tools = self.tool_registry.get_tool_definitions();
+        let tools = self.tool_registry.get_tool_definitions("");
         let mut all_tool_calls = Vec::new();
         let mut turns_taken = 0;
         let mut total_tokens = 0;

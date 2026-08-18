@@ -79,26 +79,44 @@ fn registry() -> ToolRegistry {
 }
 
 fn names(registry: &ToolRegistry, profile: ToolProfile) -> Vec<String> {
+    names_for_session(registry, profile, "")
+}
+
+fn names_for_session(registry: &ToolRegistry, profile: ToolProfile, session: &str) -> Vec<String> {
     registry
-        .get_tool_definitions_for_profile(profile)
+        .get_tool_definitions_for_profile(profile, session)
         .into_iter()
         .map(|tool| tool.function.name)
         .collect()
 }
 
 #[test]
-fn tool_search_is_absent_when_no_mcp_server_is_connected() {
-    // With nothing to search, the tool is pure overhead in every
-    // request, so it must not be offered at all.
+fn tool_search_is_present_when_native_catalog_is_nonempty() {
+    // Deferred built-ins (weather, code_python, memory, ...) always exist,
+    // so tool_search must be offered even with no MCP server connected —
+    // the model needs the gateway to load them. (Custom is the roleplay
+    // persona and is deliberately near-toolless.)
     let registry = registry();
     for (label, profile) in PROFILES {
-        assert!(
-            !names(&registry, *profile)
-                .iter()
-                .any(|n| n == "tool_search"),
-            "{} persona was offered tool_search with an empty catalog",
-            label
+        let visible = names(&registry, *profile);
+        let can_search = *profile != ToolProfile::Custom;
+        assert_eq!(
+            visible.iter().any(|n| n == "tool_search"),
+            can_search,
+            "{} persona has tool_search={}",
+            label,
+            can_search
         );
+        // Nothing is loaded into a fresh session: deferred built-ins must
+        // not leak into the default "" bucket.
+        for deferred in ["weather", "code_python", "lsp", "task"] {
+            assert!(
+                !visible.iter().any(|n| n == deferred),
+                "{} persona has '{}' loaded without a search",
+                label,
+                deferred
+            );
+        }
     }
 }
 
@@ -132,18 +150,24 @@ async fn every_persona_that_can_search_can_also_call_what_it_finds() {
     let registry = registry();
     registry.register_mcp(manager.clone());
 
-    // Simulate what tool_search does: activate both tools.
-    manager.activate(&[
-        "mcp__tracker__create_issue".to_string(),
-        "mcp__tracker__list_issues".to_string(),
-    ]);
+    // Simulate what tool_search does: activate both tools in session "s1".
+    manager.activate(
+        "s1",
+        &[
+            "mcp__tracker__create_issue".to_string(),
+            "mcp__tracker__list_issues".to_string(),
+        ],
+    );
 
     for (label, profile) in PROFILES {
-        let visible = names(&registry, *profile);
+        // Activation is session-scoped: query the same session the tools
+        // were activated into.
+        let visible = names_for_session(&registry, *profile, "s1");
         let can_search = visible.iter().any(|n| n == "tool_search");
         let reachable: Vec<&String> = visible.iter().filter(|n| n.starts_with("mcp__")).collect();
 
-        // The invariant: discovery and callable tools are all-or-nothing.
+        // The invariant: discovery and callable tools are all-or-nothing
+        // within a session.
         assert_eq!(
             can_search,
             !reachable.is_empty(),
@@ -191,13 +215,26 @@ fn tool_script_is_absent_from_read_only_and_minimal_personas() {
 #[test]
 fn native_tool_block_is_stable_across_activations() {
     // The prompt-cache argument only holds if the native block never
-    // changes shape when MCP tools come and go.
+    // changes shape when MCP tools come and go. `tool_search` and
+    // activated MCP tools are appended after the sorted native block, so
+    // only the native core is required to stay sorted and byte-stable.
     let registry = registry();
     let before = names(&registry, ToolProfile::Default);
     let after = names(&registry, ToolProfile::Default);
     assert_eq!(before, after);
+
+    let core: Vec<&String> = before
+        .iter()
+        .filter(|n| n.as_str() != "tool_search" && !n.starts_with("mcp__"))
+        .collect();
     assert!(
-        before.windows(2).all(|pair| pair[0] <= pair[1]),
+        core.windows(2).all(|pair| pair[0] <= pair[1]),
         "native tools must stay sorted so the cached prefix is byte-stable"
+    );
+    assert_eq!(
+        core.len(),
+        before.len() - 1,
+        "expected exactly one appended tail entry (tool_search), got {}",
+        before.len() - core.len()
     );
 }

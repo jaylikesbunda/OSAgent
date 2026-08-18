@@ -1,3 +1,15 @@
+v0.5.0 changes:
+
+* `tool_search` now covers low-frequency built-ins (code execution, LSP, weather, calendar, news, codesearch, process, system status, persona, task, memory/decision management, goals, coordinator, schedule, skill actions) alongside MCP servers; their schemas stay out of every request until needed
+* Added a one-line per-tool manifest of deferred built-ins to the prompt so the model knows the capability exists and can search for it; skills summary shrinks to a count + pointer to `skill_list`
+* Tool activation is now session-scoped: tools loaded via `tool_search` stay loaded only for the session that loaded them, so a new session always starts from the lean core set; config `always_active` MCP tools remain preloaded for every session, and deleted sessions drop their activation state
+* Subagents gain `tool_search` and the tool manifests, so they can load deferred built-ins and MCP tools instead of losing them from the shared registry
+* `public_web_fetch` is now excluded from full-access profiles (Default/Code/Creative) and only offered to Discord community sessions
+* Removed duplicated prompt rules: "be concise", "tool schemas are authoritative", and the lint/test mandate each existed twice across sections
+* Reworded the git safety rule to permit read-only git (status/diff/log) while still requiring approval for mutating operations, matching actual behavior
+* Trimmed implementation-detail prose from edit_file, apply_patch, read_file, and bash tool descriptions; moved the decision-memory protocol note into the record_decision tool schema
+* Shortened the per-turn "tool calls completed" follow-up nudge
+
 v0.4.5 changes:
 
 * Reworked streamed transcript rendering around one keyed model and renderer, eliminating chat flicker and tool-card ordering issues across thinking, tool, and response segments

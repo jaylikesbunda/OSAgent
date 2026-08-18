@@ -110,10 +110,16 @@ struct CatalogState {
 pub struct McpManager {
     clients: RwLock<HashMap<String, Arc<McpClient>>>,
     state: RwLock<CatalogState>,
+    /// Tools preloaded from config `always_active`, available to every
+    /// session from the first turn (skips the search round trip).
+    preloaded: RwLock<Vec<String>>,
+    /// session_id -> tools activated in that session, in activation order.
     /// Activation order is preserved: activated definitions are appended
     /// to the tool array so an activation invalidates only the tail of
     /// the provider's cached prompt prefix, never the native tool block.
-    activated: RwLock<Vec<String>>,
+    /// A fresh session starts with an empty set; activation never leaks
+    /// across sessions. The empty string "" is the default/global bucket.
+    activated: RwLock<HashMap<String, Vec<String>>>,
     max_activated: usize,
 }
 
@@ -125,7 +131,8 @@ impl McpManager {
         let manager = Arc::new(Self {
             clients: RwLock::new(HashMap::new()),
             state: RwLock::new(CatalogState::default()),
-            activated: RwLock::new(Vec::new()),
+            preloaded: RwLock::new(Vec::new()),
+            activated: RwLock::new(HashMap::new()),
             max_activated: config.max_activated_tools,
         });
 
@@ -218,7 +225,7 @@ impl McpManager {
             })
             .collect();
         if !preload.is_empty() {
-            manager.activate(&preload);
+            manager.preload(&preload);
         }
 
         manager
@@ -326,54 +333,112 @@ impl McpManager {
             .collect()
     }
 
-    /// Make tools callable for the rest of the session. Returns the
-    /// names that were newly activated.
-    pub fn activate(&self, names: &[String]) -> Vec<String> {
+    /// Preload tools for every session (config `always_active`). These are
+    /// available from the first turn and are not session-scoped.
+    pub fn preload(&self, names: &[String]) {
+        let state = self.state.read().unwrap();
+        let mut preloaded = self.preloaded.write().unwrap();
+        for name in names {
+            if state.by_name.contains_key(name) && !preloaded.contains(name) {
+                preloaded.push(name.clone());
+            }
+        }
+    }
+
+    /// Make tools callable for the rest of a session. Returns the names
+    /// that were newly activated for that session.
+    pub fn activate(&self, session: &str, names: &[String]) -> Vec<String> {
         let state = self.state.read().unwrap();
         let mut activated = self.activated.write().unwrap();
+        let bucket = activated.entry(session.to_string()).or_default();
         let mut added = Vec::new();
 
         for name in names {
-            if !state.by_name.contains_key(name) || activated.contains(name) {
+            if !state.by_name.contains_key(name) || bucket.contains(name) {
                 continue;
             }
-            if activated.len() >= self.max_activated {
+            if bucket.len() >= self.max_activated {
                 warn!(
                     "MCP activation cap ({}) reached; '{}' not activated",
                     self.max_activated, name
                 );
                 break;
             }
-            activated.push(name.clone());
+            bucket.push(name.clone());
             added.push(name.clone());
         }
 
         added
     }
 
-    pub fn activated_names(&self) -> Vec<String> {
-        self.activated.read().unwrap().clone()
+    pub fn activated_names(&self, session: &str) -> Vec<String> {
+        let mut names = self.preloaded.read().unwrap().clone();
+        if let Some(bucket) = self.activated.read().unwrap().get(session) {
+            names.extend(bucket.iter().cloned());
+        }
+        names
     }
 
-    pub fn is_activated(&self, qualified_name: &str) -> bool {
+    /// Every activated tool across all sessions, deduplicated. For UI
+    /// browsing (Settings > MCP Servers), which is not session-scoped.
+    pub fn all_activated_names(&self) -> Vec<String> {
+        let mut names = self.preloaded.read().unwrap().clone();
+        for bucket in self.activated.read().unwrap().values() {
+            for name in bucket {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        names
+    }
+
+    pub fn is_activated(&self, session: &str, qualified_name: &str) -> bool {
+        let preloaded = self.preloaded.read().unwrap();
+        if preloaded.iter().any(|name| name == qualified_name) {
+            return true;
+        }
         self.activated
             .read()
             .unwrap()
-            .iter()
-            .any(|name| name == qualified_name)
+            .get(session)
+            .map(|bucket| bucket.iter().any(|name| name == qualified_name))
+            .unwrap_or(false)
     }
 
-    /// Definitions for activated tools, in activation order.
-    pub fn activated_definitions(&self) -> Vec<ToolDefinition> {
+    /// Definitions for preloaded and session-activated tools, in
+    /// preload-then-activation order.
+    pub fn activated_definitions(&self, session: &str) -> Vec<ToolDefinition> {
         let state = self.state.read().unwrap();
-        self.activated
+        let mut definitions = Vec::new();
+        for name in self.preloaded.read().unwrap().iter() {
+            if let Some(index) = state.by_name.get(name) {
+                if let Some(entry) = state.entries.get(*index) {
+                    definitions.push(entry.to_definition());
+                }
+            }
+        }
+        for name in self
+            .activated
             .read()
             .unwrap()
-            .iter()
-            .filter_map(|name| state.by_name.get(name))
-            .filter_map(|index| state.entries.get(*index))
-            .map(|entry| entry.to_definition())
-            .collect()
+            .get(session)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(index) = state.by_name.get(name) {
+                if let Some(entry) = state.entries.get(*index) {
+                    definitions.push(entry.to_definition());
+                }
+            }
+        }
+        definitions
+    }
+
+    /// Drop all activation state for a session. Called when a session is
+    /// deleted so its loaded tools do not linger in memory.
+    pub fn prune_session(&self, session: &str) {
+        self.activated.write().unwrap().remove(session);
     }
 
     /// The always-in-context table of contents. One line per server —
@@ -420,7 +485,12 @@ impl McpManager {
     /// and activates it: the model sometimes remembers a name from an
     /// earlier search whose schema has since been dropped, and failing
     /// that call would be pure friction.
-    pub async fn call(&self, qualified_name: &str, arguments: Value) -> Result<(String, bool)> {
+    pub async fn call(
+        &self,
+        session: &str,
+        qualified_name: &str,
+        arguments: Value,
+    ) -> Result<(String, bool)> {
         let entry = self.entry(qualified_name).ok_or_else(|| {
             OSAgentError::ToolExecution(format!(
                 "Unknown MCP tool '{}'. Use tool_search to find available tools.",
@@ -428,8 +498,8 @@ impl McpManager {
             ))
         })?;
 
-        if !self.is_activated(qualified_name) {
-            self.activate(&[qualified_name.to_string()]);
+        if !self.is_activated(session, qualified_name) {
+            self.activate(session, &[qualified_name.to_string()]);
         }
 
         let client = self
@@ -619,7 +689,8 @@ mod tests {
         let manager = McpManager {
             clients: RwLock::new(HashMap::new()),
             state: RwLock::new(CatalogState::default()),
-            activated: RwLock::new(Vec::new()),
+            preloaded: RwLock::new(Vec::new()),
+            activated: RwLock::new(HashMap::new()),
             max_activated: 64,
         };
         let servers = vec![ServerSummary {
@@ -662,7 +733,7 @@ mod tests {
     #[test]
     fn nothing_is_activated_until_asked() {
         let manager = manager_with(vec![entry("linear", "create_issue", "Create an issue")]);
-        assert!(manager.activated_definitions().is_empty());
+        assert!(manager.activated_definitions("s1").is_empty());
         assert_eq!(manager.catalog_size(), 1);
     }
 
@@ -670,11 +741,11 @@ mod tests {
     fn search_activates_nothing_by_itself() {
         let manager = manager_with(vec![entry("linear", "create_issue", "Create an issue")]);
         assert_eq!(manager.search("create issue", 5).len(), 1);
-        assert!(manager.activated_names().is_empty());
+        assert!(manager.activated_names("s1").is_empty());
     }
 
     #[test]
-    fn activation_is_append_only_and_idempotent() {
+    fn activation_is_append_only_idempotent_and_session_scoped() {
         let manager = manager_with(vec![
             entry("linear", "create_issue", "Create an issue"),
             entry("linear", "list_issues", "List issues"),
@@ -682,10 +753,26 @@ mod tests {
         let first = qualified_name("linear", "create_issue");
         let second = qualified_name("linear", "list_issues");
 
-        manager.activate(std::slice::from_ref(&first));
-        manager.activate(&[first.clone(), second.clone()]);
+        manager.activate("s1", std::slice::from_ref(&first));
+        manager.activate("s1", &[first.clone(), second.clone()]);
 
-        assert_eq!(manager.activated_names(), vec![first, second]);
+        assert_eq!(
+            manager.activated_names("s1"),
+            vec![first.clone(), second.clone()]
+        );
+
+        // A different session starts clean: activation never leaks.
+        assert!(manager.activated_names("s2").is_empty());
+        assert!(!manager.is_activated("s2", &first));
+        manager.activate("s2", &[second.clone()]);
+        assert_eq!(manager.activated_names("s2"), vec![second.clone()]);
+        assert_eq!(manager.activated_definitions("s1").len(), 2);
+        assert_eq!(manager.activated_definitions("s2").len(), 1);
+
+        // Pruning removes only the targeted session.
+        manager.prune_session("s1");
+        assert!(manager.activated_names("s1").is_empty());
+        assert_eq!(manager.activated_definitions("s2").len(), 1);
     }
 
     #[test]
@@ -699,19 +786,35 @@ mod tests {
     }
 
     #[test]
+    fn preloaded_tools_are_available_to_every_session() {
+        let manager = manager_with(vec![entry("linear", "create_issue", "Create an issue")]);
+        let name = qualified_name("linear", "create_issue");
+        manager.preload(&[name.clone()]);
+
+        assert!(manager.is_activated("s1", &name));
+        assert!(manager.is_activated("s2", &name));
+        assert_eq!(manager.activated_definitions("s1").len(), 1);
+        assert_eq!(manager.activated_definitions("s2").len(), 1);
+    }
+
+    #[test]
     fn activation_respects_the_cap() {
         let manager = McpManager {
             clients: RwLock::new(HashMap::new()),
             state: RwLock::new(CatalogState::default()),
-            activated: RwLock::new(Vec::new()),
+            preloaded: RwLock::new(Vec::new()),
+            activated: RwLock::new(HashMap::new()),
             max_activated: 1,
         };
         manager.install_catalog(
             vec![entry("linear", "a", "a"), entry("linear", "b", "b")],
             Vec::new(),
         );
-        manager.activate(&[qualified_name("linear", "a"), qualified_name("linear", "b")]);
-        assert_eq!(manager.activated_names().len(), 1);
+        manager.activate(
+            "s1",
+            &[qualified_name("linear", "a"), qualified_name("linear", "b")],
+        );
+        assert_eq!(manager.activated_names("s1").len(), 1);
     }
 
     #[test]

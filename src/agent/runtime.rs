@@ -490,7 +490,7 @@ impl AgentRuntime {
         let custom_priorities = config.agent.custom_priorities.as_deref();
         let use_cache = config.agent.prompt_cache_enabled;
         let available_tools = tool_registry
-            .get_tool_definitions()
+            .get_tool_definitions("")
             .into_iter()
             .map(|tool| tool.function.name)
             .collect::<Vec<_>>();
@@ -1021,13 +1021,16 @@ impl AgentRuntime {
         let git_context = git_workspace_context(&workspace_root).await;
         let is_git_repo = workspace_root.join(".git").is_dir() || git_context.is_some();
         let skill_summary_prompt = self.tool_registry.skill_summary_prompt();
-        // Read per-run, not at startup: MCP servers connect in the
-        // background and the user can add more from the UI mid-session.
+        // The deferred built-in manifest is core to the agent's own
+        // toolset, so it is always shown. The MCP manifest is read per
+        // run, not at startup: servers connect in the background and the
+        // user can add more from the UI mid-session.
         let mcp_manifest_prompt = if runtime_config.mcp.manifest_in_prompt {
             self.tool_registry.mcp_manifest_prompt()
         } else {
             None
         };
+        let native_manifest_prompt = self.tool_registry.native_manifest_prompt();
         let context_provider = self.active_provider().await;
         let context_provider_type = context_provider.provider_type().to_string();
         let context_model = context_provider.current_model().await;
@@ -1137,11 +1140,11 @@ impl AgentRuntime {
             };
             let tools = self
                 .tool_registry
-                .get_tool_definitions_for_profile(tool_profile);
+                .get_tool_definitions_for_profile(tool_profile, session_id);
             info!(
                 "process_message: Calling provider with {} tools (filtered from {} total)",
                 tools.len(),
-                self.tool_registry.get_tool_definitions().len()
+                self.tool_registry.get_tool_definitions(session_id).len()
             );
             debug!(
                 "Selected {:?} profile tools for session {}: {}",
@@ -1265,6 +1268,9 @@ impl AgentRuntime {
                 if let Some(manifest) = mcp_manifest_prompt.as_ref() {
                     api_messages.push(Message::system(manifest.clone()));
                 }
+                if let Some(manifest) = native_manifest_prompt.as_ref() {
+                    api_messages.push(Message::system(manifest.clone()));
+                }
             }
 
             api_messages.reserve(session.messages.len());
@@ -1273,7 +1279,7 @@ impl AgentRuntime {
             }
             if pending_tool_followup && !is_roleplay {
                 api_messages.push(Message::user(
-                    "The last tool calls completed. If the user's request is fully addressed, give a concise final summary and stop. Do NOT start new tangential work, explore unrelated files, or add unsolicited improvements. Only continue with tools if there is a concrete remaining step directly related to the original request.".to_string(),
+                    "The last tool calls completed. If the request is addressed, give a concise final summary and stop. Do not start tangential work or unsolicited improvements; only continue if a concrete step directly remains.".to_string(),
                 ));
             }
             if response_truncated && !is_roleplay {
@@ -2240,17 +2246,11 @@ impl AgentRuntime {
                             .await
                         } else {
                             let mut tool_args = tool_call.arguments.clone();
-                            if tool_call.name == "question"
-                                || tool_call.name == "subagent"
-                                || tool_call.name == "coordinator"
-                                || tool_call.name == "todowrite"
-                                || tool_call.name == "todoread"
-                                || tool_call.name == "get_goal"
-                                || tool_call.name == "create_goal"
-                                || tool_call.name == "update_goal"
-                            {
-                                tool_args["session_id"] = serde_json::json!(session_id);
-                            }
+                            // Every tool call carries the session id so
+                            // session-scoped machinery (tool_search
+                            // activation, MCP auto-activation, todos,
+                            // goals, questions) can find its session.
+                            tool_args["session_id"] = serde_json::json!(session_id);
                             let external_paths = self
                                 .authorize_external_paths(
                                     session_id,
@@ -5096,6 +5096,9 @@ impl AgentRuntime {
         // Clean up session locks and cancellation notifiers
         self.session_locks.remove(id);
         self.session_cancellation.remove(id);
+        // Drop the session's tool activation so its loaded tools do not
+        // linger in memory or leak into future sessions.
+        self.tool_registry.prune_session_tools(id);
         self.session_manager.delete_session(id).await
     }
 
@@ -5930,7 +5933,7 @@ impl AgentRuntime {
             "enabled": config.mcp.enabled,
             "connecting": manager.is_none() && !config.mcp.servers.is_empty(),
             "catalog_size": manager.as_ref().map(|m| m.catalog_size()).unwrap_or(0),
-            "activated": manager.as_ref().map(|m| m.activated_names()).unwrap_or_default(),
+            "activated": manager.as_ref().map(|m| m.all_activated_names()).unwrap_or_default(),
             "max_activated_tools": config.mcp.max_activated_tools,
             "servers": servers,
         })
@@ -5942,6 +5945,7 @@ impl AgentRuntime {
         let Some(manager) = self.tool_registry.mcp_manager() else {
             return Vec::new();
         };
+        let activated = manager.all_activated_names();
         manager
             .entries()
             .into_iter()
@@ -5958,7 +5962,7 @@ impl AgentRuntime {
                     "tool": entry.tool,
                     "description": entry.description,
                     "read_only": entry.read_only,
-                    "activated": manager.is_activated(&entry.qualified_name),
+                    "activated": activated.contains(&entry.qualified_name),
                 })
             })
             .collect()

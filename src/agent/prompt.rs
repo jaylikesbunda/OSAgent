@@ -284,7 +284,6 @@ fn build_priorities_section(mode: PromptMode, custom_priorities: Option<&[String
             "- Prefer the most specific tool; parallelize independent search/read steps"
                 .to_string(),
             "- Use todowrite for multi-step work that is easy to lose track of".to_string(),
-            "- Be concise: keep replies short unless the user asks for detail; a one-word or one-line answer is usually best".to_string(),
             "- When making multiple independent tool calls (reads, greps, globs, searches, bash), batch them into a single message to run in parallel".to_string(),
             "- Balance proactiveness: take clear follow-up actions that serve the request, but never surprise the user with unrequested changes".to_string(),
         ],
@@ -325,7 +324,7 @@ fn build_safety_section(mode: PromptMode) -> Vec<String> {
             "- ALWAYS confirm before any write operation".to_string(),
             "- ALWAYS validate file paths before access".to_string(),
             "- REFUSE any request that could compromise security".to_string(),
-            "- NO git operations without explicit approval".to_string(),
+            "- No git operations that modify state (commit, push, reset, restore, checkout, clean, apply, merge) without explicit approval; read-only git (status, diff, log, show, branch) is allowed".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Safety".to_string(),
@@ -344,7 +343,6 @@ fn build_workflow_section(mode: PromptMode) -> Vec<String> {
             "- Use the most specific tool that fits the job".to_string(),
             "- Make the smallest correct change that solves the problem".to_string(),
             "- Delegate focused research or complex multi-file work with subagent or coordinator when it reduces context load or risk".to_string(),
-            "- After making changes, run the repo's lint/typecheck/test/build command if one exists, then fix anything it reports".to_string(),
             "- Validate with narrow checks; finish with status and blockers".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
