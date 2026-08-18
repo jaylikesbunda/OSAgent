@@ -278,12 +278,29 @@ OSA.setWorkspacePerm = function(perm) {
 
 OSA.browseWorkspaceSimple = async function() {
     OSA.setWorkspaceInlineStatus('');
+    let path = null;
     try {
-        const res = await OSA.fetchWithAuth('/api/workspaces/browse');
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
-        document.getElementById('workspace-inline-path').value = data.path;
-        const parts = data.path.replace(/\\/g, '/').split('/').filter(Boolean);
+        // In the native window, use Tauri's dialog plugin for a real
+        // OS folder picker. The core daemon deliberately ships no GTK,
+        // so the browser path falls back to the backend endpoint
+        // (available on Windows/macOS; on Linux browsers, type the path).
+        const tauriDialog = window.__TAURI__ && window.__TAURI__.dialog;
+        if (tauriDialog && typeof tauriDialog.open === 'function') {
+            const picked = await tauriDialog.open({
+                directory: true,
+                title: 'Choose workspace folder',
+                multiple: false
+            });
+            if (typeof picked === 'string' && picked) path = picked;
+        } else {
+            const res = await OSA.fetchWithAuth('/api/workspaces/browse');
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+            path = data.path;
+        }
+        if (!path) return;
+        document.getElementById('workspace-inline-path').value = path;
+        const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
         const nameInput = document.getElementById('workspace-inline-name');
         const idInput = document.getElementById('workspace-inline-id');
         if (nameInput && !nameInput.value.trim()) nameInput.value = parts[parts.length - 1] || '';
