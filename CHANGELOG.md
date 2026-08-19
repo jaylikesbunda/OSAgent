@@ -1,4 +1,4 @@
-v0.5.0 changes:
+v0.4.6 changes:
 
 * `tool_search` now covers low-frequency built-ins (code execution, LSP, weather, calendar, news, codesearch, process, system status, persona, task, memory/decision management, goals, coordinator, schedule, skill actions) alongside MCP servers; their schemas stay out of every request until needed
 * Added a one-line per-tool manifest of deferred built-ins to the prompt so the model knows the capability exists and can search for it; skills summary shrinks to a count + pointer to `skill_list`
@@ -9,6 +9,8 @@ v0.5.0 changes:
 * Reworded the git safety rule to permit read-only git (status/diff/log) while still requiring approval for mutating operations, matching actual behavior
 * Trimmed implementation-detail prose from edit_file, apply_patch, read_file, and bash tool descriptions; moved the decision-memory protocol note into the record_decision tool schema
 * Shortened the per-turn "tool calls completed" follow-up nudge
+* Discord now transcribes voice messages and audio attachments with local Whisper, decoding OGG/Opus, MP3, M4A, FLAC and more in-process before transcription
+* Replying to a message and tagging the bot now includes the message you replied to, so OSA sees both your reply and its context
 
 v0.4.5 changes:
 

@@ -1,3 +1,5 @@
+#[cfg(feature = "discord")]
+pub mod decode;
 pub mod piper;
 pub mod whisper;
 pub mod whisper_server;

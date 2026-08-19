@@ -1,6 +1,6 @@
 [package]
 name = "osagent"
-version = "0.5.0"
+version = "0.4.6"
 edition = "2021"
 rust-version = "1.78"
 authors = ["OSA Contributors"]
@@ -74,6 +74,14 @@ sysinfo = "0.32"
 base64 = "0.22"
 pdf-extract = "0.7"
 
+# Audio decoding for Discord voice messages and audio attachments. whisper.cpp
+# only accepts 16-bit WAV, so OGG/Opus, MP3, M4A, FLAC and friends are decoded
+# to WAV in-process before transcription. Gated behind the discord feature so a
+# non-Discord build does not pull in the libopus build (which needs cmake).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "aac", "isomp4", "mkv", "ogg", "vorbis", "wav", "pcm", "alac", "adpcm", "mpa"], optional = true }
+ogg = { version = "0.9", optional = true }
+opus = { version = "0.3", optional = true }
+
 # Async streaming
 async-stream = "0.3"
 lazy_static = "1.4"
@@ -130,7 +138,7 @@ path = "src/bin/osagent-bench.rs"
 
 [features]
 default = []
-discord = ["serenity"]
+discord = ["serenity", "dep:symphonia", "dep:ogg", "dep:opus"]
 production-frontend = []
 
 [profile.release]

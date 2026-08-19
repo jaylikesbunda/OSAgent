@@ -24,7 +24,7 @@ use serenity::{
     },
     model::{
         application::{ButtonStyle, ComponentInteraction, Interaction},
-        channel::Message,
+        channel::{Attachment, Message},
         gateway::Ready,
         id::ChannelId,
     },
@@ -1169,7 +1169,11 @@ impl EventHandler for Handler {
         };
 
         let content = strip_mention(&msg.content, bot_id);
-        if content.is_empty() || content.starts_with('!') || content.starts_with('/') {
+        let has_audio = msg.attachments.iter().any(is_audio_attachment);
+        if (content.is_empty() && !has_audio)
+            || content.starts_with('!')
+            || content.starts_with('/')
+        {
             return;
         }
 
@@ -1206,7 +1210,19 @@ impl EventHandler for Handler {
             }
         };
 
-        info!("Discord: message from {user_id} ({} chars)", content.len());
+        let prompt = match self.build_discord_prompt(&msg).await {
+            Some(prompt) => prompt,
+            None => return,
+        };
+
+        info!(
+            "Discord: message from {user_id} ({} chars, {} audio attachments)",
+            content.len(),
+            msg.attachments
+                .iter()
+                .filter(|attachment| is_audio_attachment(attachment))
+                .count()
+        );
 
         self.run_turn(
             &ctx,
@@ -1214,10 +1230,114 @@ impl EventHandler for Handler {
                 channel_id: msg.channel_id,
                 session_id,
                 user_id,
-                prompt: content,
+                prompt,
             },
         )
         .await;
+    }
+}
+
+impl Handler {
+    /// Assemble the agent prompt from a Discord message: the message you are
+    /// replying to (when there is one), any transcribed audio attachments, and
+    /// the message's own text.
+    async fn build_discord_prompt(&self, msg: &Message) -> Option<String> {
+        let bot_id = BOT_USER_ID.load(Ordering::Relaxed);
+        let text = strip_mention(&msg.content, bot_id);
+        let audio_attachments = msg
+            .attachments
+            .iter()
+            .filter(|attachment| is_audio_attachment(attachment))
+            .collect::<Vec<_>>();
+        if text.trim().is_empty() && audio_attachments.is_empty() {
+            return None;
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+
+        // Context of the message this one replies to, so "reply to that message
+        // and fix the thing in it" actually carries the referenced content.
+        if let Some(referenced) = msg.referenced_message.as_deref() {
+            let referenced_text = strip_mention(&referenced.content, bot_id)
+                .trim()
+                .to_string();
+            if !referenced_text.is_empty() {
+                parts.push(format!(
+                    "Replying to {}, who said:\n> {referenced_text}",
+                    referenced.author.name
+                ));
+            }
+        }
+
+        for attachment in audio_attachments {
+            match self.transcribe_attachment(attachment).await {
+                Ok(transcript) if !transcript.trim().is_empty() => parts.push(format!(
+                    "Voice message (transcribed): \"{}\"",
+                    transcript.trim()
+                )),
+                Ok(_) => parts.push(format!(
+                    "[Audio attachment `{}` produced no transcript]",
+                    attachment.filename
+                )),
+                Err(e) => parts.push(format!(
+                    "[Could not transcribe audio attachment `{}`: {e}]",
+                    attachment.filename
+                )),
+            }
+        }
+
+        if !text.trim().is_empty() {
+            parts.push(text.trim().to_string());
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
+    }
+
+    /// Download a Discord audio attachment, decode it to WAV, and transcribe it
+    /// with the local Whisper installation.
+    async fn transcribe_attachment(&self, attachment: &Attachment) -> Result<String, String> {
+        let bytes = reqwest::Client::new()
+            .get(&attachment.url)
+            .send()
+            .await
+            .map_err(|e| format!("Could not download audio: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Audio download failed: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| format!("Could not read downloaded audio: {e}"))?;
+
+        let temp_dir =
+            tempfile::tempdir().map_err(|e| format!("Could not create temp dir: {e}"))?;
+        let input_path = temp_dir.path().join("audio.bin");
+        let wav_path = temp_dir.path().join("audio.wav");
+        tokio::fs::write(&input_path, &bytes)
+            .await
+            .map_err(|e| format!("Could not save downloaded audio: {e}"))?;
+
+        let decoded = {
+            let input_path = input_path.clone();
+            let wav_path = wav_path.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::voice::decode::decode_audio_to_wav(&input_path, &wav_path)
+            })
+            .await
+            .map_err(|e| format!("Audio decode task failed: {e}"))?
+        }
+        .map_err(|e| format!("Could not decode audio: {e}"))?;
+
+        let config = self.agent.get_config().await;
+        let (language, model) = config
+            .voice
+            .as_ref()
+            .map(|voice| (voice.language.clone(), voice.whisper_model.clone()))
+            .unwrap_or_else(|| ("en".to_string(), None));
+
+        crate::voice::whisper::transcribe(&wav_path, Some(&language), model.as_deref()).await
     }
 }
 
@@ -1230,6 +1350,40 @@ fn strip_mention(content: &str, bot_id: u64) -> String {
         .replace(&format!("<@!{bot_id}>"), " ")
         .trim()
         .to_string()
+}
+
+/// Whether a Discord attachment carries audio, by content type (Discord voice
+/// messages are `audio/ogg`) or by file extension.
+fn is_audio_attachment(attachment: &Attachment) -> bool {
+    attachment_is_audio(attachment.content_type.as_deref(), &attachment.filename)
+}
+
+fn attachment_is_audio(content_type: Option<&str>, filename: &str) -> bool {
+    if let Some(content_type) = content_type {
+        if content_type.starts_with("audio/") {
+            return true;
+        }
+    }
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    matches!(
+        extension.as_str(),
+        "wav"
+            | "wave"
+            | "mp3"
+            | "ogg"
+            | "oga"
+            | "opus"
+            | "flac"
+            | "m4a"
+            | "mp4"
+            | "aac"
+            | "webm"
+            | "mkv"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,5 +1557,16 @@ mod tests {
             Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
             None
         );
+    }
+
+    #[test]
+    fn voice_message_attachments_are_detected() {
+        assert!(attachment_is_audio(Some("audio/ogg"), "voice-message.ogg"));
+        assert!(attachment_is_audio(None, "clip.mp3"));
+        assert!(attachment_is_audio(None, "song.m4a"));
+        assert!(attachment_is_audio(Some("audio/wav"), "a.wav"));
+        assert!(attachment_is_audio(None, "recording.webm"));
+        assert!(!attachment_is_audio(Some("image/png"), "photo.png"));
+        assert!(!attachment_is_audio(None, "notes.pdf"));
     }
 }
