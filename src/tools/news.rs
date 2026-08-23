@@ -160,9 +160,20 @@ impl NewsTool {
             "%Y-%m-%dT%H:%M:%SZ",
             "%Y-%m-%dT%H:%M:%S%#z",
         ];
+        let trimmed = text.trim();
         for fmt in &formats {
-            if let Ok(dt) = DateTime::parse_from_str(text.trim(), fmt) {
+            if let Ok(dt) = DateTime::parse_from_str(trimmed, fmt) {
                 return Some(dt.to_utc());
+            }
+        }
+        // Fallback: ignore weekday mismatch (e.g. "Mon, 07 Apr 2026" when 07 Apr is Tue)
+        // by stripping the leading "Day, " and retrying without %a.
+        if let Some(comma) = trimmed.find(',') {
+            let without_weekday = trimmed[comma + 1..].trim();
+            for fmt in &["%d %b %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S GMT"] {
+                if let Ok(dt) = DateTime::parse_from_str(without_weekday, fmt) {
+                    return Some(dt.to_utc());
+                }
             }
         }
         None
@@ -462,7 +473,7 @@ mod tests {
             <title>Breaking: Something happened</title>
             <link>https://example.com/1</link>
             <description>A description of the event</description>
-            <pubDate>Mon, 07 Apr 2026 12:00:00 GMT</pubDate>
+            <pubDate>Tue, 07 Apr 2026 12:00:00 GMT</pubDate>
         </item>
         <item>
             <title>Another story</title>

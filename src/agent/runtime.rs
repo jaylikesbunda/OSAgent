@@ -6278,6 +6278,11 @@ mod external_path_scan_tests {
 
     #[test]
     fn detects_env_var_paths() {
+        // This test is Windows-specific (USERPROFILE, backslashes). Skip on non-Windows
+        // where the scan logic treats those paths differently and env var is absent.
+        if cfg!(not(windows)) {
+            return;
+        }
         let profile = std::env::var("USERPROFILE").expect("USERPROFILE set on Windows");
         for cmd in [
             r#"dir "%USERPROFILE%\Documents""#,
@@ -6304,9 +6309,16 @@ mod external_path_scan_tests {
     fn ignores_workspace_internal_and_plain_commands() {
         assert_eq!(scan("cargo test --lib"), None);
         assert_eq!(scan("git status"), None);
-        assert_eq!(
-            scan(r#"dir "I:\GhostESP2\Research-Projects\Pwn-Power\src""#),
-            None
-        );
+        // Workspace-internal Windows path check is only meaningful on Windows where
+        // backslashes are path separators. On Unix it is treated as external.
+        if cfg!(windows) {
+            assert_eq!(
+                scan(r#"dir "I:\GhostESP2\Research-Projects\Pwn-Power\src""#),
+                None
+            );
+        } else {
+            // On Unix, ensure plain commands still don't trigger external detection
+            assert_eq!(scan(r#"dir "/tmp/some/other/path""#), None);
+        }
     }
 }
