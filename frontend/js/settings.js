@@ -1042,6 +1042,86 @@ OSA.stopDiscordBot = async function() {
     }
 };
 
+OSA.exportDiscordConfig = async function() {
+    const btn = document.getElementById('btn-discord-export');
+    const msgEl = document.getElementById('discord-import-message');
+    if (msgEl) msgEl.textContent = '';
+    if (btn) btn.disabled = true;
+    try {
+        const res = await OSA.fetchWithAuth('/api/discord/export');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `osagent-discord-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        if (msgEl) {
+            msgEl.textContent = 'Discord config exported — contains bot token, store securely.';
+            msgEl.style.color = 'var(--success)';
+        }
+    } catch (error) {
+        if (msgEl) {
+            msgEl.textContent = error.message || 'Export failed';
+            msgEl.style.color = 'var(--error)';
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+        setTimeout(() => { if (msgEl) msgEl.textContent = ''; }, 4000);
+    }
+};
+
+OSA.triggerDiscordImport = function() {
+    const input = document.getElementById('discord-import-file');
+    if (input) input.click();
+};
+
+OSA.importDiscordConfig = async function(event) {
+    const file = event.target.files && event.target.files[0];
+    const msgEl = document.getElementById('discord-import-message');
+    const btn = document.getElementById('btn-discord-import');
+    if (!file) return;
+    if (msgEl) msgEl.textContent = '';
+    if (btn) btn.disabled = true;
+    try {
+        const text = await file.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            throw new Error('Invalid JSON file');
+        }
+        const res = await OSA.fetchWithAuth('/api/discord/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(result.error || `HTTP ${res.status}`);
+        if (msgEl) {
+            msgEl.textContent = result.message || 'Discord config imported — saving and reloading...';
+            msgEl.style.color = 'var(--success)';
+        }
+        // Reload settings to reflect imported values
+        await OSA.loadSettings();
+        await OSA.loadDiscordBotStatus('Discord config imported');
+    } catch (error) {
+        if (msgEl) {
+            msgEl.textContent = error.message || 'Import failed';
+            msgEl.style.color = 'var(--error)';
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+        // Reset file input so same file can be selected again
+        event.target.value = '';
+        setTimeout(() => { if (msgEl) msgEl.textContent = ''; }, 5000);
+    }
+};
+
 OSA.updateWorkflowButtonVisibility = function(enabled) {
     const btn = document.getElementById('workflow-btn');
     if (btn) {

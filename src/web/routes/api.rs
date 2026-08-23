@@ -527,6 +527,8 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/discord/status", get(get_discord_bot_status))
         .route("/api/discord/start", post(start_discord_bot))
         .route("/api/discord/stop", post(stop_discord_bot))
+        .route("/api/discord/export", get(export_discord_config))
+        .route("/api/discord/import", post(import_discord_config))
         .route("/api/reasoning/options", get(get_reasoning_options))
         .route(
             "/api/workspaces",
@@ -1093,6 +1095,114 @@ async fn stop_discord_bot(
             "Discord bot was not running".to_string()
         },
     }))
+}
+
+#[derive(Debug, Serialize)]
+struct DiscordExportResponse {
+    version: u32,
+    exported_at: String,
+    discord: crate::config::DiscordConfig,
+}
+
+async fn export_discord_config(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Json<DiscordExportResponse> {
+    let config = agent.get_config().await;
+    let discord = config.discord.clone().unwrap_or_default();
+    Json(DiscordExportResponse {
+        version: 1,
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        discord,
+    })
+}
+
+async fn import_discord_config(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    // Accept either { discord: {...} } wrapper or raw DiscordConfig
+    let mut discord_config: crate::config::DiscordConfig =
+        if let Some(inner) = payload.get("discord") {
+            serde_json::from_value(inner.clone()).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid discord config: {e}"),
+                    }),
+                )
+            })?
+        } else if payload.get("token").is_some() || payload.get("enabled").is_some() {
+            serde_json::from_value(payload.clone()).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid discord config: {e}"),
+                    }),
+                )
+            })?
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Missing 'discord' field and no flat config detected".to_string(),
+                }),
+            ));
+        };
+
+    // Preserve existing tokens if incoming is empty (allows re-importing a file
+    // that was hand-edited or came from a redacted export without wiping secrets)
+    let current = agent.get_config().await;
+    if discord_config.token.trim().is_empty() {
+        if let Some(existing) = current.discord.as_ref() {
+            if !existing.token.trim().is_empty() {
+                discord_config.token = existing.token.clone();
+            }
+        }
+    }
+    if discord_config.github_token.trim().is_empty() {
+        if let Some(existing) = current.discord.as_ref() {
+            if !existing.github_token.trim().is_empty() {
+                discord_config.github_token = existing.github_token.clone();
+            }
+        }
+    }
+
+    // Normalize like update_config does
+    discord_config.allowed_users.sort_unstable();
+    discord_config.allowed_users.dedup();
+    discord_config.allowed_roles.sort_unstable();
+    discord_config.allowed_roles.dedup();
+    discord_config.allowed_guilds.sort_unstable();
+    discord_config.allowed_guilds.dedup();
+    discord_config.allowed_channels.sort_unstable();
+    discord_config.allowed_channels.dedup();
+    discord_config.trusted_users.sort_unstable();
+    discord_config.trusted_users.dedup();
+    discord_config.trusted_roles.sort_unstable();
+    discord_config.trusted_roles.dedup();
+    discord_config.trusted_guilds.sort_unstable();
+    discord_config.trusted_guilds.dedup();
+    discord_config.trusted_channels.sort_unstable();
+    discord_config.trusted_channels.dedup();
+
+    let mut new_config = current;
+    new_config.discord = Some(discord_config);
+
+    agent.replace_config(new_config.clone()).await;
+    new_config.save(&config_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Discord config imported successfully"
+    })))
 }
 
 async fn get_reasoning_options(

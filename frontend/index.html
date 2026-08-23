@@ -628,6 +628,17 @@
                         </div>
 
                         <div class="discord-settings-card">
+                            <div class="settings-group-title">Backup &amp; Restore</div>
+                            <p class="discord-card-desc">Export or import the full Discord bot config including bot tokens. The exported file contains secrets — store it securely.</p>
+                            <div class="discord-bot-actions" style="gap:8px;">
+                                <button type="button" class="btn-ghost" id="btn-discord-export" onclick="OSA.exportDiscordConfig()">Export Config</button>
+                                <button type="button" class="btn-ghost" id="btn-discord-import" onclick="OSA.triggerDiscordImport()">Import Config</button>
+                                <input type="file" id="discord-import-file" accept=".json,application/json" class="hidden" onchange="OSA.importDiscordConfig(event)" />
+                            </div>
+                            <span id="discord-import-message" class="settings-field-hint"></span>
+                        </div>
+
+                        <div class="discord-settings-card">
                             <div class="settings-group-title">Community Access</div>
                             <p class="discord-card-desc">Restricted support sessions can use public tools only. Trusted access stays separate.</p>
                             <div class="toggle-field discord-toggle-field">

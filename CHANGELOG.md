@@ -14,6 +14,7 @@ v0.4.6 changes:
 * Added Unsloth (Local) provider auto-detection like Ollama — probes `http://localhost:8888/v1/models` fallback `:8000` with `Bearer sk-unsloth-…` and unauthenticated fallback for `unsloth studio --no-auth`, live models appear as `installed` in the picker within 20s
 * Slimmed the outside-workspace permission prompt from `1120px` to `640px` max-width so the approval dock is centered and less wide
 * Fixed replying to a voice message in Discord not transcribing — now also transcribes audio attachments on the referenced message when you reply tagging OSA
+* Added Discord bot config export/import with tokens — `GET /api/discord/export` returns the full `DiscordConfig` (including `token`/`github_token`) and `POST /api/discord/import` restores it, with `Settings → Discord → Backup & Restore → Export/Import` handling file download/upload and preserving existing tokens when imported file omits them
 
 v0.4.5 changes:
 
