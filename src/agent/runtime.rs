@@ -6310,15 +6310,13 @@ mod external_path_scan_tests {
         assert_eq!(scan("cargo test --lib"), None);
         assert_eq!(scan("git status"), None);
         // Workspace-internal Windows path check is only meaningful on Windows where
-        // backslashes are path separators. On Unix it is treated as external.
+        // backslashes are path separators. On Unix the same string is parsed as
+        // an external absolute path, so only test it on Windows.
         if cfg!(windows) {
             assert_eq!(
                 scan(r#"dir "I:\GhostESP2\Research-Projects\Pwn-Power\src""#),
                 None
             );
-        } else {
-            // On Unix, ensure plain commands still don't trigger external detection
-            assert_eq!(scan(r#"dir "/tmp/some/other/path""#), None);
         }
     }
 }

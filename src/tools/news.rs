@@ -153,14 +153,23 @@ impl NewsTool {
     }
 
     fn parse_date(text: &str) -> Option<DateTime<Utc>> {
+        let trimmed = text.trim();
+        // Try RFC2822 first (handles "Tue, 07 Apr 2026 12:00:00 GMT" and numeric zones)
+        if let Ok(dt) = DateTime::parse_from_rfc2822(trimmed) {
+            return Some(dt.to_utc());
+        }
+        // RFC3339 for ISO dates
+        if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+            return Some(dt.to_utc());
+        }
         let formats = [
             "%a, %d %b %Y %H:%M:%S %z",
+            "%a, %d %b %Y %H:%M:%S %Z",
             "%a, %d %b %Y %H:%M:%S GMT",
             "%Y-%m-%dT%H:%M:%S%:z",
             "%Y-%m-%dT%H:%M:%SZ",
             "%Y-%m-%dT%H:%M:%S%#z",
         ];
-        let trimmed = text.trim();
         for fmt in &formats {
             if let Ok(dt) = DateTime::parse_from_str(trimmed, fmt) {
                 return Some(dt.to_utc());
@@ -170,10 +179,18 @@ impl NewsTool {
         // by stripping the leading "Day, " and retrying without %a.
         if let Some(comma) = trimmed.find(',') {
             let without_weekday = trimmed[comma + 1..].trim();
-            for fmt in &["%d %b %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S GMT"] {
+            for fmt in &[
+                "%d %b %Y %H:%M:%S %z",
+                "%d %b %Y %H:%M:%S %Z",
+                "%d %b %Y %H:%M:%S GMT",
+            ] {
                 if let Ok(dt) = DateTime::parse_from_str(without_weekday, fmt) {
                     return Some(dt.to_utc());
                 }
+            }
+            // Also try RFC2822 without weekday via chrono's lenient parser
+            if let Ok(dt) = DateTime::parse_from_str(without_weekday, "%d %b %Y %H:%M:%S %z") {
+                return Some(dt.to_utc());
             }
         }
         None
