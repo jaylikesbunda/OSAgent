@@ -22,6 +22,7 @@ env:
   R2_BUCKET: osagent-releases
   R2_RELEASE_PREFIX: releases
   CDN_BASE_URL: https://osa.fuckyourcdn.com
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   validate-release-tag:
