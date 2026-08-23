@@ -764,7 +764,7 @@ mod tests {
         // A different session starts clean: activation never leaks.
         assert!(manager.activated_names("s2").is_empty());
         assert!(!manager.is_activated("s2", &first));
-        manager.activate("s2", &[second.clone()]);
+        manager.activate("s2", std::slice::from_ref(&second));
         assert_eq!(manager.activated_names("s2"), vec![second.clone()]);
         assert_eq!(manager.activated_definitions("s1").len(), 2);
         assert_eq!(manager.activated_definitions("s2").len(), 1);
@@ -789,7 +789,7 @@ mod tests {
     fn preloaded_tools_are_available_to_every_session() {
         let manager = manager_with(vec![entry("linear", "create_issue", "Create an issue")]);
         let name = qualified_name("linear", "create_issue");
-        manager.preload(&[name.clone()]);
+        manager.preload(std::slice::from_ref(&name));
 
         assert!(manager.is_activated("s1", &name));
         assert!(manager.is_activated("s2", &name));

@@ -1358,7 +1358,7 @@ impl Handler {
             .await
             .map_err(|e| format!("Could not save downloaded audio: {e}"))?;
 
-        let decoded = {
+        {
             let input_path = input_path.clone();
             let wav_path = wav_path.clone();
             tokio::task::spawn_blocking(move || {

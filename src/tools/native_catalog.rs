@@ -52,6 +52,12 @@ pub struct NativeToolCatalog {
     activated: RwLock<HashMap<String, Vec<String>>>,
 }
 
+impl Default for NativeToolCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeToolCatalog {
     pub fn new() -> Self {
         Self {

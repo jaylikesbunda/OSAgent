@@ -210,11 +210,12 @@ impl Tool for ToolSearchTool {
             }
             let (payload, newly_activated, all_requested) = self.resolve_select(&session, &names);
             if payload.is_empty() {
-                return Ok(ToolResult::new(format!(
+                return Ok(ToolResult::new(
                     "No catalog entries matched the requested names. Available deferred \
                      built-ins are listed in the prompt manifest; MCP servers under \
                      'Connected MCP Servers'."
-                )));
+                        .to_string(),
+                ));
             }
             let activation_note = if newly_activated.is_empty() {
                 "All requested tools were already loaded.".to_string()
