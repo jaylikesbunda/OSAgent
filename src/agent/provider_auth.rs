@@ -28,6 +28,7 @@ impl ProviderAuth {
             "cerebras" => Self::cerebras(config),
             "xai" => Self::xai(config),
             "ollama" => Self::ollama(config),
+            "unsloth" => Self::unsloth(config),
             "deepseek" => Self::deepseek(config),
             "togetherai" => Self::togetherai(config),
             "mistral" => Self::mistral(config),
@@ -345,6 +346,40 @@ impl ProviderAuth {
             extra_headers: vec![],
             extra_options: json!({}),
             api_key_override: Some("ollama".to_string()),
+            base_url_override: base_url,
+        }
+    }
+
+    fn unsloth(config: &ProviderConfig) -> ProviderAuthResult {
+        // Unsloth exposes OpenAI-compatible /v1/models on localhost:8888 (default)
+        // and sometimes 8000. Like Ollama, probe locally even without a configured
+        // provider so installed models show up automatically in the picker.
+        let base_url = if config.base_url.is_empty() {
+            Some("http://localhost:8888/v1".to_string())
+        } else {
+            None
+        };
+        // Prefer explicit config key, then env. If nothing is set we still
+        // autoload and probe without auth so the UX mirrors Ollama; the probe
+        // will fail gracefully (and be cached) when auth is actually required.
+        let key = if !config.api_key.trim().is_empty() {
+            config.api_key.clone()
+        } else {
+            std::env::var("UNSLOTH_API_KEY")
+                .or_else(|_| std::env::var("UNSLOTH_STUDIO_AUTH_TOKEN"))
+                .unwrap_or_default()
+        };
+        ProviderAuthResult {
+            autoload: true,
+            extra_headers: vec![],
+            extra_options: json!({}),
+            api_key_override: if key.trim().is_empty() {
+                // Unsloth requires Bearer but Ollama pattern uses dummy key;
+                // keep probe permissive — server will return 401 and we cache empty.
+                Some("unsloth".to_string())
+            } else {
+                Some(key)
+            },
             base_url_override: base_url,
         }
     }

@@ -103,6 +103,10 @@ pub struct AgentConfig {
     /// Spawning deeper than this fails with an explicit error.
     #[serde(default = "default_subagent_depth")]
     pub subagent_depth: usize,
+    /// Per-subagent-type model overrides, e.g. `"explore" => "openrouter:deepseek/deepseek-r1"`.
+    /// Values are `"provider_id:model"` or just a model name (uses the default provider).
+    #[serde(default)]
+    pub subagent_models: std::collections::HashMap<String, String>,
 }
 
 fn default_prompt_cache_enabled() -> bool {
@@ -759,6 +763,7 @@ impl Default for AgentConfig {
             custom_priorities: None,
             prompt_cache_enabled: default_prompt_cache_enabled(),
             subagent_depth: default_subagent_depth(),
+            subagent_models: std::collections::HashMap::new(),
         }
     }
 }

@@ -178,7 +178,7 @@ OSA.refreshProviderCatalogInBackground = function() {
 };
 
 OSA.sortProvidersForDropdown = function(providers) {
-    const providerOrder = ['OpenRouter', 'OpenAI', 'Anthropic', 'Google AI', 'Groq', 'DeepSeek', 'xAI', 'Ollama (Local)'];
+    const providerOrder = ['OpenRouter', 'OpenAI', 'Anthropic', 'Google AI', 'Groq', 'DeepSeek', 'xAI', 'Ollama (Local)', 'Unsloth (Local)'];
     return [...(providers || [])].sort((a, b) => {
         if (!!a.connected !== !!b.connected) return a.connected ? -1 : 1;
         const ai = providerOrder.indexOf(a.name);
@@ -685,13 +685,14 @@ OSA.refreshModalProviderModels = async function(provider, connectedEntry) {
     const baseUrlInput = document.getElementById('provider-base-url');
     const selectedModelId = document.getElementById('provider-model').value;
 
-    if (provider.id !== 'ollama') {
+    if (provider.id !== 'ollama' && provider.id !== 'unsloth') {
         OSA.modalProviderModels = provider.models || [];
         OSA.populateModalModelDropdown(OSA.modalProviderModels, provider.id);
         return;
     }
 
-    if (list) list.innerHTML = '<div class="model-empty">Loading installed Ollama models...</div>';
+    if (provider.id === 'ollama' && list) list.innerHTML = '<div class="model-empty">Loading installed Ollama models...</div>';
+    if (provider.id === 'unsloth' && list) list.innerHTML = '<div class="model-empty">Loading installed Unsloth models...</div>';
 
     const baseUrl = (baseUrlInput && baseUrlInput.value.trim())
         || (connectedEntry && connectedEntry.base_url)
@@ -718,6 +719,9 @@ OSA.refreshModalProviderModels = async function(provider, connectedEntry) {
     if (provider.id === 'ollama' && OSA.modalProviderModels.length === 0 && list) {
         list.innerHTML = '<div class="model-empty">No Ollama models available (is Ollama running?)</div>';
     }
+    if (provider.id === 'unsloth' && OSA.modalProviderModels.length === 0 && list) {
+        list.innerHTML = '<div class="model-empty">No Unsloth models available (is Unsloth running on :8888 or :8000?)</div>';
+    }
 };
 
 OSA.renderModalModelDropdown = async function() {
@@ -731,7 +735,7 @@ OSA.renderModalModelDropdown = async function() {
         ? OSA.modalProviderModels
         : (provider.models || []);
 
-    if (provider.id === 'ollama') {
+    if (provider.id === 'ollama' || provider.id === 'unsloth') {
         const filtered = query
             ? modalModels.filter(function(model) {
                 return (model.name || '').toLowerCase().includes(query.toLowerCase())
@@ -740,7 +744,10 @@ OSA.renderModalModelDropdown = async function() {
             : modalModels;
         OSA.populateModalModelDropdown(filtered, provider.id);
         if (filtered.length === 0) {
-            list.innerHTML = '<div class="model-empty">No Ollama models available (is Ollama running?)</div>';
+            const msg = provider.id === 'unsloth'
+                ? 'No Unsloth models available (is Unsloth running on :8888 or :8000?)'
+                : 'No Ollama models available (is Ollama running?)';
+            list.innerHTML = '<div class="model-empty">' + msg + '</div>';
         }
         return;
     }
@@ -830,7 +837,7 @@ OSA.renderSettingsModelList = function(query) {
         return;
     }
 
-    const providerOrder = ['OpenRouter', 'OpenAI', 'Anthropic', 'Google AI', 'Groq', 'DeepSeek', 'xAI', 'Ollama (Local)'];
+    const providerOrder = ['OpenRouter', 'OpenAI', 'Anthropic', 'Google AI', 'Groq', 'DeepSeek', 'xAI', 'Ollama (Local)', 'Unsloth (Local)'];
     const sortedProviders = [...providers].sort((a, b) => {
         const ai = providerOrder.indexOf(a.name);
         const bi = providerOrder.indexOf(b.name);
@@ -1087,7 +1094,7 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     OSA.currentProviderApiKeyUrl = provider.api_key_url || null;
 
     // Set header icon
-    const iconMap = { openai: 'OAI', anthropic: 'ANT', google: 'GAI', openrouter: 'ORN', ollama: 'OLL', groq: 'GRQ', deepseek: 'DSK', xai: 'XAI' };
+    const iconMap = { openai: 'OAI', anthropic: 'ANT', google: 'GAI', openrouter: 'ORN', ollama: 'OLL', unsloth: 'UNS', groq: 'GRQ', deepseek: 'DSK', xai: 'XAI' };
     const iconEl = document.getElementById('provider-modal-icon');
     iconEl.textContent = iconMap[providerId] || providerId.substring(0, 3).toUpperCase();
     iconEl.className = 'provider-modal-icon icon-' + providerId;
@@ -1152,11 +1159,11 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
         }
     }
 
-    // Set up auto-validation and dynamic Ollama discovery
+    // Set up auto-validation and dynamic Ollama/Unsloth discovery
     document.getElementById('provider-api-key').oninput = function() { OSA.scheduleValidation(); };
     document.getElementById('provider-base-url').oninput = function() {
         OSA.scheduleValidation();
-        if (provider.id === 'ollama') {
+        if (provider.id === 'ollama' || provider.id === 'unsloth') {
             if (OSA.ollamaModelDebounce) clearTimeout(OSA.ollamaModelDebounce);
             OSA.ollamaModelDebounce = setTimeout(function() {
                 OSA.refreshModalProviderModels(provider, connectedEntry);
@@ -1516,7 +1523,7 @@ OSA.addProvider = async function() {
         }
     }
 
-    if (!apiKey && OSA.currentProviderId !== 'ollama') { alert('Please enter an API key'); return; }
+    if (!apiKey && OSA.currentProviderId !== 'ollama' && OSA.currentProviderId !== 'unsloth') { alert('Please enter an API key'); return; }
 
     addBtn.disabled = true;
     addBtn.textContent = 'Adding...';

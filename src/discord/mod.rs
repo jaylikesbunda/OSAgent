@@ -1169,7 +1169,12 @@ impl EventHandler for Handler {
         };
 
         let content = strip_mention(&msg.content, bot_id);
-        let has_audio = msg.attachments.iter().any(is_audio_attachment);
+        let has_audio = msg.attachments.iter().any(is_audio_attachment)
+            || msg
+                .referenced_message
+                .as_deref()
+                .map(|r| r.attachments.iter().any(is_audio_attachment))
+                .unwrap_or(false);
         if (content.is_empty() && !has_audio)
             || content.starts_with('!')
             || content.starts_with('/')
@@ -1215,13 +1220,24 @@ impl EventHandler for Handler {
             None => return,
         };
 
+        let referenced_audio_count = msg
+            .referenced_message
+            .as_deref()
+            .map(|r| {
+                r.attachments
+                    .iter()
+                    .filter(|attachment| is_audio_attachment(attachment))
+                    .count()
+            })
+            .unwrap_or(0);
         info!(
-            "Discord: message from {user_id} ({} chars, {} audio attachments)",
+            "Discord: message from {user_id} ({} chars, {} audio attachments + {} referenced)",
             content.len(),
             msg.attachments
                 .iter()
                 .filter(|attachment| is_audio_attachment(attachment))
-                .count()
+                .count(),
+            referenced_audio_count
         );
 
         self.run_turn(
@@ -1257,6 +1273,8 @@ impl Handler {
 
         // Context of the message this one replies to, so "reply to that message
         // and fix the thing in it" actually carries the referenced content.
+        // Also transcribe any audio attachments on the referenced message (e.g.
+        // user replies to a voice message tagging the bot).
         if let Some(referenced) = msg.referenced_message.as_deref() {
             let referenced_text = strip_mention(&referenced.content, bot_id)
                 .trim()
@@ -1266,6 +1284,27 @@ impl Handler {
                     "Replying to {}, who said:\n> {referenced_text}",
                     referenced.author.name
                 ));
+            }
+            for attachment in referenced
+                .attachments
+                .iter()
+                .filter(|a| is_audio_attachment(a))
+            {
+                match self.transcribe_attachment(attachment).await {
+                    Ok(transcript) if !transcript.trim().is_empty() => parts.push(format!(
+                        "Referenced voice message from {} (transcribed): \"{}\"",
+                        referenced.author.name,
+                        transcript.trim()
+                    )),
+                    Ok(_) => parts.push(format!(
+                        "[Referenced audio attachment `{}` from {} produced no transcript]",
+                        attachment.filename, referenced.author.name
+                    )),
+                    Err(e) => parts.push(format!(
+                        "[Could not transcribe referenced audio attachment `{}` from {}: {e}]",
+                        attachment.filename, referenced.author.name
+                    )),
+                }
             }
         }
 

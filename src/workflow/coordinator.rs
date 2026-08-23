@@ -422,6 +422,7 @@ impl SafeWorkflowCoordinator {
                 format!("Workflow agent: {}", config.agent_id),
                 task.clone(),
                 "general".to_string(),
+                false,
             )
             .await?;
 

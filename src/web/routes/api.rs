@@ -3981,6 +3981,7 @@ async fn validate_provider(
     Json(payload): Json<ValidateProviderRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let is_ollama = payload.provider_id == "ollama";
+    let is_unsloth = payload.provider_id == "unsloth";
     let base_url = if let Some(url) = payload.base_url {
         url
     } else {
@@ -3989,7 +3990,10 @@ async fn validate_provider(
             .unwrap_or_default()
     };
 
-    if payload.api_key.is_empty() && !is_ollama {
+    // Ollama can be validated without a key (probe localhost). Unsloth also
+    // probes localhost but truly needs a key; we allow empty for probing so
+    // the modal can show “no models” rather than a hard validation error.
+    if payload.api_key.is_empty() && !is_ollama && !is_unsloth {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -4014,6 +4018,11 @@ async fn validate_provider(
         format!(
             "{}/api/version",
             normalize_ollama_base_url(&base_url).trim_end_matches('/')
+        )
+    } else if is_unsloth {
+        format!(
+            "{}/v1/models",
+            normalize_unsloth_base_url(&base_url).trim_end_matches('/')
         )
     } else {
         format!("{}/models", base_url.trim_end_matches('/'))
@@ -5152,6 +5161,23 @@ struct OllamaTagModel {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct UnslothModelsResponse {
+    #[serde(default)]
+    data: Vec<UnslothModelEntry>,
+    #[serde(default)]
+    object: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UnslothModelEntry {
+    id: String,
+    #[serde(default)]
+    object: String,
+    #[serde(default)]
+    owned_by: String,
+}
+
 fn ollama_context_cache() -> &'static dashmap::DashMap<String, (usize, Instant)> {
     static STORE: OnceLock<dashmap::DashMap<String, (usize, Instant)>> = OnceLock::new();
     STORE.get_or_init(dashmap::DashMap::new)
@@ -5189,6 +5215,43 @@ fn ollama_models_cache(
 }
 
 const OLLAMA_MODELS_TTL: Duration = Duration::from_secs(20);
+const UNSLOTH_MODELS_TTL: Duration = Duration::from_secs(20);
+
+fn unsloth_models_cache(
+) -> &'static dashmap::DashMap<String, (Vec<crate::agent::model_catalog::ModelInfo>, Instant)> {
+    static STORE: OnceLock<
+        dashmap::DashMap<String, (Vec<crate::agent::model_catalog::ModelInfo>, Instant)>,
+    > = OnceLock::new();
+    STORE.get_or_init(dashmap::DashMap::new)
+}
+
+fn unsloth_http_client() -> Option<&'static reqwest::Client> {
+    // Reuse the same tuning as Ollama: small timeouts for loopback probes.
+    ollama_http_client()
+}
+
+fn normalize_unsloth_base_url(base_url: &str) -> String {
+    let mut normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        return "http://localhost:8888".to_string();
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if lower.ends_with("/v1/models") {
+        normalized.truncate(normalized.len().saturating_sub(10));
+    } else if lower.ends_with("/v1/chat/completions") {
+        normalized.truncate(normalized.len().saturating_sub(19));
+    } else if lower.ends_with("/v1") {
+        normalized.truncate(normalized.len().saturating_sub(3));
+    } else if lower.ends_with("/api") {
+        normalized.truncate(normalized.len().saturating_sub(4));
+    }
+    normalized = normalized.trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        "http://localhost:8888".to_string()
+    } else {
+        normalized
+    }
+}
 
 fn extract_ollama_context_window(payload: &serde_json::Value) -> Option<usize> {
     if let Some(model_info) = payload
@@ -5466,10 +5529,237 @@ async fn apply_live_ollama_models_to_catalog(
     let live_models = fetch_live_ollama_models(agent, None).await;
     if let Some(provider) = catalog.providers.iter_mut().find(|p| p.id == "ollama") {
         provider.models = live_models.clone();
+        if !live_models.is_empty() {
+            provider.connected = true;
+        }
     }
     catalog
         .all_models
         .retain(|model| model.provider_id != "ollama");
+    catalog.all_models.extend(live_models);
+}
+
+async fn resolve_unsloth_base_url(
+    agent: &Arc<AgentRuntime>,
+    base_url_override: Option<String>,
+) -> String {
+    if let Some(url) = base_url_override {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+    let config = agent.get_config().await;
+    if let Some(provider) = config
+        .providers
+        .iter()
+        .find(|p| p.provider_type == "unsloth")
+    {
+        if !provider.base_url.trim().is_empty() {
+            return provider.base_url.clone();
+        }
+    }
+    crate::agent::provider_presets::get_preset("unsloth")
+        .map(|preset| preset.base_url)
+        .unwrap_or_else(|| "http://localhost:8888/v1".to_string())
+}
+
+async fn resolve_unsloth_api_key(agent: &Arc<AgentRuntime>) -> Option<String> {
+    let config = agent.get_config().await;
+    if let Some(key) = config
+        .providers
+        .iter()
+        .find(|provider| provider.provider_type == "unsloth")
+        .map(|provider| provider.api_key.clone())
+        .filter(|api_key| !api_key.trim().is_empty())
+    {
+        return Some(key);
+    }
+    // Fall back to env vars used by preset
+    for var in ["UNSLOTH_API_KEY", "UNSLOTH_STUDIO_AUTH_TOKEN"] {
+        if let Ok(val) = std::env::var(var) {
+            if !val.trim().is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_live_unsloth_models(
+    agent: &Arc<AgentRuntime>,
+    base_url_override: Option<String>,
+) -> Vec<crate::agent::model_catalog::ModelInfo> {
+    fetch_live_unsloth_models_inner(agent, base_url_override, true).await
+}
+
+async fn fetch_live_unsloth_models_inner(
+    agent: &Arc<AgentRuntime>,
+    base_url_override: Option<String>,
+    use_cache: bool,
+) -> Vec<crate::agent::model_catalog::ModelInfo> {
+    let base_url = resolve_unsloth_base_url(agent, base_url_override).await;
+    let normalized_base = normalize_unsloth_base_url(&base_url);
+
+    if use_cache {
+        if let Some(entry) = unsloth_models_cache().get(&normalized_base) {
+            if entry.value().1.elapsed() < UNSLOTH_MODELS_TTL {
+                return entry.value().0.clone();
+            }
+        }
+    }
+
+    let models = fetch_live_unsloth_models_uncached(agent, &normalized_base).await;
+    unsloth_models_cache().insert(normalized_base, (models.clone(), Instant::now()));
+    models
+}
+
+async fn fetch_live_unsloth_models_uncached(
+    agent: &Arc<AgentRuntime>,
+    normalized_base: &str,
+) -> Vec<crate::agent::model_catalog::ModelInfo> {
+    let api_key = resolve_unsloth_api_key(agent).await;
+    let client = match unsloth_http_client() {
+        Some(client) => client.clone(),
+        None => return Vec::new(),
+    };
+
+    // Try primary base, then fallback ports if default was used and probe missed.
+    let candidates = {
+        let mut list = vec![normalized_base.to_string()];
+        // If default is 8888, also try 8000 as fallback (Unsloth commonly uses either).
+        let lower = normalized_base.to_ascii_lowercase();
+        if lower == "http://localhost:8888" || lower == "http://127.0.0.1:8888" {
+            list.push(normalized_base.replace("8888", "8000"));
+        } else if lower == "http://localhost:8000" || lower == "http://127.0.0.1:8000" {
+            list.push(normalized_base.replace("8000", "8888"));
+        }
+        list
+    };
+
+    'candidate: for base in candidates {
+        let url = format!("{}/v1/models", base.trim_end_matches('/'));
+        // Attempt 1: with auth if we have a real key; Attempt 2: without auth (covers --no-auth)
+        let has_real_key = api_key
+            .as_deref()
+            .map(|k| !k.trim().is_empty() && k.trim() != "unsloth")
+            .unwrap_or(false);
+        let attempts = if has_real_key { 2 } else { 1 };
+        let mut response_opt: Option<reqwest::Response> = None;
+        for attempt in 0..attempts {
+            let mut req = client.get(&url);
+            if attempt == 0 && has_real_key {
+                req = req.header(
+                    "Authorization",
+                    format!("Bearer {}", api_key.as_deref().unwrap().trim()),
+                );
+            }
+            // attempt 1 (or 0 when no key) is unauthenticated
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    response_opt = Some(r);
+                    break;
+                }
+                Ok(r)
+                    if (r.status() == 401 || r.status() == 403) && attempt == 0 && has_real_key =>
+                {
+                    // Auth failed, retry same base without auth (covers --no-auth servers)
+                    continue;
+                }
+                Ok(_) => {
+                    // Other non-success (404, etc.) — try next base port
+                    response_opt = None;
+                    break;
+                }
+                Err(_) => {
+                    // Connection error — try next base port (or next attempt if we have retry)
+                    if attempt == 0 && has_real_key {
+                        continue;
+                    } else {
+                        response_opt = None;
+                        break;
+                    }
+                }
+            }
+        }
+        let response = match response_opt {
+            Some(r) => r,
+            None => continue 'candidate,
+        };
+        let payload: serde_json::Value = match response.json().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // Unsloth returns {object:"list", data:[{id:...}]} — also handle {data:...} shape
+        let entries: Vec<UnslothModelEntry> = if let Some(data) = payload.get("data") {
+            serde_json::from_value(data.clone()).unwrap_or_default()
+        } else {
+            serde_json::from_value::<UnslothModelsResponse>(payload)
+                .map(|r| r.data)
+                .unwrap_or_default()
+        };
+        if entries.is_empty() {
+            // Empty list may mean server alive but no model loaded — cache empty and return.
+            // Don't try next port if first succeeded.
+            return Vec::new();
+        }
+        let mut models: Vec<crate::agent::model_catalog::ModelInfo> = entries
+            .into_iter()
+            .filter_map(|m| {
+                let id = m.id.trim().to_string();
+                if id.is_empty() {
+                    return None;
+                }
+                let name = id.split('/').next_back().unwrap_or(&id).to_string();
+                // Unsloth models are GGUF; assume tool calling + vision possible.
+                // Use installed category to match Ollama UX.
+                Some(crate::agent::model_catalog::ModelInfo {
+                    id: id.clone(),
+                    name,
+                    provider_id: "unsloth".to_string(),
+                    provider_name: "Unsloth (Local)".to_string(),
+                    // TODO: picks up context window from preset if known, else large default.
+                    context_window: crate::agent::provider_presets::get_preset("unsloth")
+                        .and_then(|p| {
+                            p.models
+                                .iter()
+                                .find(|pm| pm.id == id)
+                                .map(|pm| pm.context_window)
+                        })
+                        .unwrap_or(131_072),
+                    input_limit: None,
+                    output_limit: 0,
+                    supports_tools: true,
+                    supports_vision: id.to_ascii_lowercase().contains("vision")
+                        || id.to_ascii_lowercase().contains("vl"),
+                    category: "installed".to_string(),
+                    available: true,
+                })
+            })
+            .collect();
+        models.sort_by_key(|a| a.name.to_lowercase());
+        // If we succeeded on a fallback port, update cache key? Return models
+        return models;
+    }
+    Vec::new()
+}
+
+async fn apply_live_unsloth_models_to_catalog(
+    agent: &Arc<AgentRuntime>,
+    catalog: &mut crate::agent::model_catalog::CatalogState,
+) {
+    let live_models = fetch_live_unsloth_models(agent, None).await;
+    if let Some(provider) = catalog.providers.iter_mut().find(|p| p.id == "unsloth") {
+        provider.models = live_models.clone();
+        if !live_models.is_empty() {
+            provider.connected = true;
+            if provider.api_key_source.is_empty() {
+                provider.api_key_source = "auto".to_string();
+            }
+        }
+    }
+    catalog
+        .all_models
+        .retain(|model| model.provider_id != "unsloth");
     catalog.all_models.extend(live_models);
 }
 
@@ -5484,6 +5774,7 @@ async fn search_models(
 
     let mut catalog = agent.get_catalog_state().await;
     apply_live_ollama_models_to_catalog(&agent, &mut catalog).await;
+    apply_live_unsloth_models_to_catalog(&agent, &mut catalog).await;
 
     let models: Vec<crate::agent::model_catalog::ModelInfo> = catalog
         .all_models
@@ -5521,6 +5812,7 @@ async fn catalog_handler(
 ) -> Json<serde_json::Value> {
     let mut catalog = agent.get_catalog_state().await;
     apply_live_ollama_models_to_catalog(&agent, &mut catalog).await;
+    apply_live_unsloth_models_to_catalog(&agent, &mut catalog).await;
     // Each provider's list repeats `all_models` verbatim, which doubled the
     // payload to ~3MB. The client regroups by provider_id on arrival.
     for provider in &mut catalog.providers {
@@ -5540,12 +5832,15 @@ async fn models_handler(
             // Explicit discovery from the provider settings modal: the user is
             // configuring the endpoint and expects a live probe, not a cached one.
             fetch_live_ollama_models_inner(&agent, base_url, false).await
+        } else if provider_id == "unsloth" {
+            fetch_live_unsloth_models_inner(&agent, base_url, false).await
         } else {
             agent.get_provider_models(provider_id).await
         }
     } else {
         let mut catalog = agent.get_catalog_state().await;
         apply_live_ollama_models_to_catalog(&agent, &mut catalog).await;
+        apply_live_unsloth_models_to_catalog(&agent, &mut catalog).await;
         catalog.all_models
     };
     Json(serde_json::to_value(&models).unwrap_or(serde_json::json!([])))

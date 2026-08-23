@@ -468,6 +468,43 @@ pub fn get_presets() -> Vec<ProviderPreset> {
             ],
         },
         ProviderPreset {
+            id: "unsloth".to_string(),
+            name: "Unsloth (Local)".to_string(),
+            base_url: "http://localhost:8888/v1".to_string(),
+            env_vars: vec![
+                "UNSLOTH_API_KEY".to_string(),
+                "UNSLOTH_STUDIO_AUTH_TOKEN".to_string(),
+            ],
+            description: "Run models locally with Unsloth".to_string(),
+            api_key_url: None,
+            models: vec![
+                ModelPreset {
+                    id: "unsloth/gemma-3-27b-it-GGUF".to_string(),
+                    name: "Gemma 3 27B".to_string(),
+                    context_window: 131_072,
+                    supports_tools: true,
+                    supports_vision: false,
+                    category: "recommended".to_string(),
+                },
+                ModelPreset {
+                    id: "unsloth/qwen3-30b-a3b-GGUF".to_string(),
+                    name: "Qwen3 30B A3B".to_string(),
+                    context_window: 131_072,
+                    supports_tools: true,
+                    supports_vision: false,
+                    category: "popular".to_string(),
+                },
+                ModelPreset {
+                    id: "unsloth/llama-3.1-8b-GGUF".to_string(),
+                    name: "Llama 3.1 8B".to_string(),
+                    context_window: 131_072,
+                    supports_tools: true,
+                    supports_vision: false,
+                    category: "fast".to_string(),
+                },
+            ],
+        },
+        ProviderPreset {
             id: "groq".to_string(),
             name: "Groq".to_string(),
             base_url: "https://api.groq.com/openai/v1".to_string(),

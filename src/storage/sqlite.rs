@@ -279,6 +279,30 @@ impl SqliteStorage {
                     conn.execute("ALTER TABLE sessions ADD COLUMN context_state BLOB", [])?;
                 }
 
+                let has_notified_at: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('subagent_tasks') WHERE name='notified_at'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_notified_at {
+                    conn.execute("ALTER TABLE subagent_tasks ADD COLUMN notified_at INTEGER", [])?;
+                }
+
+                let has_background: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('subagent_tasks') WHERE name='background'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_background {
+                    conn.execute("ALTER TABLE subagent_tasks ADD COLUMN background INTEGER NOT NULL DEFAULT 0", [])?;
+                }
+
                 let has_images_json: bool = conn
                     .query_row(
                         "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('queued_messages') WHERE name='images_json'",
@@ -2331,8 +2355,8 @@ impl SqliteStorage {
     pub fn create_subagent_task(&self, task: &SubagentTask) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO subagent_tasks (id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO subagent_tasks (id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     task.id,
                     task.session_id,
@@ -2345,6 +2369,8 @@ impl SqliteStorage {
                     task.result.as_ref(),
                     task.created_at.timestamp(),
                     task.completed_at.map(|dt| dt.timestamp()),
+                    task.notified_at.map(|dt| dt.timestamp()),
+                    task.background,
                 ],
             )
             .map_err(OSAgentError::Storage)?;
@@ -2355,12 +2381,13 @@ impl SqliteStorage {
     pub fn update_subagent_task(&self, task: &SubagentTask) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "UPDATE subagent_tasks SET status = ?1, tool_count = ?2, result = ?3, completed_at = ?4 WHERE id = ?5",
+                "UPDATE subagent_tasks SET status = ?1, tool_count = ?2, result = ?3, completed_at = ?4, notified_at = ?5 WHERE id = ?6",
                 params![
                     task.status.clone(),
                     task.tool_count,
                     task.result.as_ref(),
                     task.completed_at.map(|dt| dt.timestamp()),
+                    task.notified_at.map(|dt| dt.timestamp()),
                     task.id.clone(),
                 ],
             )
@@ -2369,14 +2396,65 @@ impl SqliteStorage {
         })
     }
 
+    pub fn mark_subagent_notified(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE subagent_tasks SET notified_at = ?1 WHERE id = ?2",
+                params![Utc::now().timestamp(), id],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    /// Completed subagent tasks for a parent session whose result has not yet
+    /// been injected into the parent's conversation (background mode).
+    pub fn list_unnotified_completed_for_parent(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Vec<SubagentTask>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE parent_session_id = ?1 AND background = 1 AND notified_at IS NULL AND status IN ('completed', 'failed', 'cancelled', 'timeout') ORDER BY created_at ASC")
+                .map_err(OSAgentError::Storage)?;
+
+            let tasks = stmt
+                .query_map(params![parent_session_id], |row| {
+                    let completed_at: Option<i64> = row.get(10)?;
+                    let notified_at: Option<i64> = row.get(11)?;
+                    Ok(SubagentTask {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        parent_session_id: row.get(2)?,
+                        description: row.get(3)?,
+                        prompt: row.get(4)?,
+                        agent_type: row.get(5)?,
+                        status: row.get(6)?,
+                        tool_count: row.get(7)?,
+                        result: row.get(8)?,
+                        created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(9)?, 0)
+                            .unwrap_or_else(Utc::now),
+                        completed_at: completed_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                        notified_at: notified_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                        background: row.get(12)?,
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(tasks)
+        })
+    }
+
     pub fn get_subagent_task(&self, id: &str) -> Result<Option<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE id = ?1")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![id], |row| {
                 let completed_at: Option<i64> = row.get(10)?;
+                let notified_at: Option<i64> = row.get(11)?;
                 Ok(SubagentTask {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
@@ -2390,6 +2468,8 @@ impl SqliteStorage {
                     created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(9)?, 0)
                         .unwrap_or_else(Utc::now),
                     completed_at: completed_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                    notified_at: notified_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                    background: row.get(12)?,
                 })
             });
 
@@ -2404,11 +2484,12 @@ impl SqliteStorage {
     pub fn get_subagent_task_by_session(&self, session_id: &str) -> Result<Option<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE session_id = ?1")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE session_id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![session_id], |row| {
                 let completed_at: Option<i64> = row.get(10)?;
+                let notified_at: Option<i64> = row.get(11)?;
                 Ok(SubagentTask {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
@@ -2422,6 +2503,8 @@ impl SqliteStorage {
                     created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(9)?, 0)
                         .unwrap_or_else(Utc::now),
                     completed_at: completed_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                    notified_at: notified_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                    background: row.get(12)?,
                 })
             });
 
@@ -2436,12 +2519,13 @@ impl SqliteStorage {
     pub fn list_subagent_tasks(&self, parent_session_id: &str) -> Result<Vec<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at FROM subagent_tasks WHERE parent_session_id = ?1 ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE parent_session_id = ?1 ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
 
             let tasks = stmt
                 .query_map(params![parent_session_id], |row| {
                     let completed_at: Option<i64> = row.get(10)?;
+                    let notified_at: Option<i64> = row.get(11)?;
                     Ok(SubagentTask {
                         id: row.get(0)?,
                         session_id: row.get(1)?,
@@ -2455,6 +2539,8 @@ impl SqliteStorage {
                         created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(9)?, 0)
                             .unwrap_or_else(Utc::now),
                         completed_at: completed_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                        notified_at: notified_at.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                        background: row.get(12)?,
                     })
                 })
                 .map_err(OSAgentError::Storage)?

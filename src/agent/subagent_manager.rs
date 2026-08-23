@@ -216,21 +216,22 @@ impl SubagentManager {
             .unwrap_or(0)
     }
 
+    /// Spawn a brand-new subagent session and run it.
+    ///
+    /// When `background` is true the call returns as soon as the subagent is
+    /// launched; its result is injected into the parent session as a
+    /// synthetic message when it finishes, so the parent can react on its
+    /// next turn. Otherwise the caller is expected to follow up with
+    /// [`Self::wait_for_subagent`].
     pub async fn spawn_subagent(
         &self,
         parent_session_id: String,
         description: String,
         prompt: String,
         agent_type: String,
+        background: bool,
     ) -> Result<String> {
-        let depth_limit = self.config.read().await.agent.subagent_depth;
-        let current_depth = Self::subagent_depth_of(&self.storage, &parent_session_id);
-        if current_depth >= depth_limit {
-            return Err(crate::error::OSAgentError::ToolExecution(format!(
-                "Subagent depth limit reached ({}). Increase 'subagent_depth' in the agent config to allow nested subagents.",
-                depth_limit
-            )));
-        }
+        self.check_depth_limit(&parent_session_id).await?;
 
         let parent_session = self
             .session_manager
@@ -277,6 +278,8 @@ impl SubagentManager {
             result: None,
             created_at: Utc::now(),
             completed_at: None,
+            notified_at: None,
+            background,
         };
 
         self.storage.create_subagent_task(&task)?;
@@ -292,22 +295,165 @@ impl SubagentManager {
             timestamp: std::time::SystemTime::now(),
         });
 
+        self.launch_run(
+            parent_session_id,
+            subagent_session.id.clone(),
+            task,
+            description,
+            prompt,
+            agent_type,
+            background,
+            true,
+            parent_workspace,
+        )?;
+
+        Ok(subagent_session.id)
+    }
+
+    /// Resume a previously-completed subagent session by re-using its session
+    /// (and accumulated message history) for a fresh prompt. Returns the
+    /// session id. Works in foreground or background mode.
+    pub async fn resume_subagent(
+        &self,
+        parent_session_id: String,
+        session_id: String,
+        description: String,
+        prompt: String,
+        agent_type: String,
+        background: bool,
+    ) -> Result<String> {
+        self.check_depth_limit(&parent_session_id).await?;
+
+        let subagent_session = self
+            .session_manager
+            .get_session(&session_id)
+            .await?
+            .ok_or_else(|| {
+                crate::error::OSAgentError::ToolExecution(
+                    "Subagent session to resume not found".to_string(),
+                )
+            })?;
+
+        if subagent_session.parent_id.as_deref() != Some(parent_session_id.as_str()) {
+            return Err(crate::error::OSAgentError::ToolExecution(
+                "Cannot resume subagent: session does not belong to this parent".to_string(),
+            ));
+        }
+
+        if self.active_subagents.contains_key(&session_id) {
+            return Err(crate::error::OSAgentError::ToolExecution(
+                "Cannot resume subagent: session is already running".to_string(),
+            ));
+        }
+
+        let parent_workspace = {
+            let cfg = self.config.read().await.clone();
+            subagent_session
+                .metadata
+                .get("workspace_id")
+                .and_then(|value| value.as_str())
+                .and_then(|workspace_id| cfg.get_workspace(workspace_id))
+                .unwrap_or_else(|| cfg.get_active_workspace())
+        };
+
+        let task = SubagentTask {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            parent_session_id: parent_session_id.clone(),
+            description: description.clone(),
+            prompt: prompt.clone(),
+            agent_type: agent_type.clone(),
+            status: "running".to_string(),
+            tool_count: 0,
+            result: None,
+            created_at: Utc::now(),
+            completed_at: None,
+            notified_at: None,
+            background,
+        };
+
+        self.storage.create_subagent_task(&task)?;
+
+        self.event_bus.emit(AgentEvent::SubagentCreated {
+            session_id: parent_session_id.clone(),
+            sequence: 0,
+            parent_session_id: parent_session_id.clone(),
+            subagent_session_id: session_id.clone(),
+            description: description.clone(),
+            prompt: prompt.clone(),
+            agent_type: agent_type.clone(),
+            timestamp: std::time::SystemTime::now(),
+        });
+
+        self.launch_run(
+            parent_session_id,
+            session_id.clone(),
+            task,
+            description,
+            prompt,
+            agent_type,
+            background,
+            false,
+            parent_workspace,
+        )?;
+
+        Ok(session_id)
+    }
+
+    async fn check_depth_limit(&self, parent_session_id: &str) -> Result<()> {
+        let depth_limit = self.config.read().await.agent.subagent_depth;
+        let current_depth = Self::subagent_depth_of(&self.storage, parent_session_id);
+        if current_depth >= depth_limit {
+            return Err(crate::error::OSAgentError::ToolExecution(format!(
+                "Subagent depth limit reached ({}). Increase 'subagent_depth' in the agent config to allow nested subagents.",
+                depth_limit
+            )));
+        }
+        Ok(())
+    }
+
+    /// Spawn the async runner for a subagent (fresh or resumed) and register
+    /// it in the active-subagent table. Returns the task id.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_run(
+        &self,
+        parent_session_id: String,
+        subagent_session_id: String,
+        task: SubagentTask,
+        description: String,
+        prompt: String,
+        agent_type: String,
+        background: bool,
+        fresh_session: bool,
+        parent_workspace: WorkspaceConfig,
+    ) -> Result<String> {
+        let task_id = task.id.clone();
+
         let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
         let storage = self.storage.clone();
         let event_bus = self.event_bus.clone();
         let session_manager = self.session_manager.clone();
         let config = self.config.clone();
-        let subagent_session_id = subagent_session.id.clone();
+        let subagent_session_id = subagent_session_id.clone();
         let task_id = task.id.clone();
+        let subagent_session_id_for_insert = subagent_session_id.clone();
+        let task_id_for_return = task.id.clone();
         let parent_session_id_for_async = parent_session_id.clone();
         let active_subagents = self.active_subagents.clone();
         let shared_provider = self.shared_provider.clone();
         let workspace_root = self.workspace_root.clone();
         let parent_workspace_for_async = parent_workspace.clone();
 
-        let (result_tx, result_rx) = oneshot::channel::<SubagentOutcome>();
-        self.pending_results
-            .insert(subagent_session.id.clone(), result_rx);
+        // Background runs have no waiter, so no oneshot channel is needed.
+        let (result_tx, result_rx) = if background {
+            (None, None)
+        } else {
+            let (tx, rx) = oneshot::channel::<SubagentOutcome>();
+            (Some(tx), Some(rx))
+        };
+        if let Some(rx) = result_rx {
+            self.pending_results.insert(subagent_session_id.clone(), rx);
+        }
         let storage_for_guard = self.storage.clone();
         let guard_task_id = task.id.clone();
 
@@ -372,7 +518,7 @@ impl SubagentManager {
                 task_id: guard_task_id,
                 active_subagents: active_subagents.clone(),
                 storage: storage_for_guard,
-                result_tx: Some(result_tx),
+                result_tx,
             };
 
             let result = Self::run_subagent(
@@ -388,6 +534,7 @@ impl SubagentManager {
                 shared_provider.clone(),
                 parent_workspace_for_async,
                 workspace_root,
+                fresh_session,
                 &mut cancel_rx,
             )
             .await;
@@ -462,9 +609,9 @@ impl SubagentManager {
         };
 
         self.active_subagents
-            .insert(subagent_session.id.clone(), subagent_handle);
+            .insert(subagent_session_id_for_insert, subagent_handle);
 
-        Ok(subagent_session.id)
+        Ok(task_id_for_return)
     }
 
     async fn run_subagent(
@@ -480,6 +627,7 @@ impl SubagentManager {
         shared_provider: Option<Arc<dyn Provider>>,
         parent_workspace: WorkspaceConfig,
         workspace_root: PathBuf,
+        fresh_session: bool,
         cancel_rx: &mut mpsc::Receiver<()>,
     ) -> Result<(String, String, i32)> {
         let mut cfg = config.read().await.clone();
@@ -505,7 +653,14 @@ impl SubagentManager {
             cfg.ensure_workspace_defaults();
         }
 
-        let provider = if let Some(shared) = shared_provider {
+        // Subagents can pin their own model per agent type via
+        // `agent.subagent_models` (e.g. "explore" => "openrouter:deepseek/deepseek-r1").
+        // Overrides always use a dedicated provider instance so the shared
+        // provider used by the main agent is never mutated.
+        let model_override = cfg.agent.subagent_models.get(&agent_type).cloned();
+        let provider = if let Some(override_spec) = model_override {
+            Self::create_provider_with_override(&cfg, storage.clone(), override_spec).await?
+        } else if let Some(shared) = shared_provider {
             shared
         } else {
             Self::create_provider(&cfg, storage.clone()).await?
@@ -579,29 +734,33 @@ impl SubagentManager {
         );
 
         if let Ok(Some(mut session)) = storage.get_session(&session_id) {
-            session.messages.push(Message::system(system_prompt));
-            session.messages.push(Message::system(environment_prompt));
-            if let Some(git_context) = git_context {
-                session.messages.push(Message::system(git_context));
-            }
-            if let Some(global_instructions) = global_instructions {
-                session.messages.push(Message::system(global_instructions));
-            }
-            if let Some(workspace_instructions) = workspace_instructions {
-                session
-                    .messages
-                    .push(Message::system(workspace_instructions));
-            }
-            if let Some(skill_summary) = skill_summary {
-                session.messages.push(Message::system(skill_summary));
-            }
-            if let Some(manifest) = native_manifest {
-                session.messages.push(Message::system(manifest));
-            }
-            if let Some(manifest) = mcp_manifest {
-                session.messages.push(Message::system(manifest));
+            if fresh_session {
+                session.messages.push(Message::system(system_prompt));
+                session.messages.push(Message::system(environment_prompt));
+                if let Some(git_context) = git_context {
+                    session.messages.push(Message::system(git_context));
+                }
+                if let Some(global_instructions) = global_instructions {
+                    session.messages.push(Message::system(global_instructions));
+                }
+                if let Some(workspace_instructions) = workspace_instructions {
+                    session
+                        .messages
+                        .push(Message::system(workspace_instructions));
+                }
+                if let Some(skill_summary) = skill_summary {
+                    session.messages.push(Message::system(skill_summary));
+                }
+                if let Some(manifest) = native_manifest {
+                    session.messages.push(Message::system(manifest));
+                }
+                if let Some(manifest) = mcp_manifest {
+                    session.messages.push(Message::system(manifest));
+                }
             }
             session.messages.push(Message::user(prompt));
+            session.model = model.clone();
+            session.provider = provider_type.clone();
             let _ = storage.update_session(&session);
         }
 
@@ -672,6 +831,77 @@ impl SubagentManager {
 
         let result_text = Self::extract_result(&storage, &session_id).await?;
         Ok(("completed".to_string(), result_text, tool_count))
+    }
+
+    /// Build a dedicated provider for a subagent from `agent.subagent_models`,
+    /// which maps an agent type to either `"provider_id:model"` or `"model"` (the
+    /// latter uses the default provider). A fresh instance is always created so
+    /// the shared provider used by the main agent is never mutated.
+    async fn create_provider_with_override(
+        cfg: &Config,
+        storage: Arc<SqliteStorage>,
+        spec: String,
+    ) -> Result<Arc<dyn Provider>> {
+        let (provider_id, model) = match spec.split_once(':') {
+            Some((id, model)) => {
+                let id = id.trim();
+                let model = model.trim();
+                if id.is_empty() {
+                    (None, model.to_string())
+                } else if model.is_empty() {
+                    return Err(crate::error::OSAgentError::ToolExecution(
+                        "subagent_models entry with a provider id must also specify a model: \"provider_id:model\"".to_string(),
+                    ));
+                } else {
+                    (Some(id.to_string()), model.to_string())
+                }
+            }
+            None => (None, spec.trim().to_string()),
+        };
+
+        let selected = if let Some(id) = &provider_id {
+            cfg.providers
+                .iter()
+                .find(|p| p.provider_type == *id)
+                .cloned()
+        } else if !cfg.default_provider.is_empty() {
+            cfg.providers
+                .iter()
+                .find(|p| p.provider_type == cfg.default_provider)
+                .cloned()
+        } else {
+            cfg.providers.first().cloned()
+        };
+        let selected = selected.unwrap_or_else(|| cfg.provider.clone());
+
+        let mut config = selected.clone();
+        if model.is_empty() {
+            return Err(crate::error::OSAgentError::ToolExecution(
+                "subagent_models entry must be \"provider_id:model\" or a model name".to_string(),
+            ));
+        }
+        config.model = model;
+        if config.api_key.is_empty() {
+            if let Some(key) =
+                crate::agent::provider_presets::resolve_env_api_key(&config.provider_type)
+            {
+                config.api_key = key;
+            }
+        }
+
+        let oauth_dir = PathBuf::from(shellexpand::tilde(&cfg.storage.database).to_string())
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        Ok(Arc::new(
+            OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
+                config,
+                None,
+                Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+                Arc::new(tokio::sync::RwLock::new(cfg.agent.clone())),
+            )?,
+        ))
     }
 
     async fn create_provider(

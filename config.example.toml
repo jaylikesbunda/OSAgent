@@ -136,6 +136,14 @@ prompt_cache_enabled = true
 # Spawning deeper than this fails with an explicit error. Subagents already
 # exclude the subagent tool from their allowlist; this config is the hard limit.
 subagent_depth = 1
+# Per-subagent-type model overrides, e.g. run explore subagents on a cheaper
+# model while keeping the main agent on your default provider.
+# Value is "provider_id:model" (provider must exist under [providers]) or just
+# a model name (uses the default provider). Omitting an entry inherits the
+# parent's provider and model.
+# [agent.subagent_models]
+# "explore" = "openrouter:deepseek/deepseek-r1"
+# "general" = "anthropic:claude-3-7-sonnet-latest"
 
 # Discord Bot (optional; requires building with `--features discord`)
 # [discord]

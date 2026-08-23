@@ -11,6 +11,9 @@ v0.4.6 changes:
 * Shortened the per-turn "tool calls completed" follow-up nudge
 * Discord now transcribes voice messages and audio attachments with local Whisper, decoding OGG/Opus, MP3, M4A, FLAC and more in-process before transcription
 * Replying to a message and tagging the bot now includes the message you replied to, so OSA sees both your reply and its context
+* Added Unsloth (Local) provider auto-detection like Ollama — probes `http://localhost:8888/v1/models` fallback `:8000` with `Bearer sk-unsloth-…` and unauthenticated fallback for `unsloth studio --no-auth`, live models appear as `installed` in the picker within 20s
+* Slimmed the outside-workspace permission prompt from `1120px` to `640px` max-width so the approval dock is centered and less wide
+* Fixed replying to a voice message in Discord not transcribing — now also transcribes audio attachments on the referenced message when you reply tagging OSA
 
 v0.4.5 changes:
 

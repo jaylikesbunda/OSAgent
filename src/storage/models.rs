@@ -405,6 +405,15 @@ pub struct SubagentTask {
     pub result: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// True when launched via the background path (no waiting caller; the
+    /// result is delivered to the parent session as a synthetic message).
+    #[serde(default)]
+    pub background: bool,
+    /// When a background subagent's result was injected into the parent
+    /// session as a synthetic message. `None` means it has not been
+    /// delivered to the parent yet.
+    #[serde(default)]
+    pub notified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

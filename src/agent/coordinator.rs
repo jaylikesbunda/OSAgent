@@ -437,6 +437,7 @@ impl Coordinator {
                         spec.description.clone(),
                         spec.prompt.clone(),
                         spec.agent_type.clone(),
+                        false,
                     )
                     .await;
 
@@ -499,6 +500,7 @@ impl Coordinator {
                     spec.description.clone(),
                     spec.prompt.clone(),
                     spec.agent_type.clone(),
+                    false,
                 )
                 .await;
 

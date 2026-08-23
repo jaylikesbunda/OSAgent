@@ -660,6 +660,55 @@ impl AgentRuntime {
             .await;
     }
 
+    /// Merge results of background subagents that finished since the parent's
+    /// last turn into the parent session as synthetic user messages, so the
+    /// parent notices them on its next turn. Marks them notified so they are
+    /// delivered exactly once.
+    fn merge_pending_subagent_results(&self, session: &mut Session, session_id: &str) {
+        let tasks = match self
+            .storage
+            .list_unnotified_completed_for_parent(session_id)
+        {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                warn!(
+                    "Failed to list completed background subagents for {}: {}",
+                    session_id, e
+                );
+                return;
+            }
+        };
+        for task in &tasks {
+            let state = match task.status.as_str() {
+                "completed" => "completed",
+                "timeout" => "timeout",
+                "cancelled" => "cancelled",
+                _ => "error",
+            };
+            let result = task
+                .result
+                .clone()
+                .unwrap_or_else(|| "No result".to_string());
+            let body = format!(
+                "<task id=\"{}\" state=\"{}\">\n<summary>Background subagent '{}' finished: {}</summary>\n<task_result>\n{}\n</task_result>\n</task>",
+                task.session_id, state, task.description, task.status, result
+            );
+            session
+                .messages
+                .push(Message::synthetic_user(body, "subagent_completed"));
+            if let Err(e) = self.storage.mark_subagent_notified(&task.id) {
+                warn!("Failed to mark subagent task {} notified: {}", task.id, e);
+            }
+        }
+        if !tasks.is_empty() {
+            info!(
+                "Merged {} completed background subagent result(s) into session {}",
+                tasks.len(),
+                session_id
+            );
+        }
+    }
+
     /// Check if a session has an active operation
     pub fn is_session_busy(&self, session_id: &str) -> bool {
         self.active_runs.contains_key(session_id)
@@ -902,6 +951,8 @@ impl AgentRuntime {
 
         info!("process_message: Session loaded, adding user message");
         info!("Session metadata: {:?}", session.metadata);
+
+        self.merge_pending_subagent_results(&mut session, session_id);
 
         let repo_exploration_request = is_repo_exploration_request(&user_message);
         let queued_client_message_id = message_metadata
