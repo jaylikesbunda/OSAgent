@@ -1,3 +1,17 @@
+v0.4.7 changes:
+
+* Fixed replying to a voice message with no text not transcribing — `build_discord_prompt()` now treats referenced audio as content (`src/discord/mod.rs:1260`)
+* Added YouTube voice playback in Discord: new `discord-voice` feature with DAVE-capable Songbird 0.6 (`src/discord/music.rs`), `HttpRequest`/`YoutubeDl` queue, automatic `yt-dlp`, `piped`/`invidious` fallback (`piped_streams()`), direct HTTP audio, `deafen` and queue embeds (`Now Playing`/`Queued` with thumbnail/duration/position); Songbird 0.6 is required for Discord's mandatory 2026 voice E2EE protocol
+* Music fully automatic — no manual `yt-dlp` install: `ensure_yt_dlp_auto()` downloads `yt-dlp[.exe]` from GitHub releases on first `/play` or bot start (`src/discord/mod.rs:1472`), weekly background update, custom `yt_dlp_path`/`yt_dlp_extra_args` still supported
+* Added Discord Music settings in web UI (`frontend/index.html:746` + `frontend/js/settings.js:191`): `Enable Music`, `yt-dlp Path`, `Extra Args`, `Max Queue`, `Max Duration`, `Auto-leave`, `Piped Instances` with `src/config.rs:260` `DiscordConfig` defaults (`50`/`300`/`yt-dlp`)
+* `songbird` intents `GUILDS|GUILD_VOICE_STATES` and `SerenityInit::register_songbird()` (`src/discord/mod.rs:1443`), `cache` feature enabled for `voice_states`, `build-launcher.ps1:41` now includes `discord-voice` in all installers
+* Fixed `Access Denied` for community members on music commands — `/play`/`/skip`/`/queue` etc now allow `Community` tier (`src/discord/commands.rs:306` `command_access_level().is_none()` and `src/discord/music.rs:194` same, `command_access_level` made `pub(crate)`), so `allow_community_members` + `allowed_guilds` covers everyone without per-user grants
+* Discord music now retries failed voice connections, discards stale Songbird calls, clears self-mute, explicitly starts the first queued track, reports playback failures in Discord, and logs startup state instead of silently claiming a failed track is playing
+* Removed the obsolete missing-`ffmpeg` warning; Songbird decodes supported audio formats in-process
+* Fixed provider `opencode-go` `temperature` illegal 2-decimal error (`src/agent/provider.rs:511` `(t*100).round()/100`, `0.6999…` → `0.7`) and test update
+* Fixed provider errors showing twice in web UI transcript — `src/frontend/js/transcript.js:203` `tmodelAddError()` deduplicates identical consecutive errors (ws+sse duplicate)
+* Bump `0.4.6` → `0.4.7`
+
 v0.4.6 changes:
 
 * `tool_search` now covers low-frequency built-ins (code execution, LSP, weather, calendar, news, codesearch, process, system status, persona, task, memory/decision management, goals, coordinator, schedule, skill actions) alongside MCP servers; their schemas stay out of every request until needed

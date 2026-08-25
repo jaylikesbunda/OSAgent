@@ -223,6 +223,18 @@ impl Handler {
             CreateCommand::new("server-info")
                 .description("Show this server's OSAgent access tier and IDs"),
             CreateCommand::new("help").description("Show available commands"),
+            // ── Music (simple, robust YouTube voice) ──────────────────────────
+            CreateCommand::new("play")
+                .description(
+                    "Play YouTube audio in your voice channel (URL or search) — auto-joins",
+                )
+                .add_option(str_opt("query", "YouTube URL or search terms", true)),
+            CreateCommand::new("join").description("Join your current voice channel"),
+            CreateCommand::new("leave").description("Leave voice and clear queue"),
+            CreateCommand::new("skip").description("Skip the current track"),
+            CreateCommand::new("stop").description("Stop playback and clear queue"),
+            CreateCommand::new("queue").description("Show the music queue"),
+            CreateCommand::new("nowplaying").description("Show the current track"),
         ];
 
         match Command::set_global_commands(http, commands).await {
@@ -279,6 +291,30 @@ impl Handler {
             match name {
                 "model" => self.handle_model(ctx, command).await,
                 "provider" => self.handle_provider(ctx, command).await,
+                _ => unreachable!(),
+            }
+            return;
+        }
+
+        // Music commands — allow Community in community guilds (same as @mention chat),
+        // so `allow_community_members` + `allowed_guilds` covers everyone without per-user grants.
+        if matches!(
+            name,
+            "play" | "join" | "leave" | "skip" | "stop" | "queue" | "nowplaying"
+        ) {
+            if self.command_access_level(command).await.is_none() {
+                Self::send_unauthorized_response_command(ctx, command).await;
+                return;
+            }
+            self.remember_channel(command.channel_id.get()).await;
+            match name {
+                "play" => self.handle_music_play(ctx, command).await,
+                "join" => self.handle_music_join(ctx, command).await,
+                "leave" => self.handle_music_leave(ctx, command).await,
+                "skip" => self.handle_music_skip(ctx, command).await,
+                "stop" => self.handle_music_stop(ctx, command).await,
+                "queue" => self.handle_music_queue(ctx, command).await,
+                "nowplaying" => self.handle_music_nowplaying(ctx, command).await,
                 _ => unreachable!(),
             }
             return;
@@ -370,7 +406,7 @@ impl Handler {
         self.command_access_level(command).await == Some(super::AccessLevel::Trusted)
     }
 
-    async fn command_access_level(
+    pub(crate) async fn command_access_level(
         &self,
         command: &CommandInteraction,
     ) -> Option<super::AccessLevel> {

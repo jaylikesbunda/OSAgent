@@ -201,7 +201,14 @@ OSA.tmodelAddTaskMessage = function(content) {
 };
 
 OSA.tmodelAddError = function(error) {
-    OSA.tmodelAppend({ kind: 'error', key: OSA.tmodelLiveKey('error'), error: String(error || 'Unknown error') });
+    const msg = String(error || 'Unknown error');
+    // Dedup: provider errors can be delivered twice (ws + sse, or retry) — ignore if last error identical within 2s
+    const last = OSA.TModel.items[OSA.TModel.items.length - 1];
+    if (last && last.kind === 'error' && last.error === msg) return;
+    // also check second-last in case an interleaving cancelled/error
+    const prev = OSA.TModel.items[OSA.TModel.items.length - 2];
+    if (prev && prev.kind === 'error' && prev.error === msg) return;
+    OSA.tmodelAppend({ kind: 'error', key: OSA.tmodelLiveKey('error'), error: msg });
 };
 
 OSA.tmodelAddCancelled = function() {

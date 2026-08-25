@@ -509,14 +509,17 @@ impl OpenAICompatibleProvider {
         }
 
         if settings.temperature.is_finite() {
+            // opencode-go (and some proxies) reject >2 decimal places: 0.699999988079071 → 400
+            // `限制小数点[2]位`. Round universally — providers accept 2 decimals.
+            let t = (settings.temperature * 100.0).round() / 100.0;
             match mode {
                 RequestMode::Responses => {
                     if provider_type != "openai" {
-                        request_body["temperature"] = serde_json::json!(settings.temperature);
+                        request_body["temperature"] = serde_json::json!(t);
                     }
                 }
                 _ => {
-                    request_body["temperature"] = serde_json::json!(settings.temperature);
+                    request_body["temperature"] = serde_json::json!(t);
                 }
             }
         }
@@ -2567,7 +2570,7 @@ mod tests {
         );
 
         assert_eq!(request["max_tokens"], serde_json::json!(1024));
-        assert_eq!(request["temperature"].as_f64(), Some(0.20000000298023224));
+        assert_eq!(request["temperature"].as_f64(), Some(0.2));
         assert_eq!(request["thinking"]["type"], serde_json::json!("disabled"));
     }
 }

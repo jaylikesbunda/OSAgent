@@ -7,6 +7,7 @@
 
 mod chat;
 mod commands;
+mod music;
 mod panel;
 mod ui;
 
@@ -1265,7 +1266,11 @@ impl Handler {
             .iter()
             .filter(|attachment| is_audio_attachment(attachment))
             .collect::<Vec<_>>();
-        if text.trim().is_empty() && audio_attachments.is_empty() {
+        let has_referenced_audio = msg
+            .referenced_message
+            .as_deref()
+            .is_some_and(|referenced| referenced.attachments.iter().any(is_audio_attachment));
+        if text.trim().is_empty() && audio_attachments.is_empty() && !has_referenced_audio {
             return None;
         }
 
@@ -1437,7 +1442,9 @@ async fn run_discord_bot(
 ) -> Result<(), String> {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_VOICE_STATES;
 
     if let Some(channel_id) = discord_config.last_channel_id {
         if channel_id != 0 {
@@ -1462,6 +1469,34 @@ async fn run_discord_bot(
         );
     }
 
+    // Fully automatic yt-dlp: download on first boot if music enabled and no binary on PATH
+    #[cfg(feature = "discord-voice")]
+    if discord_config.music_enabled {
+        let cfg_clone = discord_config.clone();
+        tokio::spawn(async move {
+            let needs_yt_dlp = cfg_clone.yt_dlp_path.trim().is_empty()
+                && which::which("yt-dlp").is_err()
+                && which::which("yt-dlp.exe").is_err();
+            if needs_yt_dlp {
+                info!("Music: yt-dlp not found, auto-downloading to ~/.osagent/bin/ …");
+                match music::ensure_yt_dlp_auto().await {
+                    Ok(p) => info!("Music: yt-dlp ready at {}", p.display()),
+                    Err(e) => warn!("Music: auto yt-dlp failed: {e} — will retry on next /play"),
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "discord-voice")]
+    let mut client = {
+        use songbird::SerenityInit;
+        Client::builder(&discord_config.token, intents)
+            .event_handler(Handler::new(agent, config_path))
+            .register_songbird()
+            .await
+            .map_err(|e| format!("Error creating Discord client: {e}"))?
+    };
+    #[cfg(not(feature = "discord-voice"))]
     let mut client = Client::builder(&discord_config.token, intents)
         .event_handler(Handler::new(agent, config_path))
         .await

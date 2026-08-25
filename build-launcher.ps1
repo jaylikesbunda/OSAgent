@@ -40,6 +40,7 @@ $BundleFrontend = -not $NoFrontendBundle
 $Features = @()
 if (-not $NoDiscord) {
     $Features += "discord"
+    $Features += "discord-voice"
 }
 if ($BundleFrontend) {
     $Features += "production-frontend"

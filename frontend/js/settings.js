@@ -192,6 +192,13 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-discord-trusted-roles').value = (discord.trusted_roles || []).join('\n');
         document.getElementById('setting-discord-trusted-guilds').value = (discord.trusted_guilds || []).join('\n');
         document.getElementById('setting-discord-trusted-channels').value = (discord.trusted_channels || []).join('\n');
+        document.getElementById('setting-discord-music-enabled').checked = discord.music_enabled === true;
+        document.getElementById('setting-discord-yt-dlp-path').value = discord.yt_dlp_path || '';
+        document.getElementById('setting-discord-yt-dlp-extra-args').value = discord.yt_dlp_extra_args || '';
+        document.getElementById('setting-discord-music-max-queue').value = discord.music_max_queue || 50;
+        document.getElementById('setting-discord-music-max-duration').value = discord.music_max_duration_secs || 0;
+        document.getElementById('setting-discord-music-auto-leave').value = discord.music_auto_leave_secs ?? 300;
+        document.getElementById('setting-discord-piped-instances').value = (discord.piped_instances || []).join('\n');
         document.getElementById('setting-max-tokens').value = config.agent?.max_tokens || 4096;
         document.getElementById('setting-temperature').value = config.agent?.temperature || 0.7;
         document.getElementById('setting-show-thinking-blocks').checked = OSA.getShowThinkingBlocks();
@@ -375,7 +382,14 @@ OSA.saveSettings = async function() {
         trusted_users: trustedDiscordUsers,
         trusted_roles: trustedDiscordRoles,
         trusted_guilds: trustedDiscordGuilds,
-        trusted_channels: trustedDiscordChannels
+        trusted_channels: trustedDiscordChannels,
+        music_enabled: document.getElementById('setting-discord-music-enabled').checked,
+        yt_dlp_path: document.getElementById('setting-discord-yt-dlp-path').value || '',
+        yt_dlp_extra_args: document.getElementById('setting-discord-yt-dlp-extra-args').value || '',
+        music_max_queue: parseInt(document.getElementById('setting-discord-music-max-queue').value) || 50,
+        music_max_duration_secs: parseInt(document.getElementById('setting-discord-music-max-duration').value) || 0,
+        music_auto_leave_secs: parseInt(document.getElementById('setting-discord-music-auto-leave').value) || 300,
+        piped_instances: (document.getElementById('setting-discord-piped-instances').value || '').split(/[\n,]/).map(v=>v.trim()).filter(Boolean)
     };
     // Process custom priorities: split by newline and filter empty lines
     const customPrioritiesText = document.getElementById('setting-custom-priorities').value || '';

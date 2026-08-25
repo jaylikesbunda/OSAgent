@@ -1,6 +1,6 @@
 [package]
 name = "osagent"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 rust-version = "1.78"
 authors = ["OSA Contributors"]
@@ -18,7 +18,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["fs", "cors", "trace", "compression-br", "compression-gzip", "compression-deflate", "limit", "set-header"] }
 
 # Discord bot
-serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "builder", "http"], optional = true }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "builder", "http", "cache"], optional = true }
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
@@ -82,6 +82,10 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3", "fla
 ogg = { version = "0.9", optional = true }
 opus = { version = "0.3", optional = true }
 
+# Discord voice playback (songbird). Gated behind discord-voice so default
+# discord builds don't require cmake/libopus + ffmpeg runtime unless enabled.
+songbird = { version = "0.6", features = ["serenity", "driver", "gateway", "rustls", "builtin-queue"], optional = true }
+
 # Async streaming
 async-stream = "0.3"
 lazy_static = "1.4"
@@ -139,6 +143,7 @@ path = "src/bin/osagent-bench.rs"
 [features]
 default = []
 discord = ["serenity", "dep:symphonia", "dep:ogg", "dep:opus"]
+discord-voice = ["discord", "dep:songbird"]
 production-frontend = []
 
 [profile.release]

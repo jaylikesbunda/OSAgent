@@ -257,9 +257,18 @@ mod snowflake {
     }
 }
 
+fn default_music_max_queue() -> usize {
+    50
+}
+fn default_music_auto_leave_secs() -> u64 {
+    300
+}
+fn default_yt_dlp_path() -> String {
+    "yt-dlp".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
@@ -295,6 +304,63 @@ pub struct DiscordConfig {
     pub trusted_channels: Vec<u64>,
     #[serde(with = "snowflake::optional")]
     pub last_channel_id: Option<u64>,
+    // ── Music / voice playback ──────────────────────────────────────────
+    /// Enable YouTube/HTTP audio playback in voice channels. Requires
+    /// building with `--features discord-voice` (`yt-dlp` auto-downloads)
+    /// on PATH. Off by default.
+    pub music_enabled: bool,
+    /// Maximum queued tracks per guild.
+    #[serde(default = "default_music_max_queue")]
+    pub music_max_queue: usize,
+    /// Max track duration in seconds (0 = unlimited).
+    #[serde(default)]
+    pub music_max_duration_secs: u64,
+    /// Auto-leave voice after this many seconds of empty queue (0 = never).
+    #[serde(default = "default_music_auto_leave_secs")]
+    pub music_auto_leave_secs: u64,
+    /// Custom yt-dlp binary path (default `yt-dlp` on PATH).
+    #[serde(default = "default_yt_dlp_path")]
+    pub yt_dlp_path: String,
+    /// Extra args appended to every yt-dlp invocation (e.g. `--cookies /data/cookies.txt`).
+    #[serde(default)]
+    pub yt_dlp_extra_args: String,
+    /// Piped instances to try when YouTube extraction fails (fallback).
+    #[serde(default)]
+    pub piped_instances: Vec<String>,
+}
+
+impl Default for DiscordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token: String::new(),
+            community_mode: false,
+            allow_community_members: false,
+            community_context: String::new(),
+            docs_url: String::new(),
+            github_repo: String::new(),
+            github_token: String::new(),
+            github_tracking_channel: None,
+            github_poll_seconds: 0,
+            allowed_users: Vec::new(),
+            allowed_roles: Vec::new(),
+            allowed_guilds: Vec::new(),
+            allowed_channels: Vec::new(),
+            allow_dms: false,
+            trusted_users: Vec::new(),
+            trusted_roles: Vec::new(),
+            trusted_guilds: Vec::new(),
+            trusted_channels: Vec::new(),
+            last_channel_id: None,
+            music_enabled: false,
+            music_max_queue: default_music_max_queue(),
+            music_max_duration_secs: 0,
+            music_auto_leave_secs: default_music_auto_leave_secs(),
+            yt_dlp_path: default_yt_dlp_path(),
+            yt_dlp_extra_args: String::new(),
+            piped_instances: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

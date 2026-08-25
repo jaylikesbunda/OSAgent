@@ -743,6 +743,50 @@
                             </div>
                         </div>
 
+                        <div class="discord-settings-card">
+                            <div class="settings-group-title">Music / Voice Playback</div>
+                            <p class="discord-card-desc">YouTube audio in voice channels. Requires <code>discord-voice</code> build; <code>yt-dlp</code> auto-downloads to <code>~/.osagent/bin/</code>. <code>ffmpeg</code> optional (opus passthrough).</p>
+                            <div class="toggle-field discord-toggle-field">
+                                <div class="toggle-info">
+                                    <label class="toggle-label" for="setting-discord-music-enabled">Enable Music</label>
+                                    <span class="toggle-desc">Allow <code>/play</code>, <code>/skip</code>, <code>/queue</code>, <code>/stop</code> in voice channels.</span>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input id="setting-discord-music-enabled" type="checkbox">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="discord-settings-grid">
+                                <div class="settings-field">
+                                    <label for="setting-discord-yt-dlp-path">yt-dlp Path (optional)</label>
+                                    <input id="setting-discord-yt-dlp-path" type="text" placeholder="yt-dlp (auto)">
+                                    <span class="settings-field-hint">Leave blank for auto-download.</span>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-yt-dlp-extra-args">yt-dlp Extra Args</label>
+                                    <input id="setting-discord-yt-dlp-extra-args" type="text" placeholder="--cookies /data/cookies.txt">
+                                    <span class="settings-field-hint">For age-restricted / 429 bypass.</span>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-music-max-queue">Max Queue</label>
+                                    <input id="setting-discord-music-max-queue" type="number" min="1" max="200" placeholder="50">
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-music-max-duration">Max Duration (s, 0=unlimited)</label>
+                                    <input id="setting-discord-music-max-duration" type="number" min="0" placeholder="0">
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-music-auto-leave">Auto-leave (s, 0=never)</label>
+                                    <input id="setting-discord-music-auto-leave" type="number" min="0" placeholder="300">
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-discord-piped-instances">Piped Instances (one per line)</label>
+                                    <textarea id="setting-discord-piped-instances" rows="2" placeholder="https://pipedapi.kavin.rocks"></textarea>
+                                    <span class="settings-field-hint">Fallback when YouTube blocks.</span>
+                                </div>
+                            </div>
+                        </div>
+
                         <div class="discord-settings-card discord-runtime-card">
                             <div class="settings-group-title">Bot Runtime</div>
                             <div id="discord-bot-status" class="discord-bot-status">Checking status...</div>
