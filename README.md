@@ -15,46 +15,28 @@
 
 ---
 
-An AI agent that lives on your machine, not in the cloud. Point it at a folder and it refactors code, fixes failing scripts, researches the web, or briefs you every morning. Talks to 100+ model providers through a web UI, a Discord bot, or your voice.
-
-Nothing is sent anywhere you didn't configure. Point it at a local Ollama instance and it runs entirely off-grid.
-
-## Why OSAgent
-
-- **Stays on, unnoticed**: starts in ~540ms and idles at ~14MB of RAM (1/50th of a typical Electron agent), so it can run the background jobs, Discord sessions, and daily briefings around the clock.
-- **Runs anywhere**: a single binary with no Node, Python, or Docker: a 2GB VPS, a Raspberry Pi, a locked-down corporate laptop, a container fleet.
-- **Your machine, your model**: local via Ollama, or any API key.
-
-## Quick Start
-
-| Platform | Asset |
-|---|---|
-| Windows | `osagent-windows-x86_64-setup.exe` |
-| Linux (x86_64) | `osagent-linux-x86_64.deb` |
-| macOS (Apple Silicon) | `osagent-macos-arm64.dmg` |
-
-Download the installer, pick a provider (OAuth or API key), pick a workspace, done. Your browser opens to `http://localhost:8765`.
-
-On Debian or Ubuntu, you can also run `./install.sh`. The Linux `.tar.gz` release contains only the launcher used by in-app updates; it is not a first-time installer. Use the `.deb` for a normal installation.
-
-Prefer the terminal:
-
-```bash
-osagent start                      # Start with default config
-osagent start -w /path/to/project  # Start with a specific workspace
-```
+An AI agent that lives on your machine, not in the cloud. Point it at a folder and it refactors code, fixes failing scripts, researches the web, or briefs you every morning. Talks to 200+ model providers through a web UI, a Discord bot, or your voice.
 
 ## What it does
 
-- **Models**: 100+ providers (OpenRouter, OpenAI, Anthropic, Google, Ollama, Bedrock, Azure, ...), OAuth login for GitHub Copilot / Google / OpenAI Codex
-- **Interfaces**: web UI, Discord bot with per-channel sessions, voice (Whisper STT + Piper TTS)
-- **Tools**: 30+ built-in: file edit, code execution, grep/glob, LSP, web fetch/search, calendar, weather, persistent memory
-- **Scheduling**: cron jobs, reminders, recurring tasks, daily briefings
-- **Extending**: visual workflow editor, installable `.oskill` skill bundles
+- **Local-first** — nothing is sent anywhere you didn't configure; point it at a local Ollama instance and it runs entirely off-grid.
+- **Lightweight** — a single binary with no Node, Python, or Docker: warm-starts in ~0.5s and idles at ~20 MB fresh / ~50 MB under use (roughly a tenth of a typical Electron agent), happy on a Raspberry Pi or a 2GB VPS. Reproduce with `cargo run --release --bin osagent-bench`.
+- **Models** — 200+ providers and 7,300+ models (OpenRouter, OpenAI, Anthropic, Google, Ollama, Bedrock, Azure, …), plus OAuth login for OpenAI, Anthropic, Google, GitHub Copilot, Qwen, and Chutes.
+- **Interfaces** — embedded web UI · Discord bot with per-channel sessions · voice (Whisper STT + Piper TTS).
+- **Tools** — 40+ built-ins: file edit/patch, bash + Python/Node execution, grep/glob/code search, LSP, web fetch/search/news, calendar, weather, persistent memory, todos/goals/plans, background subagents.
+- **Automation** — cron jobs, reminders, recurring tasks, daily briefings.
+- **Extendable** — visual workflow editor · installable `.oskill` skill bundles · MCP servers · sandboxed tool scripts.
 
-Coding tools and assistant tools ship side by side, so trim `[tools].allowed` to whichever half you want.
+Coding and assistant tools ship side by side — trim `[tools].allowed` to whichever half you want.
 
-## Configuration
+## Quick Start
+
+Download and run [`osagent-windows-x86_64-setup.exe`](https://github.com/jaylikesbunda/OSAgent/releases/latest) from the [**latest release**](https://github.com/jaylikesbunda/OSAgent/releases/latest). Pick a provider (OAuth or API key), pick a workspace, done — your browser opens at `http://localhost:8765`.
+
+Linux (`.deb`) and macOS (`.dmg`) installers are on the same releases page.
+
+<details>
+<summary><strong>Configuration</strong></summary>
 
 Config lives at `~/.osagent/config.toml`. Minimal:
 
@@ -70,11 +52,14 @@ workspace = "~/.osagent/workspace"
 
 Everything else is in [`config.example.toml`](config.example.toml).
 
+</details>
+
 ## Skills
 
 A skill is a zip of `SKILL.md` (instructions) + `manifest.toml` (metadata), renamed to `.oskill` and installed via **Settings → Skills** in the web UI. Examples in `examples/skills/`.
 
-## Building from Source
+<details>
+<summary><strong>Building from Source</strong></summary>
 
 ```powershell
 git clone https://github.com/jaylikesbunda/OSAgent.git
@@ -83,6 +68,8 @@ cd OSAgent
 ```
 
 `build-launcher.ps1` is Windows-only; Linux/macOS use `launcher/build.sh`. See [RELEASING.md](RELEASING.md) for the release flow.
+
+</details>
 
 ## Contributing & License
 
