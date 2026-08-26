@@ -624,6 +624,11 @@
     background: rgba(34, 197, 94, 0.1);
 }
 
+.subagent-status-badge.partial {
+    color: #f0b429;
+    background: rgba(240, 180, 41, 0.12);
+}
+
 .subagent-status-badge.cancelled {
     color: var(--text-muted);
     background: var(--bg-tertiary);

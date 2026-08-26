@@ -144,6 +144,19 @@ subagent_depth = 1
 # [agent.subagent_models]
 # "explore" = "openrouter:deepseek/deepseek-r1"
 # "general" = "anthropic:claude-3-7-sonnet-latest"
+# When a background subagent finishes, automatically start a continuation turn
+# on the parent conversation so the results reach the agent immediately instead
+# of waiting for your next message. Results that arrive while the parent is busy
+# are delivered right after its current run (and any queued messages) finish.
+subagent_auto_resume = true
+# Safety cap on consecutive auto-continuation turns (turns started only by
+# background task completions, with no real user message in between). Prevents
+# runaway spawn -> complete -> wake loops from burning tokens unattended.
+subagent_auto_resume_max_turns = 5
+# How many times a failed subagent run is relaunched at the task level when the
+# failure looks transient (provider 5xx, rate limits, timeouts). Retries resume
+# the same subagent session with exponential backoff, so completed work is kept.
+subagent_task_max_retries = 2
 # Policy for the agent's `sessions` tool reading or searching OTHER
 # conversations (its own session and its own subagent sessions are always
 # allowed). "ask" shows the same approval popup as outside-workspace access.

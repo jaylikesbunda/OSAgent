@@ -217,8 +217,9 @@ OSA.tmodelAddCancelled = function() {
 
 OSA.tmodelSubagentItem = function(data, live) {
     const subagentId = data.subagent_session_id || data.session_id;
+    const terminalStatuses = ['completed', 'partial', 'failed', 'cancelled', 'timeout'];
     const isRunning = data.is_running === true
-        || (live && data.status !== 'completed' && data.status !== 'failed' && data.status !== 'cancelled');
+        || (live && terminalStatuses.indexOf(data.status) === -1);
     return {
         kind: 'subagent',
         key: 'subagent:' + subagentId,
@@ -298,6 +299,23 @@ OSA.tmodelSubagentRetry = function(event) {
     item.retryText = text;
     item.isRunning = true;
     OSA.tmodelMarkDirty('subagent-retry');
+};
+
+// Task-level retry: the whole run is being relaunched after a transient
+// failure, resuming the same subagent session.
+OSA.tmodelSubagentTaskRetry = function(event) {
+    if (!event || !event.subagent_session_id) return;
+    const item = OSA.tmodelGet('subagent:' + event.subagent_session_id);
+    if (!item) return;
+    const delay = event.next_retry_in_ms ? Math.max(1, Math.round(event.next_retry_in_ms / 1000)) : null;
+    const attempt = event.attempt_count || 0;
+    const max = event.max_attempts || 0;
+    let text = delay ? `resuming in ~${delay}s` : 'resuming';
+    if (attempt && max) text += ` (attempt ${attempt}/${max})`;
+    item.retryText = 'provider error — ' + text;
+    item.status = 'running';
+    item.isRunning = true;
+    OSA.tmodelMarkDirty('subagent-task-retry');
 };
 
 OSA.tmodelSubagentContextUpdate = function(event) {

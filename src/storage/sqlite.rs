@@ -521,6 +521,8 @@ impl SqliteStorage {
                     result TEXT,
                     created_at INTEGER NOT NULL,
                     completed_at INTEGER,
+                    notified_at INTEGER,
+                    background INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
                     FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
@@ -2605,6 +2607,26 @@ impl SqliteStorage {
         })
     }
 
+    /// Startup crash recovery: any task still marked `running` belongs to a
+    /// process that no longer exists. Mark it failed (leaving `notified_at`
+    /// NULL) so the result is delivered to the parent on its next turn /
+    /// wake-up instead of being lost. Returns how many rows were recovered.
+    pub fn fail_stale_running_subagent_tasks(&self) -> Result<usize> {
+        self.with_conn(|conn| {
+            let count = conn
+                .execute(
+                    "UPDATE subagent_tasks
+                     SET status = 'failed',
+                         result = COALESCE(result, 'Subagent was interrupted by an application restart.'),
+                         completed_at = ?1
+                     WHERE status = 'running' AND completed_at IS NULL",
+                    params![Utc::now().timestamp()],
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok(count)
+        })
+    }
+
     /// Completed subagent tasks for a parent session whose result has not yet
     /// been injected into the parent's conversation (background mode).
     pub fn list_unnotified_completed_for_parent(
@@ -2613,7 +2635,7 @@ impl SqliteStorage {
     ) -> Result<Vec<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE parent_session_id = ?1 AND background = 1 AND notified_at IS NULL AND status IN ('completed', 'failed', 'cancelled', 'timeout') ORDER BY created_at ASC")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE parent_session_id = ?1 AND background = 1 AND notified_at IS NULL AND status IN ('completed', 'partial', 'failed', 'cancelled', 'timeout') ORDER BY created_at ASC")
                 .map_err(OSAgentError::Storage)?;
 
             let tasks = stmt
@@ -3273,5 +3295,112 @@ mod transcript_tests {
             .expect("search")
             .is_empty());
         cleanup(&path);
+    }
+}
+
+#[cfg(test)]
+mod subagent_task_tests {
+    use super::*;
+    use crate::storage::SubagentTask;
+
+    fn task(
+        session_id: &str,
+        parent_id: &str,
+        status: &str,
+        background: bool,
+        notified: bool,
+    ) -> SubagentTask {
+        SubagentTask {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            parent_session_id: parent_id.to_string(),
+            description: "desc".to_string(),
+            prompt: "prompt".to_string(),
+            agent_type: "explore".to_string(),
+            status: status.to_string(),
+            tool_count: 0,
+            result: None,
+            created_at: Utc::now(),
+            completed_at: None,
+            notified_at: notified.then(Utc::now),
+            background,
+        }
+    }
+
+    fn seed(storage: &SqliteStorage) -> (String, String, String) {
+        let parent = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("parent");
+        let child = storage
+            .create_subagent_session(
+                parent.id.clone(),
+                "m".to_string(),
+                "p".to_string(),
+                "explore".to_string(),
+            )
+            .expect("child");
+        (parent.id, child.id, Uuid::new_v4().to_string())
+    }
+
+    #[test]
+    fn unnotified_delivery_includes_partial_and_excludes_notified() {
+        let storage = SqliteStorage::new_in_memory().expect("storage");
+        let (parent, child, _) = seed(&storage);
+
+        storage
+            .create_subagent_task(&task(&child, &parent, "completed", true, false))
+            .unwrap();
+        storage
+            .create_subagent_task(&task(&child, &parent, "partial", true, false))
+            .unwrap();
+        storage
+            .create_subagent_task(&task(&child, &parent, "failed", true, false))
+            .unwrap();
+        // Already delivered and non-background tasks must never come back.
+        storage
+            .create_subagent_task(&task(&child, &parent, "completed", true, true))
+            .unwrap();
+        storage
+            .create_subagent_task(&task(&child, &parent, "failed", false, false))
+            .unwrap();
+
+        let pending = storage
+            .list_unnotified_completed_for_parent(&parent)
+            .expect("list");
+        let statuses: Vec<String> = pending.iter().map(|t| t.status.clone()).collect();
+        assert_eq!(statuses.len(), 3, "unexpected deliveries: {statuses:?}");
+        assert!(statuses.contains(&"partial".to_string()));
+    }
+
+    #[test]
+    fn startup_sweep_fails_stale_running_tasks_only() {
+        let storage = SqliteStorage::new_in_memory().expect("storage");
+        let (parent, child, _) = seed(&storage);
+
+        let running = task(&child, &parent, "running", true, false);
+        let done = task(&child, &parent, "completed", true, false);
+        storage.create_subagent_task(&running).unwrap();
+        storage.create_subagent_task(&done).unwrap();
+
+        let recovered = storage
+            .fail_stale_running_subagent_tasks()
+            .expect("sweep");
+        assert_eq!(recovered, 1);
+
+        let swept = storage.get_subagent_task(&running.id).unwrap().unwrap();
+        assert_eq!(swept.status, "failed");
+        assert!(swept.completed_at.is_some());
+        assert!(swept.result.is_some());
+        // Still undelivered so the parent learns about the interruption.
+        assert!(swept.notified_at.is_none());
+
+        let untouched = storage.get_subagent_task(&done.id).unwrap().unwrap();
+        assert_eq!(untouched.status, "completed");
+
+        // A second sweep is a no-op.
+        assert_eq!(
+            storage.fail_stale_running_subagent_tasks().unwrap(),
+            0
+        );
     }
 }

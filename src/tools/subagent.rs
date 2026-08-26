@@ -190,6 +190,10 @@ impl Tool for SubagentTool {
                 "<task id=\"{}\" state=\"completed\">\n<task_result>\n{}\n</task_result>\n</task>",
                 subagent_session_id, result
             ))),
+            "partial" => Ok(ToolResult::new(format!(
+                "<task id=\"{}\" state=\"partial\">\n<task_result>\n{}\n</task_result>\n</task>",
+                subagent_session_id, result
+            ))),
             "cancelled" => Ok(ToolResult::failure(format!(
                 "<task id=\"{}\" state=\"cancelled\">\n<task_result>\nSubagent was cancelled.\n</task_result>\n</task>",
                 subagent_session_id

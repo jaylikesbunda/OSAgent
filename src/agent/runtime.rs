@@ -106,6 +106,13 @@ pub struct AgentRuntime {
     /// Weak handle back to this runtime, set during construction so
     /// `&self` methods can dispatch follow-up queue runs.
     self_arc: std::sync::OnceLock<std::sync::Weak<AgentRuntime>>,
+    /// Parent sessions where a background subagent finished while a run was
+    /// already active; drained into a continuation turn when the run ends.
+    pending_wakes: Arc<DashMap<String, ()>>,
+    /// Consecutive auto-continuation turns per session (started by background
+    /// task completions with no real user message in between). Reset whenever
+    /// a genuine user turn runs; guards against runaway wake loops.
+    auto_wake_turns: Arc<DashMap<String, usize>>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     restart_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     scheduler: Arc<Scheduler>,
@@ -539,12 +546,38 @@ impl AgentRuntime {
             spill_store,
             goal_store,
             self_arc: std::sync::OnceLock::new(),
+            pending_wakes: Arc::new(DashMap::new()),
+            auto_wake_turns: Arc::new(DashMap::new()),
             shutdown_tx: Arc::new(watch::channel(false).0),
             restart_tx: Arc::new(std::sync::Mutex::new(None)),
             scheduler,
             run_prompt_rx: tokio::sync::Mutex::new(Some(run_prompt_rx)),
         });
         let _ = runtime.self_arc.set(std::sync::Arc::downgrade(&runtime));
+
+        // Crash recovery: tasks still marked `running` belong to a previous
+        // process. Fail them (leaving notified_at NULL) so the parent is told
+        // about the interruption on its next turn / wake-up.
+        match runtime.storage.fail_stale_running_subagent_tasks() {
+            Ok(0) => {}
+            Ok(count) => info!(
+                "Startup recovery: marked {} orphaned subagent task(s) as failed",
+                count
+            ),
+            Err(e) => warn!("Startup recovery sweep failed: {}", e),
+        }
+
+        // Background subagent completions wake the parent for a continuation
+        // turn instead of waiting for the user's next message.
+        let weak_for_wake = Arc::downgrade(&runtime);
+        runtime.subagent_manager.set_wake_callback(Arc::new(
+            move |parent_session_id: String| {
+                if let Some(runtime) = weak_for_wake.upgrade() {
+                    runtime.notify_background_task_finished(parent_session_id);
+                }
+            },
+        ));
+
         Ok(runtime)
     }
 
@@ -642,11 +675,166 @@ impl AgentRuntime {
             .await;
     }
 
+    /// Called by the SubagentManager when a background subagent reaches a
+    /// terminal state. Starts a continuation turn on the parent right away if
+    /// it is idle; otherwise parks the request so it is honored when the
+    /// current run ends (see [`Self::check_pending_wake`]).
+    pub fn notify_background_task_finished(&self, parent_session_id: String) {
+        let Some(runtime) = self.self_arc.get().and_then(|weak| weak.upgrade()) else {
+            return;
+        };
+        tokio::spawn(async move {
+            runtime.wake_for_subagent_results(parent_session_id).await;
+        });
+    }
+
+    /// Start a continuation turn for undelivered background subagent results,
+    /// unless auto-resume is disabled, queued user messages are waiting (they
+    /// will carry the results on their own turn), or the session is busy.
+    async fn wake_for_subagent_results(self: Arc<Self>, session_id: String) {
+        if !self.agent_settings.read().await.subagent_auto_resume {
+            return;
+        }
+        if self.storage.get_session(&session_id).ok().flatten().is_none() {
+            return;
+        }
+        // Queued user messages take priority: merging happens at the start of
+        // every turn, so the next queued message delivers the results anyway.
+        match self.storage.list_queued_messages(&session_id) {
+            Ok(items) if !items.is_empty() => return,
+            Ok(_) => {}
+            Err(e) => {
+                warn!(
+                    "Wake check for {}: failed to list queued messages: {}",
+                    session_id, e
+                );
+                return;
+            }
+        }
+        self.start_wake_turn(session_id).await;
+    }
+
+    /// Acquire the run guard and spawn a continuation turn. Parks the request
+    /// when another run is already active.
+    async fn start_wake_turn(self: Arc<Self>, session_id: String) {
+        if self.active_runs.contains_key(&session_id) {
+            self.pending_wakes.insert(session_id, ());
+            return;
+        }
+
+        // Loop guard: too many consecutive background-driven turns without a
+        // real user message means we stop waking until the user chimes in.
+        let max_auto_turns = self
+            .agent_settings
+            .read()
+            .await
+            .subagent_auto_resume_max_turns;
+        {
+            let counter = self
+                .auto_wake_turns
+                .entry(session_id.clone())
+                .or_insert(0);
+            if *counter >= max_auto_turns {
+                warn!(
+                    "Session {}: {} consecutive auto-continuation turns (cap {}) — leaving remaining background result(s) for the user's next message",
+                    session_id, *counter, max_auto_turns
+                );
+                return;
+            }
+        }
+
+        // Double-check there is still something to deliver (another consumer
+        // may have merged it between notification and now).
+        match self.storage.list_unnotified_completed_for_parent(&session_id) {
+            Ok(tasks) if tasks.is_empty() => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
+
+        let run_guard = match self.try_start_run(&session_id, "background-task-wake") {
+            Ok(guard) => guard,
+            Err(OSAgentError::Session(message)) if message.contains("already in progress") => {
+                self.pending_wakes.insert(session_id, ());
+                return;
+            }
+            Err(error) => {
+                warn!("Wake turn for {} could not start: {}", session_id, error);
+                return;
+            }
+        };
+
+        info!(
+            "Background subagent result(s) ready for session {} — starting continuation turn",
+            session_id
+        );
+
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let result = runtime
+                .process_message_internal(
+                    &session_id,
+                    String::new(),
+                    "background-task-wake".to_string(),
+                    Some(serde_json::json!({"kind": "subagent_wake"})),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+
+            if let Err(error) = &result {
+                error!(
+                    "Wake turn failed for session {}: {}",
+                    session_id, error
+                );
+                let is_cancelled = matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
+                if is_cancelled {
+                    runtime.event_bus.emit(AgentEvent::Cancelled {
+                        session_id: session_id.clone(),
+                        sequence: 0,
+                        timestamp: SystemTime::now(),
+                    });
+                } else {
+                    runtime.event_bus.emit(AgentEvent::Error {
+                        session_id: session_id.clone(),
+                        sequence: 0,
+                        error: error.to_string(),
+                        recoverable: false,
+                        timestamp: SystemTime::now(),
+                    });
+                }
+            }
+
+            drop(run_guard);
+            runtime.dispatch_queued_messages(&session_id, "system");
+        });
+    }
+
+    /// Called at run end: if a background subagent finished while this run was
+    /// active, start the deferred continuation turn.
+    pub fn check_pending_wake(&self, session_id: &str) {
+        if self.pending_wakes.remove(session_id).is_some() {
+            info!(
+                "Pending background-result wake found for session {}",
+                session_id
+            );
+            if let Some(runtime) = self.self_arc.get().and_then(|weak| weak.upgrade()) {
+                let sid = session_id.to_string();
+                tokio::spawn(async move {
+                    // Give the queue dispatcher's delayed claim a head start.
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    runtime.wake_for_subagent_results(sid).await;
+                });
+            }
+        }
+    }
+
     /// Merge results of background subagents that finished since the parent's
     /// last turn into the parent session as synthetic user messages, so the
     /// parent notices them on its next turn. Marks them notified so they are
-    /// delivered exactly once.
-    fn merge_pending_subagent_results(&self, session: &mut Session, session_id: &str) {
+    /// delivered exactly once. Returns how many results were merged.
+    fn merge_pending_subagent_results(&self, session: &mut Session, session_id: &str) -> usize {
         let tasks = match self
             .storage
             .list_unnotified_completed_for_parent(session_id)
@@ -657,12 +845,13 @@ impl AgentRuntime {
                     "Failed to list completed background subagents for {}: {}",
                     session_id, e
                 );
-                return;
+                return 0;
             }
         };
         for task in &tasks {
             let state = match task.status.as_str() {
                 "completed" => "completed",
+                "partial" => "partial",
                 "timeout" => "timeout",
                 "cancelled" => "cancelled",
                 _ => "error",
@@ -689,6 +878,7 @@ impl AgentRuntime {
                 session_id
             );
         }
+        tasks.len()
     }
 
     /// Check if a session has an active operation
@@ -794,6 +984,9 @@ impl AgentRuntime {
             Some(item) => item,
             None => {
                 drop(run_guard);
+                // Queue fully drained: honor any deferred background-completion
+                // wake before the session goes idle.
+                self.check_pending_wake(&session_id);
                 return Ok(None);
             }
         };
@@ -861,6 +1054,10 @@ impl AgentRuntime {
                         );
                     }
                 });
+            } else {
+                // Terminal error stops the queue chain; still honor any
+                // background-completion wake that piled up behind this run.
+                runtime.check_pending_wake(&session_id);
             }
         });
 
@@ -934,7 +1131,27 @@ impl AgentRuntime {
         info!("process_message: Session loaded, adding user message");
         info!("Session metadata: {:?}", session.metadata);
 
-        self.merge_pending_subagent_results(&mut session, session_id);
+        // Wake turns are started by `start_wake_turn` when background subagent
+        // results are ready: the turn is driven entirely by the merged <task>
+        // blocks below, with no visible user message of its own.
+        let is_wake_turn = message_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("kind"))
+            .and_then(|value| value.as_str())
+            == Some("subagent_wake");
+        let merged_subagent_results =
+            self.merge_pending_subagent_results(&mut session, session_id);
+
+        // Track streaks of auto-continuation turns so a model that keeps
+        // spawning background work cannot loop forever without a human.
+        if is_wake_turn {
+            *self
+                .auto_wake_turns
+                .entry(session_id.to_string())
+                .or_insert(0) += 1;
+        } else {
+            self.auto_wake_turns.remove(session_id);
+        }
 
         let repo_exploration_request = is_repo_exploration_request(&user_message);
         let queued_client_message_id = message_metadata
@@ -966,41 +1183,55 @@ impl AgentRuntime {
             }
         }
 
-        let mut message = Message::user_with_images(user_message.clone(), image_items.clone());
-        if let Some(metadata) = message_metadata {
-            message.metadata = metadata;
-        }
-        if !attachment_items.is_empty() {
-            if let Some(obj) = message.metadata.as_object_mut() {
-                obj.insert(
-                    "attachments".to_string(),
-                    serde_json::to_value(&visible_attachments)
-                        .unwrap_or_else(|_| serde_json::json!([])),
+        if is_wake_turn {
+            if merged_subagent_results == 0 {
+                warn!(
+                    "Wake turn for session {} found no pending background results; skipping",
+                    session_id
                 );
+                return Ok(String::new());
             }
-        }
-        session.messages.push(message);
+            info!(
+                "process_message: wake turn for session {} driven by {} background result(s)",
+                session_id, merged_subagent_results
+            );
+        } else {
+            let mut message = Message::user_with_images(user_message.clone(), image_items.clone());
+            if let Some(metadata) = message_metadata {
+                message.metadata = metadata;
+            }
+            if !attachment_items.is_empty() {
+                if let Some(obj) = message.metadata.as_object_mut() {
+                    obj.insert(
+                        "attachments".to_string(),
+                        serde_json::to_value(&visible_attachments)
+                            .unwrap_or_else(|_| serde_json::json!([])),
+                    );
+                }
+            }
+            session.messages.push(message);
 
-        match self
-            .decision_memory
-            .maybe_capture_from_user_message(&user_message, &user)
-            .await
-        {
-            Ok(DecisionCaptureOutcome::Ignored) => {}
-            Ok(DecisionCaptureOutcome::Recorded(entry)) => {
-                info!(
-                    "Captured approved decision from user message: {}",
-                    entry.key
-                );
-            }
-            Ok(DecisionCaptureOutcome::Suggested(suggestion)) => {
-                info!(
-                    "Captured decision suggestion from user message: {} (id: {})",
-                    suggestion.key, suggestion.id
-                );
-            }
-            Err(error) => {
-                warn!("Failed to capture approved decision memory: {}", error);
+            match self
+                .decision_memory
+                .maybe_capture_from_user_message(&user_message, &user)
+                .await
+            {
+                Ok(DecisionCaptureOutcome::Ignored) => {}
+                Ok(DecisionCaptureOutcome::Recorded(entry)) => {
+                    info!(
+                        "Captured approved decision from user message: {}",
+                        entry.key
+                    );
+                }
+                Ok(DecisionCaptureOutcome::Suggested(suggestion)) => {
+                    info!(
+                        "Captured decision suggestion from user message: {} (id: {})",
+                        suggestion.key, suggestion.id
+                    );
+                }
+                Err(error) => {
+                    warn!("Failed to capture approved decision memory: {}", error);
+                }
             }
         }
 
@@ -2900,7 +3131,8 @@ impl AgentRuntime {
     }
 
     /// Dispatch pending queued messages for a session, if any. Safe to
-    /// call after every run; the queue claim is a no-op when empty.
+    /// call after every run; the queue claim is a no-op when empty. Also
+    /// honors deferred background-completion wakes once the queue settles.
     fn dispatch_queued_messages(&self, session_id: &str, user: &str) {
         let Some(runtime) = self.self_arc.get().and_then(|weak| weak.upgrade()) else {
             return;
@@ -2909,13 +3141,17 @@ impl AgentRuntime {
         let user = user.to_string();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Err(error) = runtime.spawn_next_queued_message_run(session_id.clone(), user) {
+            let dispatch_runtime = runtime.clone();
+            if let Err(error) =
+                dispatch_runtime.spawn_next_queued_message_run(session_id.clone(), user)
+            {
                 tracing::error!(
                     "Failed to dispatch queued messages for session {}: {}",
                     session_id,
                     error
                 );
             }
+            runtime.check_pending_wake(&session_id);
         });
     }
 

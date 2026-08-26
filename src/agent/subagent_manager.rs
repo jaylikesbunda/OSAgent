@@ -78,6 +78,11 @@ pub struct SubagentManager {
     config: Arc<tokio::sync::RwLock<Config>>,
     shared_provider: Option<Arc<dyn Provider>>,
     workspace_root: PathBuf,
+    /// Invoked with the parent session id whenever a *background* subagent
+    /// reaches a terminal state. Set by the runtime after construction so the
+    /// parent can be woken for a continuation turn without waiting for the
+    /// user's next message. Kept in a OnceLock to avoid a constructor cycle.
+    wake_callback: std::sync::OnceLock<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 struct SubagentHandle {
@@ -104,11 +109,18 @@ impl SubagentManager {
             config,
             shared_provider: None,
             workspace_root,
+            wake_callback: std::sync::OnceLock::new(),
         }
     }
 
     pub fn set_shared_provider(&mut self, provider: Arc<dyn Provider>) {
         self.shared_provider = Some(provider);
+    }
+
+    /// Register the callback fired when a background subagent reaches a
+    /// terminal state (see [`SubagentManager::wake_callback`]).
+    pub fn set_wake_callback(&self, callback: Arc<dyn Fn(String) + Send + Sync>) {
+        let _ = self.wake_callback.set(callback);
     }
 
     pub fn get_allowed_tools_for_agent_type(agent_type: &str) -> Vec<String> {
@@ -214,6 +226,16 @@ impl SubagentManager {
             .flatten()
             .map(|task| (Utc::now() - task.created_at).num_milliseconds().max(0) as u64)
             .unwrap_or(0)
+    }
+
+    /// Exponential backoff for task-level retries: 30s, 60s, 120s... capped
+    /// at 10 minutes.
+    fn task_retry_delay_secs(attempt: u32) -> u64 {
+        const BASE_SECS: u64 = 30;
+        const CAP_SECS: u64 = 600;
+        BASE_SECS
+            .saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1).min(8)))
+            .min(CAP_SECS)
     }
 
     /// Spawn a brand-new subagent session and run it.
@@ -456,6 +478,9 @@ impl SubagentManager {
         }
         let storage_for_guard = self.storage.clone();
         let guard_task_id = task.id.clone();
+        let background_for_notify = background;
+        let description_for_notify = description.clone();
+        let wake_callback = self.wake_callback.get().cloned();
 
         let handle = tokio::spawn(async move {
             struct CleanupGuard {
@@ -521,23 +546,80 @@ impl SubagentManager {
                 result_tx,
             };
 
-            let result = Self::run_subagent(
-                subagent_session_id.clone(),
-                parent_session_id_for_async.clone(),
-                task_id.clone(),
-                prompt,
-                agent_type,
-                storage.clone(),
-                event_bus.clone(),
-                session_manager.clone(),
-                config.clone(),
-                shared_provider.clone(),
-                parent_workspace_for_async,
-                workspace_root,
-                fresh_session,
-                &mut cancel_rx,
-            )
-            .await;
+            // Task-level retry: when a run dies on what looks like a transient
+            // failure (provider outage, rate limit, timeout...), relaunch it
+            // instead of discarding every completed iteration. Retries resume
+            // the same child session, so prior work stays in context.
+            // User-initiated cancellation is never retried.
+            let max_task_retries = config.read().await.agent.subagent_task_max_retries;
+            let mut task_attempt: u32 = 0;
+            let result = loop {
+                let resumed_run = task_attempt > 0;
+                let outcome = Self::run_subagent(
+                    subagent_session_id.clone(),
+                    parent_session_id_for_async.clone(),
+                    task_id.clone(),
+                    prompt.clone(),
+                    agent_type.clone(),
+                    storage.clone(),
+                    event_bus.clone(),
+                    session_manager.clone(),
+                    config.clone(),
+                    shared_provider.clone(),
+                    parent_workspace_for_async.clone(),
+                    workspace_root.clone(),
+                    fresh_session,
+                    resumed_run,
+                    &mut cancel_rx,
+                )
+                .await;
+
+                match outcome {
+                    Ok(value) => break Ok(value),
+                    Err(e) => {
+                        task_attempt += 1;
+                        if e.is_retryable() && task_attempt <= max_task_retries {
+                            let delay = Duration::from_secs(Self::task_retry_delay_secs(task_attempt));
+                            warn!(
+                                "Subagent {} hit a retryable error ({}/{}): {} — resuming in {}s",
+                                subagent_session_id,
+                                task_attempt,
+                                max_task_retries,
+                                e,
+                                delay.as_secs()
+                            );
+                            event_bus.emit(AgentEvent::SubagentRetrying {
+                                session_id: parent_session_id_for_async.clone(),
+                                sequence: 0,
+                                parent_session_id: parent_session_id_for_async.clone(),
+                                subagent_session_id: subagent_session_id.clone(),
+                                attempt_count: task_attempt,
+                                max_attempts: max_task_retries,
+                                next_retry_in_ms: delay.as_millis() as u64,
+                                reason: e.to_string(),
+                                timestamp: std::time::SystemTime::now(),
+                            });
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => continue,
+                                _ = cancel_rx.recv() => {
+                                    let tools = storage
+                                        .get_subagent_task(&task_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|task| task.tool_count)
+                                        .unwrap_or(0);
+                                    break Ok((
+                                        "cancelled".to_string(),
+                                        "Subagent cancelled while waiting to retry.".to_string(),
+                                        tools,
+                                    ));
+                                }
+                            }
+                        }
+                        break Err(e);
+                    }
+                }
+            };
 
             match result {
                 Ok((status, result_text, tool_count)) => {
@@ -564,10 +646,20 @@ impl SubagentManager {
                         result: result_text.clone(),
                         tool_count,
                         duration_ms,
+                        background: background_for_notify,
+                        description: description_for_notify.clone(),
                         timestamp: std::time::SystemTime::now(),
                     });
 
                     _cleanup.deliver((status, result_text, tool_count));
+
+                    // Background tasks have no waiter: poke the runtime so the
+                    // parent session can be woken for a continuation turn.
+                    if background_for_notify {
+                        if let Some(callback) = &wake_callback {
+                            callback(parent_session_id_for_async.clone());
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Subagent failed: {:?}", e);
@@ -593,10 +685,18 @@ impl SubagentManager {
                         result: format!("Error: {}", e),
                         tool_count: 0,
                         duration_ms,
+                        background: background_for_notify,
+                        description: description_for_notify.clone(),
                         timestamp: std::time::SystemTime::now(),
                     });
 
                     _cleanup.deliver(("failed".to_string(), format!("Error: {}", e), 0));
+
+                    if background_for_notify {
+                        if let Some(callback) = &wake_callback {
+                            callback(parent_session_id_for_async.clone());
+                        }
+                    }
                 }
             }
         });
@@ -614,6 +714,7 @@ impl SubagentManager {
         Ok(task_id_for_return)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_subagent(
         session_id: String,
         parent_session_id: String,
@@ -628,6 +729,7 @@ impl SubagentManager {
         parent_workspace: WorkspaceConfig,
         workspace_root: PathBuf,
         fresh_session: bool,
+        resumed_run: bool,
         cancel_rx: &mut mpsc::Receiver<()>,
     ) -> Result<(String, String, i32)> {
         let mut cfg = config.read().await.clone();
@@ -758,7 +860,18 @@ impl SubagentManager {
                     session.messages.push(Message::system(manifest));
                 }
             }
-            session.messages.push(Message::user(prompt));
+            // A resumed run (task-level retry) already has the original task
+            // and all prior work in context; nudge it to continue instead of
+            // re-sending the full prompt.
+            let effective_prompt = if resumed_run {
+                format!(
+                    "Your previous run was interrupted by a temporary provider error before you could finish. Continue from where you left off and produce your final answer.\n\nOriginal task:\n{}",
+                    prompt
+                )
+            } else {
+                prompt
+            };
+            session.messages.push(Message::user(effective_prompt));
             session.model = model.clone();
             session.provider = provider_type.clone();
             let _ = storage.update_session(&session);
@@ -829,8 +942,18 @@ impl SubagentManager {
             }
         }
 
+        // The iteration budget ran out without a final no-tool-call response:
+        // report an honest `partial` status (with the best available text) so
+        // the parent knows the task can be resumed via `task_id`.
         let result_text = Self::extract_result(&storage, &session_id).await?;
-        Ok(("completed".to_string(), result_text, tool_count))
+        Ok((
+            "partial".to_string(),
+            format!(
+                "{}\n\n(Note: the subagent hit its iteration budget before finishing; this is a partial result. Resume it by passing task_id=\"{}\".)",
+                result_text, task_id
+            ),
+            tool_count,
+        ))
     }
 
     /// Build a dedicated provider for a subagent from `agent.subagent_models`,
@@ -1409,5 +1532,21 @@ impl SubagentManager {
 
     pub async fn cleanup_completed(&self, days: i64) -> Result<usize> {
         self.storage.cleanup_completed_subagents(days)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_retry_backoff_is_exponential_and_capped() {
+        assert_eq!(SubagentManager::task_retry_delay_secs(1), 30);
+        assert_eq!(SubagentManager::task_retry_delay_secs(2), 60);
+        assert_eq!(SubagentManager::task_retry_delay_secs(3), 120);
+        // Very large attempts saturate at the 10 minute cap instead of
+        // overflowing or growing without bound.
+        assert_eq!(SubagentManager::task_retry_delay_secs(12), 600);
+        assert_eq!(SubagentManager::task_retry_delay_secs(u32::MAX), 600);
     }
 }

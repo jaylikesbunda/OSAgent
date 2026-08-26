@@ -83,7 +83,7 @@ OSA.handleAgentEvent = function(event) {
         OSA.debug.log('event.' + event.type, summary);
     }
     const isStopping = OSA.isAgentStopping();
-    const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked', 'workflow_started', 'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed', 'workflow_completed', 'workflow_failed'];
+    const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_retrying', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked', 'workflow_started', 'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed', 'workflow_completed', 'workflow_failed'];
     
     if (isStopping && ignoreDuringStop.includes(event.type)) {
         return;
@@ -277,6 +277,10 @@ OSA.handleAgentEvent = function(event) {
 
         case 'subagent_completed':
             OSA.handleSubagentCompleted(event);
+            break;
+
+        case 'subagent_retrying':
+            OSA.handleSubagentTaskRetry(event);
             break;
 
         case 'scheduled_job_fired':
@@ -1007,8 +1011,23 @@ OSA.handleSubagentRetry = function(event) {
     OSA.tmodelSubagentRetry(event);
 };
 
+// Task-level retry: a whole subagent run is being relaunched after a
+// transient (provider) failure. Reuses the same card badge as per-call
+// provider retries.
+OSA.handleSubagentTaskRetry = function(event) {
+    OSA.tmodelSubagentTaskRetry(event);
+};
+
 OSA.handleSubagentCompleted = function(event) {
     OSA.tmodelSubagentCompleted(event);
+    // Background tasks finish on their own schedule; make sure the user
+    // notices even when they are not looking at this session's transcript.
+    if (event.background && OSA.Jobs && OSA.Jobs.showNotification) {
+        const status = event.status || 'completed';
+        const type = status === 'completed' ? 'success'
+            : (status === 'partial' ? 'info' : 'error');
+        OSA.Jobs.showNotification(`Background task "${event.description || 'subagent'}" finished (${status})`, type);
+    }
     OSA.loadSessions();
 };
 

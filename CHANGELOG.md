@@ -1,5 +1,12 @@
 v0.4.7 changes:
 
+* Background subagents now wake the parent conversation automatically when they finish: results arrive as a continuation turn immediately if the agent is idle, or right after its current run and any queued messages finish, instead of waiting for your next message
+* Added `subagent_auto_resume`, `subagent_auto_resume_max_turns` (runaway-loop cap on consecutive background-driven turns), and `subagent_task_max_retries` config options
+* Failed subagent runs now retry at the task level with exponential backoff (30s → 10 min) on transient provider errors, resuming the same session so completed work is kept; the card shows "provider error — resuming (attempt n/m)"
+* Subagents that hit their iteration budget now report an honest `partial` status with resume instructions instead of claiming success, and foreground calls surface it as a resumable task
+* Orphaned subagent tasks from a crashed process are failed at startup and delivered to the parent conversation instead of being silently lost
+* Background subagent completions now raise a toast (and a desktop notification when the tab is hidden), and partial tasks get their own amber badge
+* Fixed fresh installs creating a `subagent_tasks` table without the `notified_at`/`background` columns, which broke background subagents until an in-place upgrade ran
 * Thinking levels now come from models.dev `reasoning_options` metadata instead of hardcoded provider/model rules, so every model exposes its real efforts/budget windows; the catalog also refreshes at startup
 * Fixed replying to a voice message with no text not transcribing — referenced audio now counts as content
 * Added YouTube voice playback in Discord via a new `discord-voice` feature (Songbird 0.6, required for Discord's 2026 voice E2EE), with piped/invidious fallback and Now Playing/Queued embeds

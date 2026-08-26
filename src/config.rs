@@ -114,6 +114,22 @@ pub struct AgentConfig {
     /// Values are `"provider_id:model"` or just a model name (uses the default provider).
     #[serde(default)]
     pub subagent_models: std::collections::HashMap<String, String>,
+    /// When a background subagent finishes, automatically start a continuation
+    /// turn on the parent session so the results reach the agent without
+    /// waiting for the user's next message. Results that arrive while the
+    /// parent is busy are delivered right after its current run ends.
+    #[serde(default = "default_subagent_auto_resume")]
+    pub subagent_auto_resume: bool,
+    /// Safety cap on consecutive auto-continuation turns per session (turns
+    /// started only by background-task completions, with no user message in
+    /// between). Prevents runaway spawn -> complete -> wake loops.
+    #[serde(default = "default_subagent_auto_resume_max_turns")]
+    pub subagent_auto_resume_max_turns: usize,
+    /// How many times a failed subagent run is retried at the task level when
+    /// the failure looks transient (provider 5xx, rate limits, timeouts...).
+    /// The retry resumes the same subagent session so completed work is kept.
+    #[serde(default = "default_subagent_task_max_retries")]
+    pub subagent_task_max_retries: u32,
 }
 
 fn default_prompt_cache_enabled() -> bool {
@@ -122,6 +138,18 @@ fn default_prompt_cache_enabled() -> bool {
 
 fn default_subagent_depth() -> usize {
     1
+}
+
+fn default_subagent_auto_resume() -> bool {
+    true
+}
+
+fn default_subagent_auto_resume_max_turns() -> usize {
+    5
+}
+
+fn default_subagent_task_max_retries() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -838,6 +866,9 @@ impl Default for AgentConfig {
             prompt_cache_enabled: default_prompt_cache_enabled(),
             subagent_depth: default_subagent_depth(),
             subagent_models: std::collections::HashMap::new(),
+            subagent_auto_resume: default_subagent_auto_resume(),
+            subagent_auto_resume_max_turns: default_subagent_auto_resume_max_turns(),
+            subagent_task_max_retries: default_subagent_task_max_retries(),
         }
     }
 }

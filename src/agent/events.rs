@@ -232,6 +232,19 @@ pub enum AgentEvent {
         status: String,
         timestamp: SystemTime,
     },
+    /// A subagent run died on what looks like a transient (provider) error and
+    /// is being retried at the task level, resuming the same session.
+    SubagentRetrying {
+        session_id: String,
+        sequence: u64,
+        parent_session_id: String,
+        subagent_session_id: String,
+        attempt_count: u32,
+        max_attempts: u32,
+        next_retry_in_ms: u64,
+        reason: String,
+        timestamp: SystemTime,
+    },
     SubagentCompleted {
         session_id: String,
         sequence: u64,
@@ -242,6 +255,11 @@ pub enum AgentEvent {
         tool_count: i32,
         #[serde(default)]
         duration_ms: u64,
+        /// True when launched via the background path (no waiting caller).
+        #[serde(default)]
+        background: bool,
+        #[serde(default)]
+        description: String,
         timestamp: SystemTime,
     },
     CoordinatorPhase {
@@ -383,6 +401,7 @@ impl AgentEvent {
             AgentEvent::QuestionResponse { .. } => "",
             AgentEvent::SubagentCreated { session_id, .. } => session_id,
             AgentEvent::SubagentProgress { session_id, .. } => session_id,
+            AgentEvent::SubagentRetrying { session_id, .. } => session_id,
             AgentEvent::SubagentCompleted { session_id, .. } => session_id,
             AgentEvent::CoordinatorPhase { session_id, .. } => session_id,
             AgentEvent::ScheduledJobFired { session_id, .. } => session_id.as_deref().unwrap_or(""),
@@ -423,6 +442,7 @@ impl AgentEvent {
             AgentEvent::QuestionResponse { sequence, .. } => *sequence,
             AgentEvent::SubagentCreated { sequence, .. } => *sequence,
             AgentEvent::SubagentProgress { sequence, .. } => *sequence,
+            AgentEvent::SubagentRetrying { sequence, .. } => *sequence,
             AgentEvent::SubagentCompleted { sequence, .. } => *sequence,
             AgentEvent::CoordinatorPhase { sequence, .. } => *sequence,
             AgentEvent::ScheduledJobFired { sequence, .. } => *sequence,
@@ -811,6 +831,8 @@ impl AgentEvent {
                 result,
                 tool_count,
                 duration_ms,
+                background,
+                description,
                 timestamp,
                 ..
             } => AgentEvent::SubagentCompleted {
@@ -822,6 +844,29 @@ impl AgentEvent {
                 result,
                 tool_count,
                 duration_ms,
+                background,
+                description,
+                timestamp,
+            },
+            AgentEvent::SubagentRetrying {
+                session_id,
+                parent_session_id,
+                subagent_session_id,
+                attempt_count,
+                max_attempts,
+                next_retry_in_ms,
+                reason,
+                timestamp,
+                ..
+            } => AgentEvent::SubagentRetrying {
+                session_id,
+                sequence: value,
+                parent_session_id,
+                subagent_session_id,
+                attempt_count,
+                max_attempts,
+                next_retry_in_ms,
+                reason,
                 timestamp,
             },
             AgentEvent::CoordinatorPhase {
@@ -1029,6 +1074,7 @@ impl AgentEvent {
             AgentEvent::QuestionResponse { .. } => "question_response",
             AgentEvent::SubagentCreated { .. } => "subagent_created",
             AgentEvent::SubagentProgress { .. } => "subagent_progress",
+            AgentEvent::SubagentRetrying { .. } => "subagent_retrying",
             AgentEvent::SubagentCompleted { .. } => "subagent_completed",
             AgentEvent::CoordinatorPhase { .. } => "coordinator_phase",
             AgentEvent::ScheduledJobFired { .. } => "scheduled_job_fired",
