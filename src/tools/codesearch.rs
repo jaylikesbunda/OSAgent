@@ -23,11 +23,11 @@ impl Tool for CodeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Semantic code search using BM25. Searches across all indexed code files in the workspace. Better than grep for finding code by meaning/intent, function names, variable names, and concepts."
+        "Semantic code search using BM25 over indexed workspace files. Finds code by meaning/intent, concepts, and approximate names where grep's literal matching misses.\n\nUsage:\n- When unsure what the user is referring to, fire several differently-phrased queries in parallel instead of one guess: concept terms, likely symbol names in camelCase and snake_case, synonyms, fragments of any pasted error or UI text.\n- Queries are keyword-based: 2-6 distinctive terms beat full sentences."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you need to find code by concept, function name patterns (camelCase, snake_case), or when grep is too literal. Good for 'find authentication code' or 'where is error handling'"
+        "Find code by meaning when grep is too literal or you're unsure what the user refers to; fire several rephrased queries."
     }
 
     fn when_not_to_use(&self) -> &str {

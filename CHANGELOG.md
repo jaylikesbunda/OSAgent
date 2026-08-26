@@ -10,6 +10,7 @@ v0.4.7 changes:
 * Removed the obsolete missing-`ffmpeg` warning; Songbird decodes supported audio formats in-process
 * Fixed provider `opencode-go` `temperature` illegal 2-decimal error (`src/agent/provider.rs:511` `(t*100).round()/100`, `0.6999…` → `0.7`) and test update
 * Fixed provider errors showing twice in web UI transcript — `src/frontend/js/transcript.js:203` `tmodelAddError()` deduplicates identical consecutive errors (ws+sse duplicate)
+* Added Windsurf-style search-before-asking: when OSA can't tell what the user is referring to in the codebase (vague name, "that function", pasted errors, UI text), it now fans out several parallel reformulated searches — exact phrase, camelCase/snake_case/kebab-case symbol names, synonyms, error/UI-string fragments, related file names — across grep/glob and codesearch before ever asking for clarification; guidance added to the Full-mode Tool Use prompt section, explore-agent workflow, and the grep + codesearch tool descriptions (`src/agent/prompt.rs`, `src/tools/search.rs`, `src/tools/codesearch.rs`)
 * Bump `0.4.6` → `0.4.7`
 
 v0.4.6 changes:

@@ -367,6 +367,22 @@ fn build_tool_selection_section(_allowed_tools: &[String], mode: PromptMode) -> 
 
     if mode == PromptMode::Full {
         lines.push("- For open-ended searches that will require multiple rounds of globbing and grepping, delegate to the task or subagent tool with an explore agent to reduce context usage. Do not duplicate that work yourself; continue with non-overlapping tasks or wait for the result.".to_string());
+        lines.push(
+            "- When you cannot tell what the user is referring to in the codebase — a vague name, \"that function\", pasted errors, UI text, a concept — do not guess and do not ask yet: fan out several parallel searches that rephrase their words in different ways"
+                .to_string(),
+        );
+        lines.push(
+            "- Vary each search across: the exact phrase, likely symbol names (camelCase, snake_case, kebab-case), synonyms, distinctive fragments of any error message, visible UI strings, and related file names"
+                .to_string(),
+        );
+        lines.push(
+            "- Use grep for literal fragments and glob for file names; load codesearch via tool_search when listed under Deferred Built-in Tools and you need meaning-based matching"
+                .to_string(),
+        );
+        lines.push(
+            "- Ask the user to clarify only after several genuinely different searches have all come back empty"
+                .to_string(),
+        );
     }
 
     if mode == PromptMode::Minimal || mode == PromptMode::Explore {
@@ -520,6 +536,7 @@ fn build_explore_sections(_allowed_tools: &[String]) -> Vec<String> {
         "# Workflow".to_string(),
         "- Start with the fastest path to useful evidence: use glob/grep to find relevant files, then read them".to_string(),
         "- Adapt your search approach based on the thoroughness level specified by the caller".to_string(),
+        "- When searches come back empty, rephrase rather than conclude the code does not exist: symbol-case variants (camelCase/snake_case), synonyms, substrings of quoted errors or UI text, broader concept terms; batch independent searches in parallel".to_string(),
         "- Return file paths as absolute paths".to_string(),
         "- Do not create any files, or run commands that modify the system".to_string(),
         String::new(),
