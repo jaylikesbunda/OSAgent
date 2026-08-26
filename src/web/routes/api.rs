@@ -667,6 +667,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/providers/search", get(search_models))
         .route("/api/providers/validate", post(validate_provider))
         .route("/api/providers/:id", delete(delete_provider))
+        .route("/api/local-servers/status", get(local_servers_status))
         .route("/api/oauth/providers", get(oauth_list_providers))
         .route("/api/oauth/:provider_id/start", post(oauth_start))
         .route("/api/oauth/:provider_id/device", post(oauth_device_code))
@@ -1235,6 +1236,15 @@ async fn update_config(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let current_config = agent.get_config().await;
     new_config.preserve_secrets_from(&current_config);
+
+    // Provider entries and the active route are managed exclusively through
+    // /api/providers, /api/providers/switch and /api/model, which persist
+    // immediately. Settings panes PUT their whole cached config snapshot here,
+    // and that snapshot can predate a recently added provider or model switch —
+    // trusting those fields silently deleted providers (and their API keys).
+    new_config.providers = current_config.providers.clone();
+    new_config.default_provider = current_config.default_provider.clone();
+    new_config.default_model = current_config.default_model.clone();
 
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
@@ -4063,14 +4073,18 @@ async fn add_provider(
         let mut config = agent.get_config().await;
         config.default_provider = payload.provider_id.clone();
         agent.replace_config(config.clone()).await;
-        if let Err(e) = config.save(&config_path) {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to save config: {}", e),
-                }),
-            ));
-        }
+    }
+
+    // Persist immediately. Provider keys are entered once and must survive
+    // restarts; local providers (Unsloth/Ollama) are typically saved without
+    // the default flag, which used to skip the disk write entirely.
+    if let Err(e) = agent.save_config(&config_path).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to save config: {}", e),
+            }),
+        ));
     }
 
     Ok(Json(serde_json::json!({
@@ -5954,6 +5968,136 @@ async fn models_handler(
         catalog.all_models
     };
     Json(serde_json::to_value(&models).unwrap_or(serde_json::json!([])))
+}
+
+// ── Local server status (Ollama / Unsloth) ──────────────────
+
+/// Live reachability probe for local inference servers. Unlike the catalog
+/// handlers this distinguishes "offline" from "online but needs an API key",
+/// so the settings UI can tell the user exactly what to fix.
+async fn local_servers_status(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Json<serde_json::Value> {
+    let ollama = probe_local_server_status(&agent, "ollama");
+    let unsloth = probe_local_server_status(&agent, "unsloth");
+    let (ollama, unsloth) = futures::join!(ollama, unsloth);
+    Json(serde_json::json!({ "servers": [ollama, unsloth] }))
+}
+
+async fn probe_local_server_status(
+    agent: &Arc<AgentRuntime>,
+    provider_id: &str,
+) -> serde_json::Value {
+    let is_ollama = provider_id == "ollama";
+    let name = if is_ollama { "Ollama" } else { "Unsloth Studio" };
+
+    let base_url = if is_ollama {
+        normalize_ollama_base_url(&resolve_ollama_base_url(agent, None).await)
+    } else {
+        normalize_unsloth_base_url(&resolve_unsloth_base_url(agent, None).await)
+    };
+    let api_key = if is_ollama {
+        resolve_ollama_api_key(agent).await
+    } else {
+        resolve_unsloth_api_key(agent).await
+    };
+    let has_api_key = api_key
+        .as_deref()
+        .map(|key| !key.trim().is_empty())
+        .unwrap_or(false);
+
+    let status_value = |state: &str, base: &str, models: &[String]| {
+        serde_json::json!({
+            "id": provider_id,
+            "name": name,
+            "base_url": base,
+            "state": state,
+            "model_count": models.len(),
+            "models": models.iter().take(12).cloned().collect::<Vec<_>>(),
+            "has_api_key": has_api_key,
+        })
+    };
+
+    let client = match ollama_http_client() {
+        Some(client) => client.clone(),
+        None => return status_value("offline", &base_url, &[]),
+    };
+
+    // Probe the primary base first; for Unsloth also try the alternate default
+    // port (8888 <-> 8000), matching fetch_live_unsloth_models_uncached.
+    let mut candidates = vec![base_url.clone()];
+    if !is_ollama {
+        let lower = base_url.to_ascii_lowercase();
+        if lower.ends_with(":8888") {
+            candidates.push(base_url.replace("8888", "8000"));
+        } else if lower.ends_with(":8000") {
+            candidates.push(base_url.replace("8000", "8888"));
+        }
+    }
+
+    let mut saw_auth_failure = false;
+    for candidate in candidates {
+        let url = if is_ollama {
+            format!("{}/api/tags", candidate.trim_end_matches('/'))
+        } else {
+            format!("{}/v1/models", candidate.trim_end_matches('/'))
+        };
+        let mut request = client.get(&url);
+        if let Some(key) = api_key.as_deref() {
+            if !key.trim().is_empty() {
+                request = request.header("Authorization", format!("Bearer {}", key.trim()));
+            }
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(_) => continue,
+        };
+        if response.status() == 401 || response.status() == 403 {
+            saw_auth_failure = true;
+            continue;
+        }
+        if !response.status().is_success() {
+            continue;
+        }
+
+        let models: Vec<String> = if is_ollama {
+            match response.json::<OllamaTagsResponse>().await {
+                Ok(payload) => payload
+                    .models
+                    .into_iter()
+                    .map(|model| model.model)
+                    .filter(|id| !id.trim().is_empty())
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            match response.json::<serde_json::Value>().await {
+                Ok(payload) => payload
+                    .get("data")
+                    .and_then(|data| data.as_array())
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| {
+                                entry.get("id").and_then(|value| value.as_str()).map(String::from)
+                            })
+                            .filter(|id| !id.trim().is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            }
+        };
+
+        return status_value("online", &candidate, &models);
+    }
+
+    if saw_auth_failure {
+        status_value("needs_auth", &base_url, &[])
+    } else {
+        status_value("offline", &base_url, &[])
+    }
 }
 
 #[derive(Debug, Serialize)]

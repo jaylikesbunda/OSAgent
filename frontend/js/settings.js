@@ -579,6 +579,7 @@ OSA.switchSettingsTab = async function(tabId) {
         if (catalogList) {
             catalogList.innerHTML = '<div class="model-empty">Loading...</div>';
         }
+        OSA.renderLocalServers();
         requestAnimationFrame(function() {
             OSA.renderSettingsProviders();
         });

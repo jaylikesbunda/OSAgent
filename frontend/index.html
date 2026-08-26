@@ -512,7 +512,15 @@
                         <p class="settings-pane-desc">Connect providers, pick active routes, and browse the shared model catalog.</p>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">Connected & Available Routes</div>
+                        <div class="settings-group-title settings-group-title-inline">
+                            <span>Local Servers</span>
+                            <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.refreshLocalServers()">Refresh</button>
+                        </div>
+                        <div class="settings-field-hint settings-field-hint-spaced">Live status of Ollama and Unsloth Studio. If Unsloth asks for a key, paste it from Unsloth Desktop (Settings &rarr; API keys) below.</div>
+                        <div id="local-servers-status" class="doctor-status-grid"><div class="model-empty">Checking...</div></div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Connected &amp; Available Routes</div>
                         <div class="settings-field-hint settings-field-hint-spaced">Connected providers stay at the top. Expand a provider to switch its model or edit its connection.</div>
                         <div id="model-catalog-list" class="model-catalog-list">Loading...</div>
                     </div>

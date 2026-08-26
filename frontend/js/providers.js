@@ -1028,6 +1028,111 @@ OSA.toggleProviderModels = function(providerId) {
     OSA.renderSettingsProviders();
 };
 
+// ── Local Server Status (Ollama / Unsloth) ──────────────────
+
+OSA.renderLocalServers = async function() {
+    const container = document.getElementById('local-servers-status');
+    if (!container) return;
+    container.innerHTML = '<div class="model-empty">Checking...</div>';
+
+    let servers;
+    try {
+        const data = await OSA.getJson('/api/local-servers/status');
+        servers = data.servers || [];
+    } catch (e) {
+        container.innerHTML = '<div class="model-empty">Failed to check local servers</div>';
+        return;
+    }
+    if (!servers.length) {
+        container.innerHTML = '<div class="model-empty">No local servers configured</div>';
+        return;
+    }
+
+    container.innerHTML = servers.map(function(server) {
+        const stateClass = server.state === 'online' ? 'ok'
+            : (server.state === 'needs_auth' ? 'warn' : 'error');
+        const badge = server.state === 'online'
+            ? 'Online · ' + (server.model_count || 0) + ' model' + (server.model_count !== 1 ? 's' : '')
+            : (server.state === 'needs_auth' ? 'Needs API key' : 'Offline');
+        const sampleModels = (server.models || []).slice(0, 4).join(', ');
+        const detail = OSA.escapeHtml(server.base_url || '')
+            + (sampleModels ? ' · ' + OSA.escapeHtml(sampleModels) : '');
+
+        let keyRow = '';
+        if (server.id === 'unsloth' && server.state !== 'online') {
+            keyRow = '<div class="local-server-key-row">' +
+                '<input type="password" id="local-key-' + OSA.escapeHtml(server.id) + '" placeholder="' +
+                (server.has_api_key ? 'Replace API key...' : 'Paste API key...') + '" autocomplete="off" />' +
+                '<button type="button" class="btn-action" onclick="OSA.saveLocalServerKey(\'' + OSA.escapeHtml(server.id) + '\')">Save Key</button>' +
+                '</div>';
+        }
+
+        return '<div class="doctor-status-card ' + stateClass + '">' +
+            '<div class="doctor-status-header">' +
+                '<div class="doctor-status-title">' + OSA.escapeHtml(server.name || server.id) + '</div>' +
+                '<span class="doctor-status-badge ' + stateClass + '">' + OSA.escapeHtml(badge) + '</span>' +
+            '</div>' +
+            '<div class="doctor-status-detail">' + detail + '</div>' +
+            keyRow +
+        '</div>';
+    }).join('');
+};
+
+OSA.refreshLocalServers = function() {
+    return OSA.renderLocalServers();
+};
+
+OSA.saveLocalServerKey = async function(providerId) {
+    const input = document.getElementById('local-key-' + providerId);
+    if (!input) return;
+    const apiKey = input.value.trim();
+    if (!apiKey) { alert('Paste an API key first'); return; }
+
+    // Preserve any existing route/model selection when re-saving the key.
+    let existingModel = '';
+    try {
+        const providersData = await OSA.getJson('/api/providers');
+        const entry = (providersData.providers || []).find(function(p) { return p.id === providerId; });
+        existingModel = (entry && entry.model) || '';
+    } catch (e) { /* fall through with provider default */ }
+
+    let saved;
+    try {
+        saved = await OSA.postJson('/api/providers', {
+            provider_id: providerId,
+            api_key: apiKey,
+            model: existingModel || undefined
+        });
+    } catch (e) {
+        alert('Failed to save key: ' + (e.message || e));
+        return;
+    }
+    if (saved && saved.error) {
+        alert('Failed to save key: ' + saved.error);
+        return;
+    }
+
+    input.value = '';
+    // Auto-route to the first discovered local model so the server is usable
+    // immediately instead of pointing at a preset ID that may not exist.
+    try {
+        const status = await OSA.getJson('/api/local-servers/status');
+        const server = (status.servers || []).find(function(s) { return s.id === providerId; });
+        const models = (server && server.models) || [];
+        if (server && server.state === 'online' && models.length) {
+            const known = existingModel && models.indexOf(existingModel) !== -1;
+            if (!known) {
+                await OSA.postJson('/api/providers/switch', { provider_id: providerId, model: models[0] });
+            }
+        }
+    } catch (e) { /* non-fatal */ }
+
+    OSA.loadProviderCatalog(true).then(function() {
+        OSA.renderSettingsProviders();
+    });
+    OSA.renderLocalServers();
+};
+
 OSA.renderCategorizedModels = function(models, providerId) {
     const categories = {};
     const catOrder = ['recommended', 'popular', 'fast', 'reasoning', 'open', 'code', 'custom'];

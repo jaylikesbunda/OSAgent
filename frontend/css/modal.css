@@ -2339,3 +2339,14 @@
     color: var(--text-muted);
     padding: 6px 0;
 }
+
+.local-server-key-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.local-server-key-row input {
+    flex: 1;
+    min-width: 0;
+}
