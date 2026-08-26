@@ -3382,9 +3382,7 @@ mod subagent_task_tests {
         storage.create_subagent_task(&running).unwrap();
         storage.create_subagent_task(&done).unwrap();
 
-        let recovered = storage
-            .fail_stale_running_subagent_tasks()
-            .expect("sweep");
+        let recovered = storage.fail_stale_running_subagent_tasks().expect("sweep");
         assert_eq!(recovered, 1);
 
         let swept = storage.get_subagent_task(&running.id).unwrap().unwrap();
@@ -3398,9 +3396,6 @@ mod subagent_task_tests {
         assert_eq!(untouched.status, "completed");
 
         // A second sweep is a no-op.
-        assert_eq!(
-            storage.fail_stale_running_subagent_tasks().unwrap(),
-            0
-        );
+        assert_eq!(storage.fail_stale_running_subagent_tasks().unwrap(), 0);
     }
 }

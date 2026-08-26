@@ -168,7 +168,7 @@ pub fn published_reasoning_levels(model: &ModelsDevModel) -> Option<ReasoningLev
         };
         if best
             .as_ref()
-            .is_none_or(|(best_rank, _)| rank < *best_rank)
+            .map_or(true, |(best_rank, _)| rank < *best_rank)
         {
             best = Some((rank, levels));
         }

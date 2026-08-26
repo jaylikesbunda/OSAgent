@@ -2591,12 +2591,14 @@ mod tests {
             RequestMode::Responses,
             "openai",
             &settings,
-            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
-                ["none", "low", "medium", "high", "xhigh"]
-                    .iter()
-                    .map(|value| value.to_string())
-                    .collect(),
-            )))),
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Efforts(
+                    ["none", "low", "medium", "high", "xhigh"]
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                ),
+            ))),
         );
 
         assert_eq!(request["max_output_tokens"], serde_json::json!(2048));
@@ -2675,7 +2677,10 @@ mod tests {
         );
 
         assert_eq!(request["thinking"]["type"], serde_json::json!("enabled"));
-        assert_eq!(request["thinking"]["budget_tokens"], serde_json::json!(20_890));
+        assert_eq!(
+            request["thinking"]["budget_tokens"],
+            serde_json::json!(20_890)
+        );
     }
 
     #[test]
@@ -2691,17 +2696,23 @@ mod tests {
             RequestMode::ChatCompletions,
             "anthropic",
             &settings,
-            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
-                ["low", "medium", "high", "max"]
-                    .iter()
-                    .map(|value| value.to_string())
-                    .collect(),
-            )))),
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Efforts(
+                    ["low", "medium", "high", "max"]
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                ),
+            ))),
         );
 
         assert_eq!(request["thinking"]["type"], serde_json::json!("adaptive"));
         assert_eq!(request["effort"], serde_json::json!("max"));
-        assert!(request.get("thinking").unwrap().get("budget_tokens").is_none());
+        assert!(request
+            .get("thinking")
+            .unwrap()
+            .get("budget_tokens")
+            .is_none());
     }
 
     #[test]
@@ -2738,18 +2749,22 @@ mod tests {
             RequestMode::ChatCompletions,
             "google",
             &effort_settings,
-            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
-                ["low", "medium", "high"]
-                    .iter()
-                    .map(|value| value.to_string())
-                    .collect(),
-            )))),
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Efforts(
+                    ["low", "medium", "high"]
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                ),
+            ))),
         );
         assert_eq!(
             effort_request["thinkingConfig"]["thinkingLevel"],
             serde_json::json!("medium")
         );
-        assert!(effort_request["thinkingConfig"].get("thinkingBudget").is_none());
+        assert!(effort_request["thinkingConfig"]
+            .get("thinkingBudget")
+            .is_none());
     }
 
     #[test]
@@ -2765,12 +2780,14 @@ mod tests {
             RequestMode::ChatCompletions,
             "some-custom-provider",
             &settings,
-            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
-                ["low", "medium", "high"]
-                    .iter()
-                    .map(|value| value.to_string())
-                    .collect(),
-            )))),
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Efforts(
+                    ["low", "medium", "high"]
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                ),
+            ))),
         );
 
         assert_eq!(request["reasoning_effort"], serde_json::json!("high"));
@@ -2782,7 +2799,9 @@ mod tests {
             RequestMode::ChatCompletions,
             "some-custom-provider",
             &settings,
-            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Toggle))),
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Toggle,
+            ))),
         );
         // "high" isn't a valid toggle selection, so nothing is sent.
         assert!(toggle_request.get("reasoning_effort").is_none());

@@ -11,7 +11,9 @@ use crate::tools::codesearch_tokenizer::{camel_case_join, extract_query_terms, s
 use crate::tools::guard::path_touches_backups;
 use crate::tools::output::path_touches_tool_outputs;
 use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
-use crate::tools::search::{discouraged_path_penalty, ensure_rg_checked, is_heavy_dir, rg_binary_name};
+use crate::tools::search::{
+    discouraged_path_penalty, ensure_rg_checked, is_heavy_dir, rg_binary_name,
+};
 use async_trait::async_trait;
 use rayon::prelude::*;
 use regex::Regex;
@@ -287,7 +289,11 @@ fn score_hits(patterns: &[SearchPattern], hits: Vec<Hit>) -> Vec<ScoredFile> {
         })
         .collect();
 
-    scored.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.rel_path.cmp(&b.rel_path)));
+    scored.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
     scored
 }
 
@@ -301,7 +307,11 @@ fn render_results(query: &str, scored: &[ScoredFile], limit: usize) -> String {
     ));
 
     for file in scored.iter().take(limit) {
-        output.push_str(&format!("**{}** (score {})\n", file.rel_path.display(), file.score));
+        output.push_str(&format!(
+            "**{}** (score {})\n",
+            file.rel_path.display(),
+            file.score
+        ));
         let mut last_line_shown: Option<usize> = None;
         let mut shown = 0;
         for hit in &file.hits {
@@ -388,7 +398,12 @@ impl CodeSearchTool {
             }
         }
 
-        cmd.args(["--glob", "!.osagent_backups", "--glob", "!.osa_tool_outputs"]);
+        cmd.args([
+            "--glob",
+            "!.osagent_backups",
+            "--glob",
+            "!.osa_tool_outputs",
+        ]);
 
         for pattern in patterns {
             cmd.args(["-e", &pattern.source]);
@@ -408,9 +423,8 @@ impl CodeSearchTool {
         let compiled: Vec<Regex> = patterns
             .iter()
             .map(|p| {
-                Regex::new(&format!(r"(?i){}", p.source)).map_err(|e| {
-                    OSAgentError::ToolExecution(format!("Invalid pattern: {}", e))
-                })
+                Regex::new(&format!(r"(?i){}", p.source))
+                    .map_err(|e| OSAgentError::ToolExecution(format!("Invalid pattern: {}", e)))
             })
             .collect::<crate::error::Result<Vec<_>>>()?;
         let mut hits = Vec::new();
@@ -502,7 +516,10 @@ impl CodeSearchTool {
                 let matches_ext = entry_path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map(|e| exts.iter().any(|allowed| allowed == &e.to_ascii_lowercase()))
+                    .map(|e| {
+                        exts.iter()
+                            .any(|allowed| allowed == &e.to_ascii_lowercase())
+                    })
                     .unwrap_or(false);
                 if !matches_ext {
                     continue;
@@ -635,7 +652,10 @@ impl Tool for CodeSearchTool {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| OSAgentError::ToolExecution("Missing 'query' parameter".to_string()))?;
-        let limit = args["limit"].as_u64().unwrap_or(MAX_FILES_SHOWN as u64).min(50) as usize;
+        let limit = args["limit"]
+            .as_u64()
+            .unwrap_or(MAX_FILES_SHOWN as u64)
+            .min(50) as usize;
         let language = args["language"].as_str();
 
         let search_path = self.default_workspace()?;
@@ -666,12 +686,8 @@ impl Tool for CodeSearchTool {
                 Ok(hits) => hits,
                 Err(e) => {
                     debug!("codesearch ripgrep failed ({}), falling back to walkdir", e);
-                    self.execute_walkdir_batch(
-                        &patterns,
-                        lang_extensions.as_deref(),
-                        &search_path,
-                    )
-                    .await?
+                    self.execute_walkdir_batch(&patterns, lang_extensions.as_deref(), &search_path)
+                        .await?
                 }
             }
         } else {
@@ -820,12 +836,9 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "fn main() {}\n").expect("write");
 
         let tool = CodeSearchTool::new(config_for_workspace(&dir.path().to_string_lossy()));
-        let result = Tool::execute_result(
-            &tool,
-            json!({ "query": "zzz_unfindable_term" }),
-        )
-        .await
-        .expect("result");
+        let result = Tool::execute_result(&tool, json!({ "query": "zzz_unfindable_term" }))
+            .await
+            .expect("result");
 
         assert_eq!(result.outcome, ToolOutcome::Success);
         assert!(result.metadata["files"] == 0);

@@ -570,13 +570,13 @@ impl AgentRuntime {
         // Background subagent completions wake the parent for a continuation
         // turn instead of waiting for the user's next message.
         let weak_for_wake = Arc::downgrade(&runtime);
-        runtime.subagent_manager.set_wake_callback(Arc::new(
-            move |parent_session_id: String| {
+        runtime
+            .subagent_manager
+            .set_wake_callback(Arc::new(move |parent_session_id: String| {
                 if let Some(runtime) = weak_for_wake.upgrade() {
                     runtime.notify_background_task_finished(parent_session_id);
                 }
-            },
-        ));
+            }));
 
         Ok(runtime)
     }
@@ -695,7 +695,13 @@ impl AgentRuntime {
         if !self.agent_settings.read().await.subagent_auto_resume {
             return;
         }
-        if self.storage.get_session(&session_id).ok().flatten().is_none() {
+        if self
+            .storage
+            .get_session(&session_id)
+            .ok()
+            .flatten()
+            .is_none()
+        {
             return;
         }
         // Queued user messages take priority: merging happens at the start of
@@ -730,10 +736,7 @@ impl AgentRuntime {
             .await
             .subagent_auto_resume_max_turns;
         {
-            let counter = self
-                .auto_wake_turns
-                .entry(session_id.clone())
-                .or_insert(0);
+            let counter = self.auto_wake_turns.entry(session_id.clone()).or_insert(0);
             if *counter >= max_auto_turns {
                 warn!(
                     "Session {}: {} consecutive auto-continuation turns (cap {}) — leaving remaining background result(s) for the user's next message",
@@ -745,7 +748,10 @@ impl AgentRuntime {
 
         // Double-check there is still something to deliver (another consumer
         // may have merged it between notification and now).
-        match self.storage.list_unnotified_completed_for_parent(&session_id) {
+        match self
+            .storage
+            .list_unnotified_completed_for_parent(&session_id)
+        {
             Ok(tasks) if tasks.is_empty() => return,
             Ok(_) => {}
             Err(_) => return,
@@ -784,11 +790,9 @@ impl AgentRuntime {
                 .await;
 
             if let Err(error) = &result {
-                error!(
-                    "Wake turn failed for session {}: {}",
-                    session_id, error
-                );
-                let is_cancelled = matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
+                error!("Wake turn failed for session {}: {}", session_id, error);
+                let is_cancelled =
+                    matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
                 if is_cancelled {
                     runtime.event_bus.emit(AgentEvent::Cancelled {
                         session_id: session_id.clone(),
@@ -1139,8 +1143,7 @@ impl AgentRuntime {
             .and_then(|metadata| metadata.get("kind"))
             .and_then(|value| value.as_str())
             == Some("subagent_wake");
-        let merged_subagent_results =
-            self.merge_pending_subagent_results(&mut session, session_id);
+        let merged_subagent_results = self.merge_pending_subagent_results(&mut session, session_id);
 
         // Track streaks of auto-continuation turns so a model that keeps
         // spawning background work cannot loop forever without a human.
@@ -6107,7 +6110,11 @@ impl AgentRuntime {
             }
         }
 
-        if self.external_manager.has_granted_permission(&resource).await {
+        if self
+            .external_manager
+            .has_granted_permission(&resource)
+            .await
+        {
             return Ok(());
         }
 

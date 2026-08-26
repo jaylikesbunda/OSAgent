@@ -579,7 +579,8 @@ impl SubagentManager {
                     Err(e) => {
                         task_attempt += 1;
                         if e.is_retryable() && task_attempt <= max_task_retries {
-                            let delay = Duration::from_secs(Self::task_retry_delay_secs(task_attempt));
+                            let delay =
+                                Duration::from_secs(Self::task_retry_delay_secs(task_attempt));
                             warn!(
                                 "Subagent {} hit a retryable error ({}/{}): {} — resuming in {}s",
                                 subagent_session_id,

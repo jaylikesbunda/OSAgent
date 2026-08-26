@@ -13,12 +13,8 @@ pub struct ThinkingOptionsState {
 /// Fractions of a model's published budget window backing the generic
 /// low/medium/high/max labels. The token ceilings themselves always come from
 /// catalog metadata (`reasoning_options`), never from code.
-const BUDGET_LADDER: &[(&str, f64)] = &[
-    ("low", 0.25),
-    ("medium", 0.5),
-    ("high", 0.85),
-    ("max", 1.0),
-];
+const BUDGET_LADDER: &[(&str, f64)] =
+    &[("low", 0.25), ("medium", 0.5), ("high", 0.85), ("max", 1.0)];
 
 /// The thinking levels a model supports, straight from its published
 /// `reasoning_options`. Models without catalog entry, without published
@@ -179,7 +175,10 @@ mod tests {
             }),
         );
 
-        assert_eq!(options_for(Some(&meta)), vec!["low", "medium", "high", "max"]);
+        assert_eq!(
+            options_for(Some(&meta)),
+            vec!["low", "medium", "high", "max"]
+        );
         assert_eq!(budget_for_level("low", &meta), Some(8_000));
         assert_eq!(budget_for_level("high", &meta), Some(27_199));
         assert_eq!(budget_for_level("max", &meta), Some(31_999));
@@ -234,7 +233,10 @@ mod tests {
     #[test]
     fn off_maps_to_none_when_the_model_can_be_disabled() {
         let meta = meta(true, Some(ReasoningLevels::Toggle));
-        assert_eq!(normalize_selection("off", Some(&meta)), Some("none".to_string()));
+        assert_eq!(
+            normalize_selection("off", Some(&meta)),
+            Some("none".to_string())
+        );
     }
 
     #[test]
@@ -249,7 +251,10 @@ mod tests {
             ])),
         );
 
-        assert_eq!(normalize_selection("off", Some(&meta)), Some("minimal".to_string()));
+        assert_eq!(
+            normalize_selection("off", Some(&meta)),
+            Some("minimal".to_string())
+        );
         assert!(!can_disable(Some(&meta)));
     }
 
@@ -264,8 +269,14 @@ mod tests {
             ])),
         );
 
-        assert_eq!(normalize_selection("high", Some(&meta)), Some("high".to_string()));
-        assert_eq!(normalize_selection("xhigh", Some(&meta)), Some("low".to_string()));
+        assert_eq!(
+            normalize_selection("high", Some(&meta)),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            normalize_selection("xhigh", Some(&meta)),
+            Some("low".to_string())
+        );
         assert_eq!(normalize_selection("auto", Some(&meta)), None);
     }
 

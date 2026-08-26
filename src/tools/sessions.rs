@@ -97,11 +97,7 @@ struct TimelineEntry {
 }
 
 fn format_timeline_line(entry: &TimelineEntry) -> String {
-    let marker = if entry.archived {
-        "[archived] "
-    } else {
-        ""
-    };
+    let marker = if entry.archived { "[archived] " } else { "" };
     format!(
         "[{}] {}{}: {}",
         SessionsTool::format_timestamp(entry.timestamp),
@@ -215,7 +211,7 @@ impl SessionsTool {
             .unwrap_or(LIST_DEFAULT_LIMIT);
 
         let mut summaries = self.storage.list_session_summaries()?;
-        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
         summaries.truncate(limit);
 
         if summaries.is_empty() {
@@ -247,11 +243,12 @@ impl SessionsTool {
                 Self::format_timestamp(summary.updated_at),
             ));
         }
-        lines.push(format!(
+        lines.push(
             "Pass a full session id from `/api/sessions` output or Settings → \
 Sessions; ids shown here are shortened prefixes. Use action=read with \
 target_session_id to inspect one."
-        ));
+                .to_string(),
+        );
         Ok(lines.join("\n"))
     }
 
@@ -307,7 +304,7 @@ target_session_id to inspect one."
                 archived: true,
             });
         }
-        timeline.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        timeline.sort_by_key(|entry| entry.timestamp);
 
         let filtered_total = timeline.len();
         if let Some(role) = role_filter {
@@ -363,16 +360,20 @@ offset_from_end={} (lower it to see more).",
             lines.push(line);
         }
         if omitted > 0 || window_end < filtered_total || offset_from_end > 0 {
-            lines.push(format!(
+            lines.push(
                 "… [windowed view: use offset_from_end/limit/role_filter to page through]"
-            ));
+                    .to_string(),
+            );
         }
 
         Ok(lines.join("\n"))
     }
 
     async fn run_search(&self, args: Value) -> Result<String> {
-        let Some(query) = args["query"].as_str().map(str::trim).filter(|q| !q.is_empty())
+        let Some(query) = args["query"]
+            .as_str()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
         else {
             return Err(OSAgentError::ToolExecution(
                 "action=search requires query".to_string(),
@@ -489,7 +490,9 @@ mod tests {
         );
         assert_eq!(
             resolve_access_scope(caller, "read", Some("22222222-2222-2222-2222-222222222222")),
-            SessionAccessScope::Resource("session://22222222-2222-2222-2222-222222222222".to_string())
+            SessionAccessScope::Resource(
+                "session://22222222-2222-2222-2222-222222222222".to_string()
+            )
         );
         assert_eq!(
             resolve_access_scope(caller, "read", None),
@@ -563,7 +566,9 @@ mod tests {
         assert!(output.contains("launch code"));
 
         // Search finds the archived snippet and labels it.
-        let hits = storage.search_messages("launch code", 5).expect("live search");
+        let hits = storage
+            .search_messages("launch code", 5)
+            .expect("live search");
         assert!(hits.is_empty(), "compacted rows leave the live transcript");
         let output = tool
             .execute(json!({"action": "search", "query": "launch code"}))

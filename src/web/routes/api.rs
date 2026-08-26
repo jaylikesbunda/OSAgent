@@ -5989,7 +5989,11 @@ async fn probe_local_server_status(
     provider_id: &str,
 ) -> serde_json::Value {
     let is_ollama = provider_id == "ollama";
-    let name = if is_ollama { "Ollama" } else { "Unsloth Studio" };
+    let name = if is_ollama {
+        "Ollama"
+    } else {
+        "Unsloth Studio"
+    };
 
     let base_url = if is_ollama {
         normalize_ollama_base_url(&resolve_ollama_base_url(agent, None).await)
@@ -6080,7 +6084,10 @@ async fn probe_local_server_status(
                         entries
                             .iter()
                             .filter_map(|entry| {
-                                entry.get("id").and_then(|value| value.as_str()).map(String::from)
+                                entry
+                                    .get("id")
+                                    .and_then(|value| value.as_str())
+                                    .map(String::from)
                             })
                             .filter(|id| !id.trim().is_empty())
                             .collect()

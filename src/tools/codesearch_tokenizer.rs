@@ -59,7 +59,10 @@ pub fn extract_query_terms(query: &str) -> Vec<String> {
 
             if lower.contains('_') {
                 for part in SNAKE_CASE.split(&lower) {
-                    if part.len() >= 3 && !STOPWORDS.contains(part) && !terms.contains(&part.to_string()) {
+                    if part.len() >= 3
+                        && !STOPWORDS.contains(part)
+                        && !terms.contains(&part.to_string())
+                    {
                         terms.push(part.to_string());
                     }
                 }
