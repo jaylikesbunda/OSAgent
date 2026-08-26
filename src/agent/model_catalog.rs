@@ -96,6 +96,84 @@ pub struct ModelsDevModel {
     pub cost: ModelsDevCost,
     #[serde(default)]
     pub limit: ModelsDevLimit,
+    /// Published thinking controls for this model, e.g.
+    /// `{"type":"effort","values":["low","medium","high"]}` or
+    /// `{"type":"budget_tokens","min":1024,"max":31999}` or `{"type":"toggle"}`.
+    /// Everything the reasoning UI offers is derived from this.
+    #[serde(default)]
+    pub reasoning_options: Vec<ModelsDevReasoningOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelsDevReasoningOption {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub values: Vec<Option<String>>,
+    #[serde(default)]
+    pub min: Option<i64>,
+    #[serde(default)]
+    pub max: Option<i64>,
+}
+
+/// Normalized view of a model's published reasoning controls. No provider or
+/// model names are ever matched in code — this is the single source of truth
+/// for which thinking levels exist and how they map onto request parameters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ReasoningLevels {
+    /// Explicit effort strings as published by models.dev, weakest to strongest.
+    Efforts(Vec<String>),
+    /// Thinking budget window in tokens.
+    Budget { min: i64, max: i64 },
+    /// Reasoning can only be toggled on/off.
+    Toggle,
+}
+
+impl ModelsDevReasoningOption {
+    fn to_levels(&self, output_limit: usize) -> Option<ReasoningLevels> {
+        match self.kind.as_str() {
+            "effort" => {
+                let values: Vec<String> = self.values.iter().flatten().cloned().collect();
+                (!values.is_empty()).then_some(ReasoningLevels::Efforts(values))
+            }
+            // Entries without a published ceiling default to the model's
+            // output limit; without either there is no safe budget to send.
+            "budget_tokens" => {
+                let max = match self.max {
+                    Some(max) if max > 0 => max,
+                    _ => output_limit as i64,
+                };
+                (max > 0).then(|| ReasoningLevels::Budget {
+                    min: self.min.filter(|min| *min > 0).unwrap_or(1024),
+                    max,
+                })
+            }
+            "toggle" => Some(ReasoningLevels::Toggle),
+            _ => None,
+        }
+    }
+}
+
+/// Prefers richer controls: effort levels over budgets over a bare toggle.
+pub fn published_reasoning_levels(model: &ModelsDevModel) -> Option<ReasoningLevels> {
+    let mut best: Option<(u8, ReasoningLevels)> = None;
+    for option in &model.reasoning_options {
+        let Some(levels) = option.to_levels(model.limit.output) else {
+            continue;
+        };
+        let rank = match levels {
+            ReasoningLevels::Efforts(_) => 0,
+            ReasoningLevels::Budget { .. } => 1,
+            ReasoningLevels::Toggle => 2,
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(best_rank, _)| rank < *best_rank)
+        {
+            best = Some((rank, levels));
+        }
+    }
+    best.map(|(_, levels)| levels)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -135,10 +213,12 @@ pub struct ModelLimitInfo {
 pub struct ModelReasoningMetadata {
     pub provider_id: String,
     pub model_id: String,
-    pub family: String,
     pub reasoning: bool,
-    pub release_date: String,
     pub output_limit: usize,
+    /// Normalized published thinking controls. `None` when the catalog has no
+    /// entry (or no `reasoning_options`) for this model — the UI then offers
+    /// nothing rather than guessing.
+    pub levels: Option<ReasoningLevels>,
 }
 
 pub type ModelsDevCatalog = std::collections::BTreeMap<String, ModelsDevProvider>;
@@ -551,10 +631,9 @@ impl ModelCatalog {
             Some(ModelReasoningMetadata {
                 provider_id: provider_id.to_string(),
                 model_id: model_id.to_string(),
-                family: model.family.clone(),
                 reasoning: model.reasoning,
-                release_date: model.release_date.clone(),
                 output_limit: model.limit.output,
+                levels: published_reasoning_levels(model),
             })
         })
         .or_else(|| {
@@ -566,11 +645,10 @@ impl ModelCatalog {
                 .map(|model| ModelReasoningMetadata {
                     provider_id: provider_id.to_string(),
                     model_id: model_id.to_string(),
-                    family: infer_family(model_id),
                     reasoning: model.model_id.to_ascii_lowercase().contains("reason")
                         || model.model_id.to_ascii_lowercase().contains("codex"),
-                    release_date: String::new(),
                     output_limit: 0,
+                    levels: None,
                 })
         })
     }
@@ -607,36 +685,4 @@ impl Default for ModelCatalog {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn infer_family(model_id: &str) -> String {
-    let id = model_id.to_ascii_lowercase();
-    if id.contains("claude") {
-        return "claude".to_string();
-    }
-    if id.contains("gemini") {
-        return "gemini".to_string();
-    }
-    if id.contains("grok") {
-        return "grok".to_string();
-    }
-    if id.contains("mistral") {
-        return "mistral".to_string();
-    }
-    if id.contains("llama") {
-        return "llama".to_string();
-    }
-    if id.contains("deepseek") {
-        return "deepseek".to_string();
-    }
-    if id.contains("qwen") {
-        return "qwen".to_string();
-    }
-    if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
-        return "o".to_string();
-    }
-    if id.contains("gpt") || id.contains("codex") {
-        return "gpt".to_string();
-    }
-    String::new()
 }

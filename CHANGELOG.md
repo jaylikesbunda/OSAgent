@@ -1,18 +1,17 @@
 v0.4.7 changes:
 
-* Fixed replying to a voice message with no text not transcribing — `build_discord_prompt()` now treats referenced audio as content (`src/discord/mod.rs:1260`)
-* Added YouTube voice playback in Discord: new `discord-voice` feature with DAVE-capable Songbird 0.6 (`src/discord/music.rs`), `HttpRequest`/`YoutubeDl` queue, automatic `yt-dlp`, `piped`/`invidious` fallback (`piped_streams()`), direct HTTP audio, `deafen` and queue embeds (`Now Playing`/`Queued` with thumbnail/duration/position); Songbird 0.6 is required for Discord's mandatory 2026 voice E2EE protocol
-* Music fully automatic — no manual `yt-dlp` install: `ensure_yt_dlp_auto()` downloads `yt-dlp[.exe]` from GitHub releases on first `/play` or bot start (`src/discord/mod.rs:1472`), weekly background update, custom `yt_dlp_path`/`yt_dlp_extra_args` still supported
-* Added Discord Music settings in web UI (`frontend/index.html:746` + `frontend/js/settings.js:191`): `Enable Music`, `yt-dlp Path`, `Extra Args`, `Max Queue`, `Max Duration`, `Auto-leave`, `Piped Instances` with `src/config.rs:260` `DiscordConfig` defaults (`50`/`300`/`yt-dlp`)
-* `songbird` intents `GUILDS|GUILD_VOICE_STATES` and `SerenityInit::register_songbird()` (`src/discord/mod.rs:1443`), `cache` feature enabled for `voice_states`, `build-launcher.ps1:41` now includes `discord-voice` in all installers
-* Fixed `Access Denied` for community members on music commands — `/play`/`/skip`/`/queue` etc now allow `Community` tier (`src/discord/commands.rs:306` `command_access_level().is_none()` and `src/discord/music.rs:194` same, `command_access_level` made `pub(crate)`), so `allow_community_members` + `allowed_guilds` covers everyone without per-user grants
-* Discord music now retries failed voice connections, discards stale Songbird calls, clears self-mute, explicitly starts the first queued track, reports playback failures in Discord, and logs startup state instead of silently claiming a failed track is playing
-* Removed the obsolete missing-`ffmpeg` warning; Songbird decodes supported audio formats in-process
-* Fixed provider `opencode-go` `temperature` illegal 2-decimal error (`src/agent/provider.rs:511` `(t*100).round()/100`, `0.6999…` → `0.7`) and test update
-* Fixed provider errors showing twice in web UI transcript — `src/frontend/js/transcript.js:203` `tmodelAddError()` deduplicates identical consecutive errors (ws+sse duplicate)
-* Added Windsurf-style search-before-asking: when OSA can't tell what the user is referring to in the codebase (vague name, "that function", pasted errors, UI text), it now fans out several parallel reformulated searches — exact phrase, camelCase/snake_case/kebab-case symbol names, synonyms, error/UI-string fragments, related file names — across grep/glob and codesearch before ever asking for clarification; guidance added to the Full-mode Tool Use prompt section, explore-agent workflow, and the grep + codesearch tool descriptions (`src/agent/prompt.rs`, `src/tools/search.rs`, `src/tools/codesearch.rs`)
-* Added a `sessions` tool letting OSA list, read, and search its other conversations, gated by a new `session_access` permission (`ask` by default via `[agent] session_access_default_action`, per-session allow/deny through `permission_rules`, same approval popup as outside-workspace access; own session and own subagent sessions exempt) — compaction now archives removed messages to a `session_archive` table so pre-compaction content stays searchable (`src/tools/sessions.rs`, `src/storage/sqlite.rs`, `src/agent/runtime.rs`)
-* Bump `0.4.6` → `0.4.7`
+* Thinking levels now come from models.dev `reasoning_options` metadata instead of hardcoded provider/model rules, so every model exposes its real efforts/budget windows; the catalog also refreshes at startup
+* Fixed replying to a voice message with no text not transcribing — referenced audio now counts as content
+* Added YouTube voice playback in Discord via a new `discord-voice` feature (Songbird 0.6, required for Discord's 2026 voice E2EE), with piped/invidious fallback and Now Playing/Queued embeds
+* Music needs no manual `yt-dlp` install — it auto-downloads on first `/play` or bot start and updates weekly; custom path/args still honored
+* Added Discord Music settings to the web UI: enable, yt-dlp path/extra args, queue limits, max duration, auto-leave, piped instances
+* Fixed `Access Denied` for community members on music commands — they now honor `allow_community_members`
+* Music voice connections now retry, and playback failures are reported in Discord instead of silently stalling
+* Removed the obsolete missing-`ffmpeg` warning; Songbird decodes audio in-process
+* Fixed `opencode-go` rejecting temperatures with more than two decimals
+* Fixed provider errors showing twice in the web transcript
+* Added search-before-asking: vague requests now fan out parallel reformulated searches (case variants, synonyms, error fragments) before OSA asks for clarification
+* Added a `sessions` tool to list, read, and search past conversations, gated by a new `session_access` permission; compaction archives removed messages so they stay searchable
 
 v0.4.6 changes:
 

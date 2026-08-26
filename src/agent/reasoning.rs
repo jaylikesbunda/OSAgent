@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::model_catalog::ModelReasoningMetadata;
+use super::model_catalog::{ModelReasoningMetadata, ReasoningLevels};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ThinkingOptionsState {
@@ -10,66 +10,75 @@ pub struct ThinkingOptionsState {
     pub selected: String,
 }
 
-pub fn options_for(
-    provider_id: &str,
-    model: &str,
-    meta: Option<&ModelReasoningMetadata>,
-) -> Vec<&'static str> {
-    let provider = provider_id.to_ascii_lowercase();
-    let id = model.to_ascii_lowercase();
-    let family = model_family(&id, meta);
-    let release_date = meta.map(|value| value.release_date.as_str()).unwrap_or("");
+/// Fractions of a model's published budget window backing the generic
+/// low/medium/high/max labels. The token ceilings themselves always come from
+/// catalog metadata (`reasoning_options`), never from code.
+const BUDGET_LADDER: &[(&str, f64)] = &[
+    ("low", 0.25),
+    ("medium", 0.5),
+    ("high", 0.85),
+    ("max", 1.0),
+];
 
-    match provider.as_str() {
-        "openai" => openai_options(&id, &family, release_date),
-        "github-copilot" | "github-copilot-enterprise" => copilot_options(&id),
-        "openrouter" => openrouter_options(&id, &family),
-        "anthropic" => anthropic_options(&id),
-        "google" | "google-vertex" => google_options(&id),
-        "groq" => {
-            if supports_reasoning(&id, meta) {
-                vec!["none", "low", "medium", "high"]
-            } else {
-                Vec::new()
+/// The thinking levels a model supports, straight from its published
+/// `reasoning_options`. Models without catalog entry, without published
+/// controls, or flagged non-reasoning get no options at all — nothing is
+/// guessed from provider or model names.
+pub fn options_for(meta: Option<&ModelReasoningMetadata>) -> Vec<String> {
+    let Some(meta) = meta.filter(|meta| meta.reasoning) else {
+        return Vec::new();
+    };
+    match &meta.levels {
+        Some(ReasoningLevels::Efforts(values)) => values.clone(),
+        Some(ReasoningLevels::Budget { min, max }) => {
+            // Collapse ladder rungs that clamp onto the same budget so tiny
+            // windows don't present several identical choices.
+            let mut labels = Vec::new();
+            let mut last_budget: Option<i64> = None;
+            for (label, fraction) in BUDGET_LADDER {
+                let budget = budget_at(*fraction, *min, *max);
+                if last_budget != Some(budget) {
+                    labels.push(label.to_string());
+                    last_budget = Some(budget);
+                }
             }
+            labels
         }
-        "xai" => xai_options(&id),
-        _ => Vec::new(),
+        Some(ReasoningLevels::Toggle) => vec!["on".to_string()],
+        None => Vec::new(),
     }
 }
 
-pub fn can_disable(provider_id: &str, model: &str, meta: Option<&ModelReasoningMetadata>) -> bool {
-    let provider = provider_id.to_ascii_lowercase();
-    let id = model.to_ascii_lowercase();
-
-    match provider.as_str() {
-        "openai" => !is_strict_codex(&id),
-        "github-copilot" | "github-copilot-enterprise" => !is_strict_codex(&id),
-        _ => !options_for(provider_id, model, meta).is_empty(),
+/// Whether an explicit "off" is meaningful. Effort-based models that don't
+/// publish a `none` value cannot be switched off — selecting off falls back to
+/// their weakest effort instead, mirroring the upstream API contract. Models
+/// with no catalog entry get no fabricated switches either: nothing is sent.
+pub fn can_disable(meta: Option<&ModelReasoningMetadata>) -> bool {
+    let Some(meta) = meta else {
+        return false;
+    };
+    if !meta.reasoning {
+        return false;
+    }
+    match &meta.levels {
+        Some(ReasoningLevels::Efforts(values)) => values.iter().any(|value| value == "none"),
+        // Budget and toggle families have a real disable switch; with a known
+        // reasoning model but no published controls, "off" means the same.
+        _ => true,
     }
 }
 
-pub fn ui_options_for(
-    provider_id: &str,
-    model: &str,
-    meta: Option<&ModelReasoningMetadata>,
-) -> Vec<String> {
+pub fn ui_options_for(meta: Option<&ModelReasoningMetadata>) -> Vec<String> {
     let mut options = vec!["auto".to_string()];
-    if can_disable(provider_id, model, meta) {
+    if meta.is_some_and(|meta| meta.reasoning) {
         options.push("off".to_string());
     }
-    options.extend(
-        options_for(provider_id, model, meta)
-            .into_iter()
-            .map(str::to_string),
-    );
+    options.extend(options_for(meta));
     options
 }
 
 pub fn normalize_selection(
     selection: &str,
-    provider_id: &str,
-    model: &str,
     meta: Option<&ModelReasoningMetadata>,
 ) -> Option<String> {
     let value = selection.trim().to_ascii_lowercase();
@@ -77,19 +86,34 @@ pub fn normalize_selection(
         return None;
     }
 
-    let supported = options_for(provider_id, model, meta);
+    let supported = options_for(meta);
     if value == "off" || value == "none" || value == "disabled" {
-        if can_disable(provider_id, model, meta) {
+        if can_disable(meta) {
             return Some("none".to_string());
         }
-        return supported.first().map(|value| (*value).to_string());
+        return supported.first().cloned();
     }
 
-    if supported.iter().any(|candidate| *candidate == value) {
+    if supported.iter().any(|candidate| candidate == &value) {
         return Some(value);
     }
 
-    supported.first().map(|value| (*value).to_string())
+    supported.first().cloned()
+}
+
+/// Concrete thinking-budget tokens for a UI level against budget-style
+/// metadata. `None` when the model doesn't publish a budget window or the
+/// level isn't on the ladder.
+pub fn budget_for_level(level: &str, meta: &ModelReasoningMetadata) -> Option<i64> {
+    let ReasoningLevels::Budget { min, max } = meta.levels.as_ref()? else {
+        return None;
+    };
+    let (_, fraction) = BUDGET_LADDER.iter().find(|(label, _)| *label == level)?;
+    Some(budget_at(*fraction, *min, *max))
+}
+
+fn budget_at(fraction: f64, min: i64, max: i64) -> i64 {
+    ((max as f64 * fraction).round() as i64).clamp(min, max)
 }
 
 pub fn state_for(
@@ -98,12 +122,11 @@ pub fn state_for(
     meta: Option<&ModelReasoningMetadata>,
     selected: &str,
 ) -> ThinkingOptionsState {
-    let normalized = normalize_selection(selected, provider_id, model, meta)
-        .unwrap_or_else(|| "auto".to_string());
+    let normalized = normalize_selection(selected, meta).unwrap_or_else(|| "auto".to_string());
     ThinkingOptionsState {
         provider_id: provider_id.to_string(),
         model: model.to_string(),
-        options: ui_options_for(provider_id, model, meta),
+        options: ui_options_for(meta),
         selected: if normalized == "none" {
             "off".to_string()
         } else {
@@ -112,174 +135,146 @@ pub fn state_for(
     }
 }
 
-fn is_strict_codex(id: &str) -> bool {
-    id.contains("codex")
-}
-
-fn supports_reasoning(id: &str, meta: Option<&ModelReasoningMetadata>) -> bool {
-    if let Some(meta) = meta {
-        if meta.reasoning {
-            return true;
-        }
-    }
-    id.contains("codex")
-        || id.contains("reason")
-        || id.starts_with("o1")
-        || id.starts_with("o3")
-        || id.contains("gemini")
-        || id.contains("claude")
-        || id.contains("grok-3-mini")
-}
-
-fn model_family(id: &str, meta: Option<&ModelReasoningMetadata>) -> String {
-    if let Some(meta) = meta {
-        if !meta.family.is_empty() {
-            return meta.family.to_ascii_lowercase();
-        }
-    }
-
-    if id.contains("claude") {
-        return "claude".to_string();
-    }
-    if id.contains("gemini") {
-        return "gemini".to_string();
-    }
-    if id.contains("grok") {
-        return "grok".to_string();
-    }
-    if id.contains("gpt") || id.contains("codex") {
-        return "gpt".to_string();
-    }
-    if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
-        return "o".to_string();
-    }
-    String::new()
-}
-
-fn openai_options(id: &str, family: &str, release_date: &str) -> Vec<&'static str> {
-    if id == "gpt-5-pro" || !supports_reasoning(id, None) && family != "gpt" && family != "o" {
-        return Vec::new();
-    }
-
-    if id.contains("codex") {
-        if id.contains("5.2") || id.contains("5.3") {
-            return vec!["low", "medium", "high", "xhigh"];
-        }
-        return vec!["low", "medium", "high"];
-    }
-
-    let mut efforts = vec!["low", "medium", "high"];
-    if id.contains("gpt-5") || id == "gpt-5" {
-        efforts.insert(0, "minimal");
-    }
-    if !release_date.is_empty() && release_date >= "2025-11-13" {
-        efforts.insert(0, "none");
-    }
-    if !release_date.is_empty() && release_date >= "2025-12-04" {
-        efforts.push("xhigh");
-    }
-    efforts
-}
-
-fn copilot_options(id: &str) -> Vec<&'static str> {
-    if id.contains("gemini") {
-        return Vec::new();
-    }
-    if id.contains("claude") {
-        return vec!["high"];
-    }
-    if id.contains("codex") {
-        if id.contains("5.1-codex-max") || id.contains("5.2") || id.contains("5.3") {
-            return vec!["low", "medium", "high", "xhigh"];
-        }
-        return vec!["low", "medium", "high"];
-    }
-    Vec::new()
-}
-
-fn openrouter_options(id: &str, family: &str) -> Vec<&'static str> {
-    if ["deepseek", "minimax", "glm", "mistral", "kimi", "k2p5"]
-        .iter()
-        .any(|term| id.contains(term))
-    {
-        return Vec::new();
-    }
-    if id.contains("grok-3-mini") {
-        return vec!["low", "high"];
-    }
-    if id.contains("grok") {
-        return Vec::new();
-    }
-    if family == "gpt" || id.contains("gemini-3") || family == "claude" {
-        return vec!["none", "minimal", "low", "medium", "high", "xhigh"];
-    }
-    Vec::new()
-}
-
-fn anthropic_options(id: &str) -> Vec<&'static str> {
-    if ["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"]
-        .iter()
-        .any(|term| id.contains(term))
-    {
-        return vec!["low", "medium", "high", "max"];
-    }
-    vec!["high", "max"]
-}
-
-fn google_options(id: &str) -> Vec<&'static str> {
-    if id.contains("2.5") {
-        return vec!["high", "max"];
-    }
-    if id.contains("3.1") {
-        return vec!["low", "medium", "high"];
-    }
-    if id.contains("gemini") {
-        return vec!["low", "high"];
-    }
-    Vec::new()
-}
-
-fn xai_options(id: &str) -> Vec<&'static str> {
-    if id.contains("grok-3-mini") {
-        return vec!["low", "high"];
-    }
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::model_catalog::ReasoningLevels;
+
+    fn meta(reasoning: bool, levels: Option<ReasoningLevels>) -> ModelReasoningMetadata {
+        ModelReasoningMetadata {
+            provider_id: "test-provider".to_string(),
+            model_id: "test-model".to_string(),
+            reasoning,
+            output_limit: 64_000,
+            levels,
+        }
+    }
 
     #[test]
-    fn openai_release_date_expands_efforts() {
-        let meta = ModelReasoningMetadata {
-            provider_id: "openai".to_string(),
-            model_id: "gpt-5".to_string(),
-            family: "gpt".to_string(),
-            reasoning: true,
-            release_date: "2025-12-05".to_string(),
-            output_limit: 0,
-        };
+    fn efforts_are_published_verbatim() {
+        let meta = meta(
+            true,
+            Some(ReasoningLevels::Efforts(vec![
+                "none".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string(),
+            ])),
+        );
 
-        let options = options_for("openai", "gpt-5", Some(&meta));
         assert_eq!(
-            options,
-            vec!["none", "minimal", "low", "medium", "high", "xhigh"]
+            options_for(Some(&meta)),
+            vec!["none", "low", "medium", "high", "xhigh"]
         );
     }
 
     #[test]
-    fn codex_off_normalizes_to_supported_effort() {
-        let meta = ModelReasoningMetadata {
-            provider_id: "openai".to_string(),
-            model_id: "gpt-5.3-codex".to_string(),
-            family: "gpt".to_string(),
-            reasoning: true,
-            release_date: "2025-10-01".to_string(),
-            output_limit: 0,
-        };
+    fn budget_windows_synthesize_a_ladder() {
+        let meta = meta(
+            true,
+            Some(ReasoningLevels::Budget {
+                min: 1024,
+                max: 31_999,
+            }),
+        );
 
-        let selected = normalize_selection("off", "openai", "gpt-5.3-codex", Some(&meta));
-        assert_eq!(selected.as_deref(), Some("low"));
+        assert_eq!(options_for(Some(&meta)), vec!["low", "medium", "high", "max"]);
+        assert_eq!(budget_for_level("low", &meta), Some(8_000));
+        assert_eq!(budget_for_level("high", &meta), Some(27_199));
+        assert_eq!(budget_for_level("max", &meta), Some(31_999));
+    }
+
+    #[test]
+    fn budgets_clamp_into_the_published_window() {
+        let meta = meta(
+            true,
+            Some(ReasoningLevels::Budget {
+                min: 30_000,
+                max: 32_000,
+            }),
+        );
+
+        // low/medium/high all clamp to the floor, so they collapse away.
+        assert_eq!(options_for(Some(&meta)), vec!["low", "max"]);
+        assert_eq!(budget_for_level("low", &meta), Some(30_000));
+        assert_eq!(budget_for_level("max", &meta), Some(32_000));
+    }
+
+    #[test]
+    fn toggle_exposes_on_only() {
+        let meta = meta(true, Some(ReasoningLevels::Toggle));
+
+        assert_eq!(options_for(Some(&meta)), vec!["on"]);
+        assert!(can_disable(Some(&meta)));
+    }
+
+    #[test]
+    fn non_reasoning_models_get_no_options() {
+        let meta = meta(
+            false,
+            Some(ReasoningLevels::Efforts(vec!["low".to_string()])),
+        );
+
+        assert!(options_for(Some(&meta)).is_empty());
+        assert!(!can_disable(Some(&meta)));
+        assert_eq!(ui_options_for(Some(&meta)), vec!["auto"]);
+    }
+
+    #[test]
+    fn missing_metadata_gets_no_options_and_no_fabricated_switches() {
+        assert!(options_for(None).is_empty());
+        assert_eq!(ui_options_for(None), vec!["auto"]);
+        // Unknown model: "off" degrades to sending nothing at all.
+        assert!(!can_disable(None));
+        assert_eq!(normalize_selection("off", None), None);
+        assert_eq!(normalize_selection("high", None), None);
+    }
+
+    #[test]
+    fn off_maps_to_none_when_the_model_can_be_disabled() {
+        let meta = meta(true, Some(ReasoningLevels::Toggle));
+        assert_eq!(normalize_selection("off", Some(&meta)), Some("none".to_string()));
+    }
+
+    #[test]
+    fn off_falls_back_to_weakest_effort_when_none_is_unpublished() {
+        let meta = meta(
+            true,
+            Some(ReasoningLevels::Efforts(vec![
+                "minimal".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ])),
+        );
+
+        assert_eq!(normalize_selection("off", Some(&meta)), Some("minimal".to_string()));
+        assert!(!can_disable(Some(&meta)));
+    }
+
+    #[test]
+    fn selections_are_validated_against_published_levels() {
+        let meta = meta(
+            true,
+            Some(ReasoningLevels::Efforts(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ])),
+        );
+
+        assert_eq!(normalize_selection("high", Some(&meta)), Some("high".to_string()));
+        assert_eq!(normalize_selection("xhigh", Some(&meta)), Some("low".to_string()));
+        assert_eq!(normalize_selection("auto", Some(&meta)), None);
+    }
+
+    #[test]
+    fn state_reports_off_for_none() {
+        let meta = meta(true, Some(ReasoningLevels::Toggle));
+        let state = state_for("google", "gemini-flash", Some(&meta), "off");
+
+        assert_eq!(state.selected, "off");
+        assert_eq!(state.options, vec!["auto", "off", "on"]);
     }
 }

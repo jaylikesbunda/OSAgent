@@ -531,6 +531,16 @@ impl AgentRuntime {
             crate::tools::spill::resolve_spill_root(&config.spill.root)?,
         ));
 
+        // Refresh the models.dev catalog in the background so the model list
+        // and reasoning levels are current at boot instead of waiting for the
+        // first picker open to trigger a fetch.
+        {
+            let startup_catalog = catalog.clone();
+            tokio::spawn(async move {
+                startup_catalog.refresh_catalog().await;
+            });
+        }
+
         let runtime = Arc::new(Self {
             config: Arc::new(tokio::sync::RwLock::new(config)),
             agent_settings,

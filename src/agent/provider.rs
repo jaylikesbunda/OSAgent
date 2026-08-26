@@ -478,14 +478,13 @@ impl OpenAICompatibleProvider {
         self.agent_settings.read().await.clone()
     }
 
-    fn thinking_budget_for_level(level: &str) -> usize {
+    /// Generic effort→budget fallback for models with no published budget
+    /// window. Deliberately coarse — real ceilings always come from metadata.
+    fn fallback_thinking_budget(level: &str) -> i64 {
         match level {
-            "none" => 0,
-            "minimal" | "low" => 4_000,
-            "medium" => 16_000,
-            "high" => 32_000,
-            "max" | "xhigh" => 48_000,
-            _ => 16_000,
+            "minimal" | "low" => 4_096,
+            "medium" => 16_384,
+            _ => 32_768,
         }
     }
 
@@ -493,7 +492,6 @@ impl OpenAICompatibleProvider {
         request_body: &mut serde_json::Value,
         mode: RequestMode,
         provider_type: &str,
-        model: &str,
         settings: &AgentConfig,
         meta: Option<&crate::agent::model_catalog::ModelReasoningMetadata>,
     ) {
@@ -524,60 +522,93 @@ impl OpenAICompatibleProvider {
             }
         }
 
-        let selected =
-            reasoning::normalize_selection(&settings.thinking_level, provider_type, model, meta);
+        let selected = reasoning::normalize_selection(&settings.thinking_level, meta);
         let Some(thinking_level) = selected.as_deref() else {
             return;
         };
+
+        // A published effort value flows through verbatim, including
+        // "none" for models that list it as an effort tier.
+        let effort_style_none = thinking_level == "none" && publishes_none(meta);
+
+        if thinking_level == "none" && !effort_style_none {
+            // Explicit off where the API family has a disable switch; other
+            // families simply omit the knob entirely.
+            match provider_type {
+                "anthropic" => {
+                    request_body["thinking"] = serde_json::json!({ "type": "disabled" });
+                }
+                "google" | "google-vertex" => {
+                    request_body["thinkingConfig"] =
+                        serde_json::json!({ "includeThoughts": false });
+                }
+                "openrouter" => {
+                    request_body["reasoning"] = serde_json::json!({ "enabled": false });
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Toggle-style metadata has no numeric control and "on" is the API's
+        // default state, so nothing needs to be sent.
+        if thinking_level == "on" {
+            return;
+        }
+
         match provider_type {
             "openai" if mode == RequestMode::Responses => {
-                request_body["reasoning"] = serde_json::json!({
-                    "effort": thinking_level
-                });
+                request_body["reasoning"] = serde_json::json!({ "effort": thinking_level });
             }
             "anthropic" => {
-                if thinking_level == "none" {
-                    request_body["thinking"] = serde_json::json!({
-                        "type": "disabled"
-                    });
-                } else {
-                    request_body["thinking"] = serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": Self::thinking_budget_for_level(thinking_level)
-                    });
+                // Adaptive-thinking models publish effort levels instead of a
+                // budget window; everything else takes budget_tokens.
+                match meta.and_then(|meta| meta.levels.as_ref()) {
+                    Some(crate::agent::model_catalog::ReasoningLevels::Efforts(_)) => {
+                        request_body["thinking"] = serde_json::json!({ "type": "adaptive" });
+                        request_body["effort"] = serde_json::json!(thinking_level);
+                    }
+                    _ => {
+                        let budget = meta
+                            .and_then(|meta| reasoning::budget_for_level(thinking_level, meta))
+                            .unwrap_or_else(|| Self::fallback_thinking_budget(thinking_level));
+                        request_body["thinking"] = serde_json::json!({
+                            "type": "enabled",
+                            "budget_tokens": budget
+                        });
+                    }
                 }
             }
             "google" | "google-vertex" => {
-                if model.to_ascii_lowercase().contains("2.5") {
-                    request_body["thinkingConfig"] = serde_json::json!({
-                        "includeThoughts": thinking_level != "none",
-                        "thinkingBudget": Self::thinking_budget_for_level(thinking_level)
-                    });
-                } else if thinking_level == "none" {
-                    request_body["thinkingConfig"] = serde_json::json!({
-                        "includeThoughts": false
-                    });
-                } else {
-                    request_body["thinkingConfig"] = serde_json::json!({
-                        "includeThoughts": true,
-                        "thinkingLevel": thinking_level
-                    });
+                // Budget-published Gemini generations take a token ceiling;
+                // effort-published ones take the level string directly.
+                match meta.and_then(|meta| reasoning::budget_for_level(thinking_level, meta)) {
+                    Some(budget) => {
+                        request_body["thinkingConfig"] = serde_json::json!({
+                            "includeThoughts": true,
+                            "thinkingBudget": budget
+                        });
+                    }
+                    None => {
+                        request_body["thinkingConfig"] = serde_json::json!({
+                            "includeThoughts": true,
+                            "thinkingLevel": thinking_level
+                        });
+                    }
                 }
-            }
-            "groq" => {
-                request_body["reasoning_effort"] = serde_json::json!(thinking_level);
-            }
-            "openrouter" => {
-                request_body["reasoning"] = if thinking_level == "none" {
-                    serde_json::json!({ "enabled": false })
-                } else {
-                    serde_json::json!({ "effort": thinking_level })
-                };
             }
             "xai" => {
                 request_body["reasoningEffort"] = serde_json::json!(thinking_level);
             }
-            _ => {}
+            "openrouter" => {
+                request_body["reasoning"] = serde_json::json!({ "effort": thinking_level });
+            }
+            // OpenAI-shaped chat endpoints (openai chat-completions, groq,
+            // github-copilot, generic compatible providers) accept
+            // reasoning_effort.
+            _ => {
+                request_body["reasoning_effort"] = serde_json::json!(thinking_level);
+            }
         }
     }
 
@@ -1945,7 +1976,6 @@ impl OpenAICompatibleProvider {
             &mut request_body,
             mode,
             &config.provider_type,
-            &config.model,
             &generation_settings,
             reasoning_meta.as_ref(),
         );
@@ -2109,7 +2139,6 @@ impl OpenAICompatibleProvider {
             &mut request_body,
             mode,
             &config.provider_type,
-            &config.model,
             &generation_settings,
             reasoning_meta.as_ref(),
         );
@@ -2390,6 +2419,15 @@ impl Provider for OpenAICompatibleProvider {
     }
 }
 
+/// Whether the model publishes "none" as an explicit effort tier.
+fn publishes_none(meta: Option<&crate::agent::model_catalog::ModelReasoningMetadata>) -> bool {
+    matches!(
+        meta.and_then(|meta| meta.levels.as_ref()),
+        Some(crate::agent::model_catalog::ReasoningLevels::Efforts(values))
+            if values.iter().any(|value| value == "none")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2526,6 +2564,18 @@ mod tests {
         assert_eq!(filtered[0].role, "user");
     }
 
+    fn reasoning_meta(
+        levels: Option<crate::agent::model_catalog::ReasoningLevels>,
+    ) -> crate::agent::model_catalog::ModelReasoningMetadata {
+        crate::agent::model_catalog::ModelReasoningMetadata {
+            provider_id: "test-provider".to_string(),
+            model_id: "test-model".to_string(),
+            reasoning: true,
+            output_limit: 64_000,
+            levels,
+        }
+    }
+
     #[test]
     fn applies_generation_controls_for_openai_responses() {
         let mut request = serde_json::json!({});
@@ -2540,14 +2590,37 @@ mod tests {
             &mut request,
             RequestMode::Responses,
             "openai",
-            "gpt-5.3-codex",
             &settings,
-            None,
+            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
+                ["none", "low", "medium", "high", "xhigh"]
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+            )))),
         );
 
         assert_eq!(request["max_output_tokens"], serde_json::json!(2048));
         assert_eq!(request["reasoning"]["effort"], serde_json::json!("high"));
         assert!(request.get("temperature").is_none());
+    }
+
+    #[test]
+    fn openai_without_metadata_sends_no_thinking_params() {
+        let mut request = serde_json::json!({});
+        let settings = AgentConfig {
+            thinking_level: "high".to_string(),
+            ..AgentConfig::default()
+        };
+
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut request,
+            RequestMode::Responses,
+            "openai",
+            &settings,
+            None,
+        );
+
+        assert!(request.get("reasoning").is_none());
     }
 
     #[test]
@@ -2564,13 +2637,154 @@ mod tests {
             &mut request,
             RequestMode::ChatCompletions,
             "anthropic",
-            "claude-sonnet",
             &settings,
-            None,
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Budget {
+                    min: 1024,
+                    max: 31_999,
+                },
+            ))),
         );
 
         assert_eq!(request["max_tokens"], serde_json::json!(1024));
-        assert_eq!(request["temperature"].as_f64(), Some(0.2));
+        // temperature is f32; compare with tolerance instead of exact f64.
+        let temperature = request["temperature"].as_f64().unwrap();
+        assert!((temperature - 0.2).abs() < 1e-6);
         assert_eq!(request["thinking"]["type"], serde_json::json!("disabled"));
+    }
+
+    #[test]
+    fn anthropic_budgets_clamp_to_published_windows() {
+        let mut request = serde_json::json!({});
+        let settings = AgentConfig {
+            thinking_level: "high".to_string(),
+            ..AgentConfig::default()
+        };
+
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut request,
+            RequestMode::ChatCompletions,
+            "anthropic",
+            &settings,
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Budget {
+                    min: 1024,
+                    max: 24_576,
+                },
+            ))),
+        );
+
+        assert_eq!(request["thinking"]["type"], serde_json::json!("enabled"));
+        assert_eq!(request["thinking"]["budget_tokens"], serde_json::json!(20_890));
+    }
+
+    #[test]
+    fn anthropic_effort_models_use_adaptive_thinking() {
+        let mut request = serde_json::json!({});
+        let settings = AgentConfig {
+            thinking_level: "max".to_string(),
+            ..AgentConfig::default()
+        };
+
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut request,
+            RequestMode::ChatCompletions,
+            "anthropic",
+            &settings,
+            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
+                ["low", "medium", "high", "max"]
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+            )))),
+        );
+
+        assert_eq!(request["thinking"]["type"], serde_json::json!("adaptive"));
+        assert_eq!(request["effort"], serde_json::json!("max"));
+        assert!(request.get("thinking").unwrap().get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn google_picks_budget_or_level_from_metadata() {
+        let budget_settings = AgentConfig {
+            thinking_level: "max".to_string(),
+            ..AgentConfig::default()
+        };
+        let mut budget_request = serde_json::json!({});
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut budget_request,
+            RequestMode::ChatCompletions,
+            "google",
+            &budget_settings,
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Budget {
+                    min: 512,
+                    max: 24_576,
+                },
+            ))),
+        );
+        assert_eq!(
+            budget_request["thinkingConfig"]["thinkingBudget"],
+            serde_json::json!(24_576)
+        );
+
+        let effort_settings = AgentConfig {
+            thinking_level: "medium".to_string(),
+            ..AgentConfig::default()
+        };
+        let mut effort_request = serde_json::json!({});
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut effort_request,
+            RequestMode::ChatCompletions,
+            "google",
+            &effort_settings,
+            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
+                ["low", "medium", "high"]
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+            )))),
+        );
+        assert_eq!(
+            effort_request["thinkingConfig"]["thinkingLevel"],
+            serde_json::json!("medium")
+        );
+        assert!(effort_request["thinkingConfig"].get("thinkingBudget").is_none());
+    }
+
+    #[test]
+    fn generic_providers_send_reasoning_effort_when_metadata_supports_it() {
+        let mut request = serde_json::json!({});
+        let settings = AgentConfig {
+            thinking_level: "high".to_string(),
+            ..AgentConfig::default()
+        };
+
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut request,
+            RequestMode::ChatCompletions,
+            "some-custom-provider",
+            &settings,
+            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Efforts(
+                ["low", "medium", "high"]
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+            )))),
+        );
+
+        assert_eq!(request["reasoning_effort"], serde_json::json!("high"));
+
+        // Toggle-only models have no numeric knob; "on" is the default state.
+        let mut toggle_request = serde_json::json!({});
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut toggle_request,
+            RequestMode::ChatCompletions,
+            "some-custom-provider",
+            &settings,
+            Some(&reasoning_meta(Some(crate::agent::model_catalog::ReasoningLevels::Toggle))),
+        );
+        // "high" isn't a valid toggle selection, so nothing is sent.
+        assert!(toggle_request.get("reasoning_effort").is_none());
     }
 }
