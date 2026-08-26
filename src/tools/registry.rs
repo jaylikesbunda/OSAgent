@@ -13,7 +13,8 @@ use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     bash, batch, calendar, code, codesearch, coordinator, decision_memory, files, lsp, memory,
     native_catalog::NativeToolCatalog, news, patch, persona, plan, process, question, scheduler,
-    search, skill, subagent, system_status, task, todo, tool_script, tool_search, weather, web,
+    search, sessions, skill, subagent, system_status, task, todo, tool_script, tool_search,
+    weather, web,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -134,6 +135,7 @@ impl ToolProfile {
                     | "todoread"
                     | "subagent"
                     | "system_status"
+                    | "sessions"
                     | "plan_exit"
                     | "persona"
             ),
@@ -545,6 +547,9 @@ impl ToolRegistry {
             Arc::new(system_status::SystemStatusTool::new(config.clone()));
         tools.insert("system_status".to_string(), system_status_tool.clone());
         native_catalog.register(system_status_tool);
+        let sessions_tool: Arc<dyn Tool> = Arc::new(sessions::SessionsTool::new(storage.clone()));
+        tools.insert("sessions".to_string(), sessions_tool.clone());
+        native_catalog.register(sessions_tool);
 
         if let Some(ref idx) = indexer {
             let codesearch_tool: Arc<dyn Tool> =
@@ -649,6 +654,7 @@ impl ToolRegistry {
             "weather" => Some(Arc::new(weather::WeatherTool::new(config.clone()))),
             "news" => Some(Arc::new(news::NewsTool::new(config.clone()))),
             "system_status" => Some(Arc::new(system_status::SystemStatusTool::new(config))),
+            "sessions" => Some(Arc::new(sessions::SessionsTool::new(storage.clone()))),
             "lsp" => Some(Arc::new(lsp::LspTool::new(config))),
             "plan_exit" => Some(Arc::new(plan::PlanExitTool::new())),
             _ => None,
@@ -689,6 +695,7 @@ impl ToolRegistry {
                 | "weather"
                 | "news"
                 | "system_status"
+                | "sessions"
                 | "lsp"
         )
     }

@@ -487,6 +487,24 @@ pub struct SessionSearchHit {
     pub seq: usize,
     pub role: String,
     pub snippet: String,
+    /// True when the hit came from the compaction archive rather than the
+    /// live transcript.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// A message rescued from a compaction event into `session_archive`. The
+/// live transcript only keeps a summary plus a short tail after compaction;
+/// these rows are what makes pre-compaction content searchable again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchivedMessage {
+    pub session_id: String,
+    pub batch_hash: String,
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+    pub archived_at: DateTime<Utc>,
 }
 
 /// Host-owned, editable per-message feedback. Kept in a sidecar table

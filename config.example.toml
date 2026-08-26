@@ -144,6 +144,13 @@ subagent_depth = 1
 # [agent.subagent_models]
 # "explore" = "openrouter:deepseek/deepseek-r1"
 # "general" = "anthropic:claude-3-7-sonnet-latest"
+# Policy for the agent's `sessions` tool reading or searching OTHER
+# conversations (its own session and its own subagent sessions are always
+# allowed). "ask" shows the same approval popup as outside-workspace access.
+# Per-conversation overrides live in permission_rules with
+# permission = "session_access" and glob patterns over resources like
+# "session://<session-id>" or "session://*" (all sessions).
+# session_access_default_action = "ask"   # ask | allow | deny
 
 # Discord Bot (optional; requires building with `--features discord`)
 # [discord]

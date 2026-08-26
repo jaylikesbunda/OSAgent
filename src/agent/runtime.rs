@@ -1780,8 +1780,15 @@ impl AgentRuntime {
 
             if response.context_compressed {
                 if let Some(summary) = response.compressed_summary.clone() {
-                    let compacted_count = Self::apply_provider_compaction(&mut session, &summary);
-                    if compacted_count > 0 {
+                    let provider_compaction =
+                        Self::apply_provider_compaction(&mut session, &summary);
+                    if let Some((compacted_count, dropped)) = provider_compaction {
+                        if let Err(error) = self.storage.archive_messages(&session.id, &dropped) {
+                            warn!(
+                                "Failed to archive provider-compacted messages for {}: {}",
+                                session_id, error
+                            );
+                        }
                         info!(
                             "Persisting provider-side context compression for session {}: replaced {} messages with summary",
                             session_id, compacted_count
@@ -2302,15 +2309,29 @@ impl AgentRuntime {
                             // activation, MCP auto-activation, todos,
                             // goals, questions) can find its session.
                             tool_args["session_id"] = serde_json::json!(session_id);
-                            let external_paths = self
-                                .authorize_external_paths(
-                                    session_id,
-                                    &tool_call.name,
-                                    &tool_call.id,
-                                    &tool_args,
-                                    &active_workspace,
-                                )
-                                .await;
+                            // Reading other conversations through the
+                            // `sessions` tool is gated by the
+                            // `session_access` policy (popup, rules) before
+                            // anything executes.
+                            let session_access = if tool_call.name == "sessions" {
+                                self.authorize_session_access(session_id, &tool_call.id, &tool_args)
+                                    .await
+                            } else {
+                                Ok(())
+                            };
+                            let external_paths = match session_access {
+                                Ok(()) => {
+                                    self.authorize_external_paths(
+                                        session_id,
+                                        &tool_call.name,
+                                        &tool_call.id,
+                                        &tool_args,
+                                        &active_workspace,
+                                    )
+                                    .await
+                                }
+                                Err(error) => Err(error),
+                            };
                             match external_paths {
                                 Ok((workspace_additions, resolved_path)) => {
                                     if let Some(resolved) = resolved_path {
@@ -3489,18 +3510,25 @@ impl AgentRuntime {
     /// of the history is replaced with the summary the provider produced, so the
     /// model sees it on later turns instead of the compression being lost after
     /// the single request.
-    fn apply_provider_compaction(session: &mut Session, summary: &str) -> usize {
+    ///
+    /// Returns the removed span so the caller can archive it before
+    /// persisting; `None` when there was nothing to compact.
+    fn apply_provider_compaction(
+        session: &mut Session,
+        summary: &str,
+    ) -> Option<(usize, Vec<Message>)> {
         let original_len = session.messages.len();
         if original_len < 8 {
-            return 0;
+            return None;
         }
         let keep_tail = 6usize.min(original_len.saturating_sub(4));
         let keep_head = 3usize.min(original_len.saturating_sub(keep_tail));
         if original_len <= keep_head + keep_tail + 1 {
-            return 0;
+            return None;
         }
 
         let head = session.messages[..keep_head].to_vec();
+        let dropped = session.messages[keep_head..original_len - keep_tail].to_vec();
         let tail = session.messages[original_len - keep_tail..].to_vec();
         let mut compacted = head;
         compacted.push(Message::synthetic_assistant(
@@ -3510,7 +3538,7 @@ impl AgentRuntime {
         compacted.extend(tail);
         let compacted_count = original_len - compacted.len();
         session.messages = compacted;
-        compacted_count
+        Some((compacted_count, dropped))
     }
 
     /// Frame a compaction summary the way DSH does: a single
@@ -3612,6 +3640,16 @@ impl AgentRuntime {
             "compaction_summary",
         )];
         compacted_messages.extend(tail);
+
+        // Preserve what is about to be summarized away so the `sessions`
+        // tool can still search and read pre-compaction content.
+        if let Err(error) = self.storage.archive_messages(&session.id, &prefix) {
+            warn!(
+                "Failed to archive compacted messages for {}: {}",
+                session.id, error
+            );
+        }
+
         session.messages = compacted_messages;
 
         Ok(Some((pruned, prefix.len(), true)))
@@ -5806,6 +5844,113 @@ impl AgentRuntime {
             return path.to_string_lossy().to_string();
         }
         path.parent().unwrap_or(path).to_string_lossy().to_string()
+    }
+
+    /// Policy gate for the `sessions` tool. Reading or searching
+    /// conversations other than the caller's own (its own subagent children
+    /// are exempt) follows `session_access` permission rules first, then
+    /// `[agent] session_access_default_action`; Ask raises the same approval
+    /// popup used for outside-workspace path access, addressed as
+    /// `session://<id>` (or `session://*` for broad search).
+    async fn authorize_session_access(
+        &self,
+        caller_session_id: &str,
+        tool_call_id: &str,
+        args: &serde_json::Value,
+    ) -> Result<()> {
+        let action = args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("read");
+        let target = args
+            .get("target_session_id")
+            .and_then(|value| value.as_str());
+        let scope = crate::tools::sessions::resolve_access_scope(caller_session_id, action, target);
+        let resource = match scope {
+            crate::tools::sessions::SessionAccessScope::Ungated
+            | crate::tools::sessions::SessionAccessScope::Exempt => return Ok(()),
+            crate::tools::sessions::SessionAccessScope::Resource(resource) => resource,
+        };
+
+        // A read of a session that does not exist needs no approval — the
+        // tool answers with a clean not-found error instead of a popup.
+        if let Some(id) = resource.strip_prefix("session://") {
+            if id != "*" {
+                match self.storage.get_session(id)? {
+                    None => return Ok(()),
+                    Some(other) => {
+                        // The caller's own subagent children are part of
+                        // its task tree and need no prompt.
+                        if other.parent_id.as_deref() == Some(caller_session_id) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.external_manager.has_granted_permission(&resource).await {
+            return Ok(());
+        }
+
+        let effective = {
+            let config = self.config.read().await;
+            config
+                .evaluate_permission_rule("session_access", &resource)
+                .unwrap_or_else(|| config.agent.session_access_default_action.clone())
+        };
+        // Note: `evaluate_permission_rule` returns the `permission` module's
+        // action enum; the external-path flow uses the identical-looking
+        // `external` module one.
+        match effective {
+            crate::permission::PermissionAction::Allow => return Ok(()),
+            crate::permission::PermissionAction::Deny => {
+                return Err(OSAgentError::ToolExecution(format!(
+                    "Access to conversation '{}' is denied by policy",
+                    resource
+                )))
+            }
+            crate::permission::PermissionAction::Ask => {}
+        }
+
+        let (prompt, response) = self
+            .external_manager
+            .create_waiting_prompt(
+                caller_session_id.to_string(),
+                format!("sessions:{}", tool_call_id),
+                resource.clone(),
+                "session_read".to_string(),
+                Vec::new(),
+            )
+            .await;
+
+        let timeout =
+            std::time::Duration::from_secs(self.external_manager.prompt_timeout_seconds().max(1));
+        let cancel_notify = self.get_cancellation_notify(caller_session_id);
+        let response = tokio::select! {
+            response = tokio::time::timeout(timeout, response) => response,
+            _ = cancel_notify.notified() => {
+                self.external_manager.expire_prompt(&prompt.id).await;
+                return Err(OSAgentError::Session("Operation cancelled".to_string()));
+            }
+        };
+        match response {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(OSAgentError::ToolExecution(format!(
+                "User denied access to conversation '{}'",
+                resource
+            ))),
+            Ok(Err(_)) => Err(OSAgentError::ToolExecution(
+                "Session access permission request was cancelled".to_string(),
+            )),
+            Err(_) => {
+                self.external_manager.expire_prompt(&prompt.id).await;
+                Err(OSAgentError::ToolExecution(format!(
+                    "Permission request for '{}' timed out",
+                    resource
+                )))
+            }
+        }
     }
 
     async fn authorize_external_paths(

@@ -409,10 +409,29 @@ impl SqliteStorage {
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
 
+                -- Messages dropped by context compaction. The live transcript
+                -- keeps only a summary plus a short tail after compaction;
+                -- these rows preserve the original content so the `sessions`
+                -- tool can still search and read what was compacted away.
+                -- `batch_hash` fingerprints one compaction event's prefix, so
+                -- a replayed compaction re-inserts nothing.
+                CREATE TABLE IF NOT EXISTS session_archive (
+                    session_id TEXT NOT NULL,
+                    batch_hash TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    archived_at INTEGER NOT NULL,
+                    PRIMARY KEY (session_id, batch_hash, seq),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
                 CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
+                CREATE INDEX IF NOT EXISTS idx_session_archive_session ON session_archive(session_id, timestamp);
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     description TEXT NOT NULL,
@@ -914,6 +933,185 @@ impl SqliteStorage {
                     seq: seq as usize,
                     role: message.role,
                     snippet: message.content[start..end].trim().to_string(),
+                    archived: false,
+                });
+
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+
+            Ok(hits)
+        })
+    }
+
+    /// Copies messages dropped by context compaction into `session_archive`.
+    ///
+    /// The batch is fingerprinted so a replayed compaction over the same
+    /// prefix inserts nothing: the primary key covers `(session_id,
+    /// batch_hash, seq)`. Returns how many rows were newly archived.
+    pub fn archive_messages(&self, session_id: &str, messages: &[Message]) -> Result<usize> {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+
+        let bodies: Vec<Vec<u8>> = messages
+            .iter()
+            .filter_map(|message| serde_json::to_vec(message).ok())
+            .collect();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for body in &bodies {
+            message_fingerprint(body).hash(&mut hasher);
+        }
+        use std::hash::{Hash, Hasher};
+        let batch_hash = format!("{:016x}", hasher.finish());
+        let now = Utc::now().timestamp();
+
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+            let mut inserted = 0usize;
+            for (seq, message) in messages.iter().enumerate() {
+                let done = tx
+                    .execute(
+                        "INSERT OR IGNORE INTO session_archive (session_id, batch_hash, seq, role, content, timestamp, archived_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            session_id,
+                            batch_hash,
+                            seq as i64,
+                            message.role,
+                            message.content,
+                            message.timestamp.timestamp(),
+                            now,
+                        ],
+                    )
+                    .map_err(OSAgentError::Storage)?;
+                inserted += done;
+            }
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(inserted)
+        })
+    }
+
+    /// Archived messages for one session, oldest first. These are rows a
+    /// previous compaction removed from the live transcript.
+    pub fn get_archived_messages(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ArchivedMessage>> {
+        let limit = limit.max(1) as i64;
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT session_id, batch_hash, seq, role, content, timestamp, archived_at
+                     FROM session_archive WHERE session_id = ?1
+                     ORDER BY timestamp ASC, seq ASC LIMIT ?2",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let rows = stmt
+                .query_map(params![session_id, limit], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                })
+                .map_err(OSAgentError::Storage)?;
+
+            let mut messages = Vec::new();
+            for row in rows {
+                let (session_id, batch_hash, seq, role, content, timestamp, archived_at) =
+                    row.map_err(OSAgentError::Storage)?;
+                messages.push(ArchivedMessage {
+                    session_id,
+                    batch_hash,
+                    seq,
+                    role,
+                    content,
+                    timestamp: chrono::DateTime::from_timestamp(timestamp, 0)
+                        .unwrap_or_else(Utc::now),
+                    archived_at: chrono::DateTime::from_timestamp(archived_at, 0)
+                        .unwrap_or_else(Utc::now),
+                });
+            }
+            Ok(messages)
+        })
+    }
+
+    /// Substring search across archived (pre-compaction) message content,
+    /// mirroring [`Self::search_messages`] but hitting `session_archive`.
+    pub fn search_archived_messages(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionSearchHit>> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT a.session_id, a.seq, a.role, a.content
+                     FROM session_archive a
+                     JOIN sessions s ON s.id = a.session_id
+                     ORDER BY s.updated_at DESC, a.timestamp ASC, a.seq ASC",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(OSAgentError::Storage)?;
+
+            let mut hits: Vec<SessionSearchHit> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+
+            for row in rows {
+                let (session_id, seq, role, content) = row.map_err(OSAgentError::Storage)?;
+                // One hit per archive batch per session keeps results varied
+                // without flooding; the live search already dedupes per
+                // session the same way.
+                let dedupe_key = session_id.clone();
+                if seen.contains(&dedupe_key) {
+                    continue;
+                }
+                let Some(at) = content.to_lowercase().find(&needle) else {
+                    continue;
+                };
+
+                let start = content[..at]
+                    .char_indices()
+                    .rev()
+                    .nth(40)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let end = content[at..]
+                    .char_indices()
+                    .nth(120)
+                    .map(|(i, _)| at + i)
+                    .unwrap_or(content.len());
+
+                seen.insert(dedupe_key);
+                hits.push(SessionSearchHit {
+                    session_id,
+                    seq: seq as usize,
+                    role,
+                    snippet: content[start..end].trim().to_string(),
+                    archived: true,
                 });
 
                 if hits.len() >= limit {

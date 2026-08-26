@@ -93,6 +93,13 @@ pub struct AgentConfig {
     pub decision_capture_mode: CaptureMode,
     #[serde(default)]
     pub permission_rules: Vec<PermissionRule>,
+    /// Policy applied when the agent's `sessions` tool reads or searches a
+    /// conversation other than its own (its own subagent children are
+    /// exempt). Per-session overrides live in `permission_rules` with
+    /// `permission = "session_access"` and glob patterns over resources like
+    /// `session://<id>` or `session://*`.
+    #[serde(default)]
+    pub session_access_default_action: PermissionAction,
     #[serde(default)]
     pub custom_identity: Option<String>,
     #[serde(default)]
@@ -825,6 +832,7 @@ impl Default for AgentConfig {
             decision_memory_file: default_decision_memory_file(),
             decision_capture_mode: CaptureMode::Review,
             permission_rules: vec![],
+            session_access_default_action: PermissionAction::Ask,
             custom_identity: None,
             custom_priorities: None,
             prompt_cache_enabled: default_prompt_cache_enabled(),
@@ -2017,6 +2025,13 @@ last_channel_id = 1478327393205882900
             trusted_guilds: vec![],
             trusted_channels: vec![],
             last_channel_id: None,
+            music_enabled: false,
+            music_max_queue: 50,
+            music_max_duration_secs: 0,
+            music_auto_leave_secs: 300,
+            yt_dlp_path: "yt-dlp".to_string(),
+            yt_dlp_extra_args: String::new(),
+            piped_instances: Vec::new(),
         };
 
         let text = toml::to_string(&discord).unwrap();

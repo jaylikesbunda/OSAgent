@@ -26,6 +26,7 @@ pub mod registry;
 pub mod repeat_reminder;
 pub mod scheduler;
 pub mod search;
+pub mod sessions;
 pub mod skill;
 pub mod spill;
 pub mod subagent;

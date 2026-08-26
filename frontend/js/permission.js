@@ -44,9 +44,12 @@ OSA.showNextPermissionPrompt = function() {
 
     OSA.activePermissionPrompt = prompt;
     var toolName = String(prompt.source || 'tool').split(':')[0];
+    var sessionRead = prompt.path_type === 'session_read';
     document.getElementById('permission-tool').textContent = toolName;
-    document.getElementById('permission-operation').textContent = prompt.path_type || 'access';
-    document.getElementById('permission-path').textContent = prompt.path || '';
+    document.getElementById('permission-operation').textContent =
+        sessionRead ? 'read another conversation' : (prompt.path_type || 'access');
+    document.getElementById('permission-path').textContent =
+        sessionRead ? String(prompt.path || '').replace(/^session:\/\//, '') : (prompt.path || '');
     OSA.permissionPreviousFocus = document.activeElement;
     modal.classList.remove('hidden');
     window.setTimeout(function() { document.getElementById('permission-once')?.focus(); }, 0);
