@@ -18,7 +18,6 @@ pub mod config;
 pub mod discord;
 pub mod error;
 pub mod external;
-pub mod indexer;
 pub mod lsp;
 pub mod mcp;
 pub mod oauth;

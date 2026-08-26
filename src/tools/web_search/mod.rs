@@ -766,7 +766,6 @@ mod tests {
     fn config() -> SearchConfig {
         SearchConfig {
             enabled: true,
-            index_on_startup: true,
             max_results: 20,
             global_timeout_ms: 3_500,
             per_backend_timeout_ms: 1_000,

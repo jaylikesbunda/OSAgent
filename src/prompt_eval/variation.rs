@@ -1901,7 +1901,7 @@ fn tool_line_detailed(name: &str) -> Option<(String, String)> {
             "grep(pattern=\"fn main\", path=\"src/\")".to_string(),
         )),
         "codesearch" => Some((
-            "- codesearch: semantic code search for concepts, functions, and related code".to_string(),
+            "- codesearch: batched-grep quick context for vague queries, returns ranked files".to_string(),
             "codesearch(query=\"async HTTP handler\")".to_string(),
         )),
         "list_files" => Some((
@@ -2023,7 +2023,7 @@ fn tool_line_with_example(name: &str) -> Option<(String, String)> {
             "grep(pattern=\"TODO\", path=\"src/\")".to_string(),
         )),
         "codesearch" => Some((
-            "- codesearch: semantic code search for concepts, functions, and related code".to_string(),
+            "- codesearch: batched-grep quick context for vague queries, returns ranked files".to_string(),
             "codesearch(query=\"authentication middleware\")".to_string(),
         )),
         "list_files" => Some((

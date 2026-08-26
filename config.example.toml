@@ -254,8 +254,8 @@ prune_tail_chars = 1024
 max_transcript_chars = 24000
 
 [search]
+# Enables the codesearch (quick-context) tool; web search is separate and always available.
 enabled = true
-index_on_startup = true
 max_results = 20
 global_timeout_ms = 4500
 per_backend_timeout_ms = 2000

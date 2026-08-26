@@ -22,7 +22,6 @@ mod agent;
 mod config;
 mod error;
 mod external;
-mod indexer;
 mod lsp;
 mod mcp;
 mod oauth;

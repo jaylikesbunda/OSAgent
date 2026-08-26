@@ -376,7 +376,7 @@ fn build_tool_selection_section(_allowed_tools: &[String], mode: PromptMode) -> 
                 .to_string(),
         );
         lines.push(
-            "- Use grep for literal fragments and glob for file names; load codesearch via tool_search when listed under Deferred Built-in Tools and you need meaning-based matching"
+            "- Use grep for literal fragments and glob for file names; reach for codesearch first on vague or open-ended questions to fan the query into ranked batched greps"
                 .to_string(),
         );
         lines.push(

@@ -478,8 +478,8 @@ pub struct GrepToolConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
+    /// Enables the codesearch (quick-context) tool. Web search is unaffected.
     pub enabled: bool,
-    pub index_on_startup: bool,
     pub max_results: usize,
     pub global_timeout_ms: u64,
     pub per_backend_timeout_ms: u64,
@@ -1013,7 +1013,6 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            index_on_startup: true,
             max_results: 20,
             // Public search frontends routinely take several seconds; the old
             // 2s/4.5s budget timed them out before they could ever answer.

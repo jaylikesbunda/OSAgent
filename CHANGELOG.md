@@ -12,6 +12,8 @@ v0.4.7 changes:
 * Fixed provider errors showing twice in the web transcript
 * Added search-before-asking: vague requests now fan out parallel reformulated searches (case variants, synonyms, error fragments) before OSA asks for clarification
 * Added a `sessions` tool to list, read, and search past conversations, gated by a new `session_access` permission; compaction archives removed messages so they stay searchable
+* Code search no longer needs MeiliSearch — replaced with a batched-grep quick-context tool (no binary download, background server, or stale index)
+* Code search is now an always-loaded first-class tool, with prompt guidance to reach for it before grep on vague queries
 
 v0.4.6 changes:
 

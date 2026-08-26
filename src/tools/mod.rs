@@ -3,6 +3,7 @@ pub mod batch;
 pub mod calendar;
 pub mod code;
 pub mod codesearch;
+pub mod codesearch_tokenizer;
 pub mod coordinator;
 pub mod decision_memory;
 pub mod file_cache;

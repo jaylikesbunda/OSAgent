@@ -21,7 +21,6 @@ use crate::agent::subagent_manager::SubagentManager;
 use crate::config::{AgentConfig, Config, WorkspaceConfig, WorkspacePath};
 use crate::error::{OSAgentError, Result};
 use crate::external::{ExternalDirectoryManager, PermissionAction, PermissionPrompt};
-use crate::indexer::CodeIndexer;
 use crate::plugin::PluginManager;
 use crate::scheduler::Scheduler;
 use crate::skills::{get_skills_base_dir, SkillLoader};
@@ -401,39 +400,12 @@ impl AgentRuntime {
         subagent_manager.set_shared_provider(provider.clone());
         let subagent_manager = Arc::new(subagent_manager);
 
-        let indexer: Option<Arc<CodeIndexer>> = if config.search.enabled {
-            let workspace_path =
-                PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
-            match tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let indexer = CodeIndexer::new(workspace_path).await?;
-                    if config.search.index_on_startup {
-                        indexer.index_workspace().await?;
-                    }
-                    Ok::<_, crate::error::OSAgentError>(indexer)
-                })
-            }) {
-                Ok(idx) => {
-                    info!("Code search indexer initialized");
-                    Some(Arc::new(idx))
-                }
-                Err(e) => {
-                    warn!("Failed to initialize code search indexer: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        log_phase("search_indexer_init", &mut phase_start);
-
-        let mut tool_registry_instance = ToolRegistry::with_indexer(
+        let mut tool_registry_instance = ToolRegistry::with_full(
             config.clone(),
             storage.clone(),
             Some(Arc::new(event_bus.clone())),
             skill_loader,
             Some(subagent_manager.clone()),
-            indexer.clone(),
             Some(memory_store.clone()),
             Some(decision_memory.clone()),
             Arc::new(FileReadCache::with_default_capacity()),

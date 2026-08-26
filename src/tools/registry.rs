@@ -6,7 +6,6 @@ use crate::agent::provider::ToolDefinition;
 use crate::agent::subagent_manager::SubagentManager;
 use crate::config::{Config, WorkspacePath, WorkspacePermission};
 use crate::error::{OSAgentError, Result};
-use crate::indexer::CodeIndexer;
 use crate::mcp::{McpHandle, McpManager, MCP_TOOL_PREFIX};
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
@@ -312,12 +311,11 @@ impl ToolRegistry {
         skill_loader: Option<Arc<SkillLoader>>,
     ) -> Result<Self> {
         let cache = Arc::new(FileReadCache::with_default_capacity());
-        Self::with_indexer(
+        Self::with_full(
             config,
             storage,
             event_bus,
             skill_loader,
-            None,
             None,
             None,
             None,
@@ -333,13 +331,12 @@ impl ToolRegistry {
         subagent_manager: Option<Arc<SubagentManager>>,
     ) -> Result<Self> {
         let cache = Arc::new(FileReadCache::with_default_capacity());
-        Self::with_indexer(
+        Self::with_full(
             config,
             storage,
             event_bus,
             skill_loader,
             subagent_manager,
-            None,
             None,
             None,
             cache,
@@ -354,7 +351,7 @@ impl ToolRegistry {
         subagent_manager: Option<Arc<SubagentManager>>,
         file_cache: Arc<FileReadCache>,
     ) -> Result<Self> {
-        Self::with_indexer(
+        Self::with_full(
             config,
             storage,
             event_bus,
@@ -362,18 +359,17 @@ impl ToolRegistry {
             subagent_manager,
             None,
             None,
-            None,
             file_cache,
         )
     }
 
-    pub fn with_indexer(
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_full(
         config: Config,
         storage: Arc<crate::storage::SqliteStorage>,
         event_bus: Option<Arc<EventBus>>,
         skill_loader: Option<Arc<SkillLoader>>,
         subagent_manager: Option<Arc<SubagentManager>>,
-        indexer: Option<Arc<CodeIndexer>>,
         memory_store: Option<Arc<MemoryStore>>,
         decision_memory: Option<Arc<DecisionMemory>>,
         file_cache: Arc<FileReadCache>,
@@ -478,6 +474,15 @@ impl ToolRegistry {
             Arc::new(search::GlobTool::new(config.clone())),
         );
 
+        if config.search.enabled {
+            // Always loaded, not deferred through the native catalog:
+            // quick-context search competes with grep/glob directly, and a
+            // tool_search round trip before every vague query kills usage.
+            let codesearch_tool: Arc<dyn Tool> =
+                Arc::new(codesearch::CodeSearchTool::new(config.clone()));
+            tools.insert("codesearch".to_string(), codesearch_tool);
+        }
+
         tools.insert(
             "web_fetch".to_string(),
             Arc::new(web::WebFetchTool::new(config.clone())),
@@ -550,13 +555,6 @@ impl ToolRegistry {
         let sessions_tool: Arc<dyn Tool> = Arc::new(sessions::SessionsTool::new(storage.clone()));
         tools.insert("sessions".to_string(), sessions_tool.clone());
         native_catalog.register(sessions_tool);
-
-        if let Some(ref idx) = indexer {
-            let codesearch_tool: Arc<dyn Tool> =
-                Arc::new(codesearch::CodeSearchTool::new(idx.clone()));
-            tools.insert("codesearch".to_string(), codesearch_tool.clone());
-            native_catalog.register(codesearch_tool);
-        }
 
         if let Some(ref ms) = memory_store {
             let memory_tools: Vec<Arc<dyn Tool>> = vec![

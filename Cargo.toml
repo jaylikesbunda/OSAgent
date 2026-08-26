@@ -61,6 +61,7 @@ scraper = "0.19"
 urlencoding = "2.1"
 dashmap = "5.5"
 walkdir = "2.5"
+rayon = "1.10"
 gix = { version = "0.68", default-features = false, features = ["max-performance-safe"] }
 
 # Embed frontend
@@ -90,8 +91,6 @@ songbird = { version = "0.6", features = ["serenity", "driver", "gateway", "rust
 async-stream = "0.3"
 lazy_static = "1.4"
 
-# Code search (MeiliSearch)
-meilisearch-sdk = "0.27"
 which = "6.0"
 
 # Bytes handling

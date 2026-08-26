@@ -21,10 +21,11 @@ use tracing::debug;
 use walkdir::WalkDir;
 
 static RG_AVAILABLE: AtomicBool = AtomicBool::new(true);
+static RG_PROBED: AtomicBool = AtomicBool::new(false);
 
 const MAX_WALKDIR_MATCHES: usize = 10_000;
 
-fn is_heavy_dir(path: &Path) -> bool {
+pub(crate) fn is_heavy_dir(path: &Path) -> bool {
     path.components().any(|component| {
         let part = component.as_os_str().to_string_lossy().to_ascii_lowercase();
         matches!(
@@ -53,7 +54,7 @@ fn is_heavy_dir(path: &Path) -> bool {
     })
 }
 
-fn rg_binary_name() -> &'static str {
+pub(crate) fn rg_binary_name() -> &'static str {
     if cfg!(windows) {
         "rg.exe"
     } else {
@@ -70,15 +71,20 @@ fn check_rg_available() -> bool {
         .unwrap_or(false)
 }
 
-fn ensure_rg_checked() -> bool {
-    if RG_AVAILABLE.load(Ordering::Relaxed) {
-        if check_rg_available() {
-            return true;
+pub(crate) fn ensure_rg_checked() -> bool {
+    // Probe at most once per process: spawning `rg --version` on every tool
+    // call is pure overhead, and a transient failure shouldn't disable
+    // ripgrep for the session... but a missing binary won't appear mid-run
+    // in practice, so latch the first result either way.
+    if !RG_PROBED.load(Ordering::Relaxed) {
+        let available = check_rg_available();
+        RG_AVAILABLE.store(available, Ordering::Relaxed);
+        RG_PROBED.store(true, Ordering::Relaxed);
+        if !available {
+            debug!("ripgrep not found, falling back to walkdir");
         }
-        RG_AVAILABLE.store(false, Ordering::Relaxed);
-        debug!("ripgrep not found, falling back to walkdir");
     }
-    false
+    RG_AVAILABLE.load(Ordering::Relaxed)
 }
 
 fn compile_file_matcher(pattern: Option<&str>) -> Result<Option<GlobMatcher>> {
@@ -100,7 +106,7 @@ fn path_matches(matcher: Option<&GlobMatcher>, relative_path: &Path) -> bool {
     }
 }
 
-fn discouraged_path_penalty(relative_path: &Path) -> usize {
+pub(crate) fn discouraged_path_penalty(relative_path: &Path) -> usize {
     let mut penalty = 0usize;
 
     for component in relative_path.components() {

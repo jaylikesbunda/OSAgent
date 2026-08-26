@@ -718,7 +718,6 @@ fn write_benchmark_config(
     cfg.server.password.clear();
     cfg.server.password_enabled = false;
     cfg.search.enabled = false;
-    cfg.search.index_on_startup = false;
     cfg.update.check_on_startup = false;
     cfg.agent.workspace = workspace.to_string_lossy().to_string();
     cfg.storage.database = data_dir.join("osagent.db").to_string_lossy().to_string();
