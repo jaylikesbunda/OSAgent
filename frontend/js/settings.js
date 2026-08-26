@@ -174,7 +174,7 @@ OSA.loadSettings = async function() {
         await OSA.loadWorkspaces();
 
         const discord = config.discord || {};
-        document.getElementById('setting-discord-enabled').value = discord.enabled ? 'true' : 'false';
+        document.getElementById('setting-discord-enabled').checked = discord.enabled === true;
         document.getElementById('setting-discord-token').value = discord.token || '';
         document.getElementById('setting-discord-community-mode').checked = discord.community_mode === true;
         document.getElementById('setting-discord-allow-community-members').checked = discord.allow_community_members === true;
@@ -365,7 +365,7 @@ OSA.saveSettings = async function() {
     };
     newConfig.discord = {
         ...(newConfig.discord || {}),
-        enabled: document.getElementById('setting-discord-enabled').value === 'true',
+        enabled: document.getElementById('setting-discord-enabled').checked,
         token: document.getElementById('setting-discord-token').value || '',
         community_mode: document.getElementById('setting-discord-community-mode').checked,
         allow_community_members: document.getElementById('setting-discord-allow-community-members').checked,
@@ -574,7 +574,7 @@ OSA.switchSettingsTab = async function(tabId) {
     });
     const sel = document.getElementById('settings-tab-select');
     if (sel) sel.value = tabId;
-    if (tabId === 'models' || tabId === 'provider') {
+    if (tabId === 'models') {
         const catalogList = document.getElementById('model-catalog-list');
         if (catalogList) {
             catalogList.innerHTML = '<div class="model-empty">Loading...</div>';

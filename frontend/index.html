@@ -49,14 +49,18 @@
                     <button class="new-chat-btn" onclick="createSession()">
                         <span>+</span> New chat
                     </button>
-                    <button class="clear-btn" onclick="clearSessions()">Clear sessions</button>
                 </div>
                 <div class="sessions-list" id="sessions-list"></div>
                 <div class="sidebar-footer">
-                    <button class="sidebar-jobs-btn" onclick="OSA.Jobs.show()" title="Scheduled Jobs">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                        Jobs
-                    </button>
+                    <div class="sidebar-footer-row">
+                        <button class="sidebar-jobs-btn" onclick="OSA.Jobs.show()" title="Scheduled Jobs">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            Jobs
+                        </button>
+                        <button class="sidebar-footer-icon-btn" onclick="clearSessions()" title="Delete all sessions">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -379,10 +383,9 @@
                 <h2>Settings</h2>
                 <select id="settings-tab-select" class="settings-tab-select" onchange="switchSettingsTab(this.value)">
                     <optgroup label="General">
-                        <option value="provider">Provider</option>
                         <option value="models">Models</option>
                         <option value="agent">Agent</option>
-                        <option value="theme">Theme</option>
+                        <option value="theme">Appearance</option>
                     </optgroup>
                     <optgroup label="Integrations">
                         <option value="discord">Discord</option>
@@ -394,7 +397,6 @@
                         <option value="skills">Skills</option>
                         <option value="mcp">MCP Servers</option>
                         <option value="security">Security</option>
-                        <option value="experimental">Experimental</option>
                         <option value="updates">Updates</option>
                     </optgroup>
                 </select>
@@ -403,17 +405,14 @@
                 <div class="settings-sidebar">
                     <div class="settings-sidebar-section">
                         <div class="settings-sidebar-section-title">General</div>
-                        <button class="settings-sidebar-item active" data-tab="provider" onclick="switchSettingsTab('provider')">
-                            Provider
-                        </button>
-                        <button class="settings-sidebar-item" data-tab="models" onclick="switchSettingsTab('models')">
+                        <button class="settings-sidebar-item active" data-tab="models" onclick="switchSettingsTab('models')">
                             Models
                         </button>
                         <button class="settings-sidebar-item" data-tab="agent" onclick="switchSettingsTab('agent')">
                             Agent
                         </button>
                         <button class="settings-sidebar-item" data-tab="theme" onclick="switchSettingsTab('theme')">
-                            Theme
+                            Appearance
                         </button>
                     </div>
                     <div class="settings-sidebar-section">
@@ -443,33 +442,16 @@
                         <button class="settings-sidebar-item" data-tab="security" onclick="switchSettingsTab('security')">
                             Security
                         </button>
-                        <button class="settings-sidebar-item" data-tab="experimental" onclick="switchSettingsTab('experimental')">
-                            Experimental
-                        </button>
                         <button class="settings-sidebar-item" data-tab="updates" onclick="switchSettingsTab('updates')">
                             Updates
                         </button>
                     </div>
                 </div>
                 <div class="settings-main">
-                <div class="settings-pane active" id="pane-provider">
-                    <div class="settings-pane-header">
-                        <h2>Routing</h2>
-                        <p class="settings-pane-desc">See what model route is active and manage your connected providers without losing the old fallback controls.</p>
-                    </div>
-                    <div class="settings-group">
-                        <div class="settings-group-title">Current Route</div>
-                        <div id="provider-routing-summary" class="provider-routing-summary">Loading...</div>
-                    </div>
-                    <div class="settings-group">
-                        <div class="settings-group-title">Connected Providers</div>
-                        <div id="provider-routing-list" class="provider-routing-list">Loading...</div>
-                    </div>
-                </div>
                 <div class="settings-pane" id="pane-theme">
                     <div class="settings-pane-header">
-                        <h2>Theme</h2>
-                        <p class="settings-pane-desc">Customize the appearance of the interface</p>
+                        <h2>Appearance</h2>
+                        <p class="settings-pane-desc">Colors, typography, and chat layout.</p>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Color Palette</div>
@@ -506,24 +488,34 @@
                         </div>
                     </div>
                 </div>
-                <div class="settings-pane" id="pane-models">
+                <div class="settings-pane active" id="pane-models">
                     <div class="settings-pane-header">
                         <h2>Models</h2>
-                        <p class="settings-pane-desc">Connect providers, pick active routes, and browse the shared model catalog.</p>
+                        <p class="settings-pane-desc">Your active model, connected providers, and the model catalog.</p>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title settings-group-title-inline">
-                            <span>Local Servers</span>
-                            <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.refreshLocalServers()">Refresh</button>
-                        </div>
-                        <div class="settings-field-hint settings-field-hint-spaced">Live status of Ollama and Unsloth Studio. If Unsloth asks for a key, paste it from Unsloth Desktop (Settings &rarr; API keys) below.</div>
-                        <div id="local-servers-status" class="doctor-status-grid"><div class="model-empty">Checking...</div></div>
+                        <div class="settings-group-title">Current Route</div>
+                        <div id="provider-routing-summary" class="provider-routing-summary">Loading...</div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Connected Providers</div>
+                        <div id="provider-routing-list" class="provider-routing-list">Loading...</div>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Connected &amp; Available Routes</div>
-                        <div class="settings-field-hint settings-field-hint-spaced">Connected providers stay at the top. Expand a provider to switch its model or edit its connection.</div>
                         <div id="model-catalog-list" class="model-catalog-list">Loading...</div>
                     </div>
+                    <details class="settings-advanced">
+                        <summary>Advanced</summary>
+                        <div class="settings-advanced-body">
+                            <div class="settings-group-title settings-group-title-inline">
+                                <span>Local Servers</span>
+                                <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.refreshLocalServers()">Refresh</button>
+                            </div>
+                            <div class="settings-field-hint settings-field-hint-spaced">Live status of Ollama and Unsloth Studio. If Unsloth asks for a key, paste it from Unsloth Desktop (Settings &rarr; API keys) below.</div>
+                            <div id="local-servers-status" class="doctor-status-grid"><div class="model-empty">Checking...</div></div>
+                        </div>
+                    </details>
                     <div class="settings-group">
                         <div class="settings-group-title">Catalog Search</div>
                         <div class="settings-field">
@@ -535,20 +527,10 @@
                 <div class="settings-pane" id="pane-agent">
                     <div class="settings-pane-header">
                         <h2>Agent</h2>
-                        <p class="settings-pane-desc">Adjust generation parameters and system prompt sections</p>
+                        <p class="settings-pane-desc">How the agent thinks and responds.</p>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">Generation</div>
-                        <div class="settings-field-row">
-                            <div class="settings-field flex-1">
-                                <label for="setting-max-tokens">Max Tokens</label>
-                                <input type="number" id="setting-max-tokens" placeholder="4096" />
-                            </div>
-                            <div class="settings-field flex-1">
-                                <label for="setting-temperature">Temperature</label>
-                                <input type="number" id="setting-temperature" step="0.1" placeholder="0.7" />
-                            </div>
-                        </div>
+                        <div class="settings-group-title">Reasoning</div>
                         <div class="settings-field">
                             <label for="setting-thinking-level">Thinking Level</label>
                             <select id="setting-thinking-level">
@@ -556,96 +538,128 @@
                             </select>
                             <span class="settings-field-hint" id="setting-thinking-hint">Provider/model-specific reasoning options for the active model.</span>
                         </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label">Show Thinking Blocks</label>
-                                <span class="toggle-desc">Display streamed and persisted reasoning blocks in the chat transcript</span>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-show-thinking-blocks" onchange="OSA.onThinkingVisibilityToggleChange()" />
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-debug-overlay">Debug Overlay</label>
-                                <span class="toggle-desc">Show the live event and tool-placement diagnostics panel (also toggled with Shift+D)</span>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-debug-overlay" onchange="OSA.onDebugOverlayToggleChange()" />
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
                     </div>
-                    <div class="settings-group">
-                        <div class="settings-group-title">System Prompt</div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-use-custom-identity">Use Custom Identity</label>
-                                <span class="toggle-desc">Replace the default "You are OSA..." identity with custom text</span>
+                    <details class="settings-advanced">
+                        <summary>Advanced</summary>
+                        <div class="settings-advanced-body">
+                            <div class="settings-group">
+                                <div class="settings-group-title">Generation</div>
+                                <div class="settings-field-row">
+                                    <div class="settings-field flex-1">
+                                        <label for="setting-max-tokens">Max Tokens</label>
+                                        <input type="number" id="setting-max-tokens" placeholder="4096" />
+                                    </div>
+                                    <div class="settings-field flex-1">
+                                        <label for="setting-temperature">Temperature</label>
+                                        <input type="number" id="setting-temperature" step="0.1" placeholder="0.7" />
+                                    </div>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label">Show Thinking Blocks</label>
+                                        <span class="toggle-desc">Display streamed and persisted reasoning blocks in the chat transcript</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-show-thinking-blocks" onchange="OSA.onThinkingVisibilityToggleChange()" />
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-debug-overlay">Debug Overlay</label>
+                                        <span class="toggle-desc">Show the live event and tool-placement diagnostics panel (also toggled with Shift+D)</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-debug-overlay" onchange="OSA.onDebugOverlayToggleChange()" />
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-experimental-workflows">Workflows</label>
+                                        <span class="toggle-desc">Show the Workflows button in the header</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-experimental-workflows" />
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
                             </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-use-custom-identity" onchange="OSA.onCustomIdentityToggleChange()" />
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
-                        <div class="settings-field hidden" id="custom-identity-field">
-                            <label for="setting-custom-identity">Custom Identity Text</label>
-                            <textarea id="setting-custom-identity" rows="3" placeholder="Enter custom identity description (e.g., 'You are a helpful coding assistant...')"></textarea>
-                            <span class="settings-field-hint">This replaces the entire Identity section in the system prompt. Leave blank to use default.</span>
-                        </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-use-custom-priorities">Use Custom Priorities</label>
-                                <span class="toggle-desc">Replace the default priorities list with custom bullet points</span>
+                            <div class="settings-group">
+                                <div class="settings-group-title">System Prompt</div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-use-custom-identity">Use Custom Identity</label>
+                                        <span class="toggle-desc">Replace the default "You are OSA..." identity with custom text</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-use-custom-identity" onchange="OSA.onCustomIdentityToggleChange()" />
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="settings-field hidden" id="custom-identity-field">
+                                    <label for="setting-custom-identity">Custom Identity Text</label>
+                                    <textarea id="setting-custom-identity" rows="3" placeholder="Enter custom identity description (e.g., 'You are a helpful coding assistant...')"></textarea>
+                                    <span class="settings-field-hint">This replaces the entire Identity section in the system prompt. Leave blank to use default.</span>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-use-custom-priorities">Use Custom Priorities</label>
+                                        <span class="toggle-desc">Replace the default priorities list with custom bullet points</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-use-custom-priorities" onchange="OSA.onCustomPrioritiesToggleChange()" />
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="settings-field hidden" id="custom-priorities-field">
+                                    <label for="setting-custom-priorities">Custom Priorities</label>
+                                    <textarea id="setting-custom-priorities" rows="5" placeholder="- Priority one&#10;- Priority two&#10;- Priority three"></textarea>
+                                    <span class="settings-field-hint">Enter each priority on a new line. These will appear under the "# Priorities" section. Leave blank to use default.</span>
+                                </div>
                             </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-use-custom-priorities" onchange="OSA.onCustomPrioritiesToggleChange()" />
-                                <span class="toggle-slider"></span>
-                            </label>
                         </div>
-                        <div class="settings-field hidden" id="custom-priorities-field">
-                            <label for="setting-custom-priorities">Custom Priorities</label>
-                            <textarea id="setting-custom-priorities" rows="5" placeholder="- Priority one&#10;- Priority two&#10;- Priority three"></textarea>
-                            <span class="settings-field-hint">Enter each priority on a new line. These will appear under the "# Priorities" section. Leave blank to use default.</span>
-                        </div>
-                    </div>
+                    </details>
                 </div>
                 <div class="settings-pane" id="pane-discord">
                     <div class="settings-pane-header">
                         <h2>Discord</h2>
-                        <p class="settings-pane-desc">Configure the Discord bot integration</p>
+                        <p class="settings-pane-desc">Run OSA as a bot in your Discord server.</p>
                     </div>
                     <div class="settings-group discord-settings">
                         <div class="discord-settings-card">
-                            <div class="settings-group-title">Bot Configuration</div>
-                            <div class="discord-settings-grid">
-                                <div class="settings-field">
-                                    <label for="setting-discord-enabled">Discord Bot</label>
-                                    <select id="setting-discord-enabled">
-                                        <option value="true">Enabled</option>
-                                        <option value="false">Disabled</option>
-                                    </select>
+                            <div class="settings-group-title">Bot</div>
+                            <div class="toggle-field discord-toggle-field">
+                                <div class="toggle-info">
+                                    <label class="toggle-label" for="setting-discord-enabled">Enable Discord Bot</label>
+                                    <span class="toggle-desc">Connect the bot using the token below.</span>
                                 </div>
-                                <div class="settings-field">
-                                    <label for="setting-discord-token">Bot Token</label>
-                                    <input id="setting-discord-token" type="password" placeholder="Discord bot token">
-                                    <span class="settings-field-hint">Saved in the OSAgent config file. Save before starting.</span>
-                                </div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="setting-discord-enabled">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-field">
+                                <label for="setting-discord-token">Bot Token</label>
+                                <input id="setting-discord-token" type="password" placeholder="Discord bot token">
+                                <span class="settings-field-hint">Saved in the OSAgent config file. Save before starting.</span>
                             </div>
                         </div>
 
-                        <div class="discord-settings-card">
-                            <div class="settings-group-title">Backup &amp; Restore</div>
-                            <p class="discord-card-desc">Export or import the full Discord bot config including bot tokens. The exported file contains secrets — store it securely.</p>
-                            <div class="discord-bot-actions" style="gap:8px;">
-                                <button type="button" class="btn-ghost" id="btn-discord-export" onclick="OSA.exportDiscordConfig()">Export Config</button>
-                                <button type="button" class="btn-ghost" id="btn-discord-import" onclick="OSA.triggerDiscordImport()">Import Config</button>
-                                <input type="file" id="discord-import-file" accept=".json,application/json" class="hidden" onchange="OSA.importDiscordConfig(event)" />
+                        <div class="discord-settings-card discord-runtime-card">
+                            <div class="settings-group-title">Bot Runtime</div>
+                            <div id="discord-bot-status" class="discord-bot-status">Checking status...</div>
+                            <div class="discord-bot-actions">
+                                <button type="button" class="btn-primary" id="btn-discord-start" onclick="OSA.startDiscordBot()">Start Bot</button>
+                                <button type="button" class="btn-danger" id="btn-discord-stop" onclick="OSA.stopDiscordBot()">Stop Bot</button>
                             </div>
-                            <span id="discord-import-message" class="settings-field-hint"></span>
+                            <span id="discord-bot-message" class="settings-field-hint"></span>
                         </div>
+                    </div>
 
+                    <details class="settings-advanced">
+                        <summary>Community Access</summary>
+                        <div class="settings-advanced-body">
                         <div class="discord-settings-card">
                             <div class="settings-group-title">Community Access</div>
                             <p class="discord-card-desc">Restricted support sessions can use public tools only. Trusted access stays separate.</p>
@@ -708,7 +722,12 @@
                                 </label>
                             </div>
                         </div>
+                        </div>
+                    </details>
 
+                    <details class="settings-advanced">
+                        <summary>GitHub Updates</summary>
+                        <div class="settings-advanced-body">
                         <div class="discord-settings-card">
                             <div class="settings-group-title">GitHub Updates</div>
                             <div class="discord-settings-grid discord-settings-grid-three">
@@ -727,7 +746,12 @@
                                 </div>
                             </div>
                         </div>
+                        </div>
+                    </details>
 
+                    <details class="settings-advanced">
+                        <summary>Trusted Full Access</summary>
+                        <div class="settings-advanced-body">
                         <div class="discord-settings-card">
                             <div class="settings-group-title">Trusted Full Access</div>
                             <p class="discord-card-desc">Keep this limited to your personal server and private channels.</p>
@@ -750,7 +774,12 @@
                                 </div>
                             </div>
                         </div>
+                        </div>
+                    </details>
 
+                    <details class="settings-advanced">
+                        <summary>Music / Voice Playback</summary>
+                        <div class="settings-advanced-body">
                         <div class="discord-settings-card">
                             <div class="settings-group-title">Music / Voice Playback</div>
                             <p class="discord-card-desc">YouTube audio in voice channels. Requires <code>discord-voice</code> build; <code>yt-dlp</code> auto-downloads to <code>~/.osagent/bin/</code>. <code>ffmpeg</code> optional (opus passthrough).</p>
@@ -794,17 +823,24 @@
                                 </div>
                             </div>
                         </div>
-
-                        <div class="discord-settings-card discord-runtime-card">
-                            <div class="settings-group-title">Bot Runtime</div>
-                            <div id="discord-bot-status" class="discord-bot-status">Checking status...</div>
-                            <div class="discord-bot-actions">
-                                <button type="button" class="btn-primary" id="btn-discord-start" onclick="OSA.startDiscordBot()">Start Bot</button>
-                                <button type="button" class="btn-danger" id="btn-discord-stop" onclick="OSA.stopDiscordBot()">Stop Bot</button>
-                            </div>
-                            <span id="discord-bot-message" class="settings-field-hint"></span>
                         </div>
-                    </div>
+                    </details>
+
+                    <details class="settings-advanced">
+                        <summary>Backup &amp; Restore</summary>
+                        <div class="settings-advanced-body">
+                        <div class="discord-settings-card">
+                            <div class="settings-group-title">Backup &amp; Restore</div>
+                            <p class="discord-card-desc">Export or import the full Discord bot config including bot tokens. The exported file contains secrets — store it securely.</p>
+                            <div class="discord-bot-actions" style="gap:8px;">
+                                <button type="button" class="btn-ghost" id="btn-discord-export" onclick="OSA.exportDiscordConfig()">Export Config</button>
+                                <button type="button" class="btn-ghost" id="btn-discord-import" onclick="OSA.triggerDiscordImport()">Import Config</button>
+                                <input type="file" id="discord-import-file" accept=".json,application/json" class="hidden" onchange="OSA.importDiscordConfig(event)" />
+                            </div>
+                            <span id="discord-import-message" class="settings-field-hint"></span>
+                        </div>
+                        </div>
+                    </details>
                 </div>
                 <div class="settings-pane" id="pane-voice">
                     <div class="settings-pane-header">
@@ -845,56 +881,61 @@
                             </label>
                         </div>
                         <input type="hidden" id="setting-tts-provider" value="browser">
-                        <div class="settings-field-row">
-                            <div class="settings-field flex-1">
-                                <label for="setting-voice-language">Language</label>
-                                <input type="text" id="setting-voice-language" placeholder="en" />
+                        <details class="settings-advanced">
+                            <summary>Advanced</summary>
+                            <div class="settings-advanced-body">
+                                <div class="settings-field-row">
+                                    <div class="settings-field flex-1">
+                                        <label for="setting-voice-language">Language</label>
+                                        <input type="text" id="setting-voice-language" placeholder="en" />
+                                    </div>
+                                    <div class="settings-field settings-field-narrow">
+                                        <label for="setting-voice-speed">Speed</label>
+                                        <input type="number" id="setting-voice-speed" step="0.1" min="0.5" max="2" placeholder="1.0" />
+                                    </div>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-auto-send">Auto-send Transcript</label>
+                                        <span class="toggle-desc">Automatically send the transcribed text as soon as voice input finishes instead of leaving it in the chat box for review.</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-auto-send">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-auto-speak">Auto-speak Responses</label>
+                                        <span class="toggle-desc">Automatically play assistant responses using the selected speech provider when voice is enabled.</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-auto-speak">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-silence-auto-stop">Stop on Silence</label>
+                                        <span class="toggle-desc">End Local Whisper recording automatically after a pause, so hands-free input does not need a second click.</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-silence-auto-stop">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label" for="setting-speak-tool-progress">Narrate Tool Progress</label>
+                                        <span class="toggle-desc">Speak each tool call as the agent works. Off by default: a long turn queues an utterance per tool, and the final answer cuts the queue short.</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-speak-tool-progress">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
                             </div>
-                            <div class="settings-field settings-field-narrow">
-                                <label for="setting-voice-speed">Speed</label>
-                                <input type="number" id="setting-voice-speed" step="0.1" min="0.5" max="2" placeholder="1.0" />
-                            </div>
-                        </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-auto-send">Auto-send Transcript</label>
-                                <span class="toggle-desc">Automatically send the transcribed text as soon as voice input finishes instead of leaving it in the chat box for review.</span>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-auto-send">
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-auto-speak">Auto-speak Responses</label>
-                                <span class="toggle-desc">Automatically play assistant responses using the selected speech provider when voice is enabled.</span>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-auto-speak">
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-silence-auto-stop">Stop on Silence</label>
-                                <span class="toggle-desc">End Local Whisper recording automatically after a pause, so hands-free input does not need a second click.</span>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-silence-auto-stop">
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-speak-tool-progress">Narrate Tool Progress</label>
-                                <span class="toggle-desc">Speak each tool call as the agent works. Off by default: a long turn queues an utterance per tool, and the final answer cuts the queue short.</span>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-speak-tool-progress">
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
+                        </details>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Voice Models</div>
@@ -937,11 +978,6 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="settings-field hidden" id="memory-file-field">
-                            <label for="setting-memory-file">Memory File</label>
-                            <input type="text" id="setting-memory-file" placeholder="~/.osagent/memories.json" />
-                            <span class="settings-field-hint">JSON file where memories are stored</span>
-                        </div>
                         <div class="settings-field">
                             <label for="setting-learning-mode">Learning Mode</label>
                             <select id="setting-learning-mode">
@@ -953,45 +989,54 @@
                         </div>
                     </div>
 
-                    <div class="settings-group">
-                        <div class="settings-group-title">Capture</div>
-                        <div class="settings-field">
-                            <label for="setting-memory-capture-mode">Memory Capture</label>
-                            <select id="setting-memory-capture-mode">
-                                <option value="off">Off</option>
-                                <option value="review">Review</option>
-                                <option value="auto">Auto</option>
-                            </select>
-                        </div>
-                        <div class="settings-field">
-                            <label for="setting-decision-capture-mode">Decision Capture</label>
-                            <select id="setting-decision-capture-mode">
-                                <option value="off">Off</option>
-                                <option value="review">Review</option>
-                                <option value="auto">Auto</option>
-                            </select>
-                            <span class="settings-field-hint">Natural-language decision detection. "Approved decision:" syntax always applies when enabled.</span>
-                        </div>
-                    </div>
-
-                    <div class="settings-group">
-                        <div class="settings-group-title">Decisions</div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label">Enable Decision Memory</label>
-                                <span class="toggle-desc">Capture durable choices like "Approved decision: key=value" and enforce them across sessions</span>
+                    <details class="settings-advanced">
+                        <summary>Advanced</summary>
+                        <div class="settings-advanced-body">
+                            <div class="settings-group">
+                                <div class="settings-group-title">Storage</div>
+                                <div class="settings-field hidden" id="memory-file-field">
+                                    <label for="setting-memory-file">Memory File</label>
+                                    <input type="text" id="setting-memory-file" placeholder="~/.osagent/memories.json" />
+                                    <span class="settings-field-hint">JSON file where memories are stored</span>
+                                </div>
+                                <div class="toggle-field">
+                                    <div class="toggle-info">
+                                        <label class="toggle-label">Enable Decision Memory</label>
+                                        <span class="toggle-desc">Capture durable choices like "Approved decision: key=value" and enforce them across sessions</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-decision-memory-enabled" onchange="OSA.onDecisionMemoryToggleChange()" />
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="settings-field hidden" id="decision-memory-file-field">
+                                    <label for="setting-decision-memory-file">Decision File</label>
+                                    <input type="text" id="setting-decision-memory-file" placeholder="~/.osagent/decision_memories.json" />
+                                    <span class="settings-field-hint">JSON file for durable decisions</span>
+                                </div>
                             </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-decision-memory-enabled" onchange="OSA.onDecisionMemoryToggleChange()" />
-                                <span class="toggle-slider"></span>
-                            </label>
+                            <div class="settings-group">
+                                <div class="settings-group-title">Capture</div>
+                                <div class="settings-field">
+                                    <label for="setting-memory-capture-mode">Memory Capture</label>
+                                    <select id="setting-memory-capture-mode">
+                                        <option value="off">Off</option>
+                                        <option value="review">Review</option>
+                                        <option value="auto">Auto</option>
+                                    </select>
+                                </div>
+                                <div class="settings-field">
+                                    <label for="setting-decision-capture-mode">Decision Capture</label>
+                                    <select id="setting-decision-capture-mode">
+                                        <option value="off">Off</option>
+                                        <option value="review">Review</option>
+                                        <option value="auto">Auto</option>
+                                    </select>
+                                    <span class="settings-field-hint">Natural-language decision detection. "Approved decision:" syntax always applies when enabled.</span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="settings-field hidden" id="decision-memory-file-field">
-                            <label for="setting-decision-memory-file">Decision File</label>
-                            <input type="text" id="setting-decision-memory-file" placeholder="~/.osagent/decision_memories.json" />
-                            <span class="settings-field-hint">JSON file for durable decisions</span>
-                        </div>
-                    </div>
+                    </details>
 
                     <div class="settings-group" id="memory-list-group">
                         <div class="settings-group-title settings-group-title-inline">
@@ -1111,6 +1156,9 @@
                             </div>
                         </div>
                         
+                        <details class="settings-advanced">
+                            <summary>Advanced</summary>
+                            <div class="settings-advanced-body">
                         <div id="custom-network-fields" class="hidden settings-block-spaced">
                             <div class="settings-field-row">
                                 <div class="settings-field flex-1">
@@ -1131,34 +1179,15 @@
                         <div id="network-restart-notice" class="settings-notice hidden">
                             Network settings require server restart to take effect.
                         </div>
-                    </div>
-                    
-                    <div class="settings-group">
-                        <div class="settings-group-title">Server Control</div>
-                        <button type="button" class="btn-warning" id="btn-restart-server" onclick="OSA.restartServer()">
-                            Restart Server
-                        </button>
-                        <div id="restart-success" class="settings-success hidden">Server restarting...</div>
-                    </div>
-                </div>
-                <div class="settings-pane" id="pane-experimental">
-                    <div class="settings-pane-header">
-                        <h2>Experimental</h2>
-                        <p class="settings-pane-desc">Enable or disable experimental features</p>
-                    </div>
-                    
-                    <div class="settings-group">
-                        <div class="settings-group-title">Features</div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label">Workflows</label>
-                                <span class="toggle-desc">Enable the visual workflow editor for chaining tasks</span>
+                                <div class="settings-group">
+                                    <div class="settings-group-title">Server Control</div>
+                                    <button type="button" class="btn-warning" id="btn-restart-server" onclick="OSA.restartServer()">
+                                        Restart Server
+                                    </button>
+                                    <div id="restart-success" class="settings-success hidden">Server restarting...</div>
+                                </div>
                             </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-experimental-workflows" />
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
+                        </details>
                     </div>
                 </div>
                 <div class="settings-pane" id="pane-updates">
@@ -1168,22 +1197,10 @@
                     </div>
                     
                     <div class="settings-group">
-                        <div class="settings-group-title">Version</div>
                         <div class="update-info-row">
-                            <span class="update-label">Current:</span>
+                            <span class="update-label">Current version:</span>
                             <span class="update-value" id="update-current-version">-</span>
                         </div>
-                        <div class="update-info-row">
-                            <span class="update-label">Channel:</span>
-                            <select id="update-channel-select" class="update-channel-select">
-                                <option value="stable">Stable</option>
-                                <option value="beta">Beta (includes prereleases)</option>
-                            </select>
-                        </div>
-                    </div>
-                    
-                    <div class="settings-group">
-                        <div class="settings-group-title">Status</div>
                         <div class="update-status-display" id="update-status-display">
                             <span class="update-status-text">Click "Check for Updates" to see if a new version is available.</span>
                         </div>
@@ -1191,10 +1208,6 @@
                             <span class="update-label">Latest:</span>
                             <span class="update-value" id="update-latest-version">-</span>
                         </div>
-                    </div>
-                    
-                    <div class="settings-group">
-                        <div class="settings-group-title">Actions</div>
                         <div class="update-actions">
                             <button class="btn-action" id="btn-check-update" onclick="OSA.checkForUpdates()">
                                 Check for Updates
@@ -1216,7 +1229,18 @@
                             <span class="progress-text" id="update-progress-text">0%</span>
                         </div>
                     </div>
-                    
+                    <details class="settings-advanced">
+                        <summary>Advanced</summary>
+                        <div class="settings-advanced-body">
+                            <div class="update-info-row">
+                                <span class="update-label">Channel:</span>
+                                <select id="update-channel-select" class="update-channel-select">
+                                    <option value="stable">Stable</option>
+                                    <option value="beta">Beta (includes prereleases)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </details>
                     <div class="update-release-notes hidden" id="update-release-notes">
                         <div class="settings-group-title">Release Notes</div>
                         <div class="release-notes-content" id="release-notes-content"></div>

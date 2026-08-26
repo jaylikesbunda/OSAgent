@@ -256,9 +256,10 @@
 }
 
 .settings-pane-header h2 {
-    font-family: var(--serif);
+    font-family: var(--sans);
     font-size: 20px;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: -0.01em;
     margin: 0 0 4px 0;
 }
 
@@ -351,12 +352,11 @@
 }
 
 .settings-group-title {
-    font-family: var(--serif);
-    font-size: 11px;
+    font-family: var(--sans);
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
     margin-bottom: 14px;
 }
 
@@ -364,6 +364,66 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+}
+
+/* ---- Advanced disclosures ---- */
+
+/* Native <details> disclosure for rarely-used controls. Collapsed content
+   stays in the DOM, so save logic that reads inputs by ID keeps working. */
+.settings-advanced {
+    margin-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.settings-advanced > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+    cursor: pointer;
+    list-style: none;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    user-select: none;
+    transition: color var(--transition-fast);
+}
+
+.settings-advanced > summary:hover {
+    color: var(--text-primary);
+}
+
+.settings-advanced > summary::-webkit-details-marker {
+    display: none;
+}
+
+.settings-advanced > summary::before {
+    content: '';
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    margin-right: 2px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform var(--transition-fast);
+}
+
+.settings-advanced[open] > summary::before {
+    transform: rotate(45deg);
+}
+
+.settings-advanced[open] > summary {
+    color: var(--text-primary);
+}
+
+.settings-advanced-body {
+    padding: 4px 0 16px;
+}
+
+/* Consecutive disclosures read as one clean list. */
+.settings-advanced + .settings-advanced {
+    margin-top: 0;
 }
 
 /* ---- Discord Settings ---- */

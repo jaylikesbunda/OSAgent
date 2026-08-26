@@ -180,6 +180,66 @@ OSA.getSessionSourceLabel = function(sourceKey) {
     return 'Web';
 };
 
+OSA.getSessionWorkspaceLabel = function(session) {
+    const wsId = session && session.metadata && session.metadata.workspace_id;
+    if (!wsId) return '';
+    const ws = OSA.getWorkspaceState();
+    const match = Array.isArray(ws.workspaces) && ws.workspaces.find(w => w.id === wsId);
+    return (match && (match.name || match.id)) || wsId;
+};
+
+OSA.formatSessionListDate = function(dateStr) {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '';
+    const diffMs = Date.now() - d.getTime();
+    const minute = 60000;
+    const hour = 3600000;
+    const day = 86400000;
+    if (diffMs < minute) return 'now';
+    if (diffMs < hour) return Math.floor(diffMs / minute) + 'm';
+    if (diffMs < day) return Math.floor(diffMs / hour) + 'h';
+    if (diffMs < 7 * day) return d.toLocaleDateString(undefined, { weekday: 'short' });
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+};
+
+// Collapsed subagent groups: persisted per parent session id.
+OSA._collapsedGroups = new Set();
+try {
+    OSA._collapsedGroups = new Set(JSON.parse(localStorage.getItem('osa.sidebar.collapsedGroups') || '[]'));
+} catch (_) {
+    OSA._collapsedGroups = new Set();
+}
+
+OSA.persistCollapsedGroups = function() {
+    try {
+        localStorage.setItem('osa.sidebar.collapsedGroups', JSON.stringify([...OSA._collapsedGroups]));
+    } catch (_) { /* storage unavailable */ }
+};
+
+OSA.setGroupCollapsed = function(parentId, collapsed) {
+    if (!parentId) return;
+    if (collapsed) {
+        OSA._collapsedGroups.add(parentId);
+    } else {
+        OSA._collapsedGroups.delete(parentId);
+    }
+    OSA.persistCollapsedGroups();
+
+    const group = document.querySelector(`.session-children[data-parent="${parentId}"]`);
+    if (group) group.classList.toggle('collapsed', collapsed);
+
+    const toggle = document.querySelector(`.session-item[data-session-id="${parentId}"] .session-group-toggle`);
+    if (toggle) toggle.classList.toggle('open', !collapsed);
+};
+
+OSA.toggleSessionGroup = function(parentId, ev) {
+    if (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+    }
+    OSA.setGroupCollapsed(parentId, !OSA._collapsedGroups.has(parentId));
+};
+
 OSA.checkAuthAndInit = async function() {
     try {
         const res = await fetch('/api/auth/status');
@@ -297,8 +357,10 @@ OSA.showApp = function() {
     
     OSA.initSidebarState();
     OSA.initTheme();
-    OSA.loadSessions();
-    OSA.loadWorkspaces();
+    // Load workspaces first so session rows can resolve workspace names on first paint.
+    OSA.loadWorkspaces().catch(() => {}).then(() => {
+        OSA.loadSessions();
+    });
     OSA.loadModel();
     OSA.startPermissionPolling();
     OSA.queueDeferredStartupTasks();
@@ -394,13 +456,27 @@ OSA.loadSessions = async function() {
             }
         });
 
-        const renderSession = (s, isChild, hasRunningChildren) => {
-            const indent = isChild ? 'padding-left: 24px;' : '';
+        // Prune stored collapse state for parents that no longer have children.
+        if (OSA._collapsedGroups.size > 0) {
+            let pruned = false;
+            for (const id of [...OSA._collapsedGroups]) {
+                if (!childMap.has(id)) {
+                    OSA._collapsedGroups.delete(id);
+                    pruned = true;
+                }
+            }
+            if (pruned) OSA.persistCollapsedGroups();
+        }
+
+        const renderSession = (s, isChild, hasRunningChildren, extraIndent, childCount) => {
+            const indent = isChild ? (extraIndent || '') : '';
             const childClass = isChild ? ' session-child' : '';
             const isActive = currentSession && currentSession.id === s.id;
             const displayName = OSA.getSessionDisplayName(s);
             const sourceKey = OSA.getSessionSourceKey(s);
             const sourceLabel = OSA.getSessionSourceLabel(sourceKey);
+            const workspaceLabel = OSA.getSessionWorkspaceLabel(s);
+            const dateLabel = OSA.formatSessionListDate(s.created_at);
             const isRunning = s.task_status === 'running' || hasRunningChildren;
             const iconHtml = isRunning
                 ? `
@@ -411,18 +487,29 @@ OSA.loadSessions = async function() {
                         <span class="session-running-core"></span>
                     </span>`
                 : (isChild ? 'A' : '#');
-            const iconStyle = isChild && !isRunning ? 'style="width:24px;height:24px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"' : '';
+            const iconStyle = isChild && !isRunning ? 'style="width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"' : '';
             const iconClass = isRunning ? ' session-icon-running' : '';
+            const badgeHtml = sourceKey !== 'web'
+                ? `<span class="session-source-badge source-${OSA.escapeHtml(sourceKey)}">${OSA.escapeHtml(sourceLabel)}</span>`
+                : '';
+            const groupToggleHtml = (!isChild && childCount > 0)
+                ? `
+                    <button class="session-group-toggle${OSA._collapsedGroups.has(s.id) ? '' : ' open'}" onclick="OSA.toggleSessionGroup('${s.id}', event)" title="Show/hide subagents" aria-label="Show/hide subagents">
+                        <span class="session-group-count">${childCount}</span>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>`
+                : '';
             return `
             <div class="session-item${childClass} ${isActive ? 'active' : ''}" data-session-id="${OSA.escapeHtml(s.id)}" data-session-source="${OSA.escapeHtml(sourceKey)}" onclick="OSA.selectSession('${s.id}')" style="${indent}">
                 <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}</div>
                 <div class="session-info">
                     <div class="session-name">${OSA.escapeHtml(displayName)}</div>
                     <div class="session-meta">
-                        <div class="session-date">${new Date(s.created_at).toLocaleDateString()}</div>
-                        <span class="session-source-badge source-${OSA.escapeHtml(sourceKey)}">${OSA.escapeHtml(sourceLabel)}</span>
+                        ${workspaceLabel ? `<span class="session-workspace" title="${OSA.escapeHtml(workspaceLabel)}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="session-workspace-name">${OSA.escapeHtml(workspaceLabel)}</span></span><span class="session-meta-sep">&middot;</span>` : ''}
+                        <span class="session-date" title="${new Date(s.created_at).toLocaleString()}">${OSA.escapeHtml(dateLabel)}</span>
+                        ${badgeHtml}
                     </div>
-                </div>
+                </div>${groupToggleHtml}
                 <div class="session-actions">
                     <button class="session-action-btn rename-btn" onclick="event.stopPropagation(); OSA.startRenameSession('${s.id}', this)" title="Rename">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -444,9 +531,9 @@ OSA.loadSessions = async function() {
         const renderSessionGroup = (s) => {
             const children = childMap.get(s.id);
             const hasRunningChildren = children && children.some(c => c.task_status === 'running');
-            let html = renderSession(s, false, hasRunningChildren);
+            let html = renderSession(s, false, hasRunningChildren, '', children ? children.length : 0);
             if (children && children.length > 0) {
-                html += '<div class="session-children">';
+                html += `<div class="session-children${OSA._collapsedGroups.has(s.id) ? ' collapsed' : ''}" data-parent="${OSA.escapeHtml(s.id)}">`;
                 children.forEach(c => {
                     html += renderSession(c, true, false);
                 });
@@ -461,7 +548,7 @@ OSA.loadSessions = async function() {
         if (orphanChildren.length > 0) {
             sessionsHtml += '<div class="session-children" style="margin-left:0;border-left:none;padding-left:0;">';
             orphanChildren.forEach(c => {
-                sessionsHtml += renderSession(c, true);
+                sessionsHtml += renderSession(c, true, false, 'padding-left: 14px;');
             });
             sessionsHtml += '</div>';
         }
@@ -916,6 +1003,13 @@ OSA.markSessionListSelection = function(sessionId) {
     document.querySelectorAll('.session-item').forEach(item => {
         item.classList.toggle('active', item.dataset.sessionId === sessionId);
     });
+
+    // If the selected session is a subagent inside a collapsed group, open it.
+    const selectedEl = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    const group = selectedEl ? selectedEl.closest('.session-children') : null;
+    if (group && group.dataset.parent && group.classList.contains('collapsed')) {
+        OSA.setGroupCollapsed(group.dataset.parent, false);
+    }
 };
 
 OSA.clearSessions = async function() {
@@ -1649,7 +1743,8 @@ OSA.filterSessions = function(query) {
     const childrenGroups = document.querySelectorAll('.session-children');
     const q = query.toLowerCase();
     const sourceFilter = OSA.getSessionSourceFilter ? OSA.getSessionSourceFilter() : 'all';
-    
+    const filtering = !!(q || sourceFilter !== 'all');
+
     const contentMatches = OSA._contentMatchIds;
 
     items.forEach(item => {
@@ -1661,16 +1756,22 @@ OSA.filterSessions = function(query) {
         item.style.display = ((matchesTitle || matchesContent) && matchesSource) ? '' : 'none';
     });
 
-    if (q || sourceFilter !== 'all') {
-        childrenGroups.forEach(group => {
-            const visibleChildren = group.querySelectorAll('.session-item:not([style*="display: none"])');
+    childrenGroups.forEach(group => {
+        if (!group.dataset.parent) return; // orphan group: no toggle state
+        const visibleChildren = group.querySelectorAll('.session-item:not([style*="display: none"])');
+        if (filtering) {
+            // While searching, force matching groups open regardless of stored state.
+            group.classList.remove('collapsed');
             group.style.display = visibleChildren.length > 0 ? '' : 'none';
-        });
-    } else {
-        childrenGroups.forEach(group => {
+        } else {
             group.style.display = '';
-        });
-    }
+            // Restore the user's stored collapsed/expanded state.
+            const collapsed = OSA._collapsedGroups.has(group.dataset.parent);
+            group.classList.toggle('collapsed', collapsed);
+        }
+        const toggle = document.querySelector(`.session-item[data-session-id="${group.dataset.parent}"] .session-group-toggle`);
+        if (toggle) toggle.classList.toggle('open', !group.classList.contains('collapsed'));
+    });
 };
 
 OSA.loadSessionBreadcrumb = async function(sessionId) {

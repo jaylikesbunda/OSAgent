@@ -49,6 +49,8 @@
     --radius-lg: 14px;
     --radius-xl: 18px;
 
+    --sidebar-width: 232px;
+
     --transition-fast: 0.15s ease;
     --transition-base: 0.2s ease;
     --transition-slow: 0.3s ease;

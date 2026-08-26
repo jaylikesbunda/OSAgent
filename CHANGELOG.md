@@ -1,5 +1,6 @@
-v0.4.7 changes:
+v0.5.0 changes:
 
+* Slimmed the sidebar with collapsible subagent groups and per-session workspace labels
 * Background subagents now wake the parent conversation automatically when they finish: results arrive as a continuation turn immediately if the agent is idle, or right after its current run and any queued messages finish, instead of waiting for your next message
 * Added `subagent_auto_resume`, `subagent_auto_resume_max_turns` (runaway-loop cap on consecutive background-driven turns), and `subagent_task_max_retries` config options
 * Failed subagent runs now retry at the task level with exponential backoff (30s → 10 min) on transient provider errors, resuming the same session so completed work is kept; the card shows "provider error — resuming (attempt n/m)"
@@ -21,6 +22,7 @@ v0.4.7 changes:
 * Added a `sessions` tool to list, read, and search past conversations, gated by a new `session_access` permission; compaction archives removed messages so they stay searchable
 * Code search no longer needs MeiliSearch — replaced with a batched-grep quick-context tool (no binary download, background server, or stale index)
 * Code search is now an always-loaded first-class tool, with prompt guidance to reach for it before grep on vague queries
+* Simplified the web settings UI: fewer tabs, rare options collapsed into Advanced sections
 
 v0.4.6 changes:
 

@@ -245,13 +245,6 @@ OSA.McpUI = {
                         <input id="mcp-f-url" value="${this.attr(e.url)}"
                                placeholder="https://example.com/mcp">
                     </div>
-
-                    <div class="settings-field">
-                        <label>Headers</label>
-                        <textarea id="mcp-f-headers" rows="3"
-                                  placeholder="Authorization=Bearer sk-...">${OSA.escapeHtml(e.headers)}</textarea>
-                        <span class="settings-field-hint">One <code>Key=Value</code> per line. Stored in your config file.</span>
-                    </div>
                 ` : `
                     <div class="settings-field">
                         <label>Command</label>
@@ -265,13 +258,6 @@ OSA.McpUI = {
                                placeholder="-y @modelcontextprotocol/server-filesystem ~/notes">
                         <span class="settings-field-hint">Space separated. Quote arguments containing spaces.</span>
                     </div>
-
-                    <div class="settings-field">
-                        <label>Environment</label>
-                        <textarea id="mcp-f-env" rows="3"
-                                  placeholder="API_KEY=...">${OSA.escapeHtml(e.env)}</textarea>
-                        <span class="settings-field-hint">One <code>KEY=value</code> per line.</span>
-                    </div>
                 `}
 
                 <div class="settings-field">
@@ -284,21 +270,42 @@ OSA.McpUI = {
                     </span>
                 </div>
 
-                <div class="settings-field">
-                    <label>Always load these tools <span class="settings-optional">(optional)</span></label>
-                    <input id="mcp-f-always" value="${this.attr(e.always_active)}"
-                           placeholder="create_issue, list_issues">
-                    <span class="settings-field-hint">
-                        Comma separated tool names, loaded at startup so the agent skips the search
-                        step. Each one costs context in every request — keep the list short.
-                    </span>
-                </div>
+                <details class="settings-advanced">
+                    <summary>Advanced</summary>
+                    <div class="settings-advanced-body">
+                        ${isHttp ? `
+                            <div class="settings-field">
+                                <label>Headers</label>
+                                <textarea id="mcp-f-headers" rows="3"
+                                          placeholder="Authorization=Bearer sk-...">${OSA.escapeHtml(e.headers)}</textarea>
+                                <span class="settings-field-hint">One <code>Key=Value</code> per line. Stored in your config file.</span>
+                            </div>
+                        ` : `
+                            <div class="settings-field">
+                                <label>Environment</label>
+                                <textarea id="mcp-f-env" rows="3"
+                                          placeholder="API_KEY=...">${OSA.escapeHtml(e.env)}</textarea>
+                                <span class="settings-field-hint">One <code>KEY=value</code> per line.</span>
+                            </div>
+                        `}
 
-                <div class="settings-field settings-field-narrow">
-                    <label>Timeout (seconds)</label>
-                    <input id="mcp-f-timeout" type="number" min="1" max="600"
-                           value="${e.timeout_seconds}">
-                </div>
+                        <div class="settings-field">
+                            <label>Always load these tools <span class="settings-optional">(optional)</span></label>
+                            <input id="mcp-f-always" value="${this.attr(e.always_active)}"
+                                   placeholder="create_issue, list_issues">
+                            <span class="settings-field-hint">
+                                Comma separated tool names, loaded at startup so the agent skips the search
+                                step. Each one costs context in every request — keep the list short.
+                            </span>
+                        </div>
+
+                        <div class="settings-field settings-field-narrow">
+                            <label>Timeout (seconds)</label>
+                            <input id="mcp-f-timeout" type="number" min="1" max="600"
+                                   value="${e.timeout_seconds}">
+                        </div>
+                    </div>
+                </details>
 
                 ${this.testResult ? this.renderTestResult() : ''}
 

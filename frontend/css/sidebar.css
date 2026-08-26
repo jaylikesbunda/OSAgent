@@ -1,5 +1,5 @@
 .sidebar {
-    width: 260px;
+    width: var(--sidebar-width, 232px);
     background: var(--bg-secondary);
     border-right: 1px solid var(--border);
     display: flex;
@@ -10,12 +10,12 @@
 }
 
 .sidebar.collapsed {
-    margin-left: -260px;
-    width: 260px;
+    margin-left: calc(-1 * var(--sidebar-width, 232px));
+    width: var(--sidebar-width, 232px);
 }
 
 .sidebar-header {
-    padding: 20px;
+    padding: 14px 14px 10px;
     border-bottom: 1px solid var(--border);
 }
 
@@ -49,13 +49,13 @@
 
 .new-chat-btn {
     width: 100%;
-    margin-top: 16px;
-    padding: 10px 16px;
+    margin-top: 10px;
+    padding: 7px 12px;
     background: transparent;
     border: 1px solid var(--border);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: 12.5px;
     cursor: pointer;
     transition: all 0.2s ease;
     display: flex;
@@ -68,33 +68,15 @@
     border-color: var(--text-primary);
 }
 
-.clear-btn {
-    background: transparent;
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    padding: 6px 10px;
-    border-radius: 8px;
-    font-size: 11px;
-    cursor: pointer;
-    margin: 8px;
-    width: calc(100% - 16px);
-    transition: all 0.2s ease;
-}
-
-.clear-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--text-primary);
-}
-
 .sessions-list {
     flex: 1;
     overflow-y: auto;
-    padding: 8px;
+    padding: 4px 6px 8px;
     min-height: 0;
 }
 
 .session-search {
-    padding: 0 0 8px;
+    padding: 4px 2px 8px;
     position: sticky;
     top: 0;
     z-index: 1;
@@ -103,7 +85,7 @@
 
 .session-search input {
     width: 100%;
-    padding: 8px 12px;
+    padding: 6px 10px;
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -124,8 +106,8 @@
 
 .session-search select {
     width: 100%;
-    margin-top: 8px;
-    padding: 7px 10px;
+    margin-top: 6px;
+    padding: 5px 8px;
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -140,14 +122,15 @@
 }
 
 .session-item {
-    padding: 12px 16px;
+    padding: 7px 8px;
     border-radius: 8px;
     cursor: pointer;
     transition: all 0.2s ease;
     margin-bottom: 2px;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 9px;
+    position: relative;
 }
 
 .session-item:hover {
@@ -156,7 +139,18 @@
 
 .session-item.active {
     background: var(--accent-dim);
-    border: 1px solid var(--text-primary);
+    box-shadow: inset 0 0 0 1px var(--border-hover);
+}
+
+.session-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--accent);
 }
 
 .session-actions {
@@ -218,16 +212,17 @@
 }
 
 .session-icon {
-    width: 32px;
-    height: 32px;
+    width: 26px;
+    height: 26px;
     background: var(--bg-tertiary);
     border-radius: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-secondary);
     font-weight: 600;
+    flex-shrink: 0;
 }
 
 .session-info {
@@ -244,22 +239,50 @@
     text-overflow: ellipsis;
 }
 
-.session-date {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-top: 2px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 .session-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-top: 2px;
+    gap: 6px;
+    margin-top: 1px;
     min-width: 0;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+}
+
+.session-workspace {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 110px;
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    line-height: 1;
+}
+
+.session-workspace svg {
+    flex-shrink: 0;
+    opacity: 0.75;
+}
+
+.session-workspace-name {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.session-meta-sep {
+    color: var(--text-muted);
+    opacity: 0.6;
+    font-size: 10px;
+    flex-shrink: 0;
+}
+
+.session-date {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .session-source-badge {
@@ -300,13 +323,60 @@
 }
 
 .session-children {
-    margin-left: 12px;
+    margin-left: 10px;
     border-left: 1px solid var(--border);
-    padding-left: 4px;
+    padding-left: 2px;
+}
+
+.session-children.collapsed {
+    display: none;
 }
 
 .session-child {
     position: relative;
+}
+
+.session-group-toggle {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 3px 2px;
+    margin-left: auto;
+    flex-shrink: 0;
+    border-radius: 4px;
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.session-group-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.session-group-count {
+    font-size: 9.5px;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.session-item.active .session-group-count {
+    background: rgba(var(--accent-rgb), 0.25);
+    color: var(--text-primary);
+}
+
+.session-group-toggle svg {
+    transition: transform 0.15s ease;
+}
+
+.session-group-toggle:not(.open) svg {
+    transform: rotate(-90deg);
 }
 
 .session-child::before {
@@ -419,9 +489,16 @@
     border-top: 1px solid var(--border);
 }
 
+.sidebar-footer-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+}
+
 .sidebar-jobs-btn {
     width: 100%;
-    padding: 8px 12px;
+    min-width: 0;
+    padding: 7px 10px;
     background: transparent;
     color: var(--text-muted);
     border: 1px solid var(--border);
@@ -430,6 +507,7 @@
     cursor: pointer;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
     transition: all 0.2s ease;
 }
@@ -437,6 +515,26 @@
 .sidebar-jobs-btn:hover {
     color: var(--text-primary);
     border-color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.sidebar-footer-icon-btn {
+    width: 32px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.sidebar-footer-icon-btn:hover {
+    color: #e53935;
+    border-color: rgba(229, 57, 53, 0.45);
     background: var(--bg-hover);
 }
 
