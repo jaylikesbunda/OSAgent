@@ -161,6 +161,10 @@ impl SubagentManager {
             "list_files",
             "grep",
             "glob",
+            // Explore agents need shell access for read-only repository
+            // inspection such as git status, diff, log, and show. Bash still
+            // applies its command safety checks and blocks mutations.
+            "bash",
             "web_fetch",
             "web_search",
             "reflect",
@@ -1090,8 +1094,19 @@ impl SubagentManager {
             .filter(|t| allowed_tools.contains(&t.function.name))
             .collect::<Vec<_>>();
 
-        Self::update_context_tracking(&mut session, &session_id, &provider, &event_bus, &storage)
-            .await?;
+        let tool_schema_tokens = serde_json::to_string(&tools)
+            .map(|schemas| schemas.chars().count().div_ceil(4))
+            .unwrap_or(0);
+        Self::update_context_tracking(
+            &mut session,
+            &session_id,
+            &parent_session_id,
+            &provider,
+            &event_bus,
+            &storage,
+            tool_schema_tokens,
+        )
+        .await?;
 
         let start = Instant::now();
         let response = tokio::select! {
@@ -1124,6 +1139,7 @@ impl SubagentManager {
                     cached_read: usage.cached_read,
                     cached_write: usage.cached_write,
                     reasoning: usage.reasoning,
+                    cache_reason: None,
                 });
             }
         }
@@ -1401,6 +1417,17 @@ impl SubagentManager {
             .any(|entry| entry.value().parent_session_id == parent_session_id)
     }
 
+    /// Return the persisted task record and live-running state for a child
+    /// session. This is intentionally read-only so the parent agent can check
+    /// on a background task before deciding whether to resume it.
+    pub fn get_subagent_status(&self, session_id: &str) -> Result<Option<(SubagentTask, bool)>> {
+        let task = self.storage.get_subagent_task_by_session(session_id)?;
+        Ok(task.map(|task| {
+            let running = self.active_subagents.contains_key(session_id);
+            (task, running)
+        }))
+    }
+
     pub async fn wait_for_subagent(
         &self,
         session_id: &str,
@@ -1415,11 +1442,27 @@ impl SubagentManager {
                 // Sender dropped without delivering: fall through to storage.
                 Ok(Err(_)) => {}
                 Err(_) => {
-                    let timeout_message = format!("Subagent timed out after {}s", timeout_secs);
+                    // Preserve the work already written to the child session.
+                    // A timeout is an interruption, not a reason to replace
+                    // the useful partial result with a bare error string.
+                    let partial_result = Self::extract_result(&self.storage, session_id)
+                        .await
+                        .unwrap_or_else(|_| "No partial result available".to_string());
+                    let tool_count = self
+                        .storage
+                        .get_subagent_task_by_session(session_id)
+                        .ok()
+                        .flatten()
+                        .map(|task| task.tool_count)
+                        .unwrap_or(0);
+                    let timeout_message = format!(
+                        "Subagent timed out after {}s. The session is resumable with task_id=\"{}\".\n\nPartial result:\n{}",
+                        timeout_secs, session_id, partial_result
+                    );
                     let _ = self
                         .stop_subagent(session_id, "timeout", timeout_message.clone())
                         .await;
-                    return Ok(("timeout".to_string(), timeout_message, 0));
+                    return Ok(("timeout".to_string(), timeout_message, tool_count));
                 }
             }
         }
@@ -1494,13 +1537,20 @@ impl SubagentManager {
     async fn update_context_tracking(
         session: &mut Session,
         session_id: &str,
+        parent_session_id: &str,
         provider: &Arc<dyn Provider>,
         event_bus: &Arc<EventBus>,
         storage: &Arc<SqliteStorage>,
+        tool_schema_tokens: usize,
     ) -> Result<()> {
         let context_window = provider.model_context_window().await;
         if let Some(window) = context_window {
-            let estimated_tokens: usize = session.messages.iter().map(Self::message_tokens).sum();
+            let estimated_tokens: usize = session
+                .messages
+                .iter()
+                .map(Self::message_tokens)
+                .sum::<usize>()
+                .saturating_add(tool_schema_tokens);
             let output_limit = 8192usize;
             let reserved_output = std::cmp::min(output_limit, 8192);
             let usable = window.saturating_sub(reserved_output);
@@ -1511,20 +1561,27 @@ impl SubagentManager {
                 context_window: window,
                 budget_tokens: budget,
                 actual_usage: None,
+                cache_provider: None,
+                cache_model: None,
+                cache_tools_fingerprint: None,
                 tool_usage: Vec::new(),
                 compaction_stats: CompactionStats::default(),
             });
             let _ = storage.update_session(session);
 
             event_bus.emit(AgentEvent::ContextUpdate {
-                session_id: session_id.to_string(),
+                // Subagent lifecycle events are published on the parent
+                // stream. Do the same for context updates so the parent's
+                // subagent card receives live ring updates.
+                session_id: parent_session_id.to_string(),
                 sequence: 0,
                 context_window: window,
                 estimated_tokens,
                 budget_tokens: budget,
-                tool_schema_tokens: 0,
+                tool_schema_tokens,
                 condensed: false,
                 actual_usage: None,
+                subagent_session_id: Some(session_id.to_string()),
                 timestamp: SystemTime::now(),
             });
         }
@@ -1549,5 +1606,11 @@ mod tests {
         // overflowing or growing without bound.
         assert_eq!(SubagentManager::task_retry_delay_secs(12), 600);
         assert_eq!(SubagentManager::task_retry_delay_secs(u32::MAX), 600);
+    }
+
+    #[test]
+    fn explore_agents_can_use_read_only_bash_for_repository_inspection() {
+        let tools = SubagentManager::get_allowed_tools_for_agent_type("explore");
+        assert!(tools.iter().any(|tool| tool == "bash"));
     }
 }

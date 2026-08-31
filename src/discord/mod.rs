@@ -178,7 +178,7 @@ impl Handler {
                 .any(|role_id| discord.trusted_roles.contains(role_id));
         if trusted_identity
             && (guild_id.is_none() && discord.allow_dms && discord.trusted_users.contains(&user_id)
-                || !discord.trusted_guilds.is_empty()
+                || guild_id.is_some()
                     && in_location(&discord.trusted_guilds, &discord.trusted_channels))
         {
             return Some(AccessLevel::Trusted);
@@ -205,13 +205,6 @@ impl Handler {
             && (discord.allowed_channels.is_empty()
                 || discord.allowed_channels.contains(&channel_id)))
         .then_some(AccessLevel::Community)
-    }
-
-    pub(super) async fn has_explicit_trusted_user(&self, user_id: u64) -> bool {
-        self.agent
-            .discord_config()
-            .await
-            .is_some_and(|discord| discord.trusted_users.contains(&user_id))
     }
 
     async fn is_authorized(
@@ -1248,6 +1241,7 @@ impl EventHandler for Handler {
                 session_id,
                 user_id,
                 prompt,
+                community: access == AccessLevel::Community,
             },
         )
         .await;
@@ -1629,6 +1623,39 @@ mod tests {
 
         assert_eq!(
             Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn trusted_user_can_use_controls_without_trusted_location_lists() {
+        let discord = DiscordConfig {
+            community_mode: true,
+            trusted_users: vec![7],
+            ..DiscordConfig::default()
+        };
+
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
+            Some(AccessLevel::Trusted)
+        );
+    }
+
+    #[test]
+    fn trusted_location_lists_still_restrict_trusted_access() {
+        let discord = DiscordConfig {
+            community_mode: true,
+            trusted_users: vec![7],
+            trusted_guilds: vec![42],
+            ..DiscordConfig::default()
+        };
+
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
+            Some(AccessLevel::Trusted)
+        );
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(43), 99, &[]),
             None
         );
     }

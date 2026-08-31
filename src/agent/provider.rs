@@ -478,6 +478,30 @@ impl OpenAICompatibleProvider {
         self.agent_settings.read().await.clone()
     }
 
+    /// Keep OpenRouter agent turns on the same upstream endpoint and opt in to
+    /// automatic prompt caching for Claude models. Other providers either use
+    /// their own implicit cache or do not support these OpenRouter fields.
+    fn apply_prompt_cache_options(
+        &self,
+        request_body: &mut serde_json::Value,
+        provider_type: &str,
+        model: &str,
+        session_id: Option<&str>,
+        enabled: bool,
+    ) {
+        if provider_type != "openrouter" || !enabled {
+            return;
+        }
+
+        if let Some(session_id) = session_id {
+            request_body["session_id"] = serde_json::json!(session_id);
+        }
+
+        if model.to_lowercase().contains("claude") {
+            request_body["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+        }
+    }
+
     /// Generic effort→budget fallback for models with no published budget
     /// window. Deliberately coarse — real ceilings always come from metadata.
     fn fallback_thinking_budget(level: &str) -> i64 {
@@ -896,6 +920,44 @@ impl OpenAICompatibleProvider {
     fn parse_response_usage(response_json: &serde_json::Value) -> Option<TokenUsage> {
         let usage = response_json.get("usage")?;
 
+        let cached_read = usage
+            .get("cached_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+            })
+            .or_else(|| {
+                usage
+                    .get("input_tokens_details")
+                    .and_then(|v| v.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+            })
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|v| v.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+            })
+            .map(|v| v as usize);
+        let cached_write = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                usage
+                    .get("input_tokens_details")
+                    .and_then(|v| v.get("cache_creation_tokens"))
+                    .and_then(|v| v.as_u64())
+            })
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|v| v.get("cache_write_tokens"))
+                    .and_then(|v| v.as_u64())
+            })
+            .map(|v| v as usize);
+
         let input = usage
             .get("input_tokens")
             .and_then(|v| v.as_u64())
@@ -915,12 +977,8 @@ impl OpenAICompatibleProvider {
             input,
             output,
             total,
-            cached_read: usage
-                .get("input_tokens_details")
-                .and_then(|v| v.get("cached_tokens"))
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize),
-            cached_write: None,
+            cached_read,
+            cached_write,
             reasoning: usage
                 .get("output_tokens_details")
                 .and_then(|v| v.get("reasoning_tokens"))
@@ -968,8 +1026,28 @@ impl OpenAICompatibleProvider {
             cached_read: usage_obj
                 .get("cached_tokens")
                 .and_then(|v| v.as_u64())
+                .or_else(|| {
+                    usage_obj
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64())
+                })
+                .or_else(|| {
+                    usage_obj
+                        .get("prompt_tokens_details")
+                        .and_then(|v| v.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                })
                 .map(|v| v as usize),
-            cached_write: None,
+            cached_write: usage_obj
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .or_else(|| {
+                    usage_obj
+                        .get("prompt_tokens_details")
+                        .and_then(|v| v.get("cache_write_tokens"))
+                        .and_then(|v| v.as_u64())
+                })
+                .map(|v| v as usize),
             reasoning: usage_obj
                 .get("completion_tokens_details")
                 .and_then(|v| v.get("reasoning_tokens"))
@@ -1799,7 +1877,7 @@ impl OpenAICompatibleProvider {
         let mut compressed_summary: Option<String> = None;
 
         for attempt in 1..=MAX_RETRIES {
-            match self.do_complete(&current_messages, tools).await {
+            match self.do_complete(session_id, &current_messages, tools).await {
                 Ok(mut response) => {
                     response.retry_count = attempt.saturating_sub(1);
                     response.context_compressed = context_compressed;
@@ -1866,7 +1944,10 @@ impl OpenAICompatibleProvider {
         let mut current_messages = messages.to_vec();
 
         for attempt in 1..=MAX_RETRIES {
-            match self.do_complete_stream(&current_messages, tools).await {
+            match self
+                .do_complete_stream(session_id, &current_messages, tools)
+                .await
+            {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     if e.is_context_limit() && attempt < MAX_RETRIES {
@@ -1910,6 +1991,7 @@ impl OpenAICompatibleProvider {
 
     async fn do_complete_stream(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
@@ -1967,6 +2049,13 @@ impl OpenAICompatibleProvider {
             "stream": true,
             "stream_options": { "include_usage": true },
         });
+        self.apply_prompt_cache_options(
+            &mut request_body,
+            &config.provider_type,
+            &model,
+            session_id,
+            generation_settings.prompt_cache_enabled,
+        );
         if let Some(options) = provider_options.as_object() {
             for (key, value) in options {
                 request_body[key] = value.clone();
@@ -2094,6 +2183,7 @@ impl OpenAICompatibleProvider {
 
     async fn do_complete(
         &self,
+        session_id: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse> {
@@ -2121,6 +2211,13 @@ impl OpenAICompatibleProvider {
                 "input": self.build_responses_input(&non_system_messages),
             }),
         };
+        self.apply_prompt_cache_options(
+            &mut request_body,
+            &config.provider_type,
+            &model,
+            session_id,
+            generation_settings.prompt_cache_enabled,
+        );
         if mode == RequestMode::Responses {
             if let Some(instructions) = Self::responses_instructions(&transformed_messages) {
                 request_body["instructions"] = serde_json::json!(instructions);
@@ -2451,7 +2548,11 @@ mod tests {
             "usage": {
                 "prompt_tokens": 10,
                 "completion_tokens": 5,
-                "total_tokens": 15
+                "total_tokens": 15,
+                "prompt_tokens_details": {
+                    "cached_tokens": 6,
+                    "cache_write_tokens": 4
+                }
             }
         });
 
@@ -2459,7 +2560,27 @@ mod tests {
         assert_eq!(parsed.finish_reason, "tool_calls");
         assert_eq!(parsed.tool_calls.as_ref().map(|x| x.len()), Some(1));
         assert_eq!(parsed.usage.as_ref().map(|x| x.total), Some(15));
+        assert_eq!(parsed.usage.as_ref().and_then(|x| x.cached_read), Some(6));
+        assert_eq!(parsed.usage.as_ref().and_then(|x| x.cached_write), Some(4));
         assert!(parsed.thinking.is_none());
+    }
+
+    #[test]
+    fn parses_anthropic_cache_usage_from_responses_shape() {
+        let payload = serde_json::json!({
+            "status": "completed",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 8,
+                "cache_read_input_tokens": 75,
+                "cache_creation_input_tokens": 25
+            }
+        });
+
+        let parsed = OpenAICompatibleProvider::parse_responses_response(&payload);
+        let usage = parsed.usage.expect("usage should be present");
+        assert_eq!(usage.cached_read, Some(75));
+        assert_eq!(usage.cached_write, Some(25));
     }
 
     #[test]

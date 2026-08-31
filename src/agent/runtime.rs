@@ -38,6 +38,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::{future::join_all, StreamExt};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -1340,6 +1341,16 @@ impl AgentRuntime {
         let mut total_input_tokens: usize = 0;
         let mut total_output_tokens: usize = 0;
         let mut total_tokens: usize = 0;
+        let mut total_cached_read_tokens: usize = 0;
+        let mut total_cached_write_tokens: usize = 0;
+        let mut cache_read_reported = false;
+        let mut cache_write_reported = false;
+        let mut cache_reasons: Vec<String> = Vec::new();
+        let mut cache_reason_hint = "unknown".to_string();
+        // `usage` on ResponseComplete is the final provider request. Keep the
+        // aggregate separately so tool-heavy turns do not make the displayed
+        // final-request cache rate look artificially low.
+        let mut last_request_usage: Option<EventTokenUsage> = None;
 
         loop {
             iteration += 1;
@@ -1578,18 +1589,56 @@ impl AgentRuntime {
                 let input_limit = model_limit.as_ref().and_then(|l| l.input);
                 let output_limit = model_limit.as_ref().map(|l| l.output).unwrap_or(8192);
 
+                // Message token usage is the provider usage for the request that
+                // produced that message. It is cumulative across the session and
+                // must not be used as the size of the current request context.
+                // Use the current serialized messages for the preflight estimate;
+                // provider-reported usage remains available separately below for
+                // cumulative billing/usage totals.
                 let estimated_pre_tokens: usize =
                     api_messages.iter().map(Self::message_tokens).sum();
-                let actual_pre_tokens = Self::session_actual_tokens(&api_messages);
                 let tool_schema_tokens = serde_json::to_string(&tools)
                     .map(|schemas| schemas.chars().count().div_ceil(4))
                     .unwrap_or(0);
-                let message_pre_tokens = if actual_pre_tokens > 0 {
-                    actual_pre_tokens
+                let pre_tokens = estimated_pre_tokens.saturating_add(tool_schema_tokens);
+
+                let tools_fingerprint = Self::fingerprint_tools(&tools);
+                let previous_context = session.context_state.as_ref();
+                if previous_context
+                    .and_then(|state| state.actual_usage.as_ref())
+                    .is_none()
+                    && !session
+                        .messages
+                        .iter()
+                        .any(|message| message.tokens.is_some())
+                {
+                    cache_reason_hint = "first_request".to_string();
                 } else {
-                    estimated_pre_tokens
-                };
-                let pre_tokens = message_pre_tokens.saturating_add(tool_schema_tokens);
+                    let mut changes = Vec::new();
+                    if previous_context
+                        .and_then(|state| state.cache_provider.as_deref())
+                        .is_some_and(|previous| previous != context_provider_type)
+                    {
+                        changes.push("provider_changed");
+                    }
+                    if previous_context
+                        .and_then(|state| state.cache_model.as_deref())
+                        .is_some_and(|previous| previous != context_model)
+                    {
+                        changes.push("model_changed");
+                    }
+                    if previous_context
+                        .and_then(|state| state.cache_tools_fingerprint)
+                        .is_some_and(|previous| previous != tools_fingerprint)
+                    {
+                        changes.push("tools_changed");
+                    }
+                    cache_reason_hint = if changes.is_empty() {
+                        "normal_miss".to_string()
+                    } else {
+                        changes.join("+")
+                    };
+                }
 
                 let reserved_output = std::cmp::min(output_limit, 8192);
                 let usable = input_limit.unwrap_or(window.saturating_sub(reserved_output));
@@ -1651,6 +1700,7 @@ impl AgentRuntime {
                 );
                 let condensed = condensed_messages.len() != api_messages.len();
                 if condensed {
+                    cache_reason_hint = "compacted".to_string();
                     api_messages = condensed_messages;
                 }
                 let post_tokens: usize = api_messages
@@ -1702,6 +1752,7 @@ impl AgentRuntime {
                             } else {
                                 None
                             },
+                            cache_reason: None,
                         })
                     } else {
                         None
@@ -1717,6 +1768,7 @@ impl AgentRuntime {
                     tool_schema_tokens,
                     condensed,
                     actual_usage: actual_usage.clone(),
+                    subagent_session_id: None,
                     timestamp: SystemTime::now(),
                 });
 
@@ -1731,7 +1783,11 @@ impl AgentRuntime {
                         cached_read: u.cached_read,
                         cached_write: u.cached_write,
                         reasoning: u.reasoning,
+                        cache_reason: None,
                     }),
+                    cache_provider: Some(context_provider_type.clone()),
+                    cache_model: Some(context_model.clone()),
+                    cache_tools_fingerprint: Some(tools_fingerprint),
                     tool_usage: session
                         .context_state
                         .as_ref()
@@ -1926,6 +1982,7 @@ impl AgentRuntime {
                                 cached_read: usage.cached_read,
                                 cached_write: usage.cached_write,
                                 reasoning: usage.reasoning,
+                                cache_reason: None,
                             });
                         }
 
@@ -1959,6 +2016,43 @@ impl AgentRuntime {
                 "process_message: Provider response received - content={}, tool_calls={:?}",
                 response.content.as_ref().map(|c| c.len()).unwrap_or(0),
                 response.tool_calls.as_ref().map(|t| t.len())
+            );
+
+            let response_cache_reason = response
+                .usage
+                .as_ref()
+                .map(|usage| {
+                    if usage.cached_read.is_some_and(|cached| cached > 0) {
+                        "hit".to_string()
+                    } else if response.context_compressed || cache_reason_hint == "compacted" {
+                        "compacted".to_string()
+                    } else if usage.cached_read.is_some() {
+                        cache_reason_hint.clone()
+                    } else {
+                        "unreported".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "unreported".to_string());
+            cache_reasons.push(response_cache_reason.clone());
+            last_request_usage = response.usage.as_ref().map(|usage| EventTokenUsage {
+                input: usage.input,
+                output: usage.output,
+                total: usage.total,
+                cached_read: usage.cached_read,
+                cached_write: usage.cached_write,
+                reasoning: usage.reasoning,
+                cache_reason: Some(response_cache_reason.clone()),
+            });
+            info!(
+                "Session {} cache result: {} (input={}, cached_read={:?})",
+                session_id,
+                response_cache_reason,
+                response
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.input)
+                    .unwrap_or(0),
+                response.usage.as_ref().and_then(|usage| usage.cached_read)
             );
 
             if response.retry_count > 0 && response.context_compressed {
@@ -2060,10 +2154,19 @@ impl AgentRuntime {
                             cached_read: usage.cached_read,
                             cached_write: usage.cached_write,
                             reasoning: usage.reasoning,
+                            cache_reason: Some(response_cache_reason.clone()),
                         });
                         total_input_tokens += usage.input;
                         total_output_tokens += usage.output;
                         total_tokens += usage.total;
+                        if let Some(cached_read) = usage.cached_read {
+                            total_cached_read_tokens += cached_read;
+                            cache_read_reported = true;
+                        }
+                        if let Some(cached_write) = usage.cached_write {
+                            total_cached_write_tokens += cached_write;
+                            cache_write_reported = true;
+                        }
                     }
                 }
                 self.session_manager.update_session(&session).await?;
@@ -2087,10 +2190,19 @@ impl AgentRuntime {
                         cached_read: usage.cached_read,
                         cached_write: usage.cached_write,
                         reasoning: usage.reasoning,
+                        cache_reason: Some(response_cache_reason.clone()),
                     });
                     total_input_tokens += usage.input;
                     total_output_tokens += usage.output;
                     total_tokens += usage.total;
+                    if let Some(cached_read) = usage.cached_read {
+                        total_cached_read_tokens += cached_read;
+                        cache_read_reported = true;
+                    }
+                    if let Some(cached_write) = usage.cached_write {
+                        total_cached_write_tokens += cached_write;
+                        cache_write_reported = true;
+                    }
                 }
                 session.messages.push(assistant_message);
                 self.session_manager.update_session(&session).await?;
@@ -2910,14 +3022,16 @@ impl AgentRuntime {
                     session_id: session_id.to_string(),
                     sequence: 0,
                     timestamp: SystemTime::now(),
-                    usage: if total_tokens > 0 {
+                    usage: last_request_usage.clone(),
+                    turn_usage: if total_tokens > 0 {
                         Some(EventTokenUsage {
                             input: total_input_tokens,
                             output: total_output_tokens,
                             total: total_tokens,
-                            cached_read: None,
-                            cached_write: None,
+                            cached_read: cache_read_reported.then_some(total_cached_read_tokens),
+                            cached_write: cache_write_reported.then_some(total_cached_write_tokens),
                             reasoning: None,
+                            cache_reason: Self::aggregate_cache_reason(&cache_reasons),
                         })
                     } else {
                         None
@@ -3062,14 +3176,16 @@ impl AgentRuntime {
                 session_id: session_id.to_string(),
                 sequence: 0,
                 timestamp: SystemTime::now(),
-                usage: if total_tokens > 0 {
+                usage: last_request_usage,
+                turn_usage: if total_tokens > 0 {
                     Some(EventTokenUsage {
                         input: total_input_tokens,
                         output: total_output_tokens,
                         total: total_tokens,
-                        cached_read: None,
-                        cached_write: None,
+                        cached_read: cache_read_reported.then_some(total_cached_read_tokens),
+                        cached_write: cache_write_reported.then_some(total_cached_write_tokens),
                         reasoning: None,
+                        cache_reason: Self::aggregate_cache_reason(&cache_reasons),
                     })
                 } else {
                     None
@@ -4879,15 +4995,22 @@ impl AgentRuntime {
         total
     }
 
-    fn message_actual_tokens(message: &Message) -> Option<usize> {
-        message.tokens.as_ref().map(|t| t.total)
+    fn fingerprint_tools<T: serde::Serialize>(tools: &T) -> u64 {
+        let serialized = serde_json::to_string(tools).unwrap_or_default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        serialized.hash(&mut hasher);
+        hasher.finish()
     }
 
-    fn session_actual_tokens(messages: &[Message]) -> usize {
-        messages
-            .iter()
-            .filter_map(Self::message_actual_tokens)
-            .sum()
+    fn aggregate_cache_reason(reasons: &[String]) -> Option<String> {
+        let mut unique = reasons.iter().collect::<Vec<_>>();
+        unique.sort();
+        unique.dedup();
+        match unique.as_slice() {
+            [] => None,
+            [reason] => Some((*reason).clone()),
+            _ => Some("mixed".to_string()),
+        }
     }
 
     fn condense_messages(messages: &[Message], context_window: usize) -> Vec<Message> {
@@ -5028,6 +5151,49 @@ impl AgentRuntime {
 
     pub async fn cancel_subagent(&self, session_id: &str) -> Result<bool> {
         self.subagent_manager.cancel_subagent(session_id).await
+    }
+
+    /// Resume a child session from the web UI or another control surface.
+    /// The child keeps its complete message history; only the continuation
+    /// prompt is appended and a new task record is created for the run.
+    pub async fn resume_subagent(
+        &self,
+        session_id: &str,
+        prompt: Option<String>,
+        background: bool,
+    ) -> Result<String> {
+        let session = self
+            .storage
+            .get_session(session_id)?
+            .ok_or_else(|| OSAgentError::Session("Subagent session not found".to_string()))?;
+        let parent_session_id = session.parent_id.clone().ok_or_else(|| {
+            OSAgentError::Session(
+                "Session is not a subagent and cannot be resumed here".to_string(),
+            )
+        })?;
+        let task = self
+            .storage
+            .get_subagent_task_by_session(session_id)?
+            .ok_or_else(|| OSAgentError::Session("Subagent task not found".to_string()))?;
+        let continuation = prompt
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "Continue the previous task from the existing session history. Original task:\n{}",
+                    task.prompt
+                )
+            });
+
+        self.subagent_manager
+            .resume_subagent(
+                parent_session_id,
+                session_id.to_string(),
+                task.description,
+                continuation,
+                session.agent_type,
+                background,
+            )
+            .await
     }
 
     pub async fn cleanup_completed_subagents(&self, days: i64) -> Result<usize> {

@@ -3,9 +3,9 @@ window.OSA = window.OSA || {};
 OSA.getContextRingMetrics = function(contextState) {
     if (!contextState) return null;
 
-    const used = (contextState.actual_usage && contextState.actual_usage.total > 0)
-        ? contextState.actual_usage.total
-        : (contextState.estimated_tokens || 0);
+    // actual_usage is cumulative session usage, not the size of the current
+    // context. The ring must use the current-request estimate instead.
+    const used = contextState.estimated_tokens || 0;
     const window = contextState.context_window || 1;
     const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
     const circumference = 97.4;
@@ -220,10 +220,13 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'context_update':
-            OSA.updateContextStatus(event);
             if (event.subagent_session_id) {
+                // This is a child update delivered on the parent's event
+                // stream. Do not overwrite the parent's header ring.
                 OSA.tmodelSubagentContextUpdate(event);
                 OSA.updateSubagentContextRing(event.subagent_session_id, event);
+            } else {
+                OSA.updateContextStatus(event);
             }
             break;
 
@@ -1306,6 +1309,39 @@ OSA.cancelSubagent = async function(subagentId) {
         }
     } catch (err) {
         console.error('Failed to cancel subagent:', err);
+    }
+};
+
+OSA.resumeSubagent = async function(subagentId) {
+    const resumeBtn = document.getElementById(`subagent-resume-${subagentId}`);
+    if (resumeBtn) {
+        resumeBtn.disabled = true;
+        resumeBtn.textContent = 'Resuming…';
+    }
+    try {
+        const response = await OSA.fetchWithAuth(`/api/subagents/${subagentId}/resume`, {
+            method: 'POST',
+            body: JSON.stringify({ background: true })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+
+        const item = OSA.tmodelGet(`subagent:${subagentId}`);
+        if (item) {
+            item.status = 'running';
+            item.isRunning = true;
+            item.retryText = '';
+            item.result = '';
+            OSA.tmodelMarkDirty('subagent-resumed');
+        }
+        OSA.loadSessions();
+    } catch (err) {
+        console.error('Failed to resume subagent:', err);
+        if (resumeBtn) {
+            resumeBtn.disabled = false;
+            resumeBtn.textContent = 'Resume';
+        }
+        if (OSA.showErrorCard) OSA.showErrorCard(`Failed to resume subagent: ${err.message}`);
     }
 };
 

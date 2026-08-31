@@ -20,6 +20,8 @@ pub struct EventTokenUsage {
     pub cached_write: Option<usize>,
     #[serde(default)]
     pub reasoning: Option<usize>,
+    #[serde(default)]
+    pub cache_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +83,11 @@ pub enum AgentEvent {
         timestamp: SystemTime,
         #[serde(default)]
         usage: Option<EventTokenUsage>,
+        /// Usage summed across every provider request in this user turn.
+        /// `usage` remains the final provider request so cache percentages
+        /// describe the response the user actually received.
+        #[serde(default)]
+        turn_usage: Option<EventTokenUsage>,
     },
     QueuedMessageDispatched {
         session_id: String,
@@ -105,6 +112,12 @@ pub enum AgentEvent {
         condensed: bool,
         #[serde(default)]
         actual_usage: Option<EventTokenUsage>,
+        /// When a parent session receives a context update emitted by one of
+        /// its background children, this identifies the child whose ring must
+        /// be updated. The event's `session_id` remains the parent so normal
+        /// session subscriptions receive it.
+        #[serde(default)]
+        subagent_session_id: Option<String>,
         timestamp: SystemTime,
     },
     Reasoning {
@@ -552,12 +565,14 @@ impl AgentEvent {
                 session_id,
                 timestamp,
                 usage,
+                turn_usage,
                 ..
             } => AgentEvent::ResponseComplete {
                 session_id,
                 sequence: value,
                 timestamp,
                 usage,
+                turn_usage,
             },
             AgentEvent::QueuedMessageDispatched {
                 session_id,
@@ -586,6 +601,7 @@ impl AgentEvent {
                 tool_schema_tokens,
                 condensed,
                 actual_usage,
+                subagent_session_id,
                 timestamp,
                 ..
             } => AgentEvent::ContextUpdate {
@@ -597,6 +613,7 @@ impl AgentEvent {
                 tool_schema_tokens,
                 condensed,
                 actual_usage,
+                subagent_session_id,
                 timestamp,
             },
             AgentEvent::Reasoning {

@@ -1,6 +1,6 @@
 [package]
 name = "osagent-launcher"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 authors = ["OSA Contributors"]
 license = "MIT"
@@ -49,4 +49,3 @@ opt-level = 2
 lto = false
 codegen-units = 16
 strip = true
-

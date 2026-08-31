@@ -223,6 +223,15 @@ pub(super) fn describe_error(raw: &str) -> (String, String) {
     (title.to_string(), description)
 }
 
+/// Community Discord users must never receive provider/agent error details.
+/// Those details can contain local paths, URLs, request metadata, or secrets.
+pub(super) fn describe_community_error(_raw: &str) -> (String, String) {
+    (
+        "Request Failed".to_string(),
+        "The request could not be completed. Please try again later.".to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +296,16 @@ mod tests {
         let (title, description) = describe_error("something exploded");
         assert_eq!(title, "Request Failed");
         assert!(description.contains("something exploded"));
+    }
+
+    #[test]
+    fn community_errors_never_include_raw_details() {
+        let raw = "C:\\Users\\alice\\secret\\config.json https://internal.example/v1";
+        let (title, description) = describe_community_error(raw);
+        assert_eq!(title, "Request Failed");
+        assert!(!description.contains(raw));
+        assert!(!description.contains("config.json"));
+        assert!(!description.contains("internal.example"));
     }
 
     #[test]

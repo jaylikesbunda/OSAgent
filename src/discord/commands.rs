@@ -285,17 +285,6 @@ impl Handler {
             return;
         }
 
-        if matches!(name, "model" | "provider")
-            && self.has_explicit_trusted_user(command.user.id.get()).await
-        {
-            match name {
-                "model" => self.handle_model(ctx, command).await,
-                "provider" => self.handle_provider(ctx, command).await,
-                _ => unreachable!(),
-            }
-            return;
-        }
-
         // Music commands — allow Community in community guilds (same as @mention chat),
         // so `allow_community_members` + `allowed_guilds` covers everyone without per-user grants.
         if matches!(
@@ -690,8 +679,18 @@ impl Handler {
         let session_id = match session_result {
             Ok(session_id) => session_id,
             Err(e) => {
-                self.reply(ctx, command, ui::embed("Session Error", e, ui::COLOR_ERROR))
-                    .await;
+                error!("Discord: chat session failed: {e}");
+                let description = if access == super::AccessLevel::Community {
+                    ui::describe_community_error(&e).1
+                } else {
+                    e
+                };
+                self.reply(
+                    ctx,
+                    command,
+                    ui::embed("Session Error", description, ui::COLOR_ERROR),
+                )
+                .await;
                 return;
             }
         };
@@ -734,7 +733,12 @@ impl Handler {
                 ui::COLOR_PRIMARY,
             ),
             Ok(Err(error)) => {
-                let (title, description) = ui::describe_error(&error.to_string());
+                error!("Discord: chat turn failed: {error}");
+                let (title, description) = if access == super::AccessLevel::Community {
+                    ui::describe_community_error(&error.to_string())
+                } else {
+                    ui::describe_error(&error.to_string())
+                };
                 ui::embed(&title, description, ui::COLOR_ERROR)
             }
             Err(_) => ui::embed(
@@ -782,6 +786,7 @@ impl Handler {
                 session_id,
                 user_id,
                 prompt,
+                community: false,
             },
         )
         .await;
@@ -845,7 +850,15 @@ impl Handler {
                         ),
                         ui::COLOR_SUCCESS,
                     ),
-                    Err(e) => ui::embed("Session Error", e, ui::COLOR_ERROR),
+                    Err(e) => {
+                        error!("Discord: failed to create session: {e}");
+                        let description = if access == super::AccessLevel::Community {
+                            ui::describe_community_error(&e).1
+                        } else {
+                            e
+                        };
+                        ui::embed("Session Error", description, ui::COLOR_ERROR)
+                    }
                 };
                 self.reply(ctx, command, embed).await;
             }
@@ -869,7 +882,15 @@ impl Handler {
                         "There is nothing to archive.",
                         ui::COLOR_INFO,
                     ),
-                    Err(e) => ui::embed("Archive Failed", e, ui::COLOR_ERROR),
+                    Err(e) => {
+                        error!("Discord: failed to archive session: {e}");
+                        let description = if access == super::AccessLevel::Community {
+                            ui::describe_community_error(&e).1
+                        } else {
+                            e
+                        };
+                        ui::embed("Archive Failed", description, ui::COLOR_ERROR)
+                    }
                 };
                 self.reply(ctx, command, embed).await;
             }
@@ -886,7 +907,11 @@ impl Handler {
                             "There is nothing to delete.",
                             ui::COLOR_INFO,
                         ),
-                        Err(error) => ui::embed("Delete Failed", error, ui::COLOR_ERROR),
+                        Err(error) => {
+                            error!("Discord: failed to delete community session: {error}");
+                            let description = ui::describe_community_error(&error).1;
+                            ui::embed("Delete Failed", description, ui::COLOR_ERROR)
+                        }
                     };
                     self.reply(ctx, command, embed).await;
                     return;

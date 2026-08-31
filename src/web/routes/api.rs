@@ -650,6 +650,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/subagents/:id",
             get(get_subagent_status).delete(cancel_subagent),
         )
+        .route("/api/subagents/:id/resume", post(resume_subagent))
         .route("/api/subagents/:id/result", get(get_subagent_result))
         .route("/api/subagents/cleanup", post(cleanup_subagents))
         .route("/api/tools", get(list_tools))
@@ -2179,6 +2180,14 @@ async fn get_session_tools(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<SessionToolEvent>>, (StatusCode, Json<ErrorResponse>)> {
+    let session = agent.get_session(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
     let history = agent.list_session_history(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2233,15 +2242,35 @@ async fn get_session_tools(
             }
             let tool_name = data.get("tool_name")?.as_str()?.to_string();
             let arguments = data.get("arguments")?.clone();
-            let message_index = data
+            let recorded_message_index = data
                 .get("message_index")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i32;
+                .map(|value| value as i32);
+            let inferred_message_index = session.as_ref().and_then(|session| {
+                session
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, message)| {
+                        let contains_call = message
+                            .tool_calls
+                            .as_ref()
+                            .map(|calls| calls.iter().any(|call| call.id == tool_call_id))
+                            .unwrap_or(false);
+                        contains_call.then_some(index as i32)
+                    })
+            });
+            // Older persisted events often contain the client fallback value
+            // 0 rather than the assistant message that owns the call. Prefer
+            // the authoritative tool-call association whenever available.
+            let message_index = inferred_message_index
+                .or(recorded_message_index)
+                .unwrap_or(0);
             let (completed, success, output, title, metadata) = completions
                 .remove(&tool_call_id)
                 .map(|(s, o, t, m)| (true, Some(s), o, t, m))
                 .unwrap_or((false, None, None, None, None));
-            let timestamp = e.timestamp.timestamp();
+            let timestamp = e.timestamp.timestamp_millis();
             Some(SessionToolEvent {
                 tool_call_id,
                 tool_name,
@@ -6397,6 +6426,50 @@ async fn cancel_subagent(
         }))),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+fn default_resume_background() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ResumeSubagentRequest {
+    /// Optional instruction to append before the resumed run. When omitted,
+    /// the server supplies a continuation prompt based on the original task.
+    pub prompt: Option<String>,
+    /// Resumes run in the background by default so the parent remains usable
+    /// while the child continues. API callers may request a foreground run.
+    #[serde(default = "default_resume_background")]
+    pub background: bool,
+}
+
+async fn resume_subagent(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    Json(request): Json<ResumeSubagentRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let session_id = agent
+        .resume_subagent(&id, request.prompt, request.background)
+        .await
+        .map_err(|error| {
+            let status = if error.to_string().contains("already running") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "session_id": session_id,
+        "status": "running"
+    })))
 }
 
 #[derive(Debug, Deserialize)]

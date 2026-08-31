@@ -1,3 +1,12 @@
+v0.5.1 changes:
+
+* Added cache hit-rate text beside tok/s and fixed context token accounting
+* Added cache-result reasons for misses and hits
+* Fixed Discord model/provider controls rejecting authorized users
+* Fixed context UI overstating current usage with cumulative tokens
+* Added subagent status/resume controls and preserved timeout results
+* Fixed subagent context rings, transcript ordering, and read-only Git access
+
 v0.5.0 changes:
 
 * Slimmed the sidebar with collapsible subagent groups and per-session workspace labels

@@ -2704,7 +2704,7 @@ impl SqliteStorage {
     pub fn get_subagent_task_by_session(&self, session_id: &str) -> Result<Option<SubagentTask>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE session_id = ?1")
+                .prepare_cached("SELECT id, session_id, parent_session_id, description, prompt, agent_type, status, tool_count, result, created_at, completed_at, notified_at, background FROM subagent_tasks WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![session_id], |row| {

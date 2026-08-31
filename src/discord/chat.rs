@@ -27,6 +27,7 @@ pub(super) struct Turn {
     pub session_id: String,
     pub user_id: u64,
     pub prompt: String,
+    pub community: bool,
 }
 
 #[derive(Default)]
@@ -51,7 +52,12 @@ impl TurnState {
     }
 }
 
-fn status_embed(state: &TurnState, elapsed: Duration, finished: bool) -> CreateEmbed {
+fn status_embed(
+    state: &TurnState,
+    elapsed: Duration,
+    finished: bool,
+    community: bool,
+) -> CreateEmbed {
     let elapsed_label = ui::humanize_duration(elapsed.as_millis() as u64);
 
     let headline = if finished {
@@ -73,7 +79,11 @@ fn status_embed(state: &TurnState, elapsed: Duration, finished: bool) -> CreateE
     }
 
     for failure in state.failures.iter().rev().take(3) {
-        description.push_str(&format!("\n✗ {failure}"));
+        if community {
+            description.push_str("\n✗ A tool failed");
+        } else {
+            description.push_str(&format!("\n✗ {failure}"));
+        }
     }
 
     CreateEmbed::new()
@@ -106,6 +116,7 @@ async fn status_loop(
     state: Arc<AsyncMutex<TurnState>>,
     done: Arc<Notify>,
     started: Instant,
+    community: bool,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_millis(STATUS_EDIT_INTERVAL_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -169,7 +180,7 @@ async fn status_loop(
 
                 let embed = {
                     let state = state.lock().await;
-                    status_embed(&state, started.elapsed(), false)
+                    status_embed(&state, started.elapsed(), false, community)
                 };
                 if let Err(e) = channel_id
                     .edit_message(&http, status_id, EditMessage::new().embed(embed))
@@ -258,6 +269,7 @@ impl Handler {
             session_id,
             user_id,
             prompt,
+            community,
         } = turn;
 
         // Route agent-initiated questions for this session back to this channel.
@@ -296,6 +308,7 @@ impl Handler {
                     &TurnState::default(),
                     Duration::ZERO,
                     false,
+                    community,
                 )),
             )
             .await
@@ -319,6 +332,7 @@ impl Handler {
             state.clone(),
             status_done.clone(),
             started,
+            community,
         ));
 
         let initial_message_count = self
@@ -410,7 +424,11 @@ impl Handler {
             }
             Ok(Err(e)) => {
                 error!("Discord: turn failed for session {session_id}: {e}");
-                let (title, description) = ui::describe_error(&e.to_string());
+                let (title, description) = if community {
+                    ui::describe_community_error(&e.to_string())
+                } else {
+                    ui::describe_error(&e.to_string())
+                };
                 clear_status(Some(ui::embed(&title, description, ui::COLOR_ERROR))).await;
             }
             Err(_) => {

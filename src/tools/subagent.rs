@@ -30,7 +30,7 @@ impl Tool for SubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Launch a specialized subagent for complex multi-step tasks. The subagent runs as a proper standalone agent session and returns its result. In your prompt, specify exactly what information the subagent should return in its final message. The subagent will only produce one final response back to you. Set background=true to launch it asynchronously: you will be notified automatically when it finishes; do NOT poll for its progress or duplicate its work. Pass a prior task_id (session id) to resume that subagent's session with its full history instead of starting fresh."
+        "Manage a specialized subagent for complex multi-step tasks. action=run launches a new standalone session; action=status checks a prior task_id without changing it; action=resume continues a prior task_id with its full history. For run/resume, specify exactly what information the subagent should return. Set background=true to launch or resume asynchronously; completion is reported automatically."
     }
 
     fn when_to_use(&self) -> &str {
@@ -71,9 +71,17 @@ impl Tool for SubagentTool {
             crate::tools::registry::ToolExample {
                 description: "Resume a previous task".to_string(),
                 input: json!({
+                    "action": "resume",
                     "description": "Continue prior audit",
                     "prompt": "Continue the previous audit and focus on token expiry handling.",
                     "subagent_type": "explore",
+                    "task_id": "previous-session-id"
+                }),
+            },
+            crate::tools::registry::ToolExample {
+                description: "Check a background task".to_string(),
+                input: json!({
+                    "action": "status",
                     "task_id": "previous-session-id"
                 }),
             },
@@ -84,6 +92,11 @@ impl Tool for SubagentTool {
         json!({
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["run", "status", "resume"],
+                    "description": "run: start a new task (default); status: inspect task_id without changing it; resume: continue task_id with its existing history"
+                },
                 "description": {
                     "type": "string",
                     "description": "A short (3-5 words) description of the task"
@@ -110,7 +123,7 @@ impl Tool for SubagentTool {
                     "description": "Parent session ID (injected automatically)"
                 }
             },
-            "required": ["description", "prompt", "subagent_type"]
+            "required": []
         })
     }
 
@@ -119,30 +132,60 @@ impl Tool for SubagentTool {
     }
 
     async fn execute_result(&self, args: Value) -> Result<ToolResult> {
-        let description = args["description"]
-            .as_str()
-            .ok_or_else(|| OSAgentError::ToolExecution("Missing description".to_string()))?;
-
-        let prompt = args["prompt"]
-            .as_str()
-            .ok_or_else(|| OSAgentError::ToolExecution("Missing prompt".to_string()))?;
-
-        let subagent_type = args["subagent_type"]
-            .as_str()
-            .ok_or_else(|| OSAgentError::ToolExecution("Missing subagent_type".to_string()))?;
-
-        let session_id = args["session_id"]
-            .as_str()
-            .ok_or_else(|| OSAgentError::ToolExecution("Missing session_id".to_string()))?;
-
+        let action = args["action"].as_str().unwrap_or("run");
         let task_id = args["task_id"].as_str();
-        let background = args["background"].as_bool().unwrap_or(false);
 
         let manager = self.subagent_manager.as_ref().ok_or_else(|| {
             OSAgentError::ToolExecution("Subagent manager not available".to_string())
         })?;
 
-        let subagent_session_id = if let Some(resume_id) = task_id {
+        if action == "status" {
+            let task_id = task_id.ok_or_else(|| {
+                OSAgentError::ToolExecution("Missing task_id for subagent status".to_string())
+            })?;
+            let Some((task, is_running)) = manager.get_subagent_status(task_id)? else {
+                return Ok(ToolResult::failure(format!(
+                    "<task id=\"{}\" state=\"unknown\">\n<task_result>Subagent task not found.</task_result>\n</task>",
+                    task_id
+                )));
+            };
+            let state = if is_running {
+                "running"
+            } else {
+                task.status.as_str()
+            };
+            let result = task.result.unwrap_or_else(|| "No result yet.".to_string());
+            return Ok(ToolResult::new(format!(
+                "<task id=\"{}\" state=\"{}\" tools=\"{}\">\n<task_result>\n{}\n</task_result>\n</task>",
+                task_id, state, task.tool_count, result
+            )));
+        }
+
+        if action != "run" && action != "resume" {
+            return Err(OSAgentError::ToolExecution(format!(
+                "Unknown subagent action '{}'; use run, status, or resume",
+                action
+            )));
+        }
+
+        let description = args["description"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("Missing description".to_string()))?;
+        let prompt = args["prompt"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("Missing prompt".to_string()))?;
+        let subagent_type = args["subagent_type"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("Missing subagent_type".to_string()))?;
+        let session_id = args["session_id"]
+            .as_str()
+            .ok_or_else(|| OSAgentError::ToolExecution("Missing session_id".to_string()))?;
+        let background = args["background"].as_bool().unwrap_or(false);
+
+        let subagent_session_id = if action == "resume" || task_id.is_some() {
+            let resume_id = task_id.ok_or_else(|| {
+                OSAgentError::ToolExecution("Missing task_id for subagent resume".to_string())
+            })?;
             manager
                 .resume_subagent(
                     session_id.to_string(),
@@ -199,8 +242,8 @@ impl Tool for SubagentTool {
                 subagent_session_id
             ))),
             "timeout" => Ok(ToolResult::retryable(format!(
-                "<task id=\"{}\" state=\"timeout\">\n<task_result>\nSubagent timed out.\n</task_result>\n</task>",
-                subagent_session_id
+                "<task id=\"{}\" state=\"timeout\">\n<task_result>\n{}\n\nResume with task_id=\"{}\" when ready.\n</task_result>\n</task>",
+                subagent_session_id, result, subagent_session_id
             ))),
             _ => Ok(ToolResult::failure(format!(
                 "<task id=\"{}\" state=\"error\">\n<task_result>\nSubagent finished with status '{}'.\nResult: {}\n</task_result>\n</task>",

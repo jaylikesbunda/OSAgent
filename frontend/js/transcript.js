@@ -82,6 +82,10 @@ OSA.messageIndexValue = function(value) {
 };
 
 OSA.tmodelMessageItem = function(key, message, messageIndex, opts = {}) {
+    const tokens = message.tokens || null;
+    const cachedRead = tokens && Number.isFinite(tokens.cached_read) ? tokens.cached_read : null;
+    const cachedWrite = tokens && Number.isFinite(tokens.cached_write) ? tokens.cached_write : null;
+    const inputTokens = tokens && Number.isFinite(tokens.input) ? tokens.input : 0;
     return {
         kind: 'message',
         key,
@@ -101,7 +105,16 @@ OSA.tmodelMessageItem = function(key, message, messageIndex, opts = {}) {
         thinkingStreaming: !!opts.thinkingStreaming,
         durationMs: null,
         tps: null,
-        totalTokens: null,
+        totalTokens: tokens && tokens.total ? tokens.total : null,
+        cachedRead,
+        cachedWrite,
+        cacheReason: tokens && typeof tokens.cache_reason === 'string' ? tokens.cache_reason : null,
+        cacheReported: !!tokens,
+        turnUsage: null,
+        turnCacheHitRate: null,
+        cacheHitRate: cachedRead !== null && inputTokens > 0
+            ? ((cachedRead / inputTokens) * 100).toFixed(0)
+            : null,
     };
 };
 
@@ -248,6 +261,17 @@ OSA.tmodelSubagentCreated = function(event) {
     if (!item) {
         item = OSA.tmodelSubagentItem(event, true);
         OSA.tmodelAppend(item);
+    } else {
+        // A manual resume reuses the child session, so the lifecycle event
+        // updates the existing card instead of creating a second one.
+        item.description = event.description || item.description;
+        item.agentType = event.agent_type || item.agentType;
+        item.prompt = event.prompt || item.prompt;
+        item.status = 'running';
+        item.isRunning = true;
+        item.result = '';
+        item.currentTool = '';
+        item.retryText = '';
     }
     OSA.tmodelMarkDirty('subagent-created');
     return item;
@@ -319,8 +343,9 @@ OSA.tmodelSubagentTaskRetry = function(event) {
 };
 
 OSA.tmodelSubagentContextUpdate = function(event) {
-    if (!event || !event.subagent_session_id) return;
-    const item = OSA.tmodelGet('subagent:' + event.subagent_session_id);
+    const subagentId = event && (event.subagent_session_id || event.session_id);
+    if (!subagentId) return;
+    const item = OSA.tmodelGet('subagent:' + subagentId);
     if (!item) return;
     item.contextState = event;
     OSA.tmodelMarkDirty('subagent-context');
@@ -399,12 +424,30 @@ OSA.tmodelFinalizeStreamingSegment = function(usage) {
     item.thinkingStreaming = false;
 
     const startTime = OSA.getTurnStartTime();
+    if (usage) {
+        item.totalTokens = usage.total || null;
+        item.cacheReported = true;
+        const cachedRead = Number.isFinite(usage.cached_read) ? usage.cached_read : null;
+        item.cachedRead = cachedRead;
+        item.cachedWrite = Number.isFinite(usage.cached_write) ? usage.cached_write : null;
+        item.cacheReason = typeof usage.cache_reason === 'string' ? usage.cache_reason : null;
+        item.cacheHitRate = cachedRead !== null && usage.input > 0
+            ? ((cachedRead / usage.input) * 100).toFixed(0)
+            : null;
+        item.turnUsage = usage.turn_usage || null;
+        const turnCachedRead = item.turnUsage && Number.isFinite(item.turnUsage.cached_read)
+            ? item.turnUsage.cached_read
+            : null;
+        item.turnCacheHitRate = turnCachedRead !== null && item.turnUsage.input > 0
+            ? ((turnCachedRead / item.turnUsage.input) * 100).toFixed(0)
+            : null;
+    }
+
     if (startTime) {
         item.durationMs = Date.now() - startTime;
         const elapsedSec = item.durationMs / 1000;
         if (usage && usage.output > 0 && elapsedSec > 0) {
             item.tps = (usage.output / elapsedSec).toFixed(1);
-            item.totalTokens = usage.total || null;
         }
     }
 
@@ -462,6 +505,17 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         return entry.anchorIndex;
     };
 
+    // Tool events created before message_index was persisted (and events
+    // written by older clients with the default value 0) can still be placed
+    // exactly by matching their call id to the assistant tool-call message.
+    const toolCallAnchors = new Map();
+    messages.forEach(function(message, index) {
+        if (!message || !Array.isArray(message.tool_calls)) return;
+        message.tool_calls.forEach(function(call) {
+            if (call && call.id) toolCallAnchors.set(call.id, index);
+        });
+    });
+
     const tools = (Array.isArray(toolEvents) ? toolEvents : [])
         .filter(function(t) { return t && t.tool_call_id && t.tool_name !== 'subagent'; })
         .sort(function(a, b) {
@@ -471,6 +525,9 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         });
 
     tools.forEach(function(t) {
+        const inferredAnchor = toolCallAnchors.has(t.tool_call_id)
+            ? toolCallAnchors.get(t.tool_call_id)
+            : null;
         const item = OSA.tmodelToolItem({
             tool_call_id: t.tool_call_id,
             tool_name: t.tool_name,
@@ -478,7 +535,7 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
             output: typeof t.output === 'string' ? t.output : '',
             title: typeof t.title === 'string' ? t.title : '',
             metadata: t.metadata,
-            message_index: t.message_index,
+            message_index: inferredAnchor !== null ? inferredAnchor : t.message_index,
             timestamp: t.timestamp,
         }, { completed: t.completed === true, success: t.success === true, live: false });
         let pos = items.length;
@@ -600,6 +657,9 @@ OSA.unitSignature = function(unit) {
                 item.thinkingStreaming ? 'T' : '',
                 item.durationMs || '',
                 item.tps || '',
+                item.cacheReported ? '1' : '',
+                item.cacheHitRate || '',
+                item.turnCacheHitRate || '',
                 OSA.getShowThinkingBlocks() ? '1' : '0',
             ].join('\u0002');
         }
@@ -866,11 +926,6 @@ OSA.renderTranscript = function(options = {}) {
             if (!OSA.tmodelGet('tool:' + callId)) view.ctxNodesByCallId.delete(callId);
         });
 
-        const heightBefore = OSA.estimateUnitRangeHeight(view, units, 0, view.windowStart);
-        const heightAfter = OSA.estimateUnitRangeHeight(view, units, view.windowEnd, total);
-        view.topSpacer.style.height = Math.max(0, Math.round(heightBefore)) + 'px';
-        view.bottomSpacer.style.height = Math.max(0, Math.round(heightAfter)) + 'px';
-
         if (structureChanged) {
             let measuredTotal = 0;
             let measuredCount = 0;
@@ -886,6 +941,15 @@ OSA.renderTranscript = function(options = {}) {
                 view.avgMessageHeight = measuredTotal / measuredCount;
             }
         }
+
+        // Calculate virtual spacers after measuring the newly mounted window.
+        // Doing this before measurement leaves the first session render using
+        // the fallback average for every off-screen unit, which shows up as
+        // blank gaps between otherwise correctly ordered messages.
+        const heightBefore = OSA.estimateUnitRangeHeight(view, units, 0, view.windowStart);
+        const heightAfter = OSA.estimateUnitRangeHeight(view, units, view.windowEnd, total);
+        view.topSpacer.style.height = Math.max(0, Math.round(heightBefore)) + 'px';
+        view.bottomSpacer.style.height = Math.max(0, Math.round(heightAfter)) + 'px';
 
         if (shouldStickBottom) {
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -1174,15 +1238,41 @@ OSA.patchAssistantMetrics = function(msgEl, item) {
             : Math.floor(elapsed / 60) + 'm ' + (elapsed % 60) + 's';
     }
 
-    if (item.tps) {
+    if (item.tps || item.cacheReported) {
         let tpsEl = actionsEl.querySelector('.turn-tokens');
         if (!tpsEl) {
             tpsEl = document.createElement('span');
             tpsEl.className = 'turn-tokens';
             actionsEl.appendChild(tpsEl);
         }
-        tpsEl.textContent = item.tps + ' tok/s';
-        if (item.totalTokens) tpsEl.title = item.totalTokens + ' total tokens';
+        const speed = item.tps ? item.tps + ' tok/s' : '';
+        const cache = item.cacheHitRate !== null && item.cacheHitRate !== undefined
+            ? 'request cache ' + item.cacheHitRate + '%'
+            : 'request cache n/a';
+        const turnCache = item.turnCacheHitRate !== null && item.turnCacheHitRate !== undefined
+            ? 'turn cache ' + item.turnCacheHitRate + '%'
+            : '';
+        const cacheReason = item.cacheReason ? ' (' + item.cacheReason + ')' : '';
+        tpsEl.textContent = [speed, cache + cacheReason, turnCache].filter(Boolean).join(' · ');
+        const details = [];
+        if (item.totalTokens) details.push(item.totalTokens + ' total tokens');
+        if (item.cachedRead !== null && item.cachedRead !== undefined) {
+            details.push(item.cachedRead + ' cached input tokens');
+        }
+        if (item.cachedWrite !== null && item.cachedWrite !== undefined) {
+            details.push(item.cachedWrite + ' cache-write tokens');
+        }
+        if (item.cacheReason) details.push('cache reason: ' + item.cacheReason);
+        if (item.turnUsage) {
+            details.push(
+                'full-turn cache: ' + (item.turnCacheHitRate !== null ? item.turnCacheHitRate + '%' : 'n/a')
+                + ' across ' + item.turnUsage.input + ' input tokens'
+            );
+        }
+        if (item.cacheReported && item.cacheHitRate === null) {
+            details.push('provider did not report cache reads');
+        }
+        if (details.length) tpsEl.title = details.join(' · ');
     }
 };
 
@@ -1532,6 +1622,27 @@ OSA.patchSubagentUnit = function(wrapper, unit) {
         }
     } else if (!item.isRunning && cancelBtn) {
         cancelBtn.remove();
+    }
+
+    const resumableStatuses = ['timeout', 'partial', 'failed', 'cancelled'];
+    const resumeBtnId = 'subagent-resume-' + subagentId;
+    let resumeBtn = card.querySelector('#' + OSA.cssEscape(resumeBtnId));
+    const canResume = !item.isRunning && resumableStatuses.includes(item.status);
+    if (canResume && !resumeBtn) {
+        const actions = card.querySelector('.subagent-actions');
+        if (actions) {
+            resumeBtn = document.createElement('button');
+            resumeBtn.id = resumeBtnId;
+            resumeBtn.className = 'subagent-btn subagent-btn-resume';
+            resumeBtn.textContent = 'Resume';
+            resumeBtn.onclick = function(event) {
+                event.stopPropagation();
+                OSA.resumeSubagent(subagentId);
+            };
+            actions.insertBefore(resumeBtn, actions.firstChild);
+        }
+    } else if (!canResume && resumeBtn) {
+        resumeBtn.remove();
     }
 
     OSA.updateSubagentContextRing(subagentId, item.contextState);

@@ -130,6 +130,8 @@ pub struct MessageTokens {
     pub cached_write: Option<usize>,
     #[serde(default)]
     pub reasoning: Option<usize>,
+    #[serde(default)]
+    pub cache_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -153,6 +155,12 @@ pub struct SessionContextState {
     pub context_window: usize,
     pub budget_tokens: usize,
     pub actual_usage: Option<MessageTokens>,
+    #[serde(default)]
+    pub cache_provider: Option<String>,
+    #[serde(default)]
+    pub cache_model: Option<String>,
+    #[serde(default)]
+    pub cache_tools_fingerprint: Option<u64>,
     #[serde(default)]
     pub tool_usage: Vec<ToolUsageStats>,
     #[serde(default)]
