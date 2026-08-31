@@ -413,6 +413,9 @@ fn bench_app_storage_operations(c: &mut Criterion) {
         context_window: 128_000,
         budget_tokens: 32_000,
         actual_usage: None,
+        cache_provider: None,
+        cache_model: None,
+        cache_tools_fingerprint: None,
         tool_usage: vec![],
         compaction_stats: Default::default(),
     });
@@ -443,6 +446,9 @@ fn bench_app_storage_operations(c: &mut Criterion) {
         context_window: 128_000,
         budget_tokens: 32_000,
         actual_usage: None,
+        cache_provider: None,
+        cache_model: None,
+        cache_tools_fingerprint: None,
         tool_usage: vec![],
         compaction_stats: Default::default(),
     });
