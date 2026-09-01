@@ -511,3 +511,311 @@
     font-size: 14px;
     color: var(--text-secondary);
 }
+
+/* ---- Transcript surface ----
+   Keep the conversation airy and content-first. All surfaces deliberately use
+   palette tokens so the transcript follows the active OSA theme. */
+
+.messages {
+    background: var(--bg-primary);
+    padding: clamp(28px, 4vw, 52px) clamp(18px, 5vw, 48px) 190px;
+    overscroll-behavior: contain;
+}
+
+.transcript-entry,
+.message,
+.tool-container,
+.parallel-group,
+.subagent-card,
+.error-card {
+    width: min(820px, 100%);
+    max-width: 820px;
+}
+
+/* The virtualization wrapper spans the chat column; only its content units
+   should be constrained and centered. */
+.transcript-entry {
+    width: 100%;
+    max-width: none;
+}
+
+.message {
+    box-sizing: border-box;
+    margin: 0 auto 30px;
+    padding: 13px 0 9px;
+}
+
+.message-role {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 9px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.09em;
+}
+
+.message-role::before {
+    display: none;
+}
+
+.message.assistant .message-role::before {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.message.user .message-role {
+    color: var(--accent);
+}
+
+.message.user .message-role::before {
+    background: var(--accent);
+}
+
+.message.assistant .message-content {
+    color: var(--text-primary);
+}
+
+.message-content {
+    font-size: 15px;
+    line-height: 1.72;
+    letter-spacing: 0.002em;
+}
+
+.message-content p {
+    margin: 0 0 15px;
+}
+
+.message-content p:last-child,
+.message-content ul:last-child,
+.message-content ol:last-child,
+.message-content blockquote:last-child {
+    margin-bottom: 0;
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4 {
+    color: var(--text-primary);
+    font-family: var(--serif);
+    line-height: 1.25;
+    letter-spacing: -0.015em;
+    margin: 24px 0 10px;
+}
+
+.message-content h1 { font-size: 24px; }
+.message-content h2 { font-size: 20px; }
+.message-content h3 { font-size: 17px; }
+.message-content h4 { font-size: 15px; }
+
+.message-content a {
+    color: var(--accent);
+    text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    text-underline-offset: 3px;
+}
+
+.message-content a:hover {
+    text-decoration-color: var(--accent);
+}
+
+.message-content blockquote {
+    margin: 16px 0;
+    padding: 2px 0 2px 16px;
+    border-left: 2px solid var(--accent);
+    color: var(--text-secondary);
+}
+
+.message-content ol {
+    margin: 0 0 15px 22px;
+    padding: 0;
+}
+
+.message-content li::marker {
+    color: var(--text-muted);
+}
+
+:root[data-chat-alignment="split"] .message.user {
+    width: fit-content;
+    max-width: min(760px, 82%);
+    margin-left: auto;
+    margin-right: max(0px, calc((100% - 820px) / 2));
+    padding: 14px 18px 16px;
+    align-items: stretch;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 18px 18px 6px 18px;
+    box-shadow: var(--shadow-sm);
+}
+
+:root[data-chat-alignment="split"] .message.user .message-role {
+    justify-content: flex-end;
+    text-align: right;
+}
+
+:root[data-chat-alignment="split"] .message.user .message-content {
+    width: auto;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    color: var(--text-primary);
+}
+
+.message.task {
+    padding: 14px 18px;
+    background: var(--bg-secondary);
+    border-color: var(--border);
+    box-shadow: var(--shadow-sm);
+}
+
+.message-thinking {
+    margin: 0 0 13px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-secondary) 68%, transparent);
+}
+
+.thinking-toggle {
+    width: 100%;
+    min-width: 0;
+}
+
+.thinking-toggle-label {
+    color: var(--text-secondary);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+}
+
+.thinking-preview {
+    max-width: none;
+    color: var(--text-muted);
+}
+
+.thinking-body {
+    padding-top: 10px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.message-actions {
+    gap: 4px;
+    margin-top: 14px;
+    padding-top: 7px;
+    border-top: 0;
+    opacity: 0;
+    transform: translateY(2px);
+    transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.message:hover .message-actions,
+.message-actions:focus-within {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.msg-action-btn {
+    padding: 5px 8px;
+    background: transparent;
+    border-color: transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+}
+
+.msg-action-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border);
+    color: var(--text-primary);
+}
+
+.message-attachments {
+    margin-top: 13px;
+}
+
+.message-image-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 8px;
+    max-width: 420px;
+}
+
+.message-image-thumb {
+    overflow: hidden;
+    aspect-ratio: 4 / 3;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.message-image-thumb img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+}
+
+.message-attachment-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.message-attachment-chip {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.tool-container,
+.parallel-group,
+.subagent-card,
+.error-card {
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.queued-notice {
+    width: min(820px, 100%);
+    max-width: 820px;
+    margin: 4px auto;
+    padding: 7px 12px;
+    border-left-color: var(--accent-dim);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: color-mix(in srgb, var(--bg-secondary) 50%, transparent);
+}
+
+.retry-notice {
+    max-width: 820px;
+    margin-bottom: 14px;
+    border-radius: var(--radius-md);
+    background: var(--warning-dim);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    color: var(--warning);
+}
+
+@media (max-width: 900px) {
+    .messages {
+        padding: 24px 16px 150px;
+    }
+
+    :root[data-chat-alignment="split"] .message.user {
+        max-width: 90%;
+        margin-right: 0;
+    }
+}
+
+/* No decorative role marker — the role label is enough. */
+.message-role::before,
+.message.assistant .message-role::before,
+.message.user .message-role::before {
+    content: none !important;
+    display: none !important;
+}

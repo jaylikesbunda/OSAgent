@@ -43,13 +43,14 @@
     --glass-bg: rgba(65, 65, 65, 0.86);
     --glass-border: rgba(255, 255, 255, 0.12);
     --glass-blur: blur(16px) saturate(180%);
+    --composer-bg: var(--bg-secondary);
 
     --radius-sm: 6px;
     --radius-md: 10px;
     --radius-lg: 14px;
     --radius-xl: 18px;
 
-    --sidebar-width: 232px;
+    --sidebar-width: 260px;
 
     --transition-fast: 0.15s ease;
     --transition-base: 0.2s ease;
@@ -65,6 +66,7 @@
         --accent-dark: color-mix(in srgb, var(--p-accent) 65%, #000000 35%);
         --glass-bg: color-mix(in srgb, var(--bg-secondary) 86%, transparent);
         --glass-border: color-mix(in srgb, #ffffff 12%, transparent);
+        --composer-bg: color-mix(in srgb, var(--bg-primary) 78%, var(--bg-secondary) 22%);
     }
 }
 

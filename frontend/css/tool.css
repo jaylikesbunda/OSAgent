@@ -19,6 +19,34 @@
     animation: toolComplete 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
+/* Quiet, transcript-friendly tool surfaces. */
+.tool-panel {
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    box-shadow: var(--shadow-sm);
+}
+
+.tool-trigger-panel {
+    padding: 9px 13px;
+}
+
+.tool-trigger-panel:hover {
+    background: var(--bg-hover);
+}
+
+.tool-body,
+.tool-args,
+.tool-output,
+.shell-command-line {
+    border-color: var(--border);
+}
+
+.tool-args,
+.tool-output,
+.shell-command-line {
+    background: var(--bg-primary);
+}
+
 @keyframes toolComplete {
     0% { opacity: 0.7; transform: scale(0.98); }
     50% { transform: scale(1.02); }

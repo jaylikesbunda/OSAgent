@@ -6,6 +6,12 @@ OSA.debounce = function(key, fn, delay) {
     OSA._debounceTimers[key] = setTimeout(() => { delete OSA._debounceTimers[key]; fn(); }, delay);
 };
 
+OSA.resizeMessageInput = function(input) {
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+};
+
 OSA.prefetchedSessions = null;
 OSA._startupDeferredQueued = false;
 OSA.runWhenIdle = function(callback, timeout = 1200) {
@@ -1061,7 +1067,10 @@ OSA.sendMessage = async function() {
     if (draftMessage && OSA.getAttachments().length === 0) {
         const match = OSA.SLASH_COMMANDS.find(c => c.cmd === draftMessage.toLowerCase());
         if (match) {
-            if (inputEl) inputEl.value = '';
+            if (inputEl) {
+                inputEl.value = '';
+                OSA.resizeMessageInput(inputEl);
+            }
             OSA.hideSlashMenu();
             match.action();
             return;
@@ -1108,6 +1117,7 @@ OSA.sendMessage = async function() {
     let optimisticDomId = '';
 
     input.value = '';
+    OSA.resizeMessageInput(input);
     OSA.hideSlashMenu();
     OSA.clearAttachments({ preserveObjectUrls: true });
     OSA.renderAttachmentPreviews();
@@ -1492,6 +1502,67 @@ OSA.toggleSidebar = function() {
     }
 };
 
+OSA.applySidebarWidth = function(width) {
+    const minWidth = 220;
+    const maxWidth = 420;
+    const nextWidth = Math.max(minWidth, Math.min(maxWidth, Math.round(Number(width) || 260)));
+    document.documentElement.style.setProperty('--sidebar-width', `${nextWidth}px`);
+    localStorage.setItem('sidebarWidth', String(nextWidth));
+    return nextWidth;
+};
+
+OSA.initSidebarResize = function() {
+    const handle = document.getElementById('sidebar-resize-handle');
+    const sidebar = document.querySelector('.sidebar');
+    if (!handle || !sidebar || handle.dataset.bound === 'true') return;
+
+    handle.dataset.bound = 'true';
+    OSA.applySidebarWidth(localStorage.getItem('sidebarWidth') || 260);
+
+    let resizing = false;
+    const stopResize = () => {
+        if (!resizing) return;
+        resizing = false;
+        document.body.classList.remove('resizing-sidebar');
+        if (handle.hasPointerCapture?.(OSA.sidebarResizePointerId)) {
+            handle.releasePointerCapture(OSA.sidebarResizePointerId);
+        }
+        OSA.sidebarResizePointerId = null;
+    };
+
+    handle.addEventListener('pointerdown', (event) => {
+        if (window.innerWidth <= 900 || event.button !== 0) return;
+        event.preventDefault();
+        resizing = true;
+        OSA.sidebarResizePointerId = event.pointerId;
+        handle.setPointerCapture?.(event.pointerId);
+        document.body.classList.add('resizing-sidebar');
+    });
+
+    handle.addEventListener('pointermove', (event) => {
+        if (!resizing) return;
+        const left = sidebar.getBoundingClientRect().left;
+        OSA.applySidebarWidth(event.clientX - left);
+    });
+
+    handle.addEventListener('pointerup', stopResize);
+    handle.addEventListener('pointercancel', stopResize);
+    handle.addEventListener('keydown', (event) => {
+        if (window.innerWidth <= 900) return;
+        const current = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'), 10) || 260;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            event.preventDefault();
+            OSA.applySidebarWidth(current + (event.key === 'ArrowRight' ? 16 : -16));
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            OSA.applySidebarWidth(220);
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            OSA.applySidebarWidth(420);
+        }
+    });
+};
+
 OSA.closeSidebar = function() {
     const sidebar = document.querySelector('.sidebar');
     const backdrop = document.getElementById('sidebar-backdrop');
@@ -1508,6 +1579,8 @@ OSA.initSidebarState = function() {
     const sidebar = document.querySelector('.sidebar');
     const toggleBtn = document.getElementById('sidebar-toggle');
     if (!sidebar) return;
+
+    OSA.initSidebarResize();
 
     const isMobile = window.innerWidth <= 900;
     const collapsed = OSA.getSidebarCollapsed();
@@ -1620,6 +1693,7 @@ document.addEventListener('keydown', (event) => {
                 OSA.setInputHistoryIndex(idx - 1);
             }
             input.value = history[OSA.getInputHistoryIndex()];
+            OSA.resizeMessageInput(input);
         }
         return;
     }
@@ -1630,9 +1704,11 @@ document.addEventListener('keydown', (event) => {
             if (idx < history.length - 1) {
                 OSA.setInputHistoryIndex(idx + 1);
                 input.value = history[OSA.getInputHistoryIndex()];
+                OSA.resizeMessageInput(input);
             } else {
                 OSA.setInputHistoryIndex(-1);
                 input.value = '';
+                OSA.resizeMessageInput(input);
             }
         }
         return;
@@ -1698,6 +1774,7 @@ OSA.handleSlashInput = function() {
             const command = OSA.SLASH_COMMANDS.find(c => c.cmd === cmd);
             if (command) {
                 input.value = '';
+                OSA.resizeMessageInput(input);
                 command.action();
                 OSA.hideSlashMenu();
             }

@@ -63,6 +63,11 @@
         color: var(--text-primary);
     }
 
+    /* Context now lives in the composer footer, so avoid a duplicate header control. */
+    .header .mobile-workspace-btn {
+        display: none;
+    }
+
     /* Thinking level is a secondary control — accessible in settings */
     .header-thinking-control {
         display: none;
@@ -157,41 +162,14 @@
         padding: 0 8px 10px;
     }
 
-    .input-wrapper {
-        max-width: none;
-    }
-
     .composer-card {
         padding: 8px 10px;
         border-radius: 14px;
     }
 
-    .composer-toolbar {
-        flex-direction: column;
+    .composer-footer {
         gap: 8px;
-        margin-bottom: 10px;
-    }
-
-    .context-controls {
-        flex-direction: column;
-        width: 100%;
-    }
-
-    .context-dropdown,
-    .context-trigger,
-    .context-menu {
-        width: 100%;
-    }
-
-    .context-trigger {
-        padding: 0 12px;
-        min-height: 40px;
-        font-size: 12px;
-    }
-
-    .context-trigger-text {
-        gap: 6px;
-        font-size: 12px;
+        flex-wrap: nowrap;
     }
 
     .permission-pill {

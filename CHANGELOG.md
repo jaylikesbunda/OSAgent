@@ -1,3 +1,11 @@
+v0.5.2 changes:
+
+* Redesigned the chat composer with the model selector and thinking controls in the chat bar
+* Refreshed the sidebar with clearer navigation, theme-aware styling, and a persistent resizable width
+* Polished transcript messages, thinking blocks, attachments, tool cards, and code blocks
+* Reworked the header and utility icons with cleaner spacing, states, and theme-aware controls
+* Fixed sidebar toggle icon state so the hamburger and close icons do not appear together
+
 v0.5.1 changes:
 
 * Added cache hit-rate text beside tok/s and fixed context token accounting

@@ -7,6 +7,7 @@
     flex-shrink: 0;
     transition: margin-left 0.2s ease, width 0.2s ease;
     min-height: 0;
+    position: relative;
 }
 
 .sidebar.collapsed {
@@ -544,4 +545,250 @@
     font-size: 12px;
     font-weight: 500;
     line-height: 1.35;
+}
+
+/* Codex-inspired sidebar: a quieter navigation rail with stronger spacing and grouping. */
+.sidebar {
+    background: var(--bg-secondary);
+    border-right-color: var(--border);
+}
+
+.sidebar-header {
+    padding: 17px 12px 12px;
+    border-bottom: 0;
+}
+
+.logo {
+    padding: 0 6px;
+    font-family: var(--serif);
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.logo-icon {
+    width: 21px;
+    height: 21px;
+    border-radius: 5px;
+    opacity: 0.9;
+}
+
+.logo-accent {
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.new-chat-btn {
+    margin-top: 18px;
+    padding: 9px 10px;
+    border: 0;
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    gap: 9px;
+}
+
+.new-chat-btn span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border: 1px solid var(--border-hover);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1;
+}
+
+.new-chat-btn:hover {
+    border-color: transparent;
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.sessions-list {
+    padding: 2px 8px 10px;
+}
+
+.session-search {
+    padding: 12px 2px 12px;
+    background: var(--bg-secondary);
+}
+
+.session-search::before {
+    content: 'Chats';
+    display: block;
+    margin: 0 8px 8px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+.session-search input,
+.session-search select {
+    background: var(--bg-tertiary);
+    border-color: var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+}
+
+.session-search input {
+    padding: 8px 10px;
+    font-size: 12px;
+}
+
+.session-search select {
+    padding: 7px 8px;
+}
+
+.session-search input:focus,
+.session-search select:focus {
+    border-color: var(--border-hover);
+    background: var(--bg-hover);
+}
+
+.session-item {
+    min-height: 42px;
+    padding: 8px 9px;
+    margin-bottom: 2px;
+    border-radius: 8px;
+    gap: 9px;
+}
+
+.session-item:hover {
+    background: var(--bg-hover);
+}
+
+.session-item.active {
+    background: var(--accent-dim);
+    box-shadow: inset 0 0 0 1px var(--border-hover);
+}
+
+.session-item.active::before {
+    display: none;
+}
+
+.session-icon {
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+.session-item.active .session-icon {
+    border-color: var(--border-hover);
+    background: var(--accent-dim);
+    color: var(--text-primary);
+}
+
+.session-name {
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    font-weight: 500;
+}
+
+.session-item.active .session-name {
+    color: var(--text-primary);
+}
+
+.session-meta {
+    margin-top: 2px;
+    gap: 5px;
+}
+
+.session-workspace,
+.session-date {
+    color: var(--text-muted);
+}
+
+.session-source-badge {
+    padding: 2px 5px;
+    border-color: var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.session-children {
+    margin-left: 9px;
+    border-left-color: var(--border);
+}
+
+.sidebar-footer {
+    padding: 10px 9px 12px;
+    border-top-color: var(--border);
+}
+
+.sidebar-footer-row {
+    gap: 3px;
+}
+
+.sidebar-jobs-btn,
+.sidebar-footer-icon-btn {
+    border-color: transparent;
+    border-radius: 8px;
+    background: transparent;
+}
+
+.sidebar-jobs-btn {
+    justify-content: flex-start;
+    padding: 8px 10px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.sidebar-jobs-btn:hover,
+.sidebar-footer-icon-btn:hover {
+    border-color: transparent;
+    background: var(--bg-hover);
+}
+
+.sidebar-footer-icon-btn {
+    width: 32px;
+}
+
+/* Resize rail: quiet until the pointer approaches the sidebar edge. */
+.sidebar-resize-handle {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    z-index: 5;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    background: transparent;
+    transition: background var(--transition-fast);
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle:focus-visible,
+body.resizing-sidebar .sidebar-resize-handle {
+    background: var(--accent);
+}
+
+.sidebar-resize-handle:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+body.resizing-sidebar,
+body.resizing-sidebar * {
+    cursor: col-resize !important;
+    user-select: none !important;
+}
+
+body.resizing-sidebar .sidebar {
+    transition: margin-left 0.2s ease;
+}
+
+@media (max-width: 900px) {
+    .sidebar-resize-handle {
+        display: none;
+    }
 }

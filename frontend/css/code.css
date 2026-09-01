@@ -6,6 +6,23 @@
     overflow: hidden;
 }
 
+.message-content .code-block {
+    margin: 18px 0;
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    box-shadow: var(--shadow-sm);
+}
+
+.message-content .code-header {
+    padding: 9px 13px;
+    background: var(--bg-hover);
+}
+
+.message-content .code-block pre {
+    padding: 16px 18px;
+    background: var(--bg-primary);
+}
+
 .code-header {
     display: flex;
     justify-content: space-between;

@@ -782,3 +782,184 @@
     font-size: 11px;
     user-select: none;
 }
+
+/* ---- Command header ----
+   The header is a quiet navigation rail for session identity and utilities.
+   Keep icon buttons neutral until they are actually needed. */
+
+.header {
+    min-height: 58px;
+    padding: 10px 18px;
+    gap: 12px;
+    background: var(--bg-primary);
+    border-bottom-color: var(--border);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--bg-secondary) 36%, transparent);
+}
+
+.header-title {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+}
+
+.header-title.renameable:hover {
+    color: var(--accent);
+}
+
+.header-controls {
+    gap: 4px;
+}
+
+.header .sidebar-toggle,
+.header .settings-btn,
+.header .logout-btn,
+.header .mobile-workspace-btn {
+    width: 34px;
+    height: 34px;
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text-muted);
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+}
+
+.header .sidebar-toggle:hover,
+.header .settings-btn:hover,
+.header .logout-btn:hover,
+.header .mobile-workspace-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border);
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
+.header .sidebar-toggle:active,
+.header .settings-btn:active,
+.header .logout-btn:active,
+.header .mobile-workspace-btn:active {
+    transform: translateY(0);
+}
+
+.header .sidebar-toggle:focus-visible,
+.header .settings-btn:focus-visible,
+.header .logout-btn:focus-visible,
+.header .mobile-workspace-btn:focus-visible,
+.header .workflow-btn:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.header .sidebar-toggle svg,
+.header .settings-btn svg,
+.header .logout-btn svg,
+.header .mobile-workspace-btn svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+    opacity: 0.86;
+}
+
+/* The shared icon sizing rule above must not override the toggle's two-state
+   visibility. Keep one glyph in the button's layout at a time. */
+.header .sidebar-toggle .hamburger-icon {
+    display: block;
+}
+
+.header .sidebar-toggle .close-icon {
+    display: none;
+}
+
+.header .sidebar-toggle.sidebar-open .hamburger-icon {
+    display: none !important;
+}
+
+.header .sidebar-toggle.sidebar-open .close-icon {
+    display: block !important;
+}
+
+.header .sidebar-toggle:hover svg,
+.header .settings-btn:hover svg,
+.header .logout-btn:hover svg,
+.header .mobile-workspace-btn:hover svg {
+    opacity: 1;
+}
+
+.header .connection-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.header .connection-status::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    flex: 0 0 6px;
+    border-radius: 50%;
+    background: var(--warning);
+}
+
+.header .connection-status.connected {
+    border-color: color-mix(in srgb, var(--success) 30%, var(--border));
+    color: var(--text-secondary);
+}
+
+.header .connection-status.connected::before {
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--success-dim);
+}
+
+.header .connection-status.disconnected {
+    border-color: color-mix(in srgb, var(--error) 30%, var(--border));
+}
+
+.header .connection-status.disconnected::before {
+    background: var(--error);
+    box-shadow: 0 0 0 3px var(--error-dim);
+}
+
+.header .workflow-btn {
+    padding: 7px 11px;
+    border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+    border-radius: 999px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-size: 11px;
+    box-shadow: none;
+}
+
+.header .workflow-btn:hover {
+    background: color-mix(in srgb, var(--accent) 24%, transparent);
+    border-color: var(--accent);
+    opacity: 1;
+    transform: none;
+}
+
+@media (max-width: 640px) {
+    .header {
+        min-height: 52px;
+        padding: 8px 12px;
+    }
+
+    .header-controls {
+        gap: 2px;
+    }
+
+    .header .connection-status {
+        padding-inline: 7px;
+    }
+}
