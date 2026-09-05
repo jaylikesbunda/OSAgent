@@ -1,7 +1,7 @@
 use crate::agent::runtime::AgentRuntime;
 use crate::config::Config;
 use crate::web::routes::create_router;
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 use std::collections::hash_map::DefaultHasher;
@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
 
 #[derive(RustEmbed)]
@@ -188,6 +189,22 @@ pub async fn run_with_agent(
     let app_build_start = Instant::now();
     let app = api_routes
         .fallback(serve_static_handler)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
         .layer(CompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(50 * 1024 * 1024))
         .layer(build_cors_layer(&config));

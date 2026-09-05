@@ -123,6 +123,11 @@ OSA.handleAgentEvent = function(event) {
             OSA.showThinkingIndicator();
             OSA.setSendButtonStopMode(true);
             OSA.startToolSync();
+            // A new turn starts: clear the terminal-banner coalescing window so
+            // a later stop on this turn always renders its own "Cancelled" card.
+            if (typeof OSA._resetTerminalBannerWindow === 'function') {
+                OSA._resetTerminalBannerWindow();
+            }
             OSA.renderQueuedMessages(OSA.getSessionQueue());
             if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
             break;
@@ -247,6 +252,10 @@ OSA.handleAgentEvent = function(event) {
 
         case 'question_asked':
             OSA.handleQuestionEvent(event);
+            break;
+
+        case 'question_response':
+            OSA.handleQuestionResponse(event);
             break;
 
         case 'error':
@@ -1006,8 +1015,46 @@ OSA.handleSubagentCreated = function(event) {
     OSA.loadSessions();
 };
 
+OSA._subagentProgressThrottleMs = 250;
+OSA._subagentProgressPending = {};
+OSA._subagentProgressTimers = {};
+
 OSA.handleSubagentProgress = function(event) {
-    OSA.tmodelSubagentProgress(event);
+    // A busy subagent emits executing/completed pairs in quick succession.
+    // Coalesce them per card so the parent transcript re-renders at most ~4x/s.
+    const id = event && event.subagent_session_id;
+    if (!id) return;
+    const priority = (event.status === 'completed' || event.status === 'failed');
+    if (priority) {
+        delete OSA._subagentProgressPending[id];
+        if (OSA._subagentProgressTimers[id]) {
+            clearTimeout(OSA._subagentProgressTimers[id]);
+            delete OSA._subagentProgressTimers[id];
+        }
+        OSA._flushSubagentProgress(id, event);
+        return;
+    }
+    const prev = OSA._subagentProgressPending[id];
+    if (prev && prev.status === 'executing' && event.status === 'executing'
+        && prev.tool_count === event.tool_count && prev.tool_name === event.tool_name) {
+        return;
+    }
+    OSA._subagentProgressPending[id] = event;
+    if (OSA._subagentProgressTimers[id]) return;
+    OSA._subagentProgressTimers[id] = setTimeout(function() {
+        delete OSA._subagentProgressTimers[id];
+        const pending = OSA._subagentProgressPending[id];
+        delete OSA._subagentProgressPending[id];
+        if (pending) OSA._flushSubagentProgress(id, pending);
+    }, OSA._subagentProgressThrottleMs);
+};
+
+OSA._flushSubagentProgress = function(id, event) {
+    try {
+        OSA.tmodelSubagentProgress(event);
+    } catch (err) {
+        console.warn('Subagent progress update failed:', err);
+    }
 };
 
 OSA.handleSubagentRetry = function(event) {

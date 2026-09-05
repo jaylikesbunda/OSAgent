@@ -78,3 +78,7 @@ frontend/images/3Kx3K-logo.png
 /targetverify-release-thinking-fix
 /test_cases
 /benchmark_results/
+/prompt_eval_results
+/reference
+/reference/opencode-dev-old
+/pi

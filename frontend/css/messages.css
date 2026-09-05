@@ -215,6 +215,27 @@
     opacity: 0.6;
 }
 
+.queued-notice-send-now {
+    flex-shrink: 0;
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.queued-notice-send-now:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-tertiary));
+}
+
 .message.assistant.streaming .message-content {
     position: relative;
 }

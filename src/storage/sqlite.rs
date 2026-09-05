@@ -2552,6 +2552,67 @@ impl SqliteStorage {
         })
     }
 
+    /// Move a queued message to the front of its session's queue so the next
+    /// dispatch claims it before anything else. Returns false when the message
+    /// does not exist (or is not pending). Leaves `position` ordering intact
+    /// for the remaining items.
+    pub fn promote_queued_message(&self, session_id: &str, id: &str) -> Result<bool> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+
+            let status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM queued_messages WHERE id = ?1 AND session_id = ?2",
+                    params![id, session_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+
+            let Some(status) = status else {
+                tx.commit().map_err(OSAgentError::Storage)?;
+                return Ok(false);
+            };
+            if status != QueuedMessageStatus::Pending.as_str() {
+                tx.commit().map_err(OSAgentError::Storage)?;
+                return Ok(false);
+            }
+
+            let already_first: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM queued_messages
+                     WHERE session_id = ?1 AND status = ?2 AND position < (
+                         SELECT position FROM queued_messages WHERE id = ?3
+                     )",
+                    params![session_id, QueuedMessageStatus::Pending.as_str(), id],
+                    |row| row.get(0),
+                )
+                .map_err(OSAgentError::Storage)?;
+            if already_first == 0 {
+                tx.commit().map_err(OSAgentError::Storage)?;
+                return Ok(true);
+            }
+
+            let front_position: i64 = tx
+                .query_row(
+                    "SELECT MIN(position) FROM queued_messages
+                     WHERE session_id = ?1 AND status = ?2",
+                    params![session_id, QueuedMessageStatus::Pending.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            tx.execute(
+                "UPDATE queued_messages SET position = ?1, updated_at = ?2 WHERE id = ?3",
+                params![front_position - 1, Utc::now().timestamp(), id],
+            )
+            .map_err(OSAgentError::Storage)?;
+
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(true)
+        })
+    }
+
     pub fn create_subagent_task(&self, task: &SubagentTask) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(

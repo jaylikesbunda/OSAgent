@@ -1275,6 +1275,11 @@ impl Config {
         let path_ref = path.as_ref();
         if let Some(parent) = path_ref.parent() {
             fs::create_dir_all(parent).map_err(OSAgentError::Io)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
 
         let mut cloned = self.clone();
@@ -1284,6 +1289,11 @@ impl Config {
         let data = toml::to_string_pretty(&cloned)
             .map_err(|e| OSAgentError::Config(format!("Failed to serialize config: {}", e)))?;
         fs::write(path_ref, data).map_err(OSAgentError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path_ref, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 

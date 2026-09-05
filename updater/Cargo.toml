@@ -1,6 +1,6 @@
 [package]
 name = "osagent-updater"
-version = "0.5.1"
+version = "0.5.3"
 edition = "2021"
 description = "OSAgent self-update helper"
 

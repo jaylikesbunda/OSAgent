@@ -1,3 +1,8 @@
+v0.5.3 changes:
+
+* Fixed completed streamed responses occasionally remaining stuck and preventing queued messages from sending
+* Fixed subagent card flicker when running tools
+
 v0.5.2 changes:
 
 * Redesigned the chat composer with the model selector and thinking controls in the chat bar

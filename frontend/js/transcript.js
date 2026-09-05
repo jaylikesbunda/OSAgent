@@ -213,18 +213,52 @@ OSA.tmodelAddTaskMessage = function(content) {
     OSA.tmodelAppend({ kind: 'task', key: OSA.tmodelLiveKey('task'), content: cleaned });
 };
 
+// One Stop click can surface as several terminal events (the streaming layer,
+// the run wrapper and a reconnect replay each emit `cancelled`/`error`). Track
+// the most recent terminal banner so a burst collapses to a single card.
+OSA._lastTerminalBannerAt = 0;
+OSA._lastTerminalBannerKind = '';
+OSA._TERMINAL_BANNER_COALESCE_MS = 1500;
+
+OSA._isRecentTerminalBanner = function(kind) {
+    if (!OSA._lastTerminalBannerAt) return false;
+    if (Date.now() - OSA._lastTerminalBannerAt > OSA._TERMINAL_BANNER_COALESCE_MS) return false;
+    return OSA._lastTerminalBannerKind === kind;
+};
+
+OSA._noteTerminalBanner = function(kind) {
+    OSA._lastTerminalBannerAt = Date.now();
+    OSA._lastTerminalBannerKind = kind;
+};
+
+OSA._resetTerminalBannerWindow = function() {
+    OSA._lastTerminalBannerAt = 0;
+    OSA._lastTerminalBannerKind = '';
+};
+
 OSA.tmodelAddError = function(error) {
     const msg = String(error || 'Unknown error');
-    // Dedup: provider errors can be delivered twice (ws + sse, or retry) — ignore if last error identical within 2s
+    // A Stop is reported as `cancelled`, never as an error card. Some backend
+    // paths used to re-classify cancellation ("Session error: Operation
+    // cancelled") — swallow those so a cancel shows exactly one clean banner.
+    if (/operation cancelled/i.test(msg)) {
+        return;
+    }
+    // Dedup: provider errors can be delivered twice (ws + sse, or retry) —
+    // ignore if the last terminal card was already this error moments ago.
     const last = OSA.TModel.items[OSA.TModel.items.length - 1];
     if (last && last.kind === 'error' && last.error === msg) return;
     // also check second-last in case an interleaving cancelled/error
     const prev = OSA.TModel.items[OSA.TModel.items.length - 2];
     if (prev && prev.kind === 'error' && prev.error === msg) return;
+    OSA._noteTerminalBanner('error');
     OSA.tmodelAppend({ kind: 'error', key: OSA.tmodelLiveKey('error'), error: msg });
 };
 
 OSA.tmodelAddCancelled = function() {
+    // Multiple run wrappers can each report the same stop; keep one card.
+    if (OSA._isRecentTerminalBanner('cancelled')) return;
+    OSA._noteTerminalBanner('cancelled');
     OSA.tmodelAppend({ kind: 'cancelled', key: OSA.tmodelLiveKey('cancelled') });
 };
 
@@ -277,24 +311,68 @@ OSA.tmodelSubagentCreated = function(event) {
     return item;
 };
 
+OSA._MAX_SUBAGENT_TOOL_ROWS = 50;
+
+OSA._subagentIsIterationMarker = function(name) {
+    return /^iteration_\d+$/i.test(String(name || ''));
+};
+
+// Merge a tool row in place (first-seen order, status flips in place) instead
+// of appending a new row per event. Repeat completions of the same tool bump
+// a counter. Returns true when the visible card content actually changed.
+OSA._subagentUpsertToolRow = function(item, name, status) {
+    if (!name || OSA._subagentIsIterationMarker(name)) return false;
+    const rows = item.tools;
+    for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].name === name) {
+            const row = rows[i];
+            let changed = false;
+            // A fresh execution after a settled state is a re-run of the
+            // same tool: count it instead of adding a duplicate row.
+            if (status === 'running' && (row.status === 'completed' || row.status === 'failed')) {
+                row.count = (row.count || 1) + 1;
+                changed = true;
+            }
+            if (row.status !== status) { row.status = status; changed = true; }
+            return changed;
+        }
+    }
+    rows.push({ name, status, count: 1 });
+    if (rows.length > OSA._MAX_SUBAGENT_TOOL_ROWS) {
+        rows.splice(0, rows.length - OSA._MAX_SUBAGENT_TOOL_ROWS);
+    }
+    return true;
+};
+
 OSA.tmodelSubagentProgress = function(event) {
-    if (!event || !event.subagent_session_id) return;
+    if (!event || !event.subagent_session_id) return false;
     const item = OSA.tmodelGet('subagent:' + event.subagent_session_id);
-    if (!item) return;
-    item.toolCount = event.tool_count || item.toolCount;
+    if (!item) return false;
+    let changed = false;
+    const count = event.tool_count || 0;
+    if (count && count !== item.toolCount) { item.toolCount = count; changed = true; }
     const status = event.status || 'running';
     if (status === 'executing') {
-        item.isRunning = true;
-        item.currentTool = event.tool_name || item.currentTool;
-        item.retryText = '';
+        if (!item.isRunning) { item.isRunning = true; changed = true; }
+        if (item.retryText) { item.retryText = ''; changed = true; }
+        const tool = event.tool_name || '';
+        if (tool && tool !== item.currentTool) { item.currentTool = tool; changed = true; }
+        if (tool && OSA._subagentUpsertToolRow(item, tool, 'running')) changed = true;
     } else if (status === 'completed' || status === 'failed') {
-        if (!item.currentTool || item.currentTool === (event.tool_name || '')) item.currentTool = '';
-        if (event.tool_name) item.tools.push({ name: event.tool_name, status });
-        item.retryText = '';
+        // Per-iteration heartbeats reuse tool_name for the loop counter
+        // ("iteration_N") — they carry no tool info and must not add rows or
+        // clobber the live strip.
+        const tool = event.tool_name || '';
+        if (tool && !OSA._subagentIsIterationMarker(tool)) {
+            if (OSA._subagentUpsertToolRow(item, tool, status)) changed = true;
+            if (item.currentTool === tool) { item.currentTool = ''; changed = true; }
+        }
+        if (item.retryText) { item.retryText = ''; changed = true; }
     } else if (event.tool_name) {
-        item.tools.push({ name: event.tool_name, status: 'running' });
+        if (OSA._subagentUpsertToolRow(item, event.tool_name, 'running')) changed = true;
     }
-    OSA.tmodelMarkDirty('subagent-progress');
+    if (changed) OSA.tmodelMarkDirty('subagent-progress');
+    return changed;
 };
 
 OSA.tmodelSubagentCompleted = function(event) {
@@ -670,7 +748,7 @@ OSA.unitSignature = function(unit) {
             return [
                 item.status, item.isRunning ? 'R' : '', item.toolCount,
                 item.result, item.currentTool, item.retryText,
-                item.tools.map(function(t) { return t.name + ':' + t.status; }).join(','),
+                item.tools.map(function(t) { return t.name + ':' + t.status + 'x' + (t.count || 1); }).join(','),
                 item.durationMs || '', item.contextState ? JSON.stringify(item.contextState) : '',
             ].join('\u0002');
         }
@@ -1585,11 +1663,12 @@ OSA.patchSubagentUnit = function(wrapper, unit) {
 
     const toolsEl = card.querySelector('#subagent-tools-' + OSA.cssEscape(subagentId));
     if (toolsEl) {
-        const toolsSig = item.tools.map(function(t) { return t.name + ':' + t.status; }).join(',');
+        const toolsSig = item.tools.map(function(t) { return t.name + ':' + t.status + 'x' + (t.count || 1); }).join(',');
         if (toolsEl.dataset.sig !== toolsSig) {
             toolsEl.dataset.sig = toolsSig;
             toolsEl.innerHTML = item.tools.map(function(t) {
-                return '<div class="subagent-tool-item ' + OSA.escapeHtml(t.status) + '">' + OSA.escapeHtml(t.name) + '</div>';
+                const repeat = (t.count || 1) > 1 ? ' <span class="subagent-tool-repeat">×' + t.count + '</span>' : '';
+                return '<div class="subagent-tool-item ' + OSA.escapeHtml(t.status) + '">' + OSA.escapeHtml(t.name) + repeat + '</div>';
             }).join('');
         }
     }
@@ -1597,14 +1676,23 @@ OSA.patchSubagentUnit = function(wrapper, unit) {
     const resultEl = card.querySelector('#subagent-result-' + OSA.cssEscape(subagentId));
     if (resultEl) {
         if (item.result) {
-            resultEl.style.display = 'block';
-            resultEl.innerHTML = '<div class="subagent-result-label">Result:</div><div class="subagent-result-text">'
-                + OSA.escapeHtml(item.result.slice(0, 500))
-                + (item.result.length > 500 ? '…' : '')
-                + '</div>';
+            const resultSig = String(item.result.length) + ':' + String(item.result.slice(0, 64));
+            if (resultEl.dataset.sig !== resultSig) {
+                resultEl.dataset.sig = resultSig;
+                resultEl.style.display = 'block';
+                resultEl.innerHTML = '<div class="subagent-result-label">Result:</div><div class="subagent-result-text">'
+                    + OSA.escapeHtml(item.result.slice(0, 500))
+                    + (item.result.length > 500 ? '…' : '')
+                    + '</div>';
+            } else {
+                resultEl.style.display = 'block';
+            }
         } else if (!item.isRunning) {
-            resultEl.style.display = 'none';
-            resultEl.innerHTML = '';
+            if (resultEl.dataset.sig !== '') {
+                resultEl.dataset.sig = '';
+                resultEl.style.display = 'none';
+                resultEl.innerHTML = '';
+            }
         }
     }
 

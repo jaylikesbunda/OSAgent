@@ -221,6 +221,7 @@ pub enum AgentEvent {
         questions: Vec<Question>,
     },
     QuestionResponse {
+        session_id: String,
         sequence: u64,
         question_id: String,
         answers: Vec<Vec<String>>,
@@ -372,6 +373,7 @@ pub enum AgentEvent {
 }
 
 pub struct QuestionChannel {
+    pub session_id: String,
     pub question_id: String,
     pub questions: Vec<Question>,
     pub response_tx: tokio::sync::oneshot::Sender<Vec<Vec<String>>>,
@@ -411,7 +413,7 @@ impl AgentEvent {
             AgentEvent::ToolResultTruncated { session_id, .. } => session_id,
             AgentEvent::ContextWindowWarning { session_id, .. } => session_id,
             AgentEvent::QuestionAsked { session_id, .. } => session_id,
-            AgentEvent::QuestionResponse { .. } => "",
+            AgentEvent::QuestionResponse { session_id, .. } => session_id,
             AgentEvent::SubagentCreated { session_id, .. } => session_id,
             AgentEvent::SubagentProgress { session_id, .. } => session_id,
             AgentEvent::SubagentRetrying { session_id, .. } => session_id,
@@ -794,10 +796,12 @@ impl AgentEvent {
                 questions,
             },
             AgentEvent::QuestionResponse {
+                session_id,
                 question_id,
                 answers,
                 ..
             } => AgentEvent::QuestionResponse {
+                session_id,
                 sequence: value,
                 question_id,
                 answers,
@@ -1207,11 +1211,44 @@ impl EventBus {
     pub async fn answer_question(&self, question_id: &str, answers: Vec<Vec<String>>) -> bool {
         let mut pending = self.pending_questions.write().await;
         if let Some(channel) = pending.remove(question_id) {
-            let _ = channel.response_tx.send(answers);
+            let session_id = channel.session_id.clone();
+            let _ = channel.response_tx.send(answers.clone());
+            drop(pending);
+            self.emit(AgentEvent::QuestionResponse {
+                session_id,
+                sequence: 0,
+                question_id: question_id.to_string(),
+                answers,
+            });
             true
         } else {
             false
         }
+    }
+
+    /// Drop every pending question registered for `session_id` without
+    /// delivering answers. The waiting tool futures observe the closed
+    /// oneshot receivers and return, so a cancelled run can never stay
+    /// parked on an unanswered question.
+    pub async fn cancel_questions_for_session(&self, session_id: &str) -> usize {
+        let mut pending = self.pending_questions.write().await;
+        let ids: Vec<String> = pending
+            .iter()
+            .filter(|(_, channel)| channel.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            if let Some(channel) = pending.remove(id) {
+                drop(channel.response_tx);
+                self.emit(AgentEvent::QuestionResponse {
+                    session_id: session_id.to_string(),
+                    sequence: 0,
+                    question_id: id.clone(),
+                    answers: Vec::new(),
+                });
+            }
+        }
+        ids.len()
     }
 }
 

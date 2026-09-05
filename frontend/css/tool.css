@@ -775,6 +775,21 @@
     border-bottom: none;
 }
 
+.subagent-tool-repeat {
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+/* The tool rows live inside a capped scroll box; the header and live strip
+   keep a steady footprint so rapid tool updates do not shift the card. */
+.subagent-live {
+    min-height: 24px;
+}
+
+.subagent-tools:empty {
+    display: none;
+}
+
 .subagent-tool-item.completed {
     color: #22c55e;
 }

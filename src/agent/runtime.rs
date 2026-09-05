@@ -46,6 +46,24 @@ use tokio::sync::{watch, Mutex, Notify};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+// A finish_reason completes the model output, but usage can arrive in a
+// trailing event. Bound that drain independently of the normal idle timeout.
+async fn next_provider_stream_event(
+    stream: &mut futures::stream::BoxStream<'static, Result<StreamEvent>>,
+    finish_deadline: Option<tokio::time::Instant>,
+    idle_timeout: std::time::Duration,
+) -> Option<Result<StreamEvent>> {
+    let deadline = finish_deadline.unwrap_or_else(|| tokio::time::Instant::now() + idle_timeout);
+    match tokio::time::timeout_at(deadline, stream.next()).await {
+        Ok(event) => event,
+        Err(_) if finish_deadline.is_some() => None,
+        Err(_) => Some(Err(OSAgentError::Provider(
+            "Provider stream stalled: no response events received before the idle timeout"
+                .to_string(),
+        ))),
+    }
+}
+
 const COMPACTION_PROMPT: &str = r#"Provide a continuation summary of the earlier conversation below so that another pass can continue the work.
 
 Follow this structure exactly:
@@ -218,12 +236,8 @@ fn is_repo_exploration_request(message: &str) -> bool {
     .any(|phrase| lower.contains(phrase))
 }
 
-fn should_continue_queue_after_run(result: &Result<String>) -> bool {
-    match result {
-        Ok(_) => true,
-        Err(OSAgentError::Session(message)) if message == "Operation cancelled" => true,
-        _ => false,
-    }
+fn is_operation_cancelled(error: &OSAgentError) -> bool {
+    matches!(error, OSAgentError::Session(message) if message == "Operation cancelled")
 }
 
 impl AgentRuntime {
@@ -667,6 +681,20 @@ impl AgentRuntime {
             notify.notify_waiters();
             info!("Cancelled in-progress operation for session {}", session_id);
         }
+        // A run parked on an unanswered question never polls the
+        // cancellation flag; drop its pending questions so the tool
+        // future returns and the loop can observe the cancel.
+        let event_bus = self.event_bus.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let cancelled = event_bus.cancel_questions_for_session(&session_id).await;
+            if cancelled > 0 {
+                info!(
+                    "Cancelled {} pending question(s) for session {}",
+                    cancelled, session_id
+                );
+            }
+        });
     }
 
     /// Cancel all subagents belonging to a parent session
@@ -674,6 +702,26 @@ impl AgentRuntime {
         self.subagent_manager
             .cancel_all_for_parent(session_id)
             .await;
+    }
+
+    /// Emit the terminal event for a run that returned an error. Cancellation
+    /// is emitted as a single `Cancelled`; everything else as `Error`.
+    fn emit_run_error_event(&self, session_id: &str, error: &OSAgentError) {
+        if is_operation_cancelled(error) {
+            self.event_bus.emit(AgentEvent::Cancelled {
+                session_id: session_id.to_string(),
+                sequence: 0,
+                timestamp: SystemTime::now(),
+            });
+        } else {
+            self.event_bus.emit(AgentEvent::Error {
+                session_id: session_id.to_string(),
+                sequence: 0,
+                error: error.to_string(),
+                recoverable: error.is_recoverable(),
+                timestamp: SystemTime::now(),
+            });
+        }
     }
 
     /// Called by the SubagentManager when a background subagent reaches a
@@ -792,23 +840,7 @@ impl AgentRuntime {
 
             if let Err(error) = &result {
                 error!("Wake turn failed for session {}: {}", session_id, error);
-                let is_cancelled =
-                    matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
-                if is_cancelled {
-                    runtime.event_bus.emit(AgentEvent::Cancelled {
-                        session_id: session_id.clone(),
-                        sequence: 0,
-                        timestamp: SystemTime::now(),
-                    });
-                } else {
-                    runtime.event_bus.emit(AgentEvent::Error {
-                        session_id: session_id.clone(),
-                        sequence: 0,
-                        error: error.to_string(),
-                        recoverable: false,
-                        timestamp: SystemTime::now(),
-                    });
-                }
+                runtime.emit_run_error_event(&session_id, error);
             }
 
             drop(run_guard);
@@ -943,23 +975,7 @@ impl AgentRuntime {
                     "Background run failed for session {} (user {}): {}",
                     session_id, user, error
                 );
-                let is_cancelled =
-                    matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
-                if is_cancelled {
-                    runtime.event_bus.emit(AgentEvent::Cancelled {
-                        session_id: session_id.clone(),
-                        sequence: 0,
-                        timestamp: SystemTime::now(),
-                    });
-                } else {
-                    runtime.event_bus.emit(AgentEvent::Error {
-                        session_id: session_id.clone(),
-                        sequence: 0,
-                        error: error.to_string(),
-                        recoverable: false,
-                        timestamp: SystemTime::now(),
-                    });
-                }
+                runtime.emit_run_error_event(&session_id, error);
             }
             drop(run_guard);
             runtime.dispatch_queued_messages(&session_id, &user);
@@ -1023,47 +1039,18 @@ impl AgentRuntime {
                     "Queued run failed for session {} (user {}): {}",
                     session_id, user, error
                 );
-                let is_cancelled =
-                    matches!(error, OSAgentError::Session(msg) if msg == "Operation cancelled");
-                if is_cancelled {
-                    runtime.event_bus.emit(AgentEvent::Cancelled {
-                        session_id: session_id.clone(),
-                        sequence: 0,
-                        timestamp: SystemTime::now(),
-                    });
-                } else {
-                    runtime.event_bus.emit(AgentEvent::Error {
-                        session_id: session_id.clone(),
-                        sequence: 0,
-                        error: error.to_string(),
-                        recoverable: false,
-                        timestamp: SystemTime::now(),
-                    });
-                }
+                runtime.emit_run_error_event(&session_id, error);
             }
 
-            let should_continue = should_continue_queue_after_run(&result);
             drop(run_guard);
 
-            if should_continue {
-                let next_runtime = runtime.clone();
-                let next_session_id = session_id.clone();
-                let next_user = user.clone();
-                tokio::spawn(async move {
-                    if let Err(error) =
-                        next_runtime.spawn_next_queued_message_run(next_session_id, next_user)
-                    {
-                        error!(
-                            "Failed to continue queued runs for session {}: {}",
-                            session_id, error
-                        );
-                    }
-                });
-            } else {
-                // Terminal error stops the queue chain; still honor any
-                // background-completion wake that piled up behind this run.
-                runtime.check_pending_wake(&session_id);
-            }
+            // Always hand the queue another chance once the run guard drops.
+            // Ok, cancellation and terminal errors all fall through here so a
+            // message that was enqueued mid-run can never be left stranded by
+            // a chain that stopped advancing. `dispatch_queued_messages` is a
+            // delayed no-op when the queue is empty and also honors deferred
+            // background-completion wakes.
+            runtime.dispatch_queued_messages(&session_id, &user);
         });
 
         Ok(Some(started_queue_id))
@@ -1868,6 +1855,14 @@ impl AgentRuntime {
                             (response, false)
                         }
                         Err(e) => {
+                            // `consume_provider_stream` already emitted a
+                            // `Cancelled` event when the stream was stopped by
+                            // the user. Surface the cancellation as-is instead
+                            // of re-classifying it as a provider `Error`
+                            // ("Session error: Operation cancelled").
+                            if is_operation_cancelled(&e) {
+                                return Err(e);
+                            }
                             error!("Provider stream error in session {}: {}", session_id, e);
                             self.event_bus.emit(AgentEvent::Error {
                                 session_id: session_id.to_string(),
@@ -3452,6 +3447,7 @@ impl AgentRuntime {
         let mut tool_calls: HashMap<usize, PendingToolCall> = HashMap::new();
         let mut last_flush = Instant::now();
         let mut dirty_chars = 0usize;
+        let mut finish_deadline = None;
 
         loop {
             let next_event = tokio::select! {
@@ -3463,7 +3459,11 @@ impl AgentRuntime {
                     });
                     return Err(OSAgentError::Session("Operation cancelled".to_string()));
                 }
-                event = stream.next() => event,
+                event = next_provider_stream_event(
+                    &mut stream,
+                    finish_deadline,
+                    std::time::Duration::from_secs(120),
+                ) => event,
             };
 
             let Some(event) = next_event else {
@@ -3474,6 +3474,10 @@ impl AgentRuntime {
 
             if let Some(reason) = event.finish_reason.as_ref() {
                 finish_reason = reason.clone();
+                if !reason.is_empty() && finish_deadline.is_none() {
+                    finish_deadline =
+                        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+                }
             }
             if event.usage.is_some() {
                 usage = event.usage.clone();
@@ -5478,6 +5482,46 @@ impl AgentRuntime {
         self.storage.list_queued_messages(session_id)
     }
 
+    /// "Send now": interrupt whatever the session is doing and run a specific
+    /// queued message next. The current run is cancelled the same way a Stop
+    /// click cancels it; the chosen message is promoted to the front of the
+    /// queue, so whichever path ends the current run dispatches it next. When
+    /// the session is idle the queue is dispatched immediately.
+    pub async fn send_queued_message_now(
+        &self,
+        session_id: &str,
+        queue_entry_id: &str,
+        user: &str,
+    ) -> Result<bool> {
+        if self.get_session(session_id).await?.is_none() {
+            return Err(OSAgentError::Session("Session not found".to_string()));
+        }
+        let promoted = self
+            .storage
+            .promote_queued_message(session_id, queue_entry_id)?;
+        if !promoted {
+            return Ok(false);
+        }
+
+        if self.is_session_busy(session_id) {
+            // Stop the active run (and its subagents) the same way a Stop click
+            // does; whichever path ends the current run re-dispatches the queue
+            // once the run guard drops, which will claim the promoted message.
+            self.cancel_session(session_id);
+            self.cancel_subagents_for_parent(session_id).await;
+        } else {
+            let runtime = self.self_arc.get().and_then(|weak| weak.upgrade());
+            if let Some(runtime) = runtime {
+                let session_id = session_id.to_string();
+                let user = user.to_string();
+                tokio::spawn(async move {
+                    runtime.dispatch_queued_messages(&session_id, &user);
+                });
+            }
+        }
+        Ok(true)
+    }
+
     pub async fn list_session_history(
         &self,
         session_id: &str,
@@ -6791,6 +6835,66 @@ impl AgentRuntime {
 mod external_path_scan_tests {
     use super::{AgentRuntime, ToolOutcome};
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn provider_stream_finished_without_done_releases_waiter() {
+        use futures::StreamExt;
+        let mut stream = futures::stream::pending().boxed();
+        let result = super::next_provider_stream_event(
+            &mut stream,
+            Some(tokio::time::Instant::now()),
+            std::time::Duration::from_secs(120),
+        )
+        .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_stream_unfinished_stall_is_an_error() {
+        use futures::StreamExt;
+        let mut stream = futures::stream::pending().boxed();
+        let result = super::next_provider_stream_event(
+            &mut stream,
+            None,
+            std::time::Duration::from_millis(1),
+        )
+        .await;
+        assert!(
+            matches!(result, Some(Err(super::OSAgentError::Provider(message))) if message.contains("stalled"))
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_stream_preserves_trailing_usage() {
+        use futures::StreamExt;
+        let mut stream = futures::stream::iter(vec![Ok(super::StreamEvent {
+            event_type: "usage".to_string(),
+            content: None,
+            thinking: None,
+            tool_call_deltas: vec![],
+            finish_reason: None,
+            usage: Some(crate::agent::provider::TokenUsage {
+                input: 10,
+                output: 5,
+                total: 15,
+                cached_read: None,
+                cached_write: None,
+                reasoning: None,
+            }),
+            done: false,
+        })])
+        .chain(futures::stream::pending())
+        .boxed();
+        let result = super::next_provider_stream_event(
+            &mut stream,
+            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(2)),
+            std::time::Duration::from_secs(120),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.usage.unwrap().total, 15);
+    }
 
     fn ws() -> PathBuf {
         PathBuf::from(r"I:\GhostESP2\Research-Projects\Pwn-Power")

@@ -110,24 +110,54 @@ OSA.updateCustomAnswer = function(qIdx) {
     OSA.setSelectedAnswers(selectedAnswers);
 };
 
+OSA.handleQuestionResponse = function(event) {
+    const pendingId = OSA.getPendingQuestionId();
+    const answeredId = event && event.question_id;
+    if (pendingId && answeredId && pendingId !== answeredId) return;
+    const modal = document.getElementById('question-modal');
+    if (modal) modal.classList.add('hidden');
+    OSA.setPendingQuestions([]);
+    OSA.setPendingQuestionId('');
+    OSA.setCurrentQuestionIndex(0);
+    OSA.setSelectedAnswers([]);
+};
+
 OSA.submitQuestion = function() {
     const pendingQuestions = OSA.getPendingQuestions();
     const selectedAnswers = OSA.getSelectedAnswers();
     const questionId = OSA.getPendingQuestionId();
-
     const answers = pendingQuestions.map((q, idx) => selectedAnswers[idx] || []);
 
     document.getElementById('question-modal').classList.add('hidden');
 
     if (questionId) {
-        fetch('/api/questions/answer', {
+        OSA.fetchWithAuth('/api/questions/answer', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 question_id: questionId,
                 answers: answers,
             }),
-        }).catch(err => console.error('Failed to submit question answer:', err));
+        })
+            .then(function(response) {
+                if (response.status === 401) {
+                    OSA.showErrorCard('Answer not delivered: session not authorized. Sign in again and answer the question.');
+                    return null;
+                }
+                return response.json().catch(function() { return {}; });
+            })
+            .then(function(data) {
+                if (data !== null && (!data || !data.success)) {
+                    // The backend never got the answer, so the agent is still
+                    // (or no longer) waiting — make that visible instead of
+                    // silently dropping it.
+                    OSA.showErrorCard('Answer not delivered: ' + ((data && data.message) || 'question is no longer pending') + '. Cancel the run and try again.');
+                }
+            })
+            .catch(function(err) {
+                console.error('Failed to submit question answer:', err);
+                OSA.showErrorCard('Failed to submit question answer: ' + err.message);
+            });
     }
 
     OSA.setPendingQuestions([]);
@@ -139,3 +169,4 @@ OSA.submitQuestion = function() {
 window.selectQuestionOption = OSA.selectQuestionOption;
 window.updateCustomAnswer = OSA.updateCustomAnswer;
 window.submitQuestion = OSA.submitQuestion;
+window.handleQuestionResponse = OSA.handleQuestionResponse;

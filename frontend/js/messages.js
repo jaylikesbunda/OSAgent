@@ -1732,15 +1732,75 @@ OSA.renderQueuedMessages = function(queueItems) {
 
     items.forEach((item, index) => {
         const message = document.createElement('div');
-        message.className = `queued-notice${item.status === 'dispatching' ? ' dispatching' : ''}`;
+        const isDispatching = item.status === 'dispatching';
+        message.className = `queued-notice${isDispatching ? ' dispatching' : ''}`;
         if (item.id) message.dataset.queueId = item.id;
-        const label = item.status === 'dispatching' ? 'Sending next' : `Queued ${index + 1}`;
+        const label = isDispatching ? 'Sending next' : `Queued ${index + 1}`;
         const preview = (item.content || '').slice(0, 80) + ((item.content || '').length > 80 ? '…' : '');
-        message.innerHTML = `<span class="queued-notice-label">${label}</span><span class="queued-notice-text">${OSA.escapeHtml(preview)}</span><span class="queued-notice-time">${OSA.escapeHtml(OSA.formatRelativeDateTime(item.created_at))}</span>`;
+        const timeHtml = `<span class="queued-notice-time">${OSA.escapeHtml(OSA.formatRelativeDateTime(item.created_at))}</span>`;
+        // Send-now interrupts the current turn (if any) and runs this queued
+        // message next. Hidden on the item that is already being dispatched.
+        const sendNowHtml = isDispatching
+            ? ''
+            : `<button type="button" class="queued-notice-send-now" data-queue-id="${OSA.escapeHtml(item.id || '')}" data-queue-client-id="${OSA.escapeHtml(item.client_message_id || '')}" title="Stop the current turn and send this now" aria-label="Send this queued message now">Send now</button>`;
+        message.innerHTML = `<span class="queued-notice-label">${label}</span><span class="queued-notice-text">${OSA.escapeHtml(preview)}</span>${sendNowHtml}${timeHtml}`;
         floatingRoot.appendChild(message);
     });
 
+    floatingRoot.querySelectorAll('.queued-notice-send-now').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const queueId = btn.dataset.queueId;
+            const clientId = btn.dataset.queueClientId;
+            const item = (OSA.getSessionQueue() || []).find(q =>
+                (queueId && q.id === queueId) || (!queueId && clientId && q.client_message_id === clientId)
+            );
+            if (item) OSA.sendQueuedMessageNow(item);
+        });
+    });
+
     OSA.tmodelMarkDirty('queue');
+};
+
+// Interrupt the current turn and run this queued message now.
+OSA.sendQueuedMessageNow = async function(item) {
+    const currentSession = OSA.getCurrentSession();
+    if (!currentSession || !item || !item.id) return;
+    if (OSA._sendNowInFlight) return;
+    OSA._sendNowInFlight = true;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(currentSession.id)}/queue/${encodeURIComponent(item.id)}/send-now`, {
+            method: 'POST',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        // The promoted item stays in the queue until the server dispatches it
+        // (and emits queued_message_dispatched). Mirror the promotion locally
+        // so the chosen message visibly jumps to the front of the list.
+        const queue = (OSA.getSessionQueue() || []).slice();
+        const idx = queue.findIndex(q => q.id === item.id);
+        if (idx > 0) {
+            const [promoted] = queue.splice(idx, 1);
+            queue.unshift(promoted);
+            queue.forEach((q, i) => { if (q.position !== undefined) q.position = i + 1; });
+            OSA.setSessionQueue(queue);
+        }
+        // Optimistically mark the agent as processing; the
+        // cancelled-current-turn event resets the UI.
+        OSA.setProcessing(true);
+        OSA.setStopping(false);
+        OSA.setSendButtonStopMode(true);
+        if (currentSession) currentSession.task_status = 'running';
+        OSA.showThinkingIndicator();
+        OSA.renderQueuedMessages(OSA.getSessionQueue());
+    } catch (error) {
+        console.error('Failed to send queued message now:', error);
+        OSA.showErrorCard?.(error.message || 'Failed to send queued message');
+        OSA.refreshCurrentSessionQueue?.();
+    } finally {
+        OSA._sendNowInFlight = false;
+    }
 };
 
 OSA.updateTodoDock = function() {

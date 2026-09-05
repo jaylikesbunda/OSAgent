@@ -601,6 +601,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             post(update_session_tool),
         )
         .route("/api/sessions/:id/queue", get(list_session_queue))
+        .route(
+            "/api/sessions/:id/queue/:queue_id/send-now",
+            post(send_queued_message_now),
+        )
         .route("/api/sessions/:id/send", post(send_message))
         .route(
             "/api/sessions/:id/send-multipart",
@@ -2574,6 +2578,35 @@ async fn list_session_queue(
     })?;
 
     Ok(Json(items))
+}
+
+/// Interrupt the current turn and run a specific queued message next.
+async fn send_queued_message_now(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path((id, queue_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    match agent
+        .send_queued_message_now(&id, &queue_id, "web")
+        .await
+    {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "success": true,
+            "session_id": id,
+            "queue_entry_id": queue_id,
+        }))),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Queued message not found or not pending".to_string(),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
 }
 
 async fn cancel_session(
@@ -5954,6 +5987,14 @@ async fn answer_question(
     Json(body): Json<AnswerQuestionRequest>,
 ) -> Json<serde_json::Value> {
     let found = agent.answer_question(&body.question_id, body.answers).await;
+    if found {
+        tracing::info!("Question {} answered; resuming agent", body.question_id);
+    } else {
+        tracing::warn!(
+            "Answer for question {} does not match any pending question (already answered or server restarted); agent was NOT resumed",
+            body.question_id
+        );
+    }
     Json(serde_json::json!({
         "success": found,
         "message": if found { "Answer received" } else { "Question not found or already answered" }

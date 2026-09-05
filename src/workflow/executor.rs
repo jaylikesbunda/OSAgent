@@ -10,7 +10,7 @@ use base64::Engine;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use tokio::sync::{broadcast, oneshot};
 use tokio::time::{sleep, Duration};
@@ -943,6 +943,7 @@ You cannot spawn additional subagents."#
             .register_question(
                 event_session_id.to_string(),
                 QuestionChannel {
+                    session_id: event_session_id.to_string(),
                     question_id: question_id.clone(),
                     questions: questions.clone(),
                     response_tx,
@@ -1029,7 +1030,8 @@ You cannot spawn additional subagents."#
         input: &serde_json::Value,
         shared_state: &HashMap<String, serde_json::Value>,
     ) -> String {
-        let re = regex::Regex::new(r"\{\{\s*([^{}]+?)\s*\}\}").expect("valid template regex");
+        static RE: OnceLock<regex::Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| regex::Regex::new(r"\{\{\s*([^{}]+?)\s*\}\}").expect("valid template regex"));
         re.replace_all(template, |caps: &regex::Captures<'_>| {
             let path = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
             if let Some(value) = Self::lookup_template_value(path, input, shared_state) {

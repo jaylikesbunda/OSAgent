@@ -195,6 +195,7 @@ impl Tool for QuestionTool {
         let session_id = args["session_id"].as_str().unwrap_or("").to_string();
 
         let channel = QuestionChannel {
+            session_id: session_id.clone(),
             question_id: question_id.clone(),
             questions: questions.clone(),
             response_tx,
