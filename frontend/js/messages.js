@@ -2,19 +2,12 @@ window.OSA = window.OSA || {};
 
 OSA.isHiddenSyntheticMessage = function(message) {
     if (!message || !message.metadata) return false;
-    if (!message.metadata.synthetic) return false;
-
-    const syntheticKind = message.metadata.kind || '';
-    if (message.role === 'assistant' && syntheticKind === 'tool_prelude') {
-        const hasContent = !!(message.content || '').trim();
-        const hasVisibleThinking = OSA.getShowThinkingBlocks && OSA.getShowThinkingBlocks()
-            ? !!(message.thinking || '').trim()
-            : false;
-        const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
-        if (hasContent || hasVisibleThinking || hasToolCalls) {
-            return false;
-        }
+    // Tool preludes are real narration folded into their tool card: never
+    // hidden from the transcript, and always kept model-visible in history.
+    if (message.role === 'assistant' && (message.metadata.kind || '') === 'tool_prelude') {
+        return false;
     }
+    if (!message.metadata.synthetic) return false;
 
     return true;
 };
@@ -364,6 +357,12 @@ OSA.getActiveTurnAssistantMessage = function(session) {
     const visible = session.messages.filter(message => {
         if (message.role === 'tool') return false;
         if (OSA.isHiddenSyntheticMessage(message)) return false;
+        // Mid-turn tool preludes are UI-hidden checkpoints, never the turn's
+        // spoken or final reply — even the closing summary lives in a later
+        // non-synthetic assistant segment.
+        if (message.role === 'assistant'
+            && Array.isArray(message.tool_calls)
+            && message.tool_calls.length > 0) return false;
         return true;
     });
     if (!visible.length) {

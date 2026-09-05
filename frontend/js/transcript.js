@@ -131,6 +131,7 @@ OSA.tmodelToolItem = function(event, opts = {}) {
         args: event.arguments || {},
         output: typeof event.output === 'string' ? event.output : '',
         title: typeof event.title === 'string' ? event.title : '',
+        prelude: typeof event.prelude === 'string' ? event.prelude : '',
         status: completed ? (success ? 'done' : 'failed') : 'running',
         success,
         completed,
@@ -159,6 +160,16 @@ OSA.tmodelToolStart = function(event) {
     OSA.insertCurrentSessionToolBoundary(event);
     if (event.tool_name === 'subagent') return null;
     const key = 'tool:' + event.tool_call_id;
+    // The narration the model streamed just before this call is the tool's
+    // prelude: fold it into the card instead of leaving a separate bubble.
+    const streaming = OSA.tmodelStreamingItem();
+    let prelude = '';
+    if (streaming) {
+        prelude = OSA.stripSpeakBlock
+            ? OSA.stripSpeakBlock(streaming.content || '')
+            : (streaming.content || '');
+        prelude = prelude.trim();
+    }
     let item = OSA.tmodelGet(key);
     if (item) {
         if (item.completed) return item;
@@ -169,8 +180,9 @@ OSA.tmodelToolStart = function(event) {
         item.status = 'running';
         item.output = '';
         item.ts = OSA.eventTimestampMs(event.timestamp) || Date.now();
+        if (prelude && !item.prelude) item.prelude = prelude;
     } else {
-        item = OSA.tmodelToolItem(event);
+        item = OSA.tmodelToolItem(Object.assign({}, event, prelude ? { prelude } : null));
         OSA.tmodelAppend(item);
     }
     OSA.tmodelMarkDirty('tool-start');
@@ -468,12 +480,7 @@ OSA.tmodelEnsureAssistantSegment = function() {
 OSA.tmodelFinalizeSegmentForToolCall = function() {
     const item = OSA.tmodelStreamingItem();
     if (!item) return;
-    item.streaming = false;
-    item.thinkingStreaming = false;
-    const display = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
-    if (!display.trim() && !(item.thinking || '').trim()) {
-        OSA.tmodelRemove(item.key);
-    }
+    OSA.tmodelRemove(item.key);
     OSA.tmodelMarkDirty('segment-boundary');
 };
 
@@ -570,6 +577,12 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         if (!message || message.role === 'tool') return;
         if (OSA.isHiddenSyntheticMessage(message)) return;
         if (message.role === 'assistant') {
+            const kind = message.metadata && message.metadata.kind;
+            // Tool-prelude narration renders inside its tool card; skip the
+            // separate bubble but keep the message model-visible for anchors.
+            if (kind === 'tool_prelude'
+                && Array.isArray(message.tool_calls)
+                && message.tool_calls.length > 0) return;
             const hasContent = !!(message.content || '').trim();
             const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
             const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
@@ -602,16 +615,37 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
             return (OSA.eventTimestampMs(a.timestamp) || 0) - (OSA.eventTimestampMs(b.timestamp) || 0);
         });
 
+    // Fold persisted tool-prelude narration into the card it introduced so a
+    // history reload renders the same single card as the live stream did.
+    // The message loop above skips these bubbles from `items` but the raw
+    // `messages` array still carries them for this fold.
+    const preludeByAnchor = new Map();
+    messages.forEach(function(message, index) {
+        const kind = message && message.metadata && message.metadata.kind;
+        if (!message || message.role !== 'assistant' || kind !== 'tool_prelude') return;
+        if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) return;
+        const text = OSA.stripSpeakBlock
+            ? OSA.stripSpeakBlock(message.content || '')
+            : (message.content || '');
+        if (!text.trim()) return;
+        if (!preludeByAnchor.has(index)) preludeByAnchor.set(index, []);
+        preludeByAnchor.get(index).push(text.trim());
+    });
+
     tools.forEach(function(t) {
         const inferredAnchor = toolCallAnchors.has(t.tool_call_id)
             ? toolCallAnchors.get(t.tool_call_id)
             : null;
+        const anchorPrelude = inferredAnchor !== null && preludeByAnchor.has(inferredAnchor)
+            ? preludeByAnchor.get(inferredAnchor).join('\n\n')
+            : '';
         const item = OSA.tmodelToolItem({
             tool_call_id: t.tool_call_id,
             tool_name: t.tool_name,
             arguments: t.arguments || {},
             output: typeof t.output === 'string' ? t.output : '',
             title: typeof t.title === 'string' ? t.title : '',
+            prelude: anchorPrelude,
             metadata: t.metadata,
             message_index: inferredAnchor !== null ? inferredAnchor : t.message_index,
             timestamp: t.timestamp,
@@ -742,7 +776,7 @@ OSA.unitSignature = function(unit) {
             ].join('\u0002');
         }
         if (item.kind === 'tool') {
-            return [item.toolName, item.status, item.completed ? '1' : '0', item.output || '', item.title || ''].join('\u0002');
+            return [item.toolName, item.status, item.completed ? '1' : '0', item.output || '', item.title || '', item.prelude || ''].join('\u0002');
         }
         if (item.kind === 'subagent') {
             return [
@@ -1389,6 +1423,7 @@ OSA.buildToolCardElement = function(item) {
             </div>
             <div class="tool-body" id="body-${domId}">
                 <div class="tool-body-inner">
+                    ${item.prelude ? `<div class="tool-prelude" id="prelude-${domId}">${OSA.escapeHtml(item.prelude)}</div>` : ''}
                     <div class="tool-args" id="args-${domId}">${OSA.escapeHtml(JSON.stringify(item.args, null, 2))}</div>
                     <div class="tool-output" id="output-${domId}" style="display:none"></div>
                 </div>
@@ -1412,6 +1447,20 @@ OSA.patchToolCardElement = function(container, item) {
 
     const titleEl = container.querySelector('#title-' + OSA.cssEscape(domId));
     if (titleEl) titleEl.classList.toggle('tool-title-pending', !isCompleted);
+
+    let preludeEl = container.querySelector('#prelude-' + OSA.cssEscape(domId));
+    if (item.prelude && !preludeEl) {
+        const bodyInner = container.querySelector('.tool-body-inner');
+        if (bodyInner) {
+            preludeEl = document.createElement('div');
+            preludeEl.className = 'tool-prelude';
+            preludeEl.id = 'prelude-' + domId;
+            bodyInner.insertBefore(preludeEl, bodyInner.firstChild);
+        }
+    }
+    if (preludeEl && (preludeEl.textContent || '') !== (item.prelude || '')) {
+        preludeEl.textContent = item.prelude || '';
+    }
 
     const subtitleEl = container.querySelector('#subtitle-' + OSA.cssEscape(domId));
     if (item.title && subtitleEl && !subtitleEl.textContent) {

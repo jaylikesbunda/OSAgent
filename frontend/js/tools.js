@@ -170,9 +170,9 @@ OSA.handleAgentEvent = function(event) {
             }
             OSA.completeThinkingDisplay();
             OSA.tmodelFinalizeSegmentForToolCall();
+            OSA.resetSpeechStream?.();
             OSA.tmodelToolStart(event);
             OSA.persistToolStart(event);
-            OSA.speakToolStart(event);
             OSA.renderQueuedMessages(OSA.getSessionQueue());
             break;
 
@@ -192,7 +192,6 @@ OSA.handleAgentEvent = function(event) {
             if (['write_file', 'edit_file', 'apply_patch', 'delete_file', 'batch'].includes(event.tool_name)) {
                 OSA.scheduleSessionInspectorRefresh();
             }
-            OSA.speakToolComplete(event);
             OSA.previewReadToolOutput(event);
             break;
 

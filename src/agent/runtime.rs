@@ -1299,7 +1299,6 @@ impl AgentRuntime {
         let agent_settings = self.agent_settings.read().await;
         let max_iterations = agent_settings.max_iterations;
         drop(agent_settings);
-        let mut pending_tool_followup = false;
         let mut response_truncated = false;
         let mut max_iterations_reached = false;
         let mut response_complete_emitted = false;
@@ -1345,15 +1344,6 @@ impl AgentRuntime {
                 "process_message: Iteration {} of {}",
                 iteration, max_iterations
             );
-
-            if pending_tool_followup {
-                self.event_bus.emit(AgentEvent::Thinking {
-                    session_id: session_id.to_string(),
-                    sequence: 0,
-                    message: format!("Processing tool results... iteration {}", iteration),
-                    timestamp: SystemTime::now(),
-                });
-            }
 
             // Check for cancellation at the start of each iteration
             if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
@@ -1541,11 +1531,6 @@ impl AgentRuntime {
             api_messages.reserve(session.messages.len());
             for msg in &session.messages {
                 api_messages.push(msg.clone());
-            }
-            if pending_tool_followup && !is_roleplay {
-                api_messages.push(Message::user(
-                    "The last tool calls completed. If the request is addressed, give a concise final summary and stop. Do not start tangential work or unsolicited improvements; only continue if a concrete step directly remains.".to_string(),
-                ));
             }
             if response_truncated && !is_roleplay {
                 api_messages.push(Message::user(
@@ -2136,8 +2121,11 @@ impl AgentRuntime {
                 if let Some(last_message) = session.messages.last_mut() {
                     last_message.tool_calls = response.tool_calls.clone();
                     if has_tool_calls {
+                        // Keep prelude visible (opencode-style parts): the
+                        // transcript folds it into the tool card, but the
+                        // history must retain it or the next turn loses the
+                        // model's own stated intent to continue editing.
                         last_message.metadata = serde_json::json!({
-                            "synthetic": true,
                             "kind": "tool_prelude",
                         });
                     }
@@ -2172,7 +2160,6 @@ impl AgentRuntime {
                 );
                 if has_tool_calls {
                     assistant_message.metadata = serde_json::json!({
-                        "synthetic": true,
                         "kind": "tool_prelude",
                     });
                 }
@@ -2934,21 +2921,6 @@ impl AgentRuntime {
                     timestamp: SystemTime::now(),
                 });
                 self.session_manager.update_session(&session).await?;
-                let finish = response.finish_reason.to_lowercase();
-                let looks_like_completion =
-                    finish == "stop" || finish == "end_turn" || finish == "completed";
-                let is_truncated = finish == "length";
-                if !looks_like_completion && !is_truncated {
-                    pending_tool_followup = true;
-                } else if is_truncated {
-                    warn!(
-                        "Response with tool calls truncated (finish_reason=length) for session {} - treating as pending continuation",
-                        session_id
-                    );
-                    pending_tool_followup = true;
-                } else {
-                    info!("process_message: Model stopped naturally (finish_reason={}), not forcing continuation", finish);
-                }
             } else {
                 info!("process_message: No tool calls, response complete");
 
@@ -2962,9 +2934,13 @@ impl AgentRuntime {
                     continue;
                 }
 
-                if pending_tool_followup
-                    && last_iteration_only_meta_tools
+                if last_iteration_only_meta_tools
                     && meta_only_followup_attempts < 2
+                    && response
+                        .content
+                        .as_ref()
+                        .map(|c| !c.trim().is_empty())
+                        .unwrap_or(false)
                 {
                     meta_only_followup_attempts += 1;
                     warn!(
@@ -2975,21 +2951,6 @@ impl AgentRuntime {
                         "Planning is not completion. Continue with the next real step now, or explain the blocker plainly.".to_string(),
                         "planning_nudge",
                     ));
-                    pending_tool_followup = false;
-                    continue;
-                }
-
-                if pending_tool_followup
-                    && response
-                        .content
-                        .as_ref()
-                        .map(|c| c.trim().is_empty())
-                        .unwrap_or(true)
-                {
-                    warn!(
-                        "Empty post-tool response for session {} - continuing",
-                        session_id
-                    );
                     continue;
                 }
                 // No more tool calls, emit response complete
@@ -3063,7 +3024,6 @@ impl AgentRuntime {
 
         let fallback_assistant_message = session.messages.iter().rev().find(|m| {
             m.role == "assistant"
-                && !Self::is_synthetic_message(m)
                 && !m.content.trim().is_empty()
                 && !Self::looks_like_internal_tool_dump(&m.content)
         });
@@ -3719,7 +3679,6 @@ impl AgentRuntime {
 
     fn is_visible_assistant_message(message: &Message) -> bool {
         message.role == "assistant"
-            && !Self::is_synthetic_message(message)
             && !message.content.trim().is_empty()
             && message
                 .tool_calls
@@ -4814,10 +4773,24 @@ impl AgentRuntime {
     ) -> String {
         const MAX_CHARS: usize = 4_000;
         const MAX_LINES: usize = 80;
+        const KEEP_TAIL_LINES: usize = 6;
 
         let normalized = output.replace('\r', "");
-        let line_count = normalized.lines().count();
-        let mut selected_lines: Vec<&str> = normalized.lines().take(MAX_LINES).collect();
+        let all_lines: Vec<&str> = normalized.lines().collect();
+        let line_count = all_lines.len();
+        let (mut selected_lines, omitted): (Vec<&str>, usize) = if line_count > MAX_LINES {
+            let head = MAX_LINES.saturating_sub(KEEP_TAIL_LINES);
+            let mut selected: Vec<&str> = all_lines[..head.min(line_count)].to_vec();
+            let tail_start = line_count.saturating_sub(KEEP_TAIL_LINES).max(head);
+            let omitted = tail_start.saturating_sub(selected.len());
+            if tail_start < line_count {
+                selected.push("...[middle lines omitted for context — tail kept below]");
+                selected.extend_from_slice(&all_lines[tail_start..]);
+            }
+            (selected, omitted)
+        } else {
+            (all_lines.clone(), 0)
+        };
 
         if selected_lines.is_empty() && !normalized.is_empty() {
             selected_lines.push(normalized.as_str());
@@ -4825,8 +4798,25 @@ impl AgentRuntime {
 
         let mut compact = selected_lines.join("\n");
         if compact.chars().count() > MAX_CHARS {
+            let tail: String = compact
+                .lines()
+                .rev()
+                .take(KEEP_TAIL_LINES)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
             compact = compact.chars().take(MAX_CHARS).collect::<String>();
-            compact.push_str("\n...[truncated for context]");
+            compact.push_str(&format!(
+                "\n...[truncated for context — tail kept below]\n{}",
+                tail
+            ));
+        } else if omitted > 0 {
+            compact.push_str(&format!(
+                "\n...[truncated {} more lines for context]",
+                omitted
+            ));
         } else if line_count > MAX_LINES {
             compact.push_str(&format!(
                 "\n...[truncated {} more lines for context]",

@@ -1309,7 +1309,6 @@ impl SubagentManager {
             let final_message = session.messages.iter().rev().find(|message| {
                 message.role == "assistant"
                     && !message.content.trim().is_empty()
-                    && !Self::is_synthetic_message(message)
                     && message
                         .tool_calls
                         .as_ref()
@@ -1326,7 +1325,6 @@ impl SubagentManager {
             let fallback_with_tools = session.messages.iter().rev().find(|message| {
                 message.role == "assistant"
                     && !message.content.trim().is_empty()
-                    && !Self::is_synthetic_message(message)
                     && !Self::looks_like_internal_tool_dump(&message.content)
             });
 

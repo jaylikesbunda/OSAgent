@@ -218,16 +218,11 @@ impl Handler {
                         message.role == "assistant" && !message.content.trim().is_empty()
                     })
                     .filter(|message| {
-                        let synthetic = message
-                            .metadata
-                            .get("synthetic")
-                            .and_then(|value| value.as_bool())
-                            .unwrap_or(false);
-                        let kind = message
-                            .metadata
-                            .get("kind")
-                            .and_then(|value| value.as_str());
-                        !synthetic || kind == Some("tool_prelude")
+                        message
+                            .tool_calls
+                            .as_ref()
+                            .map(|calls| calls.is_empty())
+                            .unwrap_or(true)
                     })
                     .map(|message| message.content.trim().to_string())
                     .collect::<Vec<_>>()
