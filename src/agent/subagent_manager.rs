@@ -25,42 +25,18 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 fn truncate_tool_output(tool_name: &str, output: &str) -> String {
-    const MAX_CHARS: usize = 4_000;
-    const MAX_LINES: usize = 80;
-
-    let normalized = output.replace('\r', "");
-    let line_count = normalized.lines().count();
-    let mut selected_lines: Vec<&str> = normalized.lines().take(MAX_LINES).collect();
-
-    if selected_lines.is_empty() && !normalized.is_empty() {
-        selected_lines.push(normalized.as_str());
-    }
-
-    let mut compact = selected_lines.join("\n");
-    if compact.chars().count() > MAX_CHARS {
-        compact = compact.chars().take(MAX_CHARS).collect::<String>();
-        compact.push_str("\n...[truncated for context]");
-    } else if line_count > MAX_LINES {
-        compact.push_str(&format!(
-            "\n...[truncated {} more lines for context]",
-            line_count - MAX_LINES
-        ));
-    }
-
-    if compact.trim().is_empty() {
-        compact = "(no output)".to_string();
-    }
+    let preview = crate::tools::truncation::preview_tool_output_for_context(tool_name, output);
 
     match tool_name {
         "read_file" => format!(
             "Tool: {}\nOutput summary (trimmed file content for context):\n{}",
-            tool_name, compact
+            tool_name, preview
         ),
         "list_files" | "glob" | "grep" => format!(
             "Tool: {}\nOutput summary (trimmed search results for context):\n{}",
-            tool_name, compact
+            tool_name, preview
         ),
-        _ => format!("Tool: {}\nOutput:\n{}", tool_name, compact),
+        _ => format!("Tool: {}\nOutput:\n{}", tool_name, preview),
     }
 }
 

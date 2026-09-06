@@ -1,11 +1,39 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 const INSTRUCTION_FILES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
 const MAX_TOTAL_CHARS: usize = 2_000;
+/// Instruction-block cache TTL: AGENTS.md files change rarely; a short TTL
+/// avoids a directory-tree `exists()` walk on every read_file call while
+/// still picking up edits within a minute.
+const NEARBY_CACHE_TTL: Duration = Duration::from_secs(60);
+const NEARBY_CACHE_MAX_ENTRIES: usize = 512;
+
+struct NearbyCacheEntry {
+    blocks: Vec<String>,
+    /// Newest mtime (seconds) observed across the probed dirs when cached;
+    /// a newer mtime on lookup forces a rescan even within the TTL.
+    newest_mtime: u64,
+    cached_at: Instant,
+}
+
+fn nearby_cache() -> &'static dashmap::DashMap<String, NearbyCacheEntry> {
+    static CACHE: OnceLock<dashmap::DashMap<String, NearbyCacheEntry>> = OnceLock::new();
+    CACHE.get_or_init(dashmap::DashMap::new)
+}
+
+fn dir_mtime_secs(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
 
 fn read_instruction_file(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
@@ -109,8 +137,69 @@ fn push_unique_block(path: &Path, seen: &mut HashSet<PathBuf>, found: &mut Vec<S
 }
 
 pub fn nearby_instruction_blocks(workspace: &Path, target: &Path) -> Vec<String> {
+    scan_nearby_blocks(workspace, target).0
+}
+
+/// Cached variant for hot paths (read_file on every call): same result as
+/// [`nearby_instruction_blocks`], served from a 60s TTL cache keyed on the
+/// workspace+target directory, invalidated early when any probed dir's
+/// mtime advances. RAM-bounded: capped entries, blocks already capped at
+/// 2KB total per entry.
+pub fn cached_nearby_blocks(workspace: &Path, target: &Path) -> Vec<String> {
+    let key = format!("{}|{}", workspace.display(), target.display());
+    let cache = nearby_cache();
+    if let Some(entry) = cache.get(&key) {
+        if entry.cached_at.elapsed() < NEARBY_CACHE_TTL {
+            let (_, newest) = scan_nearby_mtimes(workspace, target);
+            if newest <= entry.newest_mtime {
+                return entry.blocks.clone();
+            }
+        }
+    }
+    let (blocks, newest) = scan_nearby_blocks(workspace, target);
+    if cache.len() >= NEARBY_CACHE_MAX_ENTRIES {
+        let cutoff = Instant::now() - NEARBY_CACHE_TTL;
+        cache.retain(|_, entry| entry.cached_at > cutoff);
+        if cache.len() >= NEARBY_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+    }
+    cache.insert(
+        key,
+        NearbyCacheEntry {
+            blocks: blocks.clone(),
+            newest_mtime: newest,
+            cached_at: Instant::now(),
+        },
+    );
+    blocks
+}
+
+/// Walk target→workspace collecting probed dir mtimes (for invalidation).
+fn scan_nearby_mtimes(workspace: &Path, target: &Path) -> (Vec<PathBuf>, u64) {
+    let mut dirs = Vec::new();
     if !target.starts_with(workspace) {
-        return Vec::new();
+        return (dirs, 0);
+    }
+    let mut current = target.parent().map(PathBuf::from);
+    while let Some(dir) = current {
+        if !dir.starts_with(workspace) {
+            break;
+        }
+        dirs.push(dir.clone());
+        if dir == workspace {
+            break;
+        }
+        current = dir.parent().map(PathBuf::from);
+    }
+    let newest = dirs.iter().map(|dir| dir_mtime_secs(dir)).max().unwrap_or(0);
+    (dirs, newest)
+}
+
+fn scan_nearby_blocks(workspace: &Path, target: &Path) -> (Vec<String>, u64) {
+    let (dirs, newest) = scan_nearby_mtimes(workspace, target);
+    if dirs.is_empty() {
+        return (Vec::new(), newest);
     }
 
     if target
@@ -123,18 +212,13 @@ pub fn nearby_instruction_blocks(workspace: &Path, target: &Path) -> Vec<String>
         })
         .unwrap_or(false)
     {
-        return Vec::new();
+        return (Vec::new(), newest);
     }
 
-    let mut current = target.parent().map(PathBuf::from);
     let mut found = Vec::new();
     let mut seen = HashSet::new();
 
-    while let Some(dir) = current {
-        if !dir.starts_with(workspace) {
-            break;
-        }
-
+    for dir in dirs.iter().rev() {
         for name in INSTRUCTION_FILES {
             let path = dir.join(name);
             if path.exists() {
@@ -142,16 +226,9 @@ pub fn nearby_instruction_blocks(workspace: &Path, target: &Path) -> Vec<String>
                 break;
             }
         }
-
-        if dir == workspace {
-            break;
-        }
-
-        current = dir.parent().map(PathBuf::from);
     }
 
-    found.reverse();
-    truncate_blocks(found)
+    (truncate_blocks(found), newest)
 }
 
 pub fn format_system_reminder(blocks: &[String]) -> Option<String> {

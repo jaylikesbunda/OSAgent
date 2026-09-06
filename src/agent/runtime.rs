@@ -4771,73 +4771,17 @@ impl AgentRuntime {
         outcome: ToolOutcome,
         output: &str,
     ) -> String {
-        const MAX_CHARS: usize = 4_000;
-        const MAX_LINES: usize = 80;
-        const KEEP_TAIL_LINES: usize = 6;
-
-        let normalized = output.replace('\r', "");
-        let all_lines: Vec<&str> = normalized.lines().collect();
-        let line_count = all_lines.len();
-        let (mut selected_lines, omitted): (Vec<&str>, usize) = if line_count > MAX_LINES {
-            let head = MAX_LINES.saturating_sub(KEEP_TAIL_LINES);
-            let mut selected: Vec<&str> = all_lines[..head.min(line_count)].to_vec();
-            let tail_start = line_count.saturating_sub(KEEP_TAIL_LINES).max(head);
-            let omitted = tail_start.saturating_sub(selected.len());
-            if tail_start < line_count {
-                selected.push("...[middle lines omitted for context — tail kept below]");
-                selected.extend_from_slice(&all_lines[tail_start..]);
-            }
-            (selected, omitted)
-        } else {
-            (all_lines.clone(), 0)
-        };
-
-        if selected_lines.is_empty() && !normalized.is_empty() {
-            selected_lines.push(normalized.as_str());
-        }
-
-        let mut compact = selected_lines.join("\n");
-        if compact.chars().count() > MAX_CHARS {
-            let tail: String = compact
-                .lines()
-                .rev()
-                .take(KEEP_TAIL_LINES)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
-            compact = compact.chars().take(MAX_CHARS).collect::<String>();
-            compact.push_str(&format!(
-                "\n...[truncated for context — tail kept below]\n{}",
-                tail
-            ));
-        } else if omitted > 0 {
-            compact.push_str(&format!(
-                "\n...[truncated {} more lines for context]",
-                omitted
-            ));
-        } else if line_count > MAX_LINES {
-            compact.push_str(&format!(
-                "\n...[truncated {} more lines for context]",
-                line_count - MAX_LINES
-            ));
-        }
-
-        if compact.trim().is_empty() {
-            compact = "(no output)".to_string();
-        }
-
+        let preview = truncation::preview_tool_output_for_context(tool_name, output);
         let rendered = match tool_name {
             "read_file" => format!(
                 "Tool: {}\nOutput summary (trimmed file content for context):\n{}",
-                tool_name, compact
+                tool_name, preview
             ),
             "list_files" | "glob" | "grep" => format!(
                 "Tool: {}\nOutput summary (trimmed search results for context):\n{}",
-                tool_name, compact
+                tool_name, preview
             ),
-            _ => format!("Tool: {}\nOutput:\n{}", tool_name, compact),
+            _ => format!("Tool: {}\nOutput:\n{}", tool_name, preview),
         };
 
         format!("[tool outcome: {}]\n{}", outcome.as_str(), rendered)
@@ -4913,17 +4857,37 @@ impl AgentRuntime {
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false)
             )),
-            "read_file" => Some(format!(
-                "read_file:{}:{}:{}",
-                Self::normalized_arg(args, "path", ""),
-                args.get("start_line")
+            "read_file" => {
+                let path = args
+                    .get("filePath")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| args.get("path").and_then(|value| value.as_str()))
+                    .unwrap_or("");
+                let offset = args
+                    .get("offset")
                     .and_then(|value| value.as_u64())
-                    .unwrap_or(1),
-                args.get("end_line")
+                    .or_else(|| args.get("start_line").and_then(|value| value.as_u64()))
+                    .unwrap_or(1);
+                let limit = args
+                    .get("limit")
                     .and_then(|value| value.as_u64())
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "end".to_string())
-            )),
+                    .map(|value| {
+                        let start = offset.max(1);
+                        start.saturating_add(value).saturating_sub(1).to_string()
+                    })
+                    .or_else(|| {
+                        args.get("end_line")
+                            .and_then(|value| value.as_u64())
+                            .map(|value| value.to_string())
+                    })
+                    .unwrap_or_else(|| "end".to_string());
+                Some(format!(
+                    "read_file:{}:{}:{}",
+                    Self::normalize_loop_text(path),
+                    offset.max(1),
+                    limit
+                ))
+            }
             "bash" => Some(format!(
                 "bash:{}:{}",
                 Self::normalized_arg(args, "command", ""),
@@ -4961,7 +4925,7 @@ impl AgentRuntime {
                 "Change the path or pattern, or inspect one of the files you already found instead of repeating the same search."
             }
             "read_file" => {
-                "Read a different file or a narrower line range instead of rereading the same section unchanged."
+                "Paging the same file forward (offset=1, 200, 400, ...) is normal exploration. Only identical offset+limit repeats count as loops. Read a narrower window (limit=80 or less) of a new section instead of rereading the same lines unchanged."
             }
             "bash" | "code_python" | "code_node" | "code_bash" => {
                 "Adjust the command or script, inspect the prior output, or summarize the blocker instead of rerunning it unchanged."
@@ -6887,7 +6851,7 @@ mod external_path_scan_tests {
     }
 
     fn ws() -> PathBuf {
-        PathBuf::from(r"I:\GhostESP2\Research-Projects\Pwn-Power")
+        PathBuf::from(r"C:\example-workspace\Research-Projects\firmware-demo")
     }
 
     fn scan(cmd: &str) -> Option<String> {
@@ -6904,6 +6868,41 @@ mod external_path_scan_tests {
         );
         assert!(rendered.starts_with("[tool outcome: failure]\nTool: bash"));
         assert!(rendered.contains("Exit code: 1"));
+    }
+
+    #[test]
+    fn read_file_preview_never_splices_middle() {
+        let lines: Vec<String> = (1..=350).map(|i| format!("{i}: body {i}")).collect();
+        let rendered = AgentRuntime::summarize_tool_output_for_context(
+            "read_file",
+            ToolOutcome::Success,
+            &lines.join("\n"),
+        );
+        assert!(rendered.contains("1: body 1"));
+        assert!(!rendered.contains("middle lines omitted"));
+        assert!(!rendered.contains("tail kept below"));
+        assert!(rendered.contains("of 350 lines"));
+    }
+
+    #[test]
+    fn read_file_intent_key_covers_real_and_alias_params() {
+        let direct = AgentRuntime::tool_intent_signature(
+            "read_file",
+            &serde_json::json!({"filePath": "a.c", "offset": 200, "limit": 350}),
+        )
+        .expect("intent");
+        let alias = AgentRuntime::tool_intent_signature(
+            "read_file",
+            &serde_json::json!({"path": "a.c", "start_line": 200, "end_line": 549}),
+        )
+        .expect("intent");
+        assert_eq!(direct, alias);
+        let next_page = AgentRuntime::tool_intent_signature(
+            "read_file",
+            &serde_json::json!({"filePath": "a.c", "offset": 550, "limit": 350}),
+        )
+        .expect("intent");
+        assert_ne!(direct, next_page);
     }
 
     #[test]
@@ -6944,7 +6943,7 @@ mod external_path_scan_tests {
         // an external absolute path, so only test it on Windows.
         if cfg!(windows) {
             assert_eq!(
-                scan(r#"dir "I:\GhostESP2\Research-Projects\Pwn-Power\src""#),
+                scan(r#"dir "C:\example-workspace\Research-Projects\firmware-demo\src""#),
                 None
             );
         }

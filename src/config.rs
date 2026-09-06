@@ -501,6 +501,11 @@ pub struct CodeToolConfig {
 #[serde(default)]
 pub struct GrepToolConfig {
     pub timeout_seconds: u64,
+    /// Extra directory/file-name patterns skipped by repo-wide grep/glob
+    /// unless the search path points at them directly. Generic build
+    /// output, dependency, and VCS trees are always skipped; anything
+    /// project-specific belongs here, in config — not in code.
+    pub exclude_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1036,6 +1041,7 @@ impl Default for GrepToolConfig {
     fn default() -> Self {
         Self {
             timeout_seconds: 60,
+            exclude_dirs: Vec::new(),
         }
     }
 }

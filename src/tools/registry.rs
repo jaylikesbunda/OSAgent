@@ -251,6 +251,14 @@ pub struct ToolRegistry {
     /// on every read so that activating one never reorders or rewrites
     /// this block — the provider's cached prompt prefix survives.
     cached_tool_definitions: std::sync::RwLock<Option<Vec<ToolDefinition>>>,
+    /// Per-workspace rebuilt tool instances. Rebuilding a tool per call
+    /// means re-resolving + canonicalizing every workspace dir and
+    /// re-cloning config; the registry already owns one instance per
+    /// tool, and the per-workspace variant only differs by resolved
+    /// paths, so cache it keyed on the workspace path. Entries hold the
+    /// full tool map for that workspace; the outer map is bounded by
+    /// evicting the oldest workspace when it grows past a small cap.
+    workspace_tools: std::sync::RwLock<HashMap<String, Arc<HashMap<String, Arc<dyn Tool>>>>>,
 }
 
 /// Render the model-facing description for a tool: description,
@@ -602,7 +610,71 @@ impl ToolRegistry {
             mcp,
             native_catalog,
             cached_tool_definitions: std::sync::RwLock::new(None),
+            workspace_tools: std::sync::RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Max cached per-workspace tool maps. Sessions touch few distinct
+    /// workspaces; the cap only matters for pathological fan-out.
+    const MAX_WORKSPACE_TOOL_MAPS: usize = 16;
+
+    /// Fetch (or build + cache) the tool map for one workspace path.
+    /// Replaces per-call `build_tool` reconstruction with a map lookup:
+    /// same instances, no repeated config clones or path canonicalization.
+    fn tools_for_workspace(
+        &self,
+        tool_name: &str,
+        config: &Config,
+        workspace_path: &str,
+    ) -> Option<Arc<dyn Tool>> {
+        {
+            let cached = self
+                .workspace_tools
+                .read()
+                .expect("workspace tool cache lock");
+            if let Some(map) = cached.get(workspace_path) {
+                if let Some(tool) = map.get(tool_name) {
+                    return Some(tool.clone());
+                }
+            }
+        }
+        let tool = Self::build_tool(
+            tool_name,
+            config.clone(),
+            self.storage.clone(),
+            &self.file_cache,
+        )?;
+        {
+            let mut cached = self
+                .workspace_tools
+                .write()
+                .expect("workspace tool cache lock");
+            let map = cached
+                .entry(workspace_path.to_string())
+                .or_insert_with(|| {
+                    // Seed with the already-built tool so the first call
+                    // doesn't rebuild it below.
+                    let mut seed = HashMap::new();
+                    seed.insert(tool_name.to_string(), tool.clone());
+                    Arc::new(seed)
+                });
+            if !map.contains_key(tool_name) {
+                let mut grown = HashMap::new();
+                for (name, existing) in map.iter() {
+                    grown.insert(name.clone(), existing.clone());
+                }
+                grown.insert(tool_name.to_string(), tool.clone());
+                *map = Arc::new(grown);
+            }
+            if cached.len() > Self::MAX_WORKSPACE_TOOL_MAPS {
+                // Drop an arbitrary (oldest-ish) entry; HashMap order is
+                // random but the cap only triggers on abuse.
+                if let Some(first) = cached.keys().next().cloned() {
+                    cached.remove(&first);
+                }
+            }
+        }
+        Some(tool)
     }
 
     fn build_tool(
@@ -1019,6 +1091,19 @@ impl ToolRegistry {
         }
 
         if let Some(path) = workspace_path {
+            // Fast path: the session workspace rarely changes, and the
+            // config it resolves to is deterministic. When the resolved
+            // config matches the registry's base config (no workspace
+            // switch, no external additions), the already-built tool
+            // instance is correct — skip the clone + rebuild entirely.
+            let needs_rebuild = self.workspace_config_differs(&path, external_paths);
+            if !needs_rebuild {
+                if let Some(tool) = self.tools.get(tool_name) {
+                    return Self::run_tool_with_timeout(tool, args)
+                        .await
+                        .map_err(Self::with_rewrite_guidance);
+                }
+            }
             let mut config = self.base_config.clone();
             if let Some(workspace) = config.get_workspace_by_path(&path) {
                 config.agent.active_workspace = Some(workspace.id.clone());
@@ -1043,7 +1128,7 @@ impl ToolRegistry {
                     workspace.path = path.clone();
                 }
                 config.agent.active_workspace = Some(active_id);
-                config.agent.workspace = path;
+                config.agent.workspace = path.clone();
             }
             config.ensure_workspace_defaults();
             if !external_paths.is_empty() {
@@ -1065,9 +1150,7 @@ impl ToolRegistry {
                     }
                 }
             }
-            if let Some(tool) =
-                Self::build_tool(tool_name, config, self.storage.clone(), &self.file_cache)
-            {
+            if let Some(tool) = self.tools_for_workspace(tool_name, &config, &path) {
                 return Self::run_tool_with_timeout(&tool, args)
                     .await
                     .map_err(Self::with_rewrite_guidance);
@@ -1084,6 +1167,33 @@ impl ToolRegistry {
         }
 
         self.execute_result(tool_name, args).await
+    }
+
+    /// True when routing a call at `path` needs a different config than
+    /// the registry was built with: the path isn't covered by the base
+    /// workspace, or user-approved external paths add scope. The common
+    /// case (session workspace == base workspace, no externals) is false.
+    fn workspace_config_differs(&self, path: &str, external_paths: &[String]) -> bool {
+        if !external_paths.is_empty() {
+            return true;
+        }
+        let base = &self.base_config;
+        if base.get_workspace_by_path(path).is_some() {
+            return false;
+        }
+        // Ad-hoc session path: covered only if it falls under an existing
+        // workspace root.
+        let expanded = shellexpand::tilde(path).to_string();
+        let candidate = std::path::Path::new(&expanded);
+        base.get_active_workspace()
+            .paths
+            .iter()
+            .any(|wp| {
+                let root = std::path::PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+                candidate.starts_with(&root)
+            })
+            .then_some(false)
+            .unwrap_or(true)
     }
 
     pub fn file_cache(&self) -> &Arc<FileReadCache> {

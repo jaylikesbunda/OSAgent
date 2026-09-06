@@ -7,6 +7,12 @@ use tracing::{debug, info};
 const DEFAULT_MAX_ENTRIES: usize = 256;
 const EVICTION_AGE_SECS: u64 = 300;
 const HASH_CHUNK_SIZE: usize = 4096;
+/// RAM cap for cached file content: 64MB total keeps repeat reads free
+/// without letting one giant file eat the budget. Entries over 1MB per
+/// file are metadata-only (still skip re-reads via mtime+size hits for
+/// the unchanged-stub path, but don't pin content in RAM).
+const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHED_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct FileCacheEntry {
@@ -15,11 +21,29 @@ pub struct FileCacheEntry {
     pub content_hash: u64,
     pub line_count: usize,
     pub accessed_at: Instant,
+    /// Full text for small files; `None` for oversize entries or when the
+    /// budget is full. Freshness is still verified by mtime+size.
+    pub content: Option<String>,
+    /// Byte offsets where each line starts; lets windowed reads slice
+    /// without re-splitting the whole file.
+    pub line_starts: Option<Vec<usize>>,
+}
+
+fn line_starts_for(content: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (idx, byte) in content.bytes().enumerate() {
+        if byte == b'\n' && idx + 1 < content.len() {
+            starts.push(idx + 1);
+        }
+    }
+    starts
 }
 
 pub struct FileReadCache {
     entries: DashMap<String, FileCacheEntry>,
     max_entries: usize,
+    max_bytes: usize,
+    bytes_used: AtomicUsize,
     hits: AtomicUsize,
     misses: AtomicUsize,
 }
@@ -54,6 +78,17 @@ fn simple_hash(content: &str) -> u64 {
 
 impl FileReadCache {
     pub fn new(max_entries: usize) -> Self {
+        Self::with_limits(
+            if max_entries == 0 {
+                DEFAULT_MAX_ENTRIES
+            } else {
+                max_entries
+            },
+            DEFAULT_MAX_BYTES,
+        )
+    }
+
+    pub fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
         Self {
             entries: DashMap::new(),
             max_entries: if max_entries == 0 {
@@ -61,6 +96,12 @@ impl FileReadCache {
             } else {
                 max_entries
             },
+            max_bytes: if max_bytes == 0 {
+                DEFAULT_MAX_BYTES
+            } else {
+                max_bytes
+            },
+            bytes_used: AtomicUsize::new(0),
             hits: AtomicUsize::new(0),
             misses: AtomicUsize::new(0),
         }
@@ -68,6 +109,50 @@ impl FileReadCache {
 
     pub fn with_default_capacity() -> Self {
         Self::new(DEFAULT_MAX_ENTRIES)
+    }
+
+    /// Fresh entry with content when the file fits the RAM budget.
+    /// Returns `None` on mtime/size mismatch (stale) or when the entry
+    /// holds metadata only. Stale entries are evicted; metadata-only
+    /// entries are kept so `check` still sees them. Callers fall back to
+    /// a streaming disk read.
+    pub fn get_content(&self, canonical_path: &Path) -> Option<FileCacheEntry> {
+        let key = canonical_path.to_string_lossy().to_string();
+        let current_meta = file_metadata(canonical_path);
+        let entry = self.entries.get(&key)?;
+
+        match current_meta {
+            Some((mtime, size)) => {
+                if entry.mtime_secs == mtime && entry.size == size {
+                    if entry.content.is_some() {
+                        drop(entry);
+                        if let Some(mut e) = self.entries.get_mut(&key) {
+                            e.accessed_at = Instant::now();
+                        }
+                        let e = self.entries.get(&key)?;
+                        self.hits.fetch_add(1, Ordering::Relaxed);
+                        return Some(e.value().clone());
+                    }
+                    // Metadata-only entry: fresh but no content to serve.
+                    return None;
+                }
+                drop(entry);
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                if let Some((_, removed)) = self.entries.remove(&key) {
+                    self.bytes_used
+                        .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
+                }
+                None
+            }
+            None => {
+                drop(entry);
+                if let Some((_, removed)) = self.entries.remove(&key) {
+                    self.bytes_used
+                        .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
+                }
+                None
+            }
+        }
     }
 
     pub fn check(&self, canonical_path: &Path) -> Option<FileCacheEntry> {
@@ -128,6 +213,13 @@ impl FileReadCache {
     }
 
     pub fn update(&self, canonical_path: &Path, content: &str) {
+        self.insert(canonical_path, content.to_string());
+    }
+
+    /// Insert owned content (avoids a second copy of the file text).
+    /// Files over `MAX_CACHED_FILE_BYTES` or inserts that would exceed
+    /// the byte budget are stored metadata-only.
+    pub fn insert(&self, canonical_path: &Path, content: String) {
         let key = canonical_path.to_string_lossy().to_string();
         let meta = file_metadata(canonical_path);
 
@@ -140,9 +232,34 @@ impl FileReadCache {
             self.evict_old();
         }
 
-        let line_count = content.lines().count();
-        let content_hash = simple_hash(content);
+        let oversize = size > MAX_CACHED_FILE_BYTES || content.len() as u64 > MAX_CACHED_FILE_BYTES;
+        let fits_budget =
+            self.bytes_used.load(Ordering::Relaxed) + content.len() <= self.max_bytes;
+        let (stored_content, line_starts) = if !oversize && fits_budget {
+            let starts = line_starts_for(&content);
+            (Some(content), Some(starts))
+        } else {
+            (None, None)
+        };
+        let stored_len = stored_content.as_ref().map(|c| c.len()).unwrap_or(0);
 
+        let line_count = if let Some(ref text) = stored_content {
+            text.lines().count()
+        } else {
+            // Metadata-only: count cheaply from size is wrong, so leave 0;
+            // callers that need exact counts stream the file.
+            0
+        };
+        let content_hash = stored_content
+            .as_ref()
+            .map(|text| simple_hash(text))
+            .unwrap_or(size.wrapping_mul(1099511628211));
+
+        if let Some((_, removed)) = self.entries.remove(&key) {
+            self.bytes_used
+                .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
+        }
+        self.bytes_used.fetch_add(stored_len, Ordering::Relaxed);
         self.entries.insert(
             key,
             FileCacheEntry {
@@ -151,6 +268,8 @@ impl FileReadCache {
                 content_hash,
                 line_count,
                 accessed_at: Instant::now(),
+                content: stored_content,
+                line_starts,
             },
         );
 
@@ -159,29 +278,34 @@ impl FileReadCache {
 
     pub fn invalidate(&self, canonical_path: &Path) {
         let key = canonical_path.to_string_lossy().to_string();
-        let removed = self.entries.remove(&key);
-        if removed.is_some() {
+        if let Some((_, removed)) = self.entries.remove(&key) {
+            self.bytes_used
+                .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
             debug!("File cache invalidated: {}", key);
         }
     }
 
     pub fn invalidate_by_prefix(&self, prefix: &Path) {
         let prefix_str = prefix.to_string_lossy().to_string();
-        let keys_to_remove: Vec<String> = self
+        let removed: Vec<(String, FileCacheEntry)> = self
             .entries
             .iter()
             .filter(|entry| entry.key().starts_with(&prefix_str))
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
 
-        for key in keys_to_remove {
+        let mut freed = 0usize;
+        for (key, entry) in removed {
+            freed += entry.content.map(|c| c.len()).unwrap_or(0);
             self.entries.remove(&key);
         }
+        self.bytes_used.fetch_sub(freed, Ordering::Relaxed);
     }
 
     pub fn invalidate_all(&self) {
         let count = self.entries.len();
         self.entries.clear();
+        self.bytes_used.store(0, Ordering::Relaxed);
         if count > 0 {
             info!("File cache cleared ({} entries evicted)", count);
         }
@@ -189,23 +313,60 @@ impl FileReadCache {
 
     fn evict_old(&self) {
         let cutoff = Instant::now() - std::time::Duration::from_secs(EVICTION_AGE_SECS);
-        let keys_to_remove: Vec<String> = self
+        let victims: Vec<(String, usize)> = self
             .entries
             .iter()
             .filter(|entry| entry.value().accessed_at < cutoff)
-            .map(|entry| entry.key().clone())
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    entry.value().content.as_ref().map(|c| c.len()).unwrap_or(0),
+                )
+            })
             .take(self.max_entries / 4)
             .collect();
 
-        for key in keys_to_remove {
-            self.entries.remove(&key);
+        // If nothing is stale but the budget is full, evict least-recently
+        // used regardless of age: content cache must make room.
+        let victims = if victims.is_empty() {
+            let mut by_age: Vec<(String, usize, Instant)> = self
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.key().clone(),
+                        entry.value().content.as_ref().map(|c| c.len()).unwrap_or(0),
+                        entry.value().accessed_at,
+                    )
+                })
+                .collect();
+            by_age.sort_by_key(|(_, _, accessed)| *accessed);
+            by_age
+                .into_iter()
+                .take(self.max_entries / 4 + 1)
+                .map(|(key, bytes, _)| (key, bytes))
+                .collect()
+        } else {
+            victims
+        };
+
+        let mut freed = 0usize;
+        for (key, bytes) in victims {
+            if self.entries.remove(&key).is_some() {
+                freed += bytes;
+            }
         }
+        self.bytes_used.fetch_sub(freed, Ordering::Relaxed);
     }
 
     pub fn stats(&self) -> (usize, usize, usize) {
         let hits = self.hits.load(Ordering::Relaxed);
         let misses = self.misses.load(Ordering::Relaxed);
         (self.entries.len(), hits, misses)
+    }
+
+    pub fn bytes_used(&self) -> usize {
+        self.bytes_used.load(Ordering::Relaxed)
     }
 
     pub fn format_stub(entry: &FileCacheEntry, path: &Path) -> String {
@@ -345,6 +506,8 @@ mod tests {
             content_hash: 0,
             line_count: 42,
             accessed_at: Instant::now(),
+            content: None,
+            line_starts: None,
         };
         let stub = FileReadCache::format_stub(&entry, Path::new("src/main.rs"));
         assert!(stub.contains("42 lines"));
@@ -374,5 +537,52 @@ mod tests {
         cache.check_hit(&canonical);
         let (_, hits, _) = cache.stats();
         assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn content_cache_serves_repeat_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "line 1\nline 2\nline 3\n").unwrap();
+
+        let cache = FileReadCache::new(10);
+        let canonical = file_path.canonicalize().unwrap();
+
+        assert!(cache.get_content(&canonical).is_none());
+        cache.update(&canonical, "line 1\nline 2\nline 3\n");
+        let entry = cache.get_content(&canonical).expect("content hit");
+        assert_eq!(entry.content.as_deref(), Some("line 1\nline 2\nline 3\n"));
+        assert_eq!(entry.line_starts.as_ref().map(|v| v.len()), Some(3));
+        assert!(cache.bytes_used() > 0);
+    }
+
+    #[test]
+    fn oversize_files_stay_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("big.bin");
+        let big = "x".repeat((MAX_CACHED_FILE_BYTES + 1) as usize);
+        fs::write(&file_path, &big).unwrap();
+
+        let cache = FileReadCache::with_limits(10, 1024 * 1024 * 1024);
+        let canonical = file_path.canonicalize().unwrap();
+        cache.update(&canonical, &big);
+        // Content path refuses oversize entries...
+        assert!(cache.get_content(&canonical).is_none());
+        assert_eq!(cache.bytes_used(), 0);
+        // ...but the metadata path still records the file.
+        assert!(cache.check(&canonical).is_some());
+    }
+
+    #[test]
+    fn byte_budget_evicts_lru_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FileReadCache::with_limits(256, 100);
+        for i in 0..4 {
+            let path = dir.path().join(format!("f{i}.txt"));
+            fs::write(&path, "0123456789abcdef0123456789abcdef").unwrap();
+            let canonical = path.canonicalize().unwrap();
+            cache.update(&canonical, "0123456789abcdef0123456789abcdef");
+        }
+        assert!(cache.bytes_used() <= 100);
     }
 }

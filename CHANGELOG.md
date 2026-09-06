@@ -3,6 +3,10 @@ v0.5.3 changes:
 * Added a Bing backend to web search: burst-tolerant with direct result URLs, so general queries survive rate limiting better
 * Fixed completed streamed responses occasionally remaining stuck and preventing queued messages from sending
 * Fixed subagent card flicker when running tools
+* Fixed wide file reads losing their middle: tool output is now head-only with a correct `offset=` hint
+* Fixed read loop guard blocking page-forward reads: it now keys on `filePath`/`offset`/`limit`
+* Fixed grep/glob scanning build and dependency trees: generic junk skipped, project trees via new `exclude_dirs` config
+* Fixed walkdir grep missing matches in files under 4KB and on `\\?\` Windows paths
 
 v0.5.2 changes:
 

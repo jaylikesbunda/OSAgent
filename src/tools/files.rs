@@ -1,4 +1,4 @@
-use crate::agent::instruction::{format_system_reminder, nearby_instruction_blocks};
+use crate::agent::instruction::format_system_reminder;
 use crate::config::Config;
 use crate::error::{OSAgentError, Result};
 use crate::tools::file_cache::FileReadCache;
@@ -36,6 +36,263 @@ fn ensure_workspace(workspaces: &[PathBuf]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Outcome of the streaming disk read: the requested window plus an
+/// optional full text for cache insertion (only for small files), or a
+/// classification that avoids ever loading the whole file
+/// (binary/image/PDF detection from a header).
+#[derive(Debug)]
+enum WindowRead {
+    Found {
+        text: Option<String>,
+        total_lines: usize,
+        lines: Vec<String>,
+    },
+    Empty,
+    PastEnd {
+        total_lines: usize,
+    },
+    BinaryImage {
+        mime: String,
+    },
+    Pdf,
+    Binary,
+    NonUtf8,
+}
+
+/// Full text is retained for the content cache only up to this size;
+/// anything bigger streams the window and skips insertion.
+const CACHE_TEXT_MAX_BYTES: usize = 1024 * 1024;
+
+/// Read only the requested line window from disk. Streams bytes, splits
+/// on newlines incrementally, and stops collecting once the last wanted
+/// line is complete; the remainder is newline-counted with memchr over
+/// raw bytes (no UTF-8 validation, no per-line allocation). Full text is
+/// retained only for small files so the content cache can serve repeats.
+fn read_window_from_disk(path: &std::path::Path, start_line: usize, limit: usize) -> Result<WindowRead> {
+    use std::io::{BufRead, Read};
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+
+    // Header probe for binary/image/PDF, chained back so no bytes are lost.
+    let mut head = vec![0u8; 4096];
+    let head_len = reader
+        .read(&mut head)
+        .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+    head.truncate(head_len);
+    if head_len == 0 {
+        return Ok(WindowRead::Empty);
+    }
+    if memchr::memchr(0, &head).is_some() {
+        if let Some(mime) = detect_image_mime(&head) {
+            return Ok(WindowRead::BinaryImage {
+                mime: mime.to_string(),
+            });
+        }
+        if head.starts_with(b"%PDF-") {
+            return Ok(WindowRead::Pdf);
+        }
+        return Ok(WindowRead::Binary);
+    }
+    let mut reader = head.chain(reader);
+
+    let end_line = start_line.saturating_add(limit).saturating_sub(1).max(start_line);
+    let mut lines: Vec<String> = Vec::new();
+    let mut total_lines = 0usize;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut retain_text: Option<Vec<u8>> = Some(Vec::new());
+
+    loop {
+        let chunk = reader
+            .fill_buf()
+            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+        if chunk.is_empty() {
+            break;
+        }
+        if let Some(buf) = retain_text.as_mut() {
+            buf.extend_from_slice(chunk);
+            if buf.len() > CACHE_TEXT_MAX_BYTES {
+                retain_text = None;
+            }
+        }
+        let consumed = chunk.len();
+        pending.extend_from_slice(chunk);
+        reader.consume(consumed);
+
+        while let Some(pos) = memchr::memchr(b'\n', &pending) {
+            let mut raw: Vec<u8> = pending.drain(..=pos).collect();
+            if raw.last() == Some(&b'\n') {
+                raw.pop();
+            }
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
+            total_lines += 1;
+            if total_lines >= start_line && total_lines <= end_line {
+                match String::from_utf8(raw) {
+                    Ok(line) => lines.push(line),
+                    Err(_) => return Ok(WindowRead::NonUtf8),
+                }
+            }
+        }
+
+        if total_lines >= end_line {
+            // Window complete: count the rest with memchr over raw bytes.
+            let mut extra_newlines = 0usize;
+            let mut last_was_newline = pending.is_empty();
+            loop {
+                let chunk = reader
+                    .fill_buf()
+                    .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+                if chunk.is_empty() {
+                    break;
+                }
+                if let Some(buf) = retain_text.as_mut() {
+                    buf.extend_from_slice(chunk);
+                    if buf.len() > CACHE_TEXT_MAX_BYTES {
+                        retain_text = None;
+                    }
+                }
+                extra_newlines += memchr::memchr_iter(b'\n', chunk).count();
+                last_was_newline = *chunk.last().unwrap() == b'\n';
+                let consumed = chunk.len();
+                reader.consume(consumed);
+            }
+            total_lines += extra_newlines;
+            if !pending.is_empty() {
+                match String::from_utf8(std::mem::take(&mut pending)) {
+                    Ok(_) => total_lines += 1,
+                    Err(_) => return Ok(WindowRead::NonUtf8),
+                }
+            } else if !last_was_newline && total_lines == 0 {
+                // Unreachable: empty files return early.
+            }
+            let text = match retain_text {
+                Some(buf) => match String::from_utf8(buf) {
+                    Ok(text) => Some(text),
+                    Err(_) => return Ok(WindowRead::NonUtf8),
+                },
+                None => None,
+            };
+            return Ok(WindowRead::Found {
+                text,
+                total_lines,
+                lines,
+            });
+        }
+    }
+
+    // Reached EOF while still inside (or before) the window.
+    if !pending.is_empty() {
+        let mut raw = std::mem::take(&mut pending);
+        if raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+        total_lines += 1;
+        if total_lines >= start_line && total_lines <= end_line {
+            match String::from_utf8(raw) {
+                Ok(line) => lines.push(line),
+                Err(_) => return Ok(WindowRead::NonUtf8),
+            }
+        }
+    }
+    if total_lines == 0 {
+        return Ok(WindowRead::Empty);
+    }
+    if start_line > total_lines {
+        return Ok(WindowRead::PastEnd { total_lines });
+    }
+    let text = match retain_text {
+        Some(buf) => match String::from_utf8(buf) {
+            Ok(text) => Some(text),
+            Err(_) => return Ok(WindowRead::NonUtf8),
+        },
+        None => None,
+    };
+    Ok(WindowRead::Found {
+        text,
+        total_lines,
+        lines,
+    })
+}
+
+fn line_starts_of(lines: &[String], text: &Option<String>) -> Vec<usize> {
+    if let Some(text) = text {
+        let mut starts = vec![0usize];
+        for (idx, byte) in text.bytes().enumerate() {
+            if byte == b'\n' && idx + 1 < text.len() {
+                starts.push(idx + 1);
+            }
+        }
+        return starts;
+    }
+    // No full text (large file): synthesize an index for the window alone.
+    let mut starts = Vec::with_capacity(lines.len());
+    let mut offset = 0usize;
+    for line in lines {
+        starts.push(offset);
+        offset += line.len() + 1;
+    }
+    starts
+}
+
+/// Render one window of lines with numbers + paging footer. Used both for
+/// cache-served and freshly-streamed reads so output stays identical.
+fn render_lines(
+    lines: &[String],
+    start_line: usize,
+    total_lines: usize,
+    limit: usize,
+    requested_path: &str,
+) -> ToolResult {
+    let mut output = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        if line.chars().count() > ReadFileTool::MAX_LINE_CHARS {
+            let mut clipped: String = line.chars().take(ReadFileTool::MAX_LINE_CHARS).collect();
+            clipped.push_str("...[line truncated]");
+            output.push_str(&format!("{}: {}", start_line + index, clipped));
+        } else {
+            output.push_str(&format!("{}: {}", start_line + index, line));
+        }
+    }
+
+    let end_line = start_line + lines.len().saturating_sub(1);
+    let truncated = end_line < total_lines;
+    if truncated {
+        output.push_str(&format!(
+            "\n\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
+            start_line,
+            end_line,
+            total_lines,
+            end_line + 1
+        ));
+    } else {
+        output.push_str(&format!(
+            "\n\n[Showing lines {}-{} of {}]",
+            start_line, end_line, total_lines
+        ));
+    }
+
+    ToolResult {
+        output,
+        outcome: ToolOutcome::Success,
+        title: Some(requested_path.to_string()),
+        metadata: json!({
+            "kind": "file",
+            "path": requested_path,
+            "offset": start_line,
+            "limit": limit,
+            "total_lines": total_lines,
+            "truncated": truncated
+        }),
+        attachments: Vec::new(),
+    }
 }
 
 pub struct ReadFileTool {
@@ -237,140 +494,206 @@ impl ReadFileTool {
         limit: usize,
         requested_path: &str,
     ) -> Result<ToolResult> {
+        // Fast path: cached content slices the window with zero disk I/O.
+        // Freshness is verified inside get_content via mtime+size.
+        let canonical_hint = file_path.clone();
+        if let Some(entry) = self.cache.get_content(&canonical_hint) {
+            if let (Some(text), Some(starts)) = (entry.content, entry.line_starts) {
+                return Ok(Self::render_window(
+                    &text,
+                    &starts,
+                    entry.line_count,
+                    offset,
+                    limit,
+                    requested_path,
+                    &self.workspaces,
+                    &self.config,
+                    file_path,
+                ));
+            }
+        }
+
         let fp = file_path.clone();
-        let bytes = tokio::task::spawn_blocking(move || std::fs::read(&fp))
-            .await
-            .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))?
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
-
-        if bytes.is_empty() {
-            return Ok(ToolResult {
-                output: "(empty file)".to_string(),
-                outcome: ToolOutcome::Success,
-                title: Some(requested_path.to_string()),
-                metadata: json!({
-                    "kind": "file",
-                    "path": requested_path,
-                    "offset": offset,
-                    "limit": limit,
-                    "total_lines": 0,
-                    "truncated": false
-                }),
-                attachments: Vec::new(),
-            });
-        }
-
-        let sample_len = bytes.len().min(4096);
-        let nul_count = bytes[..sample_len].iter().filter(|b| **b == 0).count();
-        if nul_count > 0 {
-            if let Some(mime) = detect_image_mime(&bytes) {
-                return self.read_image(&bytes, mime, requested_path).await;
-            }
-            if bytes.starts_with(b"%PDF-") {
-                return self.read_pdf(&bytes, offset, limit, requested_path).await;
-            }
-            return Err(OSAgentError::ToolExecution(
-                "File appears to be binary and cannot be displayed as text".to_string(),
-            ));
-        }
-
-        let content = String::from_utf8(bytes).map_err(|_| {
-            OSAgentError::ToolExecution(
-                "File contains non-UTF8 data and cannot be displayed as text".to_string(),
-            )
-        })?;
-
-        let canonical = file_path
-            .canonicalize()
-            .unwrap_or_else(|_| file_path.clone());
-        self.cache.update(&canonical, &content);
-
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-        if total_lines == 0 {
-            return Ok(ToolResult {
-                output: "(empty file)".to_string(),
-                outcome: ToolOutcome::Success,
-                title: Some(requested_path.to_string()),
-                metadata: json!({
-                    "kind": "file",
-                    "path": requested_path,
-                    "offset": offset,
-                    "limit": limit,
-                    "total_lines": 0,
-                    "truncated": false
-                }),
-                attachments: Vec::new(),
-            });
-        }
-
         let start_line = offset.max(1);
-        if start_line > total_lines {
-            return Err(OSAgentError::ToolExecution(format!(
+        // Stream only the needed window: stop reading once the last
+        // requested line is complete. Large files cost O(window), not O(file).
+        let window = tokio::task::spawn_blocking(move || {
+            read_window_from_disk(&fp, start_line, limit)
+        })
+        .await
+        .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))??;
+
+        match window {
+            WindowRead::Found {
+                text,
+                total_lines,
+                lines,
+            } => {
+                let start_line = offset.max(1);
+                // Small files carry full text: insert once so repeats are
+                // zero-I/O. Large files skip the cache (window already in
+                // hand, no second copy).
+                if let Some(text) = text {
+                    let canonical = file_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| file_path.clone());
+                    self.cache.insert(&canonical, text);
+                    if let Some(entry) = self.cache.get_content(&canonical) {
+                        if let (Some(text), Some(starts)) = (entry.content, entry.line_starts) {
+                            return Ok(Self::render_window(
+                                &text,
+                                &starts,
+                                entry.line_count,
+                                offset,
+                                limit,
+                                requested_path,
+                                &self.workspaces,
+                                &self.config,
+                                file_path,
+                            ));
+                        }
+                    }
+                }
+                let mut result = render_lines(&lines, start_line, total_lines, limit, requested_path);
+                Self::append_instructions(&mut result, &self.workspaces, &self.config, file_path);
+                Ok(result)
+            }
+            WindowRead::Empty => Ok(ToolResult {
+                output: "(empty file)".to_string(),
+                outcome: ToolOutcome::Success,
+                title: Some(requested_path.to_string()),
+                metadata: json!({
+                    "kind": "file",
+                    "path": requested_path,
+                    "offset": offset,
+                    "limit": limit,
+                    "total_lines": 0,
+                    "truncated": false
+                }),
+                attachments: Vec::new(),
+            }),
+            WindowRead::PastEnd { total_lines } => Err(OSAgentError::ToolExecution(format!(
                 "offset {} is past end of file ({} lines)",
                 start_line, total_lines
-            )));
+            ))),
+            WindowRead::BinaryImage { mime } => {
+                let bytes = std::fs::read(file_path).map_err(|e| {
+                    OSAgentError::ToolExecution(format!("Failed to read file: {}", e))
+                })?;
+                self.read_image(&bytes, &mime, requested_path).await
+            }
+            WindowRead::Pdf => {
+                let bytes = std::fs::read(file_path).map_err(|e| {
+                    OSAgentError::ToolExecution(format!("Failed to read file: {}", e))
+                })?;
+                self.read_pdf(&bytes, offset, limit, requested_path).await
+            }
+            WindowRead::Binary => Err(OSAgentError::ToolExecution(
+                "File appears to be binary and cannot be displayed as text".to_string(),
+            )),
+            WindowRead::NonUtf8 => Err(OSAgentError::ToolExecution(
+                "File contains non-UTF8 data and cannot be displayed as text".to_string(),
+            )),
+        }
+    }
+
+    /// Render a window from full text + line index. Shared by the cache
+    /// fast path and the streaming disk path so both stay identical.
+    #[allow(clippy::too_many_arguments)]
+    fn render_window(
+        text: &str,
+        starts: &[usize],
+        total_lines: usize,
+        offset: usize,
+        limit: usize,
+        requested_path: &str,
+        workspaces: &[PathBuf],
+        config: &Config,
+        file_path: &PathBuf,
+    ) -> ToolResult {
+        let start_line = offset.max(1);
+        if total_lines == 0 || start_line > total_lines {
+            if total_lines == 0 {
+                return ToolResult {
+                    output: "(empty file)".to_string(),
+                    outcome: ToolOutcome::Success,
+                    title: Some(requested_path.to_string()),
+                    metadata: json!({
+                        "kind": "file",
+                        "path": requested_path,
+                        "offset": offset,
+                        "limit": limit,
+                        "total_lines": 0,
+                        "truncated": false
+                    }),
+                    attachments: Vec::new(),
+                };
+            }
+            return ToolResult {
+                output: format!(
+                    "offset {} is past end of file ({} lines)",
+                    start_line, total_lines
+                ),
+                outcome: ToolOutcome::Failure,
+                title: Some(requested_path.to_string()),
+                metadata: json!({
+                    "kind": "file",
+                    "path": requested_path,
+                    "offset": start_line,
+                    "limit": limit,
+                    "total_lines": total_lines,
+                    "truncated": false
+                }),
+                attachments: Vec::new(),
+            };
         }
 
         let end_line = (start_line + limit - 1).min(total_lines);
-        let mut output = lines[start_line - 1..end_line]
-            .iter()
-            .enumerate()
-            .map(|(index, line)| {
-                let clipped = if line.chars().count() > Self::MAX_LINE_CHARS {
-                    let mut s = line.chars().take(Self::MAX_LINE_CHARS).collect::<String>();
-                    s.push_str("...[line truncated]");
-                    s
-                } else {
-                    (*line).to_string()
-                };
-                format!("{}: {}", start_line + index, clipped)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let truncated = end_line < total_lines;
-        if truncated {
-            output.push_str(&format!(
-                "\n\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
-                start_line,
-                end_line,
-                total_lines,
-                end_line + 1
-            ));
-        } else {
-            output.push_str(&format!(
-                "\n\n[Showing lines {}-{} of {}]",
-                start_line, end_line, total_lines
-            ));
+        let mut window: Vec<String> = Vec::new();
+        for line_no in start_line..=end_line {
+            let start = starts.get(line_no - 1).copied().unwrap_or(text.len());
+            let end = starts.get(line_no).copied().unwrap_or(text.len());
+            let mut line = text[start..end.min(text.len())]
+                .strip_suffix('\n')
+                .unwrap_or(&text[start..end.min(text.len())]);
+            line = line.strip_suffix('\r').unwrap_or(line);
+            window.push(line.to_string());
         }
 
-        let instruction_root = self
-            .workspaces
+        let mut result = render_lines(&window, start_line, total_lines, limit, requested_path);
+        Self::append_instructions(&mut result, workspaces, config, file_path);
+        result
+    }
+
+    fn append_instructions(
+        result: &mut ToolResult,
+        workspaces: &[PathBuf],
+        config: &Config,
+        file_path: &PathBuf,
+    ) {
+        Self::append_instructions_inner(&mut result.output, workspaces, config, file_path);
+    }
+
+    fn append_instructions_inner(
+        output: &mut String,
+        workspaces: &[PathBuf],
+        config: &Config,
+        file_path: &PathBuf,
+    ) {
+        let instruction_root = workspaces
             .iter()
             .filter(|workspace| file_path.starts_with(workspace))
             .max_by_key(|workspace| workspace.components().count())
-            .unwrap_or(&self.workspaces[0]);
+            .unwrap_or(&workspaces[0]);
         if let Some(reminder) =
-            format_system_reminder(&nearby_instruction_blocks(instruction_root, file_path))
+            format_system_reminder(&crate::agent::instruction::cached_nearby_blocks(
+                instruction_root,
+                file_path,
+            ))
         {
-            output = format!("{}\n\n{}", reminder, output);
+            *output = format!("{}\n\n{}", reminder, output);
         }
-
-        Ok(ToolResult {
-            output,
-            outcome: ToolOutcome::Success,
-            title: Some(requested_path.to_string()),
-            metadata: json!({
-                "kind": "file",
-                "path": requested_path,
-                "offset": start_line,
-                "limit": limit,
-                "total_lines": total_lines,
-                "truncated": truncated
-            }),
-            attachments: Vec::new(),
-        })
+        let _ = config;
     }
 
     async fn read_image(
@@ -574,7 +897,7 @@ impl Tool for ReadFileTool {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum lines/entries to return (default: 200, max: 2000)"
+                    "description": "Maximum lines/entries to return (default: 200, max: 2000). Reads over ~80 lines are previewed head-only in context, so prefer limit<=80 and page with offset for large files."
                 },
                 "start_line": {
                     "type": "integer",
@@ -1413,5 +1736,74 @@ mod tests {
         assert!(result.output.contains("nested/"));
         assert!(result.output.contains("root.txt"));
         assert_eq!(result.metadata["kind"], "directory");
+    }
+
+    #[tokio::test]
+    async fn read_file_repeat_reads_hit_cache() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("cached.txt"), "one\ntwo\nthree\n").expect("write file");
+
+        let config = config_for_workspace(&dir.path().to_string_lossy());
+        let cache = Arc::new(FileReadCache::with_default_capacity());
+        let tool = ReadFileTool::new(config, cache.clone());
+
+        let first = Tool::execute_result(
+            &tool,
+            json!({ "filePath": "cached.txt", "offset": 1, "limit": 2 }),
+        )
+        .await
+        .expect("first read");
+        assert!(first.output.contains("1: one"));
+        assert!(cache.bytes_used() > 0);
+
+        // Second read of a different window must still hit the cache.
+        let (entries_before, hits_before, _) = cache.stats();
+        assert!(entries_before > 0);
+        let second = Tool::execute_result(
+            &tool,
+            json!({ "filePath": "cached.txt", "offset": 2, "limit": 2 }),
+        )
+        .await
+        .expect("second read");
+        assert!(second.output.contains("2: two"));
+        assert!(second.output.contains("3: three"));
+        let (_, hits_after, _) = cache.stats();
+        assert!(hits_after > hits_before);
+    }
+
+    #[tokio::test]
+    async fn read_file_window_matches_full_read() {
+        let dir = tempdir().expect("tempdir");
+        let body: String = (1..=500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.path().join("big.txt"), &body).expect("write file");
+
+        let config = config_for_workspace(&dir.path().to_string_lossy());
+        let tool = ReadFileTool::new(config, Arc::new(FileReadCache::with_default_capacity()));
+
+        let window = Tool::execute_result(
+            &tool,
+            json!({ "filePath": "big.txt", "offset": 200, "limit": 50 }),
+        )
+        .await
+        .expect("window read");
+        assert!(window.output.contains("200: line 200"));
+        assert!(window.output.contains("249: line 249"));
+        assert!(!window.output.contains("199: line 199"));
+        assert_eq!(window.metadata["total_lines"], 500);
+    }
+
+    #[test]
+    fn streaming_window_handles_crlf_and_no_trailing_newline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("crlf.txt");
+        std::fs::write(&path, "a\r\nb\r\nc").expect("write file");
+        let window = read_window_from_disk(&path, 1, 10).expect("window");
+        match window {
+            WindowRead::Found { lines, total_lines, .. } => {
+                assert_eq!(total_lines, 3);
+                assert_eq!(lines, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+            }
+            other => panic!("unexpected window: {other:?}"),
+        }
     }
 }

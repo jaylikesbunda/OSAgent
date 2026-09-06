@@ -11,9 +11,7 @@ use crate::tools::codesearch_tokenizer::{camel_case_join, extract_query_terms, s
 use crate::tools::guard::path_touches_backups;
 use crate::tools::output::path_touches_tool_outputs;
 use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
-use crate::tools::search::{
-    discouraged_path_penalty, ensure_rg_checked, is_heavy_dir, rg_binary_name,
-};
+use crate::tools::search::{discouraged_path_penalty, ensure_rg_checked, rg_binary_name};
 use async_trait::async_trait;
 use rayon::prelude::*;
 use regex::Regex;
@@ -28,7 +26,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::debug;
-use walkdir::WalkDir;
 
 const MAX_PATTERNS: usize = 14;
 const MAX_TERMS: usize = 6;
@@ -486,32 +483,23 @@ impl CodeSearchTool {
         let compiled = compiled?;
 
         let workspace = self.default_workspace()?;
-        let search_path = search_path.to_path_buf();
         let allowed_extensions: Option<Vec<String>> = allowed_extensions.map(<[String]>::to_vec);
-        let search_path_is_heavy = is_heavy_dir(&search_path);
 
         // Phase 1 (cheap, sequential): traverse and filter down to candidate
-        // files. No content reading here.
+        // files via the shared FastWalk path — ignore-crate traversal with
+        // builtin + configured excludes, no process spawn. No content
+        // reading here.
+        let walker = crate::tools::search::FastWalk::new(
+            workspace,
+            search_path.to_path_buf(),
+            &[],
+            None,
+            MAX_SCANNED_FILES,
+        )?;
         let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for entry in WalkDir::new(&search_path)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-
-            let entry_path = entry.path().to_path_buf();
-            let relative_path = entry_path
-                .strip_prefix(&workspace)
-                .unwrap_or(&entry_path)
-                .to_path_buf();
-            if path_touches_backups(&relative_path) || path_touches_tool_outputs(&relative_path) {
-                continue;
-            }
-            if !search_path_is_heavy && is_heavy_dir(&entry_path) {
-                continue;
-            }
+        for (abs, rel) in walker.collect_files() {
+            let entry_path = abs;
+            let relative_path = PathBuf::from(rel);
             if let Some(exts) = allowed_extensions.as_deref() {
                 let matches_ext = entry_path
                     .extension()
