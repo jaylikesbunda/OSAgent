@@ -581,6 +581,9 @@ OSA.selectModel = async function(modelId, providerId) {
             const selected = cachedConfig?.agent?.thinking_level || 'auto';
             OSA.refreshThinkingOptions(providerId, modelId, selected);
         }
+        if (typeof OSA.renderDiscordActiveModel === 'function') {
+            OSA.renderDiscordActiveModel();
+        }
     } catch (error) {
         OSA.currentModelId = previousModelId;
         OSA.currentModelProviderId = previousProviderId;

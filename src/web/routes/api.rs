@@ -824,23 +824,26 @@ async fn set_model(
     }
 
     let model = payload.model.trim().to_string();
-    let provider_id = payload.provider_id.as_deref().unwrap_or("");
+    let provider_id = match payload
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(provider_id) => provider_id.to_string(),
+        None => agent.get_config().await.default_provider.clone(),
+    };
 
-    if !provider_id.is_empty() {
-        if let Err(e) = agent
-            .switch_provider_model(provider_id.to_string(), model.clone())
-            .await
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            ));
-        }
-    } else {
-        agent.set_current_model(model.clone()).await;
-        agent.set_provider_model_in_config(model).await;
+    if let Err(e) = agent
+        .switch_provider_model(provider_id.clone(), model.clone())
+        .await
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        ));
     }
 
     agent.save_config(&config_path).await.map_err(|e| {
@@ -2585,10 +2588,7 @@ async fn send_queued_message_now(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path((id, queue_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    match agent
-        .send_queued_message_now(&id, &queue_id, "web")
-        .await
-    {
+    match agent.send_queued_message_now(&id, &queue_id, "web").await {
         Ok(true) => Ok(Json(serde_json::json!({
             "success": true,
             "session_id": id,

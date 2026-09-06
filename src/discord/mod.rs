@@ -207,6 +207,65 @@ impl Handler {
         .then_some(AccessLevel::Community)
     }
 
+    /// Control access for `/model`, `/provider`, `/settings` and the settings
+    /// panel. Chat access (`access_level`) stays Community for everyone in a
+    /// community location — including the owner — so community turns never see
+    /// the real workspace. But an owner listed in `trusted_users` /
+    /// `trusted_roles` keeps control access from any location they can already
+    /// talk in, without marking that server trusted for everyone.
+    fn control_is_authorized_for_config(
+        discord: &DiscordConfig,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+    ) -> bool {
+        if !discord.community_mode {
+            return discord.allowed_users.contains(&user_id);
+        }
+        if Self::access_level_for_config(discord, user_id, guild_id, channel_id, role_ids)
+            == Some(AccessLevel::Trusted)
+        {
+            return true;
+        }
+        let trusted_identity = discord.trusted_users.contains(&user_id)
+            || role_ids
+                .iter()
+                .any(|role_id| discord.trusted_roles.contains(role_id));
+        trusted_identity
+            && Self::access_level_for_config(discord, user_id, guild_id, channel_id, role_ids)
+                .is_some()
+    }
+
+    async fn control_is_authorized(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+    ) -> bool {
+        let Some(discord) = self.agent.discord_config().await else {
+            return false;
+        };
+        Self::control_is_authorized_for_config(&discord, user_id, guild_id, channel_id, role_ids)
+    }
+
+    /// Component-level control check used by the settings panel: the model
+    /// select, "Use anyway" force button and delete-session confirm share the
+    /// slash-command control gate, so the owner keeps them from a Community
+    /// chat location while regular members stay gated on Trusted.
+    async fn control_is_authorized_for_access(
+        &self,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+        _access: AccessLevel,
+    ) -> bool {
+        self.control_is_authorized(user_id, guild_id, channel_id, role_ids)
+            .await
+    }
+
     async fn is_authorized(
         &self,
         user_id: u64,
@@ -217,6 +276,42 @@ impl Handler {
         self.access_level(user_id, guild_id, channel_id, role_ids)
             .await
             == Some(AccessLevel::Trusted)
+    }
+
+    async fn component_access_level(
+        &self,
+        component: &serenity::model::application::ComponentInteraction,
+        role_ids: &[u64],
+    ) -> Option<AccessLevel> {
+        self.access_level(
+            component.user.id.get(),
+            component.guild_id.map(|id| id.get()),
+            component.channel_id.get(),
+            role_ids,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_access_level(
+        discord: &DiscordConfig,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+    ) -> Option<AccessLevel> {
+        Self::access_level_for_config(discord, user_id, guild_id, channel_id, role_ids)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_control_authorized(
+        discord: &DiscordConfig,
+        user_id: u64,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        role_ids: &[u64],
+    ) -> bool {
+        Self::control_is_authorized_for_config(discord, user_id, guild_id, channel_id, role_ids)
     }
 
     fn community_owner_key(user_id: u64, guild_id: Option<u64>) -> String {
@@ -1658,6 +1753,42 @@ mod tests {
             Handler::access_level_for_config(&discord, 7, Some(43), 99, &[]),
             None
         );
+    }
+
+    #[test]
+    fn owner_stays_community_for_chat_but_keeps_control_access() {
+        let discord = DiscordConfig {
+            community_mode: true,
+            allow_community_members: true,
+            allowed_guilds: vec![42],
+            trusted_users: vec![7],
+            ..DiscordConfig::default()
+        };
+
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 7, Some(42), 99, &[]),
+            Some(AccessLevel::Community)
+        );
+        assert!(Handler::control_is_authorized_for_config(
+            &discord,
+            7,
+            Some(42),
+            99,
+            &[]
+        ));
+        // A community-only member in the same channel chats but cannot
+        // touch controls.
+        assert_eq!(
+            Handler::access_level_for_config(&discord, 8, Some(42), 99, &[]),
+            Some(AccessLevel::Community)
+        );
+        assert!(!Handler::control_is_authorized_for_config(
+            &discord,
+            8,
+            Some(42),
+            99,
+            &[]
+        ));
     }
 
     #[test]

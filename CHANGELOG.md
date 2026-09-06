@@ -1,5 +1,6 @@
 v0.5.3 changes:
 
+* Added a Bing backend to web search: burst-tolerant with direct result URLs, so general queries survive rate limiting better
 * Fixed completed streamed responses occasionally remaining stuck and preventing queued messages from sending
 * Fixed subagent card flicker when running tools
 

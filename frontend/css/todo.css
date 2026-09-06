@@ -178,7 +178,9 @@
 .dock-list {
     margin-top: 10px;
     max-height: 220px;
+    max-width: 640px;
     overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     gap: 6px;

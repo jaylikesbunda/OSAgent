@@ -130,6 +130,12 @@ OSA.handleAgentEvent = function(event) {
             }
             OSA.renderQueuedMessages(OSA.getSessionQueue());
             if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
+            // The sidebar icon flips on the very next loadSessions refresh.
+            // Paint the orbit state immediately so the icon never lags the turn.
+            if (typeof OSA.setSessionSidebarRunning === 'function') {
+                const currentSession = OSA.getCurrentSession();
+                if (currentSession && currentSession.id) OSA.setSessionSidebarRunning(currentSession.id, true);
+            }
             break;
 
         case 'thinking_start':
@@ -216,6 +222,13 @@ OSA.handleAgentEvent = function(event) {
             OSA.scheduleSessionInspectorRefresh();
             if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
             OSA.maybeAutoNameSession();
+            // Paint the static icon immediately; the loadSessions refresh that
+            // corrects every other row follows right behind it.
+            if (typeof OSA.setSessionSidebarRunning === 'function') {
+                const completedSession = OSA.getCurrentSession();
+                if (completedSession && completedSession.id && !queueStillHasItems) OSA.setSessionSidebarRunning(completedSession.id, false);
+            }
+            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
             break;
 
         case 'queued_message_dispatched':
@@ -938,7 +951,8 @@ OSA.clearRetryNotice = function() {
 OSA.handleEventError = function(event) {
     OSA.clearRetryNotice();
     console.error('Agent error:', event.error);
-    if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
+    const erroredSession = OSA.getCurrentSession();
+    if (erroredSession) erroredSession.task_status = 'active';
     OSA.completeThinkingDisplay();
     OSA.pruneEmptyStreamingMessage();
     OSA.completeAssistantResponse();
@@ -948,10 +962,15 @@ OSA.handleEventError = function(event) {
     OSA.tmodelMarkDirty('error');
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
+    if (erroredSession && erroredSession.id && typeof OSA.setSessionSidebarRunning === 'function') {
+        OSA.setSessionSidebarRunning(erroredSession.id, false);
+    }
+    if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
 };
 
 OSA.handleEventCancelled = function(event) {
-    if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
+    const cancelledSession = OSA.getCurrentSession();
+    if (cancelledSession) cancelledSession.task_status = 'active';
     OSA.setProcessing(false);
     OSA.setStopping(false);
     OSA.resetSendButton();
@@ -969,6 +988,10 @@ OSA.handleEventCancelled = function(event) {
     OSA.tmodelMarkDirty('cancelled');
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
+    if (cancelledSession && cancelledSession.id && typeof OSA.setSessionSidebarRunning === 'function') {
+        OSA.setSessionSidebarRunning(cancelledSession.id, false);
+    }
+    if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
 };
 
 OSA._activeSubagents = new Map();

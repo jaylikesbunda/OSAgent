@@ -277,6 +277,7 @@ OSA.loadSettings = async function() {
         await OSA.loadDecisionSuggestions();
         await OSA.loadVoiceInstallStatus();
         await OSA.loadDiscordBotStatus();
+        await OSA.renderDiscordActiveModel();
         await OSA.renderSettingsProviders();
         OSA.loadDoctorStatus();
     } catch (error) {
@@ -296,6 +297,18 @@ OSA.saveSettings = async function() {
     }
     
     const newConfig = { ...cachedConfig };
+    // The active provider route is managed live through /api/model and
+    // /api/providers/switch (the model picker, the Discord model card, and
+    // /model set all persist immediately). The settings form has no provider
+    // fields, so echo the fresh route instead of the cached snapshot — the
+    // server ignores these fields on PUT, but this keeps the local cache
+    // from going stale when settings are saved after a model switch.
+    if (typeof OSA.currentModelId === 'string' && OSA.currentModelId) {
+        newConfig.default_model = OSA.currentModelId;
+    }
+    if (typeof OSA.currentModelProviderId === 'string' && OSA.currentModelProviderId) {
+        newConfig.default_provider = OSA.currentModelProviderId;
+    }
     let allowedDiscordUsers = [];
     let allowedDiscordRoles = [];
     let allowedDiscordGuilds = [];
@@ -448,6 +461,18 @@ OSA.saveSettings = async function() {
         }
         OSA.setCachedConfig(newConfig);
         OSA.closeSettings();
+        // Saving other settings must not move the route: confirm the live
+        // trigger still matches what we just kept, then refresh the Discord
+        // card from the server.
+        if (typeof OSA.loadModel === 'function') {
+            await OSA.loadModel().catch(function(error) {
+                console.error('Post-save model refresh failed:', error);
+            });
+        } else if (typeof OSA.renderDiscordActiveModel === 'function') {
+            await OSA.renderDiscordActiveModel().catch(function(error) {
+                console.error('Post-save model refresh failed:', error);
+            });
+        }
     } catch (error) {
         errorDiv.textContent = error.message;
         errorDiv.classList.remove('hidden');
@@ -1015,6 +1040,56 @@ OSA.loadDiscordBotStatus = async function(message) {
     } catch (error) {
         OSA.renderDiscordBotStatus({ available: false, enabled: false, configured: false, running: false }, error.message);
     }
+};
+
+// Discord has no per-server model: the bot answers with the same active
+// provider route as the desktop app, so the existing model picker in the
+// Models tab is the only switch. This card mirrors that route inside the
+// Discord tab instead of duplicating the picker.
+OSA.renderDiscordActiveModel = async function() {
+    const el = document.getElementById('discord-active-model');
+    if (!el) return;
+
+    const showRoute = function(providerId, model) {
+        el.innerHTML = '<div><div class="provider-route-kicker">Active route (shared with Discord)</div>' +
+            '<div class="provider-route-title">' + OSA.escapeHtml(providerId || 'none') + '</div>' +
+            '<div class="provider-route-meta">Model: <strong>' + OSA.escapeHtml(model || 'none') + '</strong></div></div>';
+    };
+
+    try {
+        const res = await OSA.fetchWithAuth('/api/model');
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        const cached = OSA.getCachedConfig ? OSA.getCachedConfig() : null;
+        if (cached) {
+            OSA.setCachedConfig({
+                ...cached,
+                default_provider: data.provider_id || cached.default_provider,
+                default_model: data.model || cached.default_model
+            });
+        }
+        showRoute(data.provider_id, data.model);
+    } catch (error) {
+        const cached = OSA.getCachedConfig ? OSA.getCachedConfig() : null;
+        if (cached && (cached.default_provider || cached.default_model)) {
+            showRoute(cached.default_provider, cached.default_model);
+        } else {
+            el.innerHTML = '<div><div class="provider-route-title">No active route</div>' +
+                '<div class="provider-route-meta">' + OSA.escapeHtml(error.message || 'Could not load the active model.') + '</div></div>';
+        }
+    }
+};
+
+OSA.openDiscordModelPicker = function() {
+    if (typeof OSA.switchSettingsTab === 'function') {
+        OSA.switchSettingsTab('models');
+    } else if (typeof switchSettingsTab === 'function') {
+        switchSettingsTab('models');
+    }
+    setTimeout(function() {
+        const search = document.getElementById('model-catalog-search');
+        if (search) search.focus();
+    }, 100);
 };
 
 OSA.startDiscordBot = async function() {

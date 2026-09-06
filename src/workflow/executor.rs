@@ -1031,7 +1031,9 @@ You cannot spawn additional subagents."#
         shared_state: &HashMap<String, serde_json::Value>,
     ) -> String {
         static RE: OnceLock<regex::Regex> = OnceLock::new();
-        let re = RE.get_or_init(|| regex::Regex::new(r"\{\{\s*([^{}]+?)\s*\}\}").expect("valid template regex"));
+        let re = RE.get_or_init(|| {
+            regex::Regex::new(r"\{\{\s*([^{}]+?)\s*\}\}").expect("valid template regex")
+        });
         re.replace_all(template, |caps: &regex::Captures<'_>| {
             let path = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
             if let Some(value) = Self::lookup_template_value(path, input, shared_state) {

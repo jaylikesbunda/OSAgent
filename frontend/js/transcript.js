@@ -1149,8 +1149,8 @@ OSA.patchUnit = function(wrapper, unit) {
         const sig = OSA.unitSignature(unit);
         if (wrapper.dataset.sig === sig) return;
         wrapper.dataset.sig = sig;
-    } else {
-        wrapper.dataset.sig = OSA.unitSignature(unit);
+    } else if (wrapper.dataset.sig !== 'live') {
+        wrapper.dataset.sig = 'live';
     }
 
     switch (unit.type) {

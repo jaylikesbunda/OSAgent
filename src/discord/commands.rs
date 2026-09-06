@@ -309,7 +309,7 @@ impl Handler {
             return;
         }
 
-        if !self.ensure_authorized(ctx, command).await {
+        if !self.ensure_control_authorized(ctx, command).await {
             return;
         }
 
@@ -335,7 +335,13 @@ impl Handler {
     }
 
     pub(super) async fn dispatch_autocomplete(&self, ctx: &Context, command: &CommandInteraction) {
-        if !self.command_is_authorized(command).await {
+        // Model/provider autocomplete backs the control commands: the owner in
+        // a Community location needs the same completions as in a trusted one.
+        let allowed = match command.data.name.as_str() {
+            "model" | "provider" => self.command_control_authorized(command).await,
+            _ => self.command_is_authorized(command).await,
+        };
+        if !allowed {
             let _ = command
                 .create_response(
                     &ctx.http,
@@ -379,6 +385,39 @@ impl Handler {
         }
         Self::send_unauthorized_response_command(ctx, command).await;
         false
+    }
+
+    /// Gate for `/model`, `/provider`, `/settings` and the control commands:
+    /// Trusted access always passes; in community mode a `trusted_users` /
+    /// `trusted_roles` identity also passes from any location they can already
+    /// chat in, without elevating the location itself to Trusted.
+    async fn ensure_control_authorized(&self, ctx: &Context, command: &CommandInteraction) -> bool {
+        if self.command_control_authorized(command).await {
+            return true;
+        }
+        Self::send_unauthorized_response_command(ctx, command).await;
+        false
+    }
+
+    pub(super) async fn command_control_authorized(&self, command: &CommandInteraction) -> bool {
+        let roles = command
+            .member
+            .as_ref()
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(|role| role.get())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.control_is_authorized(
+            command.user.id.get(),
+            command.guild_id.map(|id| id.get()),
+            command.channel_id.get(),
+            &roles,
+        )
+        .await
     }
 
     async fn discord_setup_is_authorized(&self, command: &CommandInteraction) -> bool {
@@ -550,20 +589,37 @@ impl Handler {
             self.agent.search_catalog_models(query.to_string()).await
         };
 
-        models
-            .into_iter()
-            .map(|model| {
-                (
-                    format!(
-                        "{} · {} · {}",
-                        model.name,
-                        model.provider_id,
-                        format_context(model.context_window)
-                    ),
-                    format!("{}:{}", model.provider_id, model.id),
-                )
-            })
-            .collect()
+        let mut out = Vec::with_capacity(models.len());
+        for model in models {
+            let label = format!(
+                "{} · {} · {}",
+                model.name,
+                model.provider_id,
+                format_context(model.context_window)
+            );
+            let value = self.model_option_value(&model.provider_id, &model.id).await;
+            // Discord rejects autocomplete values over 100 chars; a 25-char
+            // label cap would still show the row, so filter here instead.
+            if value.is_empty() || value.len() > 100 {
+                continue;
+            }
+            out.push((label, value));
+        }
+        out
+    }
+
+    /// Autocomplete values are `provider:model` where they fit under Discord's
+    /// 100-char value cap; longer model ids arrive bare and `handle_model`
+    /// resolves them against the active provider.
+    async fn model_option_value(&self, provider_id: &str, model_id: &str) -> String {
+        let full = format!("{provider_id}:{model_id}");
+        if full.len() <= 100 {
+            return full;
+        }
+        if self.agent.active_provider().await.provider_type() == provider_id {
+            return model_id.to_string();
+        }
+        full
     }
 
     async fn provider_choices(&self, query: &str) -> Vec<(String, String)> {
@@ -1033,13 +1089,18 @@ impl Handler {
         let active_provider_id = active_provider.provider_type().to_string();
 
         // Autocomplete hands back `provider:model`; a hand-typed value is just a
-        // model id on the current provider.
-        let (provider_id, model_id) = match raw.split_once(':') {
-            Some((provider, model)) if !provider.contains(' ') && !model.is_empty() => {
-                (provider.to_string(), model.to_string())
-            }
-            _ => (active_provider_id, raw.to_string()),
-        };
+        // model id on the current provider. Model ids can themselves contain
+        // colons (`openrouter:mimo-v2-flash:free`), so only treat the prefix as
+        // a provider when it is a configured provider id.
+        let (provider_id, model_id) =
+            match Self::split_provider_model(&self.agent, raw, &active_provider_id).await {
+                Some(split) => split,
+                None => {
+                    self.confirm_unknown_model(ctx, command, &active_provider_id, raw)
+                        .await;
+                    return;
+                }
+            };
 
         let known = self
             .agent
@@ -1068,8 +1129,46 @@ impl Handler {
         self.reply(ctx, command, embed).await;
     }
 
+    /// Split an autocomplete `provider:model` value. The longest configured
+    /// provider id wins, because model ids can contain colons too
+    /// (`openrouter:mimo-v2-flash:free`).
+    async fn split_provider_model(
+        agent: &crate::agent::runtime::AgentRuntime,
+        raw: &str,
+        active_provider_id: &str,
+    ) -> Option<(String, String)> {
+        let configured = agent.get_config().await;
+        let mut ids: Vec<&str> = configured
+            .providers
+            .iter()
+            .map(|provider| provider.provider_type.as_str())
+            .collect();
+        ids.push(active_provider_id);
+        ids.sort_unstable_by_key(|id| std::cmp::Reverse(id.len()));
+        for provider_id in ids {
+            if provider_id.is_empty() {
+                continue;
+            }
+            if let Some(model) = raw.strip_prefix(&format!("{provider_id}:")) {
+                if !model.is_empty() {
+                    return Some((provider_id.to_string(), model.to_string()));
+                }
+            }
+        }
+        // No configured provider prefix: a bare model id on the active
+        // provider, unless it looks like `something:model` for an unknown
+        // provider.
+        if raw.contains(':') {
+            return None;
+        }
+        Some((active_provider_id.to_string(), raw.to_string()))
+    }
+
     /// Never silently accept a model the catalog does not know — offer the
-    /// nearest matches and require one more click to force it.
+    /// nearest matches and require one more click to force it. The custom_id
+    /// payload is `owner-id:provider:model…`; the model part may itself
+    /// contain colons, so the split helper re-parses the `provider:model…`
+    /// tail instead of splitting once.
     async fn confirm_unknown_model(
         &self,
         ctx: &Context,
@@ -1094,18 +1193,29 @@ impl Handler {
         }
 
         let embed = ui::embed("Unknown Model", description, ui::COLOR_WARNING);
-        let custom_id = format!(
+        // custom_id is capped at 100 characters. Long free-tier ids
+        // (`openrouter:…:free`) arrive at the force button bare and are
+        // resolved against the active provider there.
+        let full_custom_id = format!(
             "{PANEL_PREFIX}forcemodel:{}:{provider_id}:{model_id}",
             command.user.id.get()
         );
+        let custom_id = if full_custom_id.len() <= 100 {
+            Some(full_custom_id)
+        } else {
+            (model_id.len() <= 80).then(|| {
+                format!(
+                    "{PANEL_PREFIX}forcemodel:{}:{model_id}",
+                    command.user.id.get()
+                )
+            })
+        };
 
         let mut response = CreateInteractionResponseMessage::new()
             .embed(embed)
             .ephemeral(true);
 
-        // custom_id is capped at 100 characters; skip the button rather than
-        // sending a payload Discord will reject.
-        if custom_id.len() <= 100 {
+        if let Some(custom_id) = custom_id {
             response =
                 response.components(vec![CreateActionRow::Buttons(vec![CreateButton::new(
                     custom_id,

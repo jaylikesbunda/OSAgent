@@ -391,6 +391,9 @@ OSA.loadModel = async function() {
             const selected = OSA.getCachedConfig?.()?.agent?.thinking_level || 'auto';
             await OSA.refreshThinkingOptions(data.provider_id || '', data.model || '', selected);
         }
+        if (typeof OSA.renderDiscordActiveModel === 'function') {
+            OSA.renderDiscordActiveModel();
+        }
     } catch (error) {
         console.error('Failed to load model:', error);
     }
@@ -411,7 +414,10 @@ OSA.updateModel = async function() {
                 'Authorization': `Bearer ${OSA.getToken()}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ model })
+            body: JSON.stringify({
+                model,
+                provider_id: OSA.currentModelProviderId || input.dataset.providerId || undefined
+            })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -438,9 +444,26 @@ OSA.loadSessions = async function() {
             sessions = [];
         }
 
-        const sessionIds = new Set(sessions.map(function(session) { return session.id; }));
-        
+        // The sidebar list is authoritative for running icons, but the live
+        // event stream knows the instant a turn ends. A summaries fetch that
+        // started mid-turn can arrive after the terminal event and resurrect
+        // the orbit animation, so trust the local turn state for the active
+        // session over any stale fetch result.
         const currentSession = OSA.getCurrentSession();
+        if (currentSession && currentSession.id) {
+            const localRunning = OSA.isAgentProcessing()
+                || ((OSA.getSessionQueue() || []).length > 0)
+                || !!OSA.tmodelStreamingItem?.();
+            for (const s of sessions) {
+                if (s && s.id === currentSession.id) {
+                    if (currentSession.task_status === 'active') s.task_status = 'active';
+                    else if (localRunning || currentSession.task_status === 'running') s.task_status = 'running';
+                    break;
+                }
+            }
+        }
+
+        const sessionIds = new Set(sessions.map(function(session) { return session.id; }));
 
         const childMap = new Map();
         const rootSessions = [];
@@ -485,13 +508,7 @@ OSA.loadSessions = async function() {
             const dateLabel = OSA.formatSessionListDate(s.created_at);
             const isRunning = s.task_status === 'running' || hasRunningChildren;
             const iconHtml = isRunning
-                ? `
-                    <span class="session-running-orbits" aria-hidden="true">
-                        <span class="session-running-track track-a"></span>
-                        <span class="session-running-track track-b"></span>
-                        <span class="session-running-track track-c"></span>
-                        <span class="session-running-core"></span>
-                    </span>`
+                ? OSA.sessionRunningOrbitHtml()
                 : (isChild ? 'A' : '#');
             const iconStyle = isChild && !isRunning ? 'style="width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"' : '';
             const iconClass = isRunning ? ' session-icon-running' : '';
@@ -1015,6 +1032,41 @@ OSA.markSessionListSelection = function(sessionId) {
     const group = selectedEl ? selectedEl.closest('.session-children') : null;
     if (group && group.dataset.parent && group.classList.contains('collapsed')) {
         OSA.setGroupCollapsed(group.dataset.parent, false);
+    }
+};
+
+// Flip one sidebar row between the running orbit animation and its static
+// icon without rebuilding the whole list, so the animation can never linger
+// after a turn ends while a background loadSessions refresh is in flight.
+OSA.sessionRunningOrbitHtml = function() {
+    return `<span class="session-running-orbits" aria-hidden="true">`
+        + `<span class="session-running-track track-a"></span>`
+        + `<span class="session-running-track track-b"></span>`
+        + `<span class="session-running-track track-c"></span>`
+        + `<span class="session-running-core"></span>`
+        + `</span>`;
+};
+
+OSA.setSessionSidebarRunning = function(sessionId, running) {
+    if (!sessionId) return;
+    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    if (!item) return;
+    const icon = item.querySelector(':scope > .session-icon');
+    if (!icon) return;
+    const isChild = item.classList.contains('session-child');
+    if (running) {
+        icon.classList.add('session-icon-running');
+        icon.removeAttribute('style');
+        icon.innerHTML = OSA.sessionRunningOrbitHtml();
+        return;
+    }
+    icon.classList.remove('session-icon-running');
+    if (isChild) {
+        icon.setAttribute('style', 'width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);');
+        icon.textContent = 'A';
+    } else {
+        icon.removeAttribute('style');
+        icon.textContent = '#';
     }
 };
 

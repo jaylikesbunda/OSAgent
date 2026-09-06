@@ -7,6 +7,7 @@ mod types;
 
 use crate::config::SearchConfig;
 use crate::error::{OSAgentError, Result};
+use backends::bing::BingBackend;
 use backends::brave::BraveBackend;
 use backends::ddg_html::DuckDuckGoHtmlBackend;
 use backends::ddg_lite::DuckDuckGoLiteBackend;
@@ -97,6 +98,7 @@ impl SearchService {
             client,
             vec![
                 Arc::new(BraveBackend),
+                Arc::new(BingBackend),
                 Arc::new(StartpageBackend),
                 Arc::new(SearxngBackend::new(
                     refresh_ttl,

@@ -317,21 +317,29 @@ impl Handler {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
+        // Select values are capped at 100 chars, so the active free-tier id
+        // (`openrouter:…:free`) is shown as the bare model id when the full
+        // value would not fit — the handler resolves bare ids against the
+        // panel's provider.
+        fn option_value(provider_id: &str, model_id: &str) -> String {
+            if provider_id.len() + model_id.len() < 100 {
+                format!("{provider_id}:{model_id}")
+            } else {
+                model_id.to_string()
+            }
+        }
+        let active_value = option_value(&provider_id, &model_id);
         let model_options: Vec<CreateSelectMenuOption> = sorted_models
             .iter()
-            .filter(|model| provider_id.len() + model.id.len() < 100)
+            .filter(|model| provider_id.len() + model.id.len() < 100 || model.id == model_id)
             .take(ui::SELECT_LIMIT)
             .map(|model| {
                 let mut detail = format_context(model.context_window);
                 if !model.available {
                     detail.push_str(" · unavailable");
                 }
-                option(
-                    &model.name,
-                    &format!("{provider_id}:{}", model.id),
-                    Some(&detail),
-                    model.id == model_id,
-                )
+                let value = option_value(&provider_id, &model.id);
+                option(&model.name, &value, Some(&detail), value == active_value)
             })
             .collect();
 
@@ -410,7 +418,7 @@ impl Handler {
     /// `/settings` — open a fresh panel, private to the caller.
     pub(super) async fn open_settings_panel(&self, ctx: &Context, command: &CommandInteraction) {
         let user_id = command.user.id.get();
-        if !self.command_is_authorized(command).await {
+        if !self.command_control_authorized(command).await {
             Self::send_unauthorized_response_command(ctx, command).await;
             return;
         }
@@ -442,11 +450,26 @@ impl Handler {
         let Some(rest) = component.data.custom_id.strip_prefix(PANEL_PREFIX) else {
             return false;
         };
-        // `osa:<action>:<owner-id>[:<payload>]`
-        let mut parts = rest.splitn(3, ':');
-        let action = parts.next().unwrap_or_default();
-        let owner = parts.next().unwrap_or_default();
-        let payload = parts.next().unwrap_or_default();
+        // `osa:<action>:<owner-id>[:<payload>]`, except `forcemodel`, whose
+        // payload keeps its own colons (`provider:model…`).
+        let (action, owner, payload) = match rest.split_once(':') {
+            Some((action, tail)) => match action {
+                "forcemodel" => match tail.split_once(':') {
+                    Some((owner, payload)) => (action, owner, payload),
+                    None => (action, tail, ""),
+                },
+                _ => match tail.split_once(':') {
+                    Some((owner, payload)) => {
+                        // Panel payloads never contain a second colon; anything
+                        // after it belongs to a malformed id.
+                        let payload = payload.split(':').next().unwrap_or(payload);
+                        (action, owner, payload)
+                    }
+                    None => (action, tail, ""),
+                },
+            },
+            None => (rest, "", ""),
+        };
 
         let user_id = component.user.id.get();
 
@@ -461,15 +484,30 @@ impl Handler {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if !self
-            .is_authorized(
+        // Model/provider/persona/workspace changes are control actions: the
+        // owner keeps them from a Community chat location, while regular
+        // members stay gated on full Trusted access.
+        let control_action = matches!(
+            action,
+            "provider" | "model" | "persona" | "workspace" | "newsession" | "forcemodel"
+        );
+        let access = self
+            .component_access_level(component, &roles)
+            .await
+            .unwrap_or(super::AccessLevel::Community);
+        let control_allowed = if control_action {
+            self.control_is_authorized_for_access(
                 user_id,
                 component.guild_id.map(|id| id.get()),
                 component.channel_id.get(),
                 &roles,
+                access,
             )
             .await
-        {
+        } else {
+            access == super::AccessLevel::Trusted
+        };
+        if !control_allowed {
             self.reject_component(ctx, component, "You are not authorized to use this bot.")
                 .await;
             return true;
@@ -507,17 +545,38 @@ impl Handler {
                 Err(e) => Notice::err(e),
             },
             // `/model set` with an id the catalog does not know, confirmed once.
-            "forcemodel" => match payload.split_once(':') {
-                Some((provider_id, model_id)) => {
-                    match self.apply_model_switch(provider_id, model_id).await {
-                        Ok(()) => Notice::ok(format!(
-                            "Forced `{model_id}` on `{provider_id}` — it is not in the catalog."
+            // The payload is `provider:model…`; model ids can contain colons,
+            // so the split helper matches the longest configured provider id.
+            // Long free-tier ids arrive bare (the full value would exceed
+            // Discord's 100-char custom_id cap) and resolve against the active
+            // provider.
+            "forcemodel" => {
+                if payload.trim().is_empty() {
+                    None
+                } else {
+                    let forced = match self.split_panel_model(payload).await {
+                        Some(split) => Some(split),
+                        None if !payload.contains(':') => {
+                            let active = self.agent.active_provider().await;
+                            Some((active.provider_type().to_string(), payload.to_string()))
+                        }
+                        None => None,
+                    };
+                    match forced {
+                        Some((provider_id, model_id)) => {
+                            match self.apply_model_switch(&provider_id, &model_id).await {
+                                Ok(()) => Notice::ok(format!(
+                                    "Forced `{model_id}` on `{provider_id}` — it is not in the catalog."
+                                )),
+                                Err(e) => Notice::err(e),
+                            }
+                        }
+                        None => Notice::err(format!(
+                            "`{payload}` does not start with a configured provider id."
                         )),
-                        Err(e) => Notice::err(e),
                     }
                 }
-                None => None,
-            },
+            }
             _ => None,
         };
 
@@ -576,12 +635,50 @@ impl Handler {
 
     async fn on_model_selected(&self, selected: Option<String>) -> Option<Notice> {
         let value = selected?;
-        let (provider_id, model_id) = value.split_once(':')?;
+        // Long free-tier select values arrive bare (the full
+        // `provider:model…` would exceed Discord's 100-char value cap).
+        let (provider_id, model_id) = match self.split_panel_model(&value).await {
+            Some(split) => split,
+            None => {
+                let active = self.agent.active_provider().await;
+                let provider_id = active.provider_type().to_string();
+                if value.contains(':') || value.trim().is_empty() {
+                    return None;
+                }
+                (provider_id, value)
+            }
+        };
 
-        match self.apply_model_switch(provider_id, model_id).await {
+        match self.apply_model_switch(&provider_id, &model_id).await {
             Ok(()) => Notice::ok(format!("Model set to `{model_id}`.")),
             Err(e) => Notice::err(e),
         }
+    }
+
+    /// Split a panel model select value (`provider:model`). Model ids can
+    /// contain colons, so the longest configured provider id wins.
+    async fn split_panel_model(&self, value: &str) -> Option<(String, String)> {
+        let configured = self.agent.get_config().await;
+        let active = self.agent.active_provider().await;
+        let active_id = active.provider_type().to_string();
+        let mut ids: Vec<&str> = configured
+            .providers
+            .iter()
+            .map(|provider| provider.provider_type.as_str())
+            .collect();
+        ids.push(&active_id);
+        ids.sort_unstable_by_key(|id| std::cmp::Reverse(id.len()));
+        for provider_id in ids {
+            if provider_id.is_empty() {
+                continue;
+            }
+            if let Some(model) = value.strip_prefix(&format!("{provider_id}:")) {
+                if !model.is_empty() {
+                    return Some((provider_id.to_string(), model.to_string()));
+                }
+            }
+        }
+        None
     }
 
     async fn on_persona_selected(&self, user_id: u64, selected: Option<String>) -> Option<Notice> {

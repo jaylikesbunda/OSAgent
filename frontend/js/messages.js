@@ -1234,7 +1234,8 @@ OSA.createIncrementalMd = function() {
         listEl: null,
         tableRows: null,
         tableHeader: false,
-        tail: null,
+        tableEl: null,
+        tableRowCount: 0,
     };
 };
 
@@ -1261,10 +1262,14 @@ OSA.mdBuildListItem = function(text) {
 };
 
 OSA.mdBuildTable = function(md) {
-    const table = document.createElement('table');
+    const table = md.tableEl || document.createElement('table');
+    if (!md.tableEl) {
+        md.tableEl = table;
+        md.tableRowCount = 0;
+    }
     (md.tableRows || []).forEach((row, i) => {
         const tr = document.createElement('tr');
-        const tag = (i === 0 && md.tableHeader) ? 'th' : 'td';
+        const tag = (md.tableRowCount + i === 0 && md.tableHeader) ? 'th' : 'td';
         row.forEach(cell => {
             const cellEl = document.createElement(tag);
             cellEl.innerHTML = OSA.formatInlineMarkdown(OSA.escapeHtml(cell.trim()));
@@ -1272,8 +1277,8 @@ OSA.mdBuildTable = function(md) {
         });
         table.appendChild(tr);
     });
-    md.tableRows = null;
-    md.tableHeader = false;
+    md.tableRowCount = (md.tableRowCount || 0) + (md.tableRows || []).length;
+    md.tableRows = [];
     return table;
 };
 
@@ -1332,21 +1337,32 @@ OSA.mdAppendLine = function(md, line, el) {
             return;
         }
         if (md.listEl) {
-            el.appendChild(md.listEl);
+            if (!md.listEl.isConnected) el.appendChild(md.listEl);
             md.listEl = null;
         }
         if (!md.tableRows) md.tableRows = [];
+        if (!md.tableEl) {
+            md.tableEl = document.createElement('table');
+            md.tableRowCount = 0;
+            el.appendChild(md.tableEl);
+        }
         md.tableRows.push(OSA.mdParseTableCells(trimmed));
+        // Render table rows incrementally instead of rebuilding the table on
+        // every line: stale header detection flickers mid-stream.
+        OSA.mdBuildTable(md);
         return;
     }
 
-    if (md.tableRows) {
-        el.appendChild(OSA.mdBuildTable(md));
+    if (md.tableRows && md.tableRows.length) {
+        OSA.mdBuildTable(md);
     }
+    md.tableEl = null;
+    md.tableRowCount = 0;
+    md.tableRows = null;
 
     if (OSA.mdIsHeader(trimmed)) {
         if (md.listEl) {
-            el.appendChild(md.listEl);
+            if (!md.listEl.isConnected) el.appendChild(md.listEl);
             md.listEl = null;
         }
         const level = (trimmed.match(/^(#+)/) || ['', ''])[1].length;
@@ -1358,7 +1374,7 @@ OSA.mdAppendLine = function(md, line, el) {
 
     if (/^```(\w+)?$/.test(trimmed)) {
         if (md.listEl) {
-            el.appendChild(md.listEl);
+            if (!md.listEl.isConnected) el.appendChild(md.listEl);
             md.listEl = null;
         }
         OSA.mdOpenCodeBlock(md, (trimmed.match(/^```(\w+)?$/) || ['', ''])[1], el);
@@ -1367,6 +1383,7 @@ OSA.mdAppendLine = function(md, line, el) {
 
     if (trimmed.startsWith('- ')) {
         if (!md.listEl) md.listEl = document.createElement('ul');
+        if (!md.listEl.isConnected) el.appendChild(md.listEl);
         md.listEl.appendChild(OSA.mdBuildListItem(trimmed.slice(2)));
         return;
     }
@@ -1374,12 +1391,13 @@ OSA.mdAppendLine = function(md, line, el) {
     const numberedMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
     if (numberedMatch) {
         if (!md.listEl) md.listEl = document.createElement('ul');
+        if (!md.listEl.isConnected) el.appendChild(md.listEl);
         md.listEl.appendChild(OSA.mdBuildListItem(numberedMatch[2]));
         return;
     }
 
     if (md.listEl) {
-        el.appendChild(md.listEl);
+        if (!md.listEl.isConnected) el.appendChild(md.listEl);
         md.listEl = null;
     }
 
@@ -1394,42 +1412,35 @@ OSA.mdAppendLine = function(md, line, el) {
 
 OSA.renderIncrementalMarkdown = function(el, rawText) {
     let md = el._md;
-    if (rawText.length < md.renderedLen) {
+    if (!md || rawText.length < md.renderedLen) {
         el.innerHTML = '';
         el._md = OSA.createIncrementalMd();
         md = el._md;
     }
-    const delta = rawText.slice(md.renderedLen);
-    if (!delta) {
+    const pending = rawText.slice(md.renderedLen);
+    if (!pending) {
         el.dataset.renderedText = rawText;
         return;
     }
-    const lastNl = delta.lastIndexOf('\n');
-    const complete = lastNl >= 0 ? delta.slice(0, lastNl + 1) : '';
-    const partial = lastNl >= 0 ? delta.slice(lastNl + 1) : delta;
 
-    if (md.tail) {
-        md.tail.remove();
-        md.tail = null;
+    // Commit only newline-terminated lines, each styled exactly once as it is
+    // appended. The trailing fragment without a terminator is held back
+    // silently until more text arrives or the turn flushes, so unfinished
+    // text is never shown in a half-styled state.
+    // Code fences stream complete lines straight into the fence's text node
+    // (no innerHTML restyle), so they commit the same way as other lines.
+    const lastNl = pending.lastIndexOf('\n');
+    if (lastNl < 0) {
+        el.dataset.renderedText = rawText;
+        return;
     }
-
-    if (complete) {
-        const lines = complete.split('\n');
-        lines.pop();
-        for (const line of lines) {
-            OSA.mdAppendLine(md, line, el);
-        }
+    const lines = pending.slice(0, lastNl + 1).split('\n');
+    lines.pop();
+    for (const line of lines) {
+        OSA.mdAppendLine(md, line, el);
     }
+    md.renderedLen += lastNl + 1;
 
-    if (partial && md.codeLang === null) {
-        const tail = document.createElement('span');
-        tail.className = 'md-partial';
-        tail.innerHTML = OSA.formatInlineMarkdown(OSA.escapeHtml(partial));
-        el.appendChild(tail);
-        md.tail = tail;
-    }
-
-    md.renderedLen += complete.length;
     el.dataset.renderedText = rawText;
 };
 
@@ -1443,19 +1454,21 @@ OSA.flushIncrementalMarkdown = function(el, rawText) {
     }
     const partial = rawText.slice(md.renderedLen);
     if (partial) {
-        OSA.mdAppendLine(md, partial, el);
-    }
-    if (md.tail) {
-        md.tail.remove();
-        md.tail = null;
+        const lines = partial.split('\n');
+        for (const line of lines) {
+            OSA.mdAppendLine(md, line, el);
+        }
     }
     if (md.listEl) {
-        el.appendChild(md.listEl);
+        if (!md.listEl.isConnected) el.appendChild(md.listEl);
         md.listEl = null;
     }
-    if (md.tableRows) {
-        el.appendChild(OSA.mdBuildTable(md));
+    if (md.tableRows && md.tableRows.length) {
+        OSA.mdBuildTable(md);
     }
+    md.tableEl = null;
+    md.tableRowCount = 0;
+    md.tableRows = null;
     if (md.codeLang !== null && md.codeText) {
         const codeEl = md.codeText.parentNode;
         if (codeEl) {
