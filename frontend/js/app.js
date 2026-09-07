@@ -1117,14 +1117,25 @@ OSA.sendMessage = async function() {
     });
 
     if (draftMessage && OSA.getAttachments().length === 0) {
-        const match = OSA.SLASH_COMMANDS.find(c => c.cmd === draftMessage.toLowerCase());
+        // /compact accepts trailing focus text ("/compact focus on X");
+        // everything else requires an exact match to avoid hijacking chat.
+        const lower = draftMessage.toLowerCase();
+        const compactMatch = lower === '/compact' || lower.startsWith('/compact ');
+        const match = compactMatch
+            ? OSA.SLASH_COMMANDS.find(c => c.cmd === '/compact')
+            : OSA.SLASH_COMMANDS.find(c => c.cmd === lower);
         if (match) {
             if (inputEl) {
                 inputEl.value = '';
                 OSA.resizeMessageInput(inputEl);
             }
             OSA.hideSlashMenu();
-            match.action();
+            if (match.cmd === '/compact') {
+                const focus = draftMessage.slice('/compact'.length).trim();
+                OSA.compactSession(focus ? { focus } : undefined);
+            } else {
+                match.action();
+            }
             return;
         }
     }
@@ -1776,7 +1787,7 @@ OSA.SLASH_COMMANDS = [
     { cmd: '/model', label: 'Set model', desc: 'Focus the model input', action: () => { const m = document.getElementById('model-input'); if (m) m.focus(); } },
     { cmd: '/settings', label: 'Settings', desc: 'Open settings panel', action: () => OSA.openSettings() },
     { cmd: '/workflow', label: 'Workflows', desc: 'Open workflow editor', action: () => OSA.openWorkflowEditor() },
-    { cmd: '/compact', label: 'Compact', desc: 'Summarize and compact the conversation', action: () => { const i = document.getElementById('message-input'); if (i) { i.value = 'Summarize our conversation so far and continue'; OSA.sendMessage(); } } },
+    { cmd: '/compact', label: 'Compact', desc: 'Verify notes and compact the conversation (resets context)', action: () => OSA.compactSession() },
     { cmd: '/clear', label: 'Clear screen', desc: 'Clear the message display', action: () => { OSA.resetTranscriptView(); } },
     { cmd: '/reset', label: 'Reset session', desc: 'Clear messages and start fresh', action: () => OSA.createSession() },
     { cmd: '/help', label: 'Help', desc: 'Show available commands', action: () => {} },

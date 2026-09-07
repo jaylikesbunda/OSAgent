@@ -16,6 +16,28 @@ OSA.fetchWithAuth = async function(url, options = {}) {
     return fetch(url, { ...options, headers });
 };
 
+// Global toast used by chat actions (e.g. /compact). Delegates to the
+// Jobs toast renderer when available so there is a single toast style,
+// with a minimal DOM fallback so callers never fail silently.
+OSA.showToast = function(message, type) {
+    if (OSA.Jobs && typeof OSA.Jobs.showToast === 'function' && OSA.Jobs.showToast !== OSA.showToast) {
+        return OSA.Jobs.showToast(message, type);
+    }
+    try {
+        const existing = document.querySelectorAll('.jobs-toast');
+        existing.forEach(t => t.remove());
+        const toast = document.createElement('div');
+        toast.className = `jobs-toast jobs-toast-${type || 'info'}`;
+        toast.innerHTML = `<span class="jobs-toast-msg"></span><button class="jobs-toast-dismiss" onclick="this.parentElement.remove()">&times;</button>`;
+        const msgEl = toast.querySelector('.jobs-toast-msg');
+        if (msgEl) msgEl.textContent = String(message ?? '');
+        document.body.appendChild(toast);
+        setTimeout(() => { if (toast.parentNode) toast.remove(); }, 6000);
+    } catch (e) {
+        console.log('[toast]', message);
+    }
+};
+
 OSA.getJson = async function(url) {
     const res = await OSA.fetchWithAuth(url);
     return res.json();

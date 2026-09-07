@@ -257,14 +257,23 @@ max_inline_bytes = 24000
 # Context-window compaction: when the request approaches the model's
 # context window, older history is summarized into a
 # <compacted-summary> frame (or pruned with a model-free head/tail
-# pass first).
+# pass first). With notes enabled, the agent instead keeps a short
+# rolling handoff note current during work; at pressure time the notes
+# are verify-and-corrected against the transcript (opencode-style:
+# summary + retained recent tail) so a fresh agent continues instantly.
 enabled = true
 threshold_ratio = 0.8        # trigger at this fraction of the usable window
+fallback_context_window = 128000  # used when provider/catalog report no window
+reserved_output_tokens = 8192     # reply headroom subtracted from the window
+preserve_recent_tokens = 15000    # recent-tail budget kept verbatim (turns)
 prune_enabled = true
 prune_threshold_chars = 8192
 prune_head_chars = 4096
 prune_tail_chars = 1024
 max_transcript_chars = 24000
+notes_enabled = true
+notes_max_chars = 2000
+notes_verify_at_compaction = true
 
 [search]
 # Enables the codesearch (quick-context) tool; web search is separate and always available.

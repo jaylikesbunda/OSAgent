@@ -81,6 +81,21 @@ OSA.messageIndexValue = function(value) {
     return Number.isInteger(parsed) ? parsed : null;
 };
 
+OSA.tmodelCompactionItem = function(key, message, messageIndex) {
+    const raw = message.content || '';
+    let content = OSA.stripCompactedSummary
+        ? OSA.stripCompactedSummary(raw)
+        : String(raw || '').trim();
+    content = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(content) : content;
+    return {
+        kind: 'compaction',
+        key,
+        content,
+        timestamp: message.timestamp || '',
+        messageIndex: Number.isInteger(messageIndex) ? messageIndex : null,
+    };
+};
+
 OSA.tmodelMessageItem = function(key, message, messageIndex, opts = {}) {
     const tokens = message.tokens || null;
     const cachedRead = tokens && Number.isFinite(tokens.cached_read) ? tokens.cached_read : null;
@@ -575,6 +590,17 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
 
     messages.forEach(function(message, idx) {
         if (!message || message.role === 'tool') return;
+        // Compaction summaries are synthetic but render as a collapsed
+        // system card (not a chat bubble); every other synthetic control
+        // message stays hidden from the transcript.
+        if (OSA.isCompactionSummaryMessage && OSA.isCompactionSummaryMessage(message)) {
+            const text = OSA.stripCompactedSummary
+                ? OSA.stripCompactedSummary(message.content || '')
+                : String(message.content || '').trim();
+            if (!text) return;
+            items.push(OSA.tmodelCompactionItem(OSA.getMessageRenderKey(message, idx), message, idx));
+            return;
+        }
         if (OSA.isHiddenSyntheticMessage(message)) return;
         if (message.role === 'assistant') {
             const kind = message.metadata && message.metadata.kind;
@@ -636,6 +662,11 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         const inferredAnchor = toolCallAnchors.has(t.tool_call_id)
             ? toolCallAnchors.get(t.tool_call_id)
             : null;
+        // No anchor means the owning assistant message is no longer in the
+        // transcript (e.g. compacted into the summary and archived). The
+        // recorded message_index is pre-compaction and would splice the card
+        // at a wrong position, so drop it instead of misplacing it.
+        if (inferredAnchor === null) return;
         const anchorPrelude = inferredAnchor !== null && preludeByAnchor.has(inferredAnchor)
             ? preludeByAnchor.get(inferredAnchor).join('\n\n')
             : '';
@@ -647,7 +678,7 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
             title: typeof t.title === 'string' ? t.title : '',
             prelude: anchorPrelude,
             metadata: t.metadata,
-            message_index: inferredAnchor !== null ? inferredAnchor : t.message_index,
+            message_index: inferredAnchor,
             timestamp: t.timestamp,
         }, { completed: t.completed === true, success: t.success === true, live: false });
         let pos = items.length;
@@ -667,10 +698,26 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
             return (OSA.eventTimestampMs(a.created_at) || 0) - (OSA.eventTimestampMs(b.created_at) || 0);
         });
 
+    const oldestVisibleMs = (function() {
+        let oldest = null;
+        for (const entry of items) {
+            if (entry.kind !== 'message') continue;
+            const ms = OSA.eventTimestampMs(entry.timestamp);
+            if (ms === null) continue;
+            if (oldest === null || ms < oldest) oldest = ms;
+        }
+        return oldest;
+    })();
+
     subagents.forEach(function(task) {
         if (!task || !task.session_id) return;
-        const item = OSA.tmodelSubagentItem(task, false);
         const createdMs = OSA.eventTimestampMs(task.created_at);
+        // Tasks from compacted-away history have no in-transcript anchor
+        // (they are timestamp-ordered). Anything older than the oldest
+        // visible message belongs to the summarized prefix, so drop it
+        // rather than appending it at the end out of order.
+        if (createdMs !== null && oldestVisibleMs !== null && createdMs < oldestVisibleMs) return;
+        const item = OSA.tmodelSubagentItem(task, false);
         let pos = items.length;
         if (createdMs !== null) {
             for (let i = items.length - 1; i >= 0; i--) {
@@ -759,9 +806,11 @@ OSA.buildTranscriptUnits = function() {
 OSA.unitSignature = function(unit) {
     return unit.items.map(function(item) {
         if (item.kind === 'message') {
+            let sigContent = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
+            sigContent = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(sigContent) : sigContent;
             return [
                 item.role,
-                OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || ''),
+                sigContent,
                 item.thinking || '',
                 item.timestamp || '',
                 item.images.length + '/' + item.attachments.length,
@@ -785,6 +834,9 @@ OSA.unitSignature = function(unit) {
                 item.tools.map(function(t) { return t.name + ':' + t.status + 'x' + (t.count || 1); }).join(','),
                 item.durationMs || '', item.contextState ? JSON.stringify(item.contextState) : '',
             ].join('\u0002');
+        }
+        if (item.kind === 'compaction') {
+            return ['compaction', item.content || '', item.timestamp || ''].join('\u0002');
         }
         return JSON.stringify(item);
     }).join('\u0001');
@@ -1178,6 +1230,13 @@ OSA.patchUnit = function(wrapper, unit) {
                 return OSA.formatMessage(content);
             });
             break;
+        case 'compaction':
+            OSA.patchSimpleMessageUnit(wrapper, unit, 'compaction', 'Context compacted', function(item) {
+                const body = OSA.formatMessage(String(item.content || ''));
+                return '<details><summary>Earlier history summarized — expand to review</summary>'
+                    + '<div class="compaction-body">' + body + '</div></details>';
+            });
+            break;
         case 'error':
             OSA.patchSimpleMessageUnit(wrapper, unit, 'error', 'Error', function(item) {
                 return OSA.escapeHtml(item.error || '');
@@ -1269,7 +1328,8 @@ OSA.patchMessageUnit = function(wrapper, unit) {
     }
 
     if (item.role === 'assistant') {
-        const display = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
+        let display = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
+        display = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(display) : display;
         if ((contentEl.dataset.rawText || '') !== display) {
             if (item.streaming) {
                 OSA.renderStreamingText(contentEl, display);

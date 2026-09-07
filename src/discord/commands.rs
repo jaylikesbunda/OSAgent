@@ -106,7 +106,11 @@ impl Handler {
                     "Archive the current session and start a fresh one",
                 ))
                 .add_option(sub("archive", "Archive the current session"))
-                .add_option(sub("delete", "Permanently delete the current session")),
+                .add_option(sub("delete", "Permanently delete the current session"))
+                .add_option(sub(
+                    "compact",
+                    "Summarize older history to free context (keeps recent messages)",
+                )),
             CreateCommand::new("model")
                 .description("Show or change the active model")
                 .add_option(sub("show", "Show the active model and provider"))
@@ -947,6 +951,59 @@ impl Handler {
                         };
                         ui::embed("Archive Failed", description, ui::COLOR_ERROR)
                     }
+                };
+                self.reply(ctx, command, embed).await;
+            }
+            "compact" => {
+                let session_id = match access {
+                    super::AccessLevel::Trusted => {
+                        self.get_active_session_id_for_user(user_id).await
+                    }
+                    super::AccessLevel::Community => {
+                        self.get_active_community_session_id(user_id, guild_id)
+                            .await
+                    }
+                };
+                let embed = match session_id {
+                    Some(session_id) => match self.agent.compact_session_now(&session_id, None).await {
+                        Ok((pruned, compacted, _)) => {
+                            let mut lines = Vec::new();
+                            if compacted > 0 {
+                                lines.push(format!("Summarized {compacted} older messages."));
+                            }
+                            if pruned > 0 {
+                                lines.push(format!("Pruned {pruned} tool results."));
+                            }
+                            if lines.is_empty() {
+                                ui::embed(
+                                    "Nothing To Compact",
+                                    "The history is still short enough to keep whole.",
+                                    ui::COLOR_INFO,
+                                )
+                            } else {
+                                lines.push("Recent messages are untouched.".to_string());
+                                ui::embed(
+                                    "Session Compacted",
+                                    lines.join("\n"),
+                                    ui::COLOR_SUCCESS,
+                                )
+                            }
+                        }
+                        Err(e) => {
+                            error!("Discord: failed to compact session: {e}");
+                            let description = if access == super::AccessLevel::Community {
+                                ui::describe_community_error(&e.to_string()).1
+                            } else {
+                                e.to_string()
+                            };
+                            ui::embed("Compaction Failed", description, ui::COLOR_ERROR)
+                        }
+                    },
+                    None => ui::embed(
+                        "No Active Session",
+                        "Send a message or run `/session new` to start one.",
+                        ui::COLOR_INFO,
+                    ),
                 };
                 self.reply(ctx, command, embed).await;
             }

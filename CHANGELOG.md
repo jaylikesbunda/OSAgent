@@ -1,5 +1,8 @@
 v0.5.3 changes:
 
+* Added rolling working notes + real `/compact` (verify-and-correct handoff, resets context)
+* Context ring now provider-reported (input+cache) with estimate fallback
+* Fixed code highlight leaking `token-*` strings into previews
 * Added a Bing backend to web search: burst-tolerant with direct result URLs, so general queries survive rate limiting better
 * Fixed completed streamed responses occasionally remaining stuck and preventing queued messages from sending
 * Fixed subagent card flicker when running tools

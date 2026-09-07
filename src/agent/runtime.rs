@@ -87,8 +87,23 @@ Follow this structure exactly:
 
 Rules:
 - Be concrete and repo-specific; optimize for continuing the task, not retelling it.
-- If the transcript already contains earlier compacted summaries, merge them into your output instead of repeating them.
+- If the transcript already contains earlier compacted summaries, merge them into your output instead of repeating them. A prior summary is discarded after this pass: carry forward anything still needed (objectives, constraints, decisions, parallel workstreams) and drop only what is finished. Where the newer transcript contradicts a prior summary, the transcript wins.
+- Preserve exact file paths, symbols, commands, and error strings when known.
+- Keep every section, using "(none)" when empty. Use terse bullets, not prose.
 - Wrap your output in a single <compacted-summary> block. Do not acknowledge this summary explicitly in your reply."#;
+
+const NOTES_VERIFY_PROMPT: &str = r#"Review the session's rolling working notes against the earlier conversation transcript below and produce corrected notes.
+
+The notes are a short handoff a fresh agent reads to continue instantly. Fix anything stale, wrong, or missing: goals, key decisions, files touched, what was tried, errors and fixes, and the concrete next step. Keep it under 2000 characters. Be concrete and repo-specific.
+
+Rules:
+- Preserve what is still accurate; correct what the transcript contradicts.
+- Fold in important transcript facts the notes missed.
+- Drop trivia that does not help continue the work.
+- Output only the corrected notes text, no preamble."#;
+
+const WORKING_NOTES_INSTRUCTIONS: &str = r#"# Working Notes
+Maintain a short rolling handoff note so a fresh agent can continue instantly after compaction. After each meaningful step, update the note with: current goal, key decisions, files touched, what was tried, errors/fixes, and the concrete next step. Keep it under 2000 characters, concrete and repo-specific. Use the `update_notes` tool. Do not acknowledge the notes in your reply."#;
 
 pub struct AgentRuntime {
     config: Arc<tokio::sync::RwLock<Config>>,
@@ -1526,10 +1541,37 @@ impl AgentRuntime {
                 if let Some(manifest) = native_manifest_prompt.as_ref() {
                     api_messages.push(Message::system(manifest.clone()));
                 }
+                if runtime_config.compaction.notes_enabled {
+                    api_messages.push(Message::system(WORKING_NOTES_INSTRUCTIONS.to_string()));
+                    if let Some(notes) = session
+                        .context_state
+                        .as_ref()
+                        .and_then(|state| state.working_notes.as_ref())
+                        .map(|notes| notes.text.trim().to_string())
+                        .filter(|text| !text.is_empty())
+                    {
+                        api_messages.push(Message::system(format!(
+                            "# Session Working Notes\n{}\n\nThese notes are your rolling handoff. Keep them current with `update_notes`; a fresh agent reads them first after compaction.",
+                            notes
+                        )));
+                    }
+                }
             }
 
+            // Compaction markers accumulate in storage; forward at most the
+            // newest one so prior summaries are not re-sent (and
+            // re-summarized) on every turn, while other synthetic control
+            // messages never reach the provider at all.
             api_messages.reserve(session.messages.len());
-            for msg in &session.messages {
+            for (index, msg) in session.messages.iter().enumerate() {
+                if Self::is_superseded_summary(&session.messages, index) {
+                    continue;
+                }
+                if Self::is_synthetic_message(msg)
+                    && Self::message_kind(msg) != Some("compaction_summary")
+                {
+                    continue;
+                }
                 api_messages.push(msg.clone());
             }
             if response_truncated && !is_roleplay {
@@ -1553,7 +1595,14 @@ impl AgentRuntime {
             }
 
             let provider = self.active_provider().await;
-            let context_window = provider.model_context_window().await;
+            // Fall back to the configured window when the provider and the
+            // catalog both come up empty: without a window the pressure
+            // trigger below never runs and the session grows until the
+            // provider hard-errors.
+            let context_window = provider.model_context_window().await.or_else(|| {
+                let fallback = runtime_config.compaction.fallback_context_window;
+                if fallback > 0 { Some(fallback) } else { None }
+            });
             if let Some(window) = context_window {
                 let model_limit = self
                     .catalog
@@ -1612,8 +1661,13 @@ impl AgentRuntime {
                     };
                 }
 
-                let reserved_output = std::cmp::min(output_limit, 8192);
-                let usable = input_limit.unwrap_or(window.saturating_sub(reserved_output));
+                let reserved_output = std::cmp::min(
+                    output_limit,
+                    runtime_config.compaction.reserved_output_tokens.max(1024),
+                );
+                let usable = input_limit
+                    .unwrap_or(window.saturating_sub(reserved_output))
+                    .saturating_sub(tool_schema_tokens);
                 let threshold_ratio = if runtime_config.compaction.enabled {
                     runtime_config.compaction.threshold_ratio.clamp(0.5, 0.99)
                 } else {
@@ -1635,6 +1689,7 @@ impl AgentRuntime {
                             &mut session,
                             &active_workspace,
                             &runtime_config.compaction,
+                            None,
                         )
                         .await?
                     {
@@ -1643,6 +1698,10 @@ impl AgentRuntime {
                             cs.compaction_stats.total_pruned_messages += pruned;
                             cs.compaction_stats.total_compacted_messages += compacted;
                         }
+                        // The pre-compact provider usage no longer describes
+                        // the shrunken request: drop it so the next preflight
+                        // reports the fresh estimate instead of stale occupancy.
+                        last_request_usage = None;
                         self.record_session_event(
                             &mut session,
                             "compaction",
@@ -1740,6 +1799,7 @@ impl AgentRuntime {
                     tool_schema_tokens,
                     condensed,
                     actual_usage: actual_usage.clone(),
+                    last_request_usage: last_request_usage.clone(),
                     subagent_session_id: None,
                     timestamp: SystemTime::now(),
                 });
@@ -1756,6 +1816,21 @@ impl AgentRuntime {
                         cached_write: u.cached_write,
                         reasoning: u.reasoning,
                         cache_reason: None,
+                    }),
+                    working_notes: session
+                        .context_state
+                        .as_ref()
+                        .and_then(|cs| cs.working_notes.clone()),
+                    last_request_usage: last_request_usage.as_ref().map(|u| {
+                        crate::storage::models::MessageTokens {
+                            input: u.input,
+                            output: u.output,
+                            total: u.total,
+                            cached_read: u.cached_read,
+                            cached_write: u.cached_write,
+                            reasoning: u.reasoning,
+                            cache_reason: None,
+                        }
                     }),
                     cache_provider: Some(context_provider_type.clone()),
                     cache_model: Some(context_model.clone()),
@@ -1892,6 +1967,26 @@ impl AgentRuntime {
                         "Provider stream setup error in session {}: {}",
                         session_id, error
                     );
+                    // A hard context-length rejection is recoverable by
+                    // compaction: shrink history once and retry the request
+                    // instead of failing the turn.
+                    if error.is_context_limit() {
+                        if let Some(recovered) = self
+                            .compact_after_context_error(
+                                session_id,
+                                &mut session,
+                                &active_workspace,
+                                &runtime_config,
+                                iteration,
+                                &error,
+                            )
+                            .await?
+                        {
+                            if recovered {
+                                continue;
+                            }
+                        }
+                    }
                     self.event_bus.emit(AgentEvent::Error {
                         session_id: session_id.to_string(),
                         sequence: 0,
@@ -2071,14 +2166,24 @@ impl AgentRuntime {
             if response.context_compressed {
                 if let Some(summary) = response.compressed_summary.clone() {
                     let provider_compaction =
-                        Self::apply_provider_compaction(&mut session, &summary);
-                    if let Some((compacted_count, dropped)) = provider_compaction {
+                        Self::plan_provider_compaction(&session, &summary);
+                    if let Some((keep_head, keep_tail, dropped, framed)) = provider_compaction {
                         if let Err(error) = self.storage.archive_messages(&session.id, &dropped) {
                             warn!(
-                                "Failed to archive provider-compacted messages for {}: {}",
+                                "Failed to archive provider-compacted messages for {}: {}; keeping full history",
                                 session_id, error
                             );
-                        }
+                        } else {
+                        let original_len = session.messages.len();
+                        let tail = session.messages[original_len - keep_tail..].to_vec();
+                        let mut compacted = session.messages[..keep_head].to_vec();
+                        compacted.push(Message::synthetic_assistant(
+                            framed.clone(),
+                            "compaction_summary",
+                        ));
+                        compacted.extend(tail);
+                        let compacted_count = original_len - compacted.len();
+                        session.messages = compacted;
                         info!(
                             "Persisting provider-side context compression for session {}: replaced {} messages with summary",
                             session_id, compacted_count
@@ -2086,6 +2191,11 @@ impl AgentRuntime {
                         if let Some(ref mut cs) = session.context_state {
                             cs.compaction_stats.total_compactions += 1;
                             cs.compaction_stats.total_compacted_messages += compacted_count;
+                            cs.compaction_stats.estimated_tokens_saved += dropped
+                                .iter()
+                                .map(Self::message_tokens)
+                                .sum::<usize>()
+                                .saturating_sub(Self::estimate_tokens(&framed));
                         }
                         self.record_session_event(
                             &mut session,
@@ -2107,6 +2217,7 @@ impl AgentRuntime {
                             timestamp: SystemTime::now(),
                         });
                         self.session_manager.update_session(&session).await?;
+                        }
                     }
                 }
             }
@@ -3663,6 +3774,23 @@ impl AgentRuntime {
         message.role == "user" && !Self::is_synthetic_message(message)
     }
 
+    /// Whether a stored compaction marker is superseded by a newer one.
+    /// Only the newest summary is forwarded to the provider; older ones
+    /// stay in storage and the archive but are never re-sent (and
+    /// re-summarized) on later turns.
+    fn is_superseded_summary(messages: &[Message], index: usize) -> bool {
+        let message = &messages[index];
+        if !Self::is_synthetic_message(message)
+            || Self::message_kind(message) != Some("compaction_summary")
+        {
+            return false;
+        }
+        messages[index + 1..].iter().any(|later| {
+            Self::is_synthetic_message(later)
+                && Self::message_kind(later) == Some("compaction_summary")
+        })
+    }
+
     fn looks_like_internal_tool_dump(content: &str) -> bool {
         let trimmed = content.trim();
         let lower = trimmed.to_lowercase();
@@ -3688,7 +3816,14 @@ impl AgentRuntime {
             && !Self::looks_like_internal_tool_dump(&message.content)
     }
 
+    /// Last real (non-synthetic) user message, else last user message, else
+    /// a conservative tail offset. Retained for callers that need a replay
+    /// anchor; the compaction split itself is token-budget based.
     fn replay_start_index(messages: &[Message]) -> usize {
+        Self::compaction_replay_start(messages)
+    }
+
+    fn compaction_replay_start(messages: &[Message]) -> usize {
         for (index, message) in messages.iter().enumerate().rev() {
             if Self::is_real_user_message(message) {
                 return index;
@@ -3704,19 +3839,86 @@ impl AgentRuntime {
         messages.len().saturating_sub(6)
     }
 
+    /// Remove model-emitted `<tool_call>...</tool_call>` text blocks (and a
+    /// dangling unclosed opener) from text fed to the summarizer. The client
+    /// never parses this Qwen/GLM-style convention into structured calls, so
+    /// leaving it in pollutes summaries with raw call markup.
+    fn strip_tool_call_markup_text(text: &str) -> String {
+        let mut out = text.to_string();
+        loop {
+            let lower = out.to_lowercase();
+            let Some(start) = lower.find("<tool_call>") else {
+                break;
+            };
+            if let Some(end_rel) = lower[start..].find("</tool_call>") {
+                let end = start + end_rel + "</tool_call>".len();
+                out.replace_range(start..end, "");
+            } else {
+                out.truncate(start);
+                break;
+            }
+        }
+        out
+    }
+
+    /// Unwrap a previously framed `<compacted-summary>...</compacted-summary>`
+    /// body to its inner text so re-compaction merges summaries instead of
+    /// nesting framing tags inside each other.
+    fn unwrap_compacted_summary_text(text: &str) -> &str {
+        let lower = text.to_lowercase();
+        if let Some(start_rel) = lower.find("<compacted-summary>") {
+            let inner_start = start_rel + "<compacted-summary>".len();
+            if let Some(end_rel) = lower[inner_start..].find("</compacted-summary>") {
+                return text[inner_start..inner_start + end_rel].trim();
+            }
+        }
+        text
+    }
+
     fn compactable_message_content(message: &Message) -> Option<String> {
-        if message.role == "system" || Self::is_synthetic_message(message) {
+        if message.role == "system" {
+            return None;
+        }
+        // Compaction summaries merge into the next summary like opencode's
+        // prior summaries; every other synthetic control message is skipped.
+        if Self::is_synthetic_message(message)
+            && Self::message_kind(message) != Some("compaction_summary")
+        {
             return None;
         }
 
         let mut content = message.content.replace('\n', " ").trim().to_string();
+        // Prior summaries feed back in unwrapped so tags never nest, and
+        // unparsed tool-call markup is dropped before it can leak into the
+        // next summary.
+        if Self::message_kind(message) == Some("compaction_summary") {
+            content = Self::unwrap_compacted_summary_text(&content).to_string();
+        }
+        content = Self::strip_tool_call_markup_text(&content)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if content.is_empty() {
+            // Tool-call-only assistant turns and image-only user turns still
+            // carry signal; describe the shape instead of dropping them.
+            if let Some(calls) = message.tool_calls.as_ref().filter(|calls| !calls.is_empty()) {
+                let names: Vec<String> = calls.iter().map(|call| call.name.clone()).collect();
+                content = format!("[tool calls: {}]", names.join(", "));
+            } else if !message.images.is_empty() {
+                content = format!("[{} attached image(s)]", message.images.len());
+            }
+        }
+        if let Some(thinking) = message.thinking.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            let short: String = thinking.replace('\n', " ").chars().take(300).collect();
+            content = format!("{} [reasoning: {}]", content, short.trim());
+        }
         if content.is_empty() {
             return None;
         }
 
-        if content.chars().count() > 500 {
-            content = content.chars().take(500).collect::<String>();
-            content.push_str("...");
+        if content.chars().count() > 2_000 {
+            content = content.chars().take(2_000).collect::<String>();
+            content.push_str("... [truncated]");
         }
 
         let label = match (message.role.as_str(), Self::message_kind(message)) {
@@ -3728,27 +3930,30 @@ impl AgentRuntime {
         Some(format!("{}: {}", label, content))
     }
 
+    /// Newest-first transcript for the summarizer: opencode-style, so the
+    /// most recent prefix content is kept and older content is what gets
+    /// cut at the cap instead of `break`ing on the first overflow.
     fn transcript_for_compaction(messages: &[Message], max_chars: usize) -> String {
-        let mut transcript = String::new();
-
-        for line in messages
+        let lines: Vec<String> = messages
             .iter()
             .filter_map(Self::compactable_message_content)
-        {
-            let extra = if transcript.is_empty() { 0 } else { 1 };
-            if transcript.chars().count() + line.chars().count() + extra > max_chars {
-                break;
+            .collect();
+        let mut kept: Vec<&str> = Vec::new();
+        let mut used = 0usize;
+        for line in lines.iter().rev() {
+            let extra = if kept.is_empty() { 0 } else { 1 };
+            if used + line.chars().count() + extra > max_chars {
+                continue;
             }
-            if !transcript.is_empty() {
-                transcript.push('\n');
-            }
-            transcript.push_str(&line);
+            used += line.chars().count() + extra;
+            kept.push(line);
         }
+        kept.reverse();
 
-        if transcript.is_empty() {
+        if kept.is_empty() {
             "No earlier transcript available.".to_string()
         } else {
-            transcript
+            kept.join("\n")
         }
     }
 
@@ -3771,7 +3976,11 @@ impl AgentRuntime {
             .prune_tail_chars
             .min(threshold.saturating_sub(head + MIDDLE_MARKER.len()));
 
-        for message in session.messages.iter_mut().take(preserve_from) {
+        // `preserve_from` is the retained-tail split: everything before it is
+        // about to be archived byte-identical, so pruning must only touch the
+        // retained tail. This keeps the archive faithful and leaves the
+        // summarizer the full original prefix.
+        for message in session.messages.iter_mut().skip(preserve_from) {
             if message.role != "tool" {
                 continue;
             }
@@ -3813,10 +4022,16 @@ impl AgentRuntime {
     ///
     /// Returns the removed span so the caller can archive it before
     /// persisting; `None` when there was nothing to compact.
-    fn apply_provider_compaction(
-        session: &mut Session,
+    /// Plan a provider-side compression splice without mutating the session,
+    /// so the caller can archive the dropped span first and only splice on
+    /// success (fail closed: history is never replaced unless archived).
+    /// Returns `(keep_head, keep_tail, dropped, framed_summary)`.
+    /// The summary uses the standard `<compacted-summary>` framing so later
+    /// local compactions merge it instead of nesting foreign formats.
+    fn plan_provider_compaction(
+        session: &Session,
         summary: &str,
-    ) -> Option<(usize, Vec<Message>)> {
+    ) -> Option<(usize, usize, Vec<Message>, String)> {
         let original_len = session.messages.len();
         if original_len < 8 {
             return None;
@@ -3826,19 +4041,9 @@ impl AgentRuntime {
         if original_len <= keep_head + keep_tail + 1 {
             return None;
         }
-
-        let head = session.messages[..keep_head].to_vec();
         let dropped = session.messages[keep_head..original_len - keep_tail].to_vec();
-        let tail = session.messages[original_len - keep_tail..].to_vec();
-        let mut compacted = head;
-        compacted.push(Message::synthetic_assistant(
-            format!("Compaction summary:\n{}", summary.trim()),
-            "compaction_summary",
-        ));
-        compacted.extend(tail);
-        let compacted_count = original_len - compacted.len();
-        session.messages = compacted;
-        Some((compacted_count, dropped))
+        let framed = Self::frame_compacted_summary(summary);
+        Some((keep_head, keep_tail, dropped, framed))
     }
 
     /// Frame a compaction summary the way DSH does: a single
@@ -3852,31 +4057,233 @@ impl AgentRuntime {
         )
     }
 
+    /// Deduplicated framing helper used by the summary path below; kept as
+    /// a separate name because `frame_compacted_summary` is referenced by
+    /// older call sites and tests.
+    fn frame_summary_block(summary: &str) -> String {
+        Self::frame_compacted_summary(summary)
+    }
+
+    /// Compact-and-retry after a provider context-length rejection.
+    /// Returns `Ok(Some(true))` when history shrank and the caller should
+    /// rebuild the request (`continue`), `Ok(Some(false))` when compaction
+    /// ran but nothing shrank, and `Ok(None)` when there was nothing to
+    /// compact at all.
+    async fn compact_after_context_error(
+        &self,
+        session_id: &str,
+        session: &mut Session,
+        active_workspace: &WorkspaceConfig,
+        runtime_config: &Config,
+        iteration: usize,
+        error: &OSAgentError,
+    ) -> Result<Option<bool>> {
+        let before: usize = session.messages.iter().map(Self::message_tokens).sum();
+        match self
+            .compact_session_history(
+                session,
+                active_workspace,
+                &runtime_config.compaction,
+                None,
+            )
+            .await?
+        {
+            Some((pruned, compacted, replayed)) => {
+                if let Some(ref mut cs) = session.context_state {
+                    cs.compaction_stats.total_compactions += 1;
+                    cs.compaction_stats.total_pruned_messages += pruned;
+                    cs.compaction_stats.total_compacted_messages += compacted;
+                }
+                self.record_session_event(
+                    session,
+                    "compaction",
+                    serde_json::json!({
+                        "iteration": iteration,
+                        "pruned_messages": pruned,
+                        "compacted_messages": compacted,
+                        "replayed": replayed,
+                        "source": "context_limit_retry",
+                        "error": error.to_string(),
+                    }),
+                )?;
+                self.event_bus.emit(AgentEvent::Compaction {
+                    session_id: session_id.to_string(),
+                    sequence: 0,
+                    pruned_messages: pruned,
+                    compacted_messages: compacted,
+                    replayed,
+                    timestamp: SystemTime::now(),
+                });
+                self.session_manager.update_session(session).await?;
+                let after: usize = session.messages.iter().map(Self::message_tokens).sum();
+                if after < before {
+                    self.emit_reasoning_event(
+                        session_id,
+                        format!(
+                            "Provider rejected the request as over context ({} tokens); compacted to {} and retrying.",
+                            before, after
+                        ),
+                    );
+                    Ok(Some(true))
+                } else {
+                    Ok(Some(false))
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Split the transcript into a compactable prefix and a retained tail.
+    /// The tail walks back whole user turns until it fits the configured
+    /// recent-token budget, then advances past any dangling tool-result or
+    /// tool-call pairing so the cut never orphans one side of the pair.
+    /// When nothing fits (a single turn already exceeds the budget), the
+    /// oldest turn boundary still compacts so pressure always shrinks.
+    fn compaction_split_index(messages: &[Message], compaction: &crate::config::CompactionConfig) -> usize {
+        let tail_budget = compaction.preserve_recent_tokens.max(2_000);
+        let turns: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| Self::is_real_user_message(message))
+            .map(|(index, _)| index)
+            .collect();
+        if turns.is_empty() {
+            // No user turns (system/synthetic/tool-only history): still
+            // compact by keeping the last few messages as the tail.
+            let fallback = messages.len().saturating_sub(6).max(1).min(messages.len());
+            let snapped = Self::snap_split_to_tool_boundary(messages, fallback).min(messages.len());
+            return if snapped == 0 || snapped >= messages.len() {
+                fallback.min(messages.len().saturating_sub(1).max(1))
+            } else {
+                snapped
+            };
+        }
+        let mut split = *turns.last().unwrap_or(&0);
+        let mut tail_tokens = 0usize;
+        for position in (0..turns.len()).rev() {
+            let turn_start = turns[position];
+            let turn_end = turns.get(position + 1).copied().unwrap_or(messages.len());
+            let turn_tokens: usize = messages[turn_start..turn_end]
+                .iter()
+                .map(Self::message_tokens)
+                .sum();
+            if tail_tokens + turn_tokens <= tail_budget {
+                tail_tokens += turn_tokens;
+                split = turn_start;
+                continue;
+            }
+            break;
+        }
+        // When even the newest turn exceeds the budget, keep that newest
+        // turn as the tail rather than giving up: compacting everything
+        // except the latest turn still relieves pressure.
+        if split == 0 && turns.len() > 1 {
+            split = turns[turns.len() - 1];
+        }
+        // Never cut between an assistant tool call and its tool results, or
+        // between tool results and the assistant turn that consumed them.
+        // Snapping returns `messages.len()` when the whole remaining suffix
+        // is one fused tool-pair block: the entire suffix then forms the
+        // tail and the split is the earlier turn start we snapped from.
+        let snapped = Self::snap_split_to_tool_boundary(messages, split);
+        split = if snapped >= messages.len() { split } else { snapped };
+        split = split.min(messages.len());
+        // Single-turn sessions still need compaction when they are large:
+        // fall back to keeping the last few messages as the tail.
+        if split == 0 && messages.len() > 1 {
+            let fallback = messages.len().saturating_sub(6).max(1);
+            split = Self::snap_split_to_tool_boundary(messages, fallback).min(messages.len());
+            if split == 0 || split >= messages.len() {
+                split = fallback.min(messages.len().saturating_sub(1).max(1));
+            }
+        }
+        split
+    }
+
+    /// Move a candidate split forward past tool-pairing boundaries: a split
+    /// that would strand an assistant tool call without its tool results,
+    /// or tool results without the assistant call that owns them, advances
+    /// until both sides sit on the same side of the cut.
+    fn snap_split_to_tool_boundary(messages: &[Message], split: usize) -> usize {
+        let mut adjusted = split.min(messages.len());
+        while adjusted > 0 && adjusted < messages.len() {
+            let in_prefix_call_ids: std::collections::HashSet<&str> = messages[..adjusted]
+                .iter()
+                .filter_map(|message| message.tool_calls.as_ref())
+                .flat_map(|calls| calls.iter().map(|call| call.id.as_str()))
+                .collect();
+            let in_prefix_result_ids: std::collections::HashSet<&str> = messages[..adjusted]
+                .iter()
+                .filter_map(|message| message.tool_call_id.as_deref())
+                .collect();
+            let tail_result_ids: std::collections::HashSet<&str> = messages[adjusted..]
+                .iter()
+                .filter_map(|message| message.tool_call_id.as_deref())
+                .collect();
+            let tail_call_ids: std::collections::HashSet<&str> = messages[adjusted..]
+                .iter()
+                .filter_map(|message| message.tool_calls.as_ref())
+                .flat_map(|calls| calls.iter().map(|call| call.id.as_str()))
+                .collect();
+            let stranded_call = in_prefix_call_ids
+                .iter()
+                .any(|id| !in_prefix_result_ids.contains(id) && tail_result_ids.contains(id));
+            let stranded_result = in_prefix_result_ids
+                .iter()
+                .any(|id| !in_prefix_call_ids.contains(id) && tail_call_ids.contains(id));
+            // A tail that opens mid-pair must pull the pair's other half
+            // into the tail too: a tool result whose call is not in the
+            // tail, or an assistant call whose result never follows in the
+            // tail. A call whose result follows inside the tail is the
+            // healthy case and must NOT advance.
+            let tail_opens_orphaned = messages[adjusted..].first().is_some_and(|first| {
+                let opens_with_result = first.role == "tool"
+                    && first
+                        .tool_call_id
+                        .as_deref()
+                        .is_some_and(|id| !tail_call_ids.contains(id));
+                let opens_with_call = first
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+                    && first.tool_calls.as_ref().is_some_and(|calls| {
+                        !calls
+                            .iter()
+                            .any(|call| tail_result_ids.contains(call.id.as_str()))
+                    });
+                opens_with_result || opens_with_call
+            });
+            if stranded_call || stranded_result || tail_opens_orphaned {
+                adjusted += 1;
+                continue;
+            }
+            break;
+        }
+        adjusted
+    }
+
     async fn compact_session_history(
         &self,
         session: &mut Session,
-        active_workspace: &WorkspaceConfig,
+        _active_workspace: &WorkspaceConfig,
         compaction: &crate::config::CompactionConfig,
+        focus: Option<&str>,
     ) -> Result<Option<(usize, usize, bool)>> {
-        if session.messages.len() < 8 {
+        let compact_end = Self::compaction_split_index(&session.messages, compaction);
+        if compact_end == 0 || compact_end >= session.messages.len() {
             return Ok(None);
         }
 
-        let replay_start = Self::replay_start_index(&session.messages);
+        // Prune only the retained tail: rewriting the prefix before it is
+        // archived would persist pruned text instead of the original content.
+        let tail_start_for_prune = compact_end;
         let pruned = if compaction.prune_enabled {
-            Self::prune_old_tool_messages(session, replay_start, compaction)
+            Self::prune_old_tool_messages(session, tail_start_for_prune, compaction)
         } else {
             0
         };
-        let compact_end = replay_start.max(session.messages.len().saturating_sub(6));
-        if compact_end == 0 {
-            return Ok(if pruned > 0 {
-                Some((pruned, 0, false))
-            } else {
-                None
-            });
-        }
-
+        // Re-split after pruning, since pruning never changes message count
+        // but the tail token cost may have dropped; keep the same split.
         let prefix = session.messages[..compact_end].to_vec();
         let tail = session.messages[compact_end..].to_vec();
         if prefix.is_empty() {
@@ -3886,20 +4293,85 @@ impl AgentRuntime {
                 None
             });
         }
+        // Refuse to summarize trivia: when the prefix costs almost nothing,
+        // a "summary" can only echo it back (or pad it), which reads as trash
+        // and pollutes the next merge. Prune-only progress above is still
+        // returned; otherwise the caller reports nothing to compact.
+        // Floor is ~4KB of text: tool-output-heavy short sessions still pass
+        // on token weight, not message count.
+        const MIN_PREFIX_TOKENS: usize = 1_000;
+        let prefix_tokens: usize = prefix.iter().map(Self::message_tokens).sum();
+        if prefix_tokens < MIN_PREFIX_TOKENS {
+            return Ok(if pruned > 0 {
+                Some((pruned, 0, false))
+            } else {
+                None
+            });
+        }
 
-        let workspace_path = std::path::PathBuf::from(
-            shellexpand::tilde(&active_workspace.resolved_path()).to_string(),
-        );
-        let mut compact_messages = vec![Message::system(COMPACTION_PROMPT.to_string())];
-        let config_dir = self.config.read().await.config_dir();
-        if let Some(reminder) = format_system_reminder(&global_instruction_blocks(&config_dir)) {
-            compact_messages.push(Message::system(reminder));
-        }
-        if let Some(reminder) =
-            format_system_reminder(&workspace_instruction_blocks(&workspace_path))
+        let existing_notes = session
+            .context_state
+            .as_ref()
+            .and_then(|state| state.working_notes.as_ref())
+            .map(|notes| notes.text.trim().to_string())
+            .filter(|text| !text.is_empty());
+
+        // Notes-first compaction (opencode-style): when rolling working notes
+        // exist, verify-and-correct them against the transcript instead of a
+        // full re-summarization, then keep notes + tail. The tail is the
+        // "serialized recent context" opencode retains beside its summary;
+        // the transcript is archived either way so nothing durable is lost.
+        // A failed verify pass returns the stale notes with `verified=false`,
+        // so a stale-notes compaction never claims verification.
+        // A manual focus request is honored by the verify pass (it is the
+        // only summarization that runs on this path).
+        if compaction.notes_enabled
+            && compaction.notes_verify_at_compaction
+            && existing_notes.is_some()
         {
-            compact_messages.push(Message::system(reminder));
+            let focus_text = focus.map(str::trim).filter(|text| !text.is_empty());
+            let (verified, verify_ok) = self
+                .verify_working_notes(session, &prefix, compaction, focus_text)
+                .await;
+            let prefix_len = prefix.len();
+            if let Err(error) = self.storage.archive_messages(&session.id, &prefix) {
+                warn!(
+                    "Failed to archive compacted messages for {}: {}",
+                    session.id, error
+                );
+                // Fail closed: the prefix is still intact both in memory and
+                // in the transcript table, so keep prune-only progress (if
+                // any) instead of replacing history that was never archived.
+                return Ok(if pruned > 0 {
+                    self.session_manager.update_session(session).await?;
+                    Some((pruned, 0, false))
+                } else {
+                    None
+                });
+            }
+            let framed_notes = Self::frame_working_notes(&verified);
+            if let Some(ref mut cs) = session.context_state {
+                cs.compaction_stats.estimated_tokens_saved += prefix_tokens
+                    .saturating_sub(Self::estimate_tokens(&framed_notes));
+            }
+            let mut compacted_messages = vec![Message::synthetic_assistant(
+                framed_notes,
+                "compaction_summary",
+            )];
+            compacted_messages.extend(tail);
+            session.messages = compacted_messages;
+            self.store_working_notes(session, verified, verify_ok);
+            return Ok(Some((pruned, prefix_len, true)));
         }
+
+        let mut prompt_text = COMPACTION_PROMPT.to_string();
+        if let Some(focus) = focus.map(str::trim).filter(|text| !text.is_empty()) {
+            prompt_text.push_str(&format!(
+                "\n\nThe user asked to focus this compaction on: {}",
+                focus
+            ));
+        }
+        let mut compact_messages = vec![Message::system(prompt_text)];
         compact_messages.push(Message::user(format!(
             "Earlier conversation transcript:\n{}",
             Self::transcript_for_compaction(&prefix, compaction.max_transcript_chars)
@@ -3910,13 +4382,22 @@ impl AgentRuntime {
             .complete(Some(&session.id), &compact_messages, &[])
             .await
         {
-            Ok(response) => response
-                .content
-                .unwrap_or_else(|| Self::summarize_for_context(&prefix, 2_500)),
+            Ok(response) => response.content.filter(|text| !text.trim().is_empty()),
             Err(error) => {
                 warn!("Compaction model pass failed: {}", error);
-                Self::summarize_for_context(&prefix, 2_500)
+                None
             }
+        };
+        // Never delete history on a failed summary call: opencode aborts and
+        // preserves history, and so do we. Keep prune-only progress if the
+        // tail prune did anything.
+        let Some(summary) = summary else {
+            return Ok(if pruned > 0 {
+                self.session_manager.update_session(session).await?;
+                Some((pruned, 0, false))
+            } else {
+                None
+            });
         };
 
         // Shrink validation: a summary must cost fewer tokens than the
@@ -3924,7 +4405,6 @@ impl AgentRuntime {
         // the deterministic summarizer, which is always smaller.
         let framed = Self::frame_compacted_summary(&summary);
         let framed_tokens = framed.chars().count().div_ceil(4).max(1);
-        let prefix_tokens: usize = prefix.iter().map(Self::message_tokens).sum();
         let final_summary = if framed_tokens >= prefix_tokens {
             warn!(
                 "Compaction summary did not shrink ({} est. tokens vs {}): using deterministic fallback",
@@ -3936,23 +4416,123 @@ impl AgentRuntime {
         };
 
         let mut compacted_messages = vec![Message::synthetic_assistant(
-            final_summary,
+            final_summary.clone(),
             "compaction_summary",
         )];
         compacted_messages.extend(tail);
 
         // Preserve what is about to be summarized away so the `sessions`
-        // tool can still search and read pre-compaction content.
+        // tool can still search and read pre-compaction content. Fail closed
+        // like the summary-failure path above: never replace history that
+        // was not archived.
         if let Err(error) = self.storage.archive_messages(&session.id, &prefix) {
             warn!(
                 "Failed to archive compacted messages for {}: {}",
                 session.id, error
             );
+            return Ok(if pruned > 0 {
+                self.session_manager.update_session(session).await?;
+                Some((pruned, 0, false))
+            } else {
+                None
+            });
+        }
+        if let Some(ref mut cs) = session.context_state {
+            cs.compaction_stats.estimated_tokens_saved += prefix_tokens
+                .saturating_sub(Self::estimate_tokens(&final_summary));
         }
 
         session.messages = compacted_messages;
 
         Ok(Some((pruned, prefix.len(), true)))
+    }
+
+    fn frame_working_notes(notes: &str) -> String {
+        format!(
+            "<compacted-summary>\n# Session Working Notes (verified at compaction)\n{}\n</compacted-summary>\n\nDo not acknowledge the compacted summary explicitly in your reply. Keep the working notes current with `update_notes`.",
+            notes.trim()
+        )
+    }
+
+    fn store_working_notes(&self, session: &mut Session, text: String, verified: bool) {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        let mut state = session.context_state.clone().unwrap_or_default();
+        let iteration = state
+            .working_notes
+            .as_ref()
+            .map(|notes| notes.updated_iteration)
+            .unwrap_or(0);
+        state.working_notes = Some(crate::storage::models::WorkingNotes {
+            text: trimmed,
+            updated_at: Some(chrono::Utc::now()),
+            updated_iteration: iteration + 1,
+            verified,
+        });
+        session.context_state = Some(state);
+    }
+
+    async fn verify_working_notes(
+        &self,
+        session: &Session,
+        prefix: &[Message],
+        compaction: &crate::config::CompactionConfig,
+        focus: Option<&str>,
+    ) -> (String, bool) {
+        let current = session
+            .context_state
+            .as_ref()
+            .and_then(|state| state.working_notes.as_ref())
+            .map(|notes| notes.text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_default();
+        if current.is_empty() {
+            return (Self::summarize_for_context(prefix, 2_500), false);
+        }
+        let transcript = Self::transcript_for_compaction(prefix, compaction.max_transcript_chars);
+        let mut user_text = format!(
+            "Current working notes:\n{}\n\nEarlier conversation transcript:\n{}",
+            current, transcript
+        );
+        if let Some(focus) = focus.map(str::trim).filter(|text| !text.is_empty()) {
+            user_text.push_str(&format!(
+                "\n\nThe user asked to focus this compaction on: {}",
+                focus
+            ));
+        }
+        let verify_messages = vec![
+            Message::system(NOTES_VERIFY_PROMPT.to_string()),
+            Message::user(user_text),
+        ];
+        let provider = self.active_provider().await;
+        match provider
+            .complete(Some(&session.id), &verify_messages, &[])
+            .await
+        {
+            Ok(response) => {
+                let corrected = response
+                    .content
+                    .unwrap_or_else(|| current.clone())
+                    .trim()
+                    .to_string();
+                if corrected.is_empty() {
+                    (current, false)
+                } else if corrected.chars().count() > compaction.notes_max_chars {
+                    (
+                        corrected.chars().take(compaction.notes_max_chars).collect(),
+                        true,
+                    )
+                } else {
+                    (corrected, true)
+                }
+            }
+            Err(error) => {
+                warn!("Working-notes verification pass failed: {}", error);
+                (current, false)
+            }
+        }
     }
 
     fn emit_reasoning_event(&self, session_id: &str, summary: impl Into<String>) {
@@ -4950,6 +5530,11 @@ impl AgentRuntime {
         if let Some(tool_call_id) = &message.tool_call_id {
             total += Self::estimate_tokens(tool_call_id);
         }
+        // Images ride the request as base64 payloads; chars/4 of the text
+        // alone would make multimodal sessions invisible to the trigger.
+        for image in &message.images {
+            total += image.data_url.chars().count().div_ceil(4).max(256);
+        }
         total
     }
 
@@ -5408,6 +5993,111 @@ impl AgentRuntime {
         let session_lock = self.get_session_lock(session_id);
         let _lock_guard = session_lock.lock().await;
         self.storage.truncate_session_messages(session_id, from)
+    }
+
+    /// Manual compaction: verify-and-correct the rolling working notes (or
+    /// full-summarize when there are no notes), archive the compacted prefix,
+    /// and keep notes/summary + recent tail. Refuses while a turn is in
+    /// flight for the same reason truncation does.
+    pub async fn compact_session_now(
+        &self,
+        session_id: &str,
+        focus: Option<&str>,
+    ) -> Result<(usize, usize, bool)> {
+        if self.active_runs.contains_key(session_id) {
+            return Err(OSAgentError::Session(
+                "Cannot compact while the agent is running. Stop it first.".to_string(),
+            ));
+        }
+
+        let session_lock = self.get_session_lock(session_id);
+        let _lock_guard = session_lock.lock().await;
+        let mut session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| OSAgentError::Session("Session not found".to_string()))?;
+
+        let runtime_config = self.config.read().await.clone();
+        let active_workspace = Self::resolve_workspace_for_session(&session, &runtime_config)
+            .unwrap_or_else(|| runtime_config.get_active_workspace());
+
+        let outcome = self
+            .compact_session_history(
+                &mut session,
+                &active_workspace,
+                &runtime_config.compaction,
+                focus,
+            )
+            .await?
+            .ok_or_else(|| {
+                OSAgentError::Session("Nothing to compact yet (history too short).".to_string())
+            })?;
+        let (pruned, compacted, replayed) = outcome;
+        // Refresh the cached context numbers so the context ring drops
+        // immediately: the shrunken transcript costs fewer tokens, and the
+        // pre-compact provider usage no longer describes the live request.
+        let post_tokens: usize = session.messages.iter().map(Self::message_tokens).sum();
+        if let Some(ref mut cs) = session.context_state {
+            cs.compaction_stats.total_compactions += 1;
+            cs.compaction_stats.total_pruned_messages += pruned;
+            cs.compaction_stats.total_compacted_messages += compacted;
+            cs.estimated_tokens = post_tokens;
+            cs.last_request_usage = None;
+        }
+        self.event_bus.emit(AgentEvent::ContextUpdate {
+            session_id: session_id.to_string(),
+            sequence: 0,
+            context_window: session
+                .context_state
+                .as_ref()
+                .map(|cs| cs.context_window)
+                .unwrap_or(runtime_config.compaction.fallback_context_window),
+            estimated_tokens: post_tokens,
+            budget_tokens: session
+                .context_state
+                .as_ref()
+                .map(|cs| cs.budget_tokens)
+                .unwrap_or(runtime_config.compaction.fallback_context_window),
+            tool_schema_tokens: 0,
+            condensed: true,
+            actual_usage: session
+                .context_state
+                .as_ref()
+                .and_then(|cs| cs.actual_usage.clone())
+                .map(|u| crate::agent::events::EventTokenUsage {
+                    input: u.input,
+                    output: u.output,
+                    total: u.total,
+                    cached_read: u.cached_read,
+                    cached_write: u.cached_write,
+                    reasoning: u.reasoning,
+                    cache_reason: None,
+                }),
+            last_request_usage: None,
+            subagent_session_id: None,
+            timestamp: SystemTime::now(),
+        });
+        self.record_session_event(
+            &mut session,
+            "compaction",
+            serde_json::json!({
+                "pruned_messages": pruned,
+                "compacted_messages": compacted,
+                "replayed": replayed,
+                "manual": true,
+            }),
+        )?;
+        self.event_bus.emit(AgentEvent::Compaction {
+            session_id: session_id.to_string(),
+            sequence: 0,
+            pruned_messages: pruned,
+            compacted_messages: compacted,
+            replayed,
+            timestamp: SystemTime::now(),
+        });
+        self.session_manager.update_session(&session).await?;
+        Ok(outcome)
     }
 
     pub async fn enqueue_message(
@@ -6788,7 +7478,98 @@ impl AgentRuntime {
 #[cfg(test)]
 mod external_path_scan_tests {
     use super::{AgentRuntime, ToolOutcome};
+    use crate::storage::models::Message;
     use std::path::PathBuf;
+
+    fn test_message(role: &str, content: &str) -> Message {
+        match role {
+            "user" => Message::user(content.to_string()),
+            "assistant" => Message::assistant(content.to_string(), None),
+            "tool" => Message::tool_result("call-1".to_string(), content.to_string()),
+            _ => Message::system(content.to_string()),
+        }
+    }
+
+    #[test]
+    fn compaction_split_walks_back_whole_turns() {        let compaction = crate::config::CompactionConfig {
+            preserve_recent_tokens: 2_000,
+            ..crate::config::CompactionConfig::default()
+        };
+        let messages = vec![
+            test_message("user", "first question"),
+            test_message("assistant", "first answer"),
+            test_message("user", "second question"),
+            test_message("assistant", "second answer"),
+        ];
+        let split = AgentRuntime::compaction_split_index(&messages, &compaction);
+        assert!(split > 0 && split < messages.len());
+        assert_eq!(messages[split].role, "user");
+    }
+
+    #[test]
+    fn compaction_split_never_orphans_tool_pairs() {
+        let compaction = crate::config::CompactionConfig {
+            preserve_recent_tokens: 2_000,
+            ..crate::config::CompactionConfig::default()
+        };
+        let mut call = test_message("assistant", "");
+        call.tool_calls = Some(vec![crate::storage::models::ToolCall {
+            id: "call-9".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        }]);
+        let mut result = test_message("tool", "file contents");
+        result.tool_call_id = Some("call-9".to_string());
+        let messages = vec![
+            test_message("user", "read the file"),
+            call,
+            result,
+            test_message("assistant", "done"),
+        ];
+        let split = AgentRuntime::compaction_split_index(&messages, &compaction);
+        assert!(split <= 1, "split must not strand the tool pair, got {split}");
+    }
+
+    #[test]
+    fn compaction_split_compacts_single_turn_sessions() {
+        let compaction = crate::config::CompactionConfig {
+            preserve_recent_tokens: 2_000,
+            ..crate::config::CompactionConfig::default()
+        };
+        let messages: Vec<Message> = (0..10)
+            .map(|i| {
+                if i % 2 == 0 {
+                    test_message("user", &format!("q{i}"))
+                } else {
+                    test_message("assistant", &format!("a{i}"))
+                }
+            })
+            .collect();
+        let split = AgentRuntime::compaction_split_index(&messages, &compaction);
+        assert!(split > 0 && split < messages.len());
+    }
+
+    #[test]
+    fn compactable_content_strips_tool_call_markup() {
+        let msg = test_message(
+            "assistant",
+            "Let me read it:<tool_call>read_file<arg_key>path</arg_key><arg_value>x.h</arg_value></tool_call> done",
+        );
+        let content = AgentRuntime::compactable_message_content(&msg).unwrap();
+        assert!(!content.to_lowercase().contains("tool_call"), "{content}");
+        assert!(content.contains("Let me read it"), "{content}");
+    }
+
+    #[test]
+    fn compactable_content_unwraps_prior_summaries() {
+        let msg = Message::synthetic_assistant(
+            "<compacted-summary>\n## Next Step\nDo X\n</compacted-summary>\n\nDo not acknowledge.".to_string(),
+            "compaction_summary",
+        );
+        let content = AgentRuntime::compactable_message_content(&msg).unwrap();
+        assert!(!content.to_lowercase().contains("compacted-summary"), "{content}");
+        assert!(content.contains("Do X"), "{content}");
+    }
 
     #[tokio::test]
     async fn provider_stream_finished_without_done_releases_waiter() {

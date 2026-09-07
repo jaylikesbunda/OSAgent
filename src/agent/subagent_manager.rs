@@ -1535,6 +1535,14 @@ impl SubagentManager {
                 context_window: window,
                 budget_tokens: budget,
                 actual_usage: None,
+                working_notes: session
+                    .context_state
+                    .as_ref()
+                    .and_then(|cs| cs.working_notes.clone()),
+                last_request_usage: session
+                    .context_state
+                    .as_ref()
+                    .and_then(|cs| cs.last_request_usage.clone()),
                 cache_provider: None,
                 cache_model: None,
                 cache_tools_fingerprint: None,
@@ -1555,6 +1563,7 @@ impl SubagentManager {
                 tool_schema_tokens,
                 condensed: false,
                 actual_usage: None,
+                last_request_usage: None,
                 subagent_session_id: Some(session_id.to_string()),
                 timestamp: SystemTime::now(),
             });

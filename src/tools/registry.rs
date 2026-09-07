@@ -11,9 +11,9 @@ use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     bash, batch, calendar, code, codesearch, coordinator, decision_memory, files, lsp, memory,
-    native_catalog::NativeToolCatalog, news, patch, persona, plan, process, question, scheduler,
-    search, sessions, skill, subagent, system_status, task, todo, tool_script, tool_search,
-    weather, web,
+    native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process, question,
+    scheduler, search, sessions, skill, subagent, system_status, task, todo, tool_script,
+    tool_search, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -598,6 +598,14 @@ impl ToolRegistry {
             }
         }
 
+        if config.compaction.notes_enabled {
+            let notes_tool: Arc<dyn Tool> = Arc::new(notes::UpdateNotesTool::new(
+                storage.clone(),
+                config.compaction.notes_max_chars,
+            ));
+            tools.insert("update_notes".to_string(), notes_tool);
+        }
+
         Ok(Self {
             tools,
             allowed: config.tools.denied.iter().cloned().collect(),
@@ -727,6 +735,10 @@ impl ToolRegistry {
             "sessions" => Some(Arc::new(sessions::SessionsTool::new(storage.clone()))),
             "lsp" => Some(Arc::new(lsp::LspTool::new(config))),
             "plan_exit" => Some(Arc::new(plan::PlanExitTool::new())),
+            "update_notes" => Some(Arc::new(notes::UpdateNotesTool::new(
+                storage.clone(),
+                config.compaction.notes_max_chars,
+            ))),
             _ => None,
         }
     }
@@ -759,6 +771,7 @@ impl ToolRegistry {
                 | "web_fetch"
                 | "web_search"
                 | "reflect"
+                | "update_notes"
                 | "codesearch"
                 | "todoread"
                 | "process"

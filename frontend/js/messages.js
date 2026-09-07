@@ -1,5 +1,39 @@
 window.OSA = window.OSA || {};
 
+OSA.isCompactionSummaryMessage = function(message) {
+    return !!(message && message.metadata
+        && message.metadata.synthetic
+        && (message.metadata.kind || '') === 'compaction_summary');
+};
+
+// Display text for a compaction summary: unwrap the
+// `<compacted-summary>...</compacted-summary>` frame the backend stores and
+// drop trailing model instructions ("Do not acknowledge...", "Keep the
+// working notes...") so the card shows only the human-readable handoff.
+// Unframed legacy bodies ("Compaction summary:\n...") pass through as-is.
+OSA.stripCompactedSummary = function(text) {
+    let out = String(text || '');
+    const framed = out.match(/<compacted-summary>([\s\S]*?)<\/compacted-summary>/i);
+    if (framed) out = framed[1];
+    out = out.replace(/\n*Do not acknowledge the compacted summary explicitly in your reply\.[^\n]*/i, '');
+    out = out.replace(/\n*Keep the working notes current with `update_notes`\.[^\n]*/i, '');
+    return out.trim();
+};
+
+// Models sometimes emit Qwen/GLM-style `<tool_call>...</tool_call>` text
+// blocks that this client never parses into structured calls (when the call
+// succeeds the real tool card renders separately). Strip them from displayed
+// assistant text so raw call markup never leaks into the chat; surrounding
+// narration is preserved. A dangling unclosed block (partial stream) is cut
+// too so markup never flashes mid-turn.
+OSA.stripToolCallMarkup = function(text) {
+    if (!text) return text;
+    let out = String(text).replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '');
+    const open = out.match(/<tool_call>/i);
+    if (open) out = out.slice(0, open.index);
+    return out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+};
+
 OSA.isHiddenSyntheticMessage = function(message) {
     if (!message || !message.metadata) return false;
     // Tool preludes are real narration folded into their tool card: never
@@ -763,6 +797,44 @@ OSA.truncateSessionMessages = async function(sessionId, from) {
     OSA.rebuildAfterTruncate(from);
 };
 
+OSA.compactSession = async function(options = {}) {
+    const session = OSA.getCurrentSession();
+    if (!session?.id) {
+        OSA.showToast?.('No active session to compact.');
+        return;
+    }
+    if (OSA.isAgentProcessing && OSA.isAgentProcessing()) {
+        OSA.showToast?.('Stop the agent before compacting.');
+        return;
+    }
+    try {
+        OSA.showToast?.('Compacting conversation...');
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(session.id)}/compact`, {
+            method: 'POST',
+            body: JSON.stringify(options && options.focus ? { focus: options.focus } : {}),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.error || 'Compaction failed');
+        }
+        const parts = [];
+        if (data.compacted_messages) parts.push(`${data.compacted_messages} summarized`);
+        if (data.pruned_messages) parts.push(`${data.pruned_messages} pruned`);
+        OSA.showToast?.(parts.length ? `Compacted: ${parts.join(', ')}.` : 'Nothing to compact yet.');
+        if (typeof OSA.selectSession === 'function') {
+            await OSA.selectSession(session.id);
+        } else if (typeof OSA.loadSessions === 'function') {
+            OSA.loadSessions();
+        }
+        if (typeof OSA.scheduleSessionInspectorRefresh === 'function') {
+            OSA.scheduleSessionInspectorRefresh();
+        }
+    } catch (error) {
+        console.error('Compaction failed:', error);
+        OSA.showToast?.(error.message || 'Compaction failed.');
+    }
+};
+
 OSA.updateAssistantMessageActions = function(messageEl, sourceMessage) {
     if (!messageEl) return;
     const actionsEl = messageEl.querySelector('.message-actions');
@@ -1504,19 +1576,80 @@ OSA.highlightCode = function(code, lang) {
         rust: ['fn', 'let', 'mut', 'pub', 'use', 'mod', 'struct', 'enum', 'impl', 'trait', 'if', 'else', 'match', 'return', 'const', 'static'],
         java: ['public', 'private', 'protected', 'class', 'interface', 'void', 'int', 'String', 'return', 'if', 'else', 'for', 'while', 'import', 'package']
     };
-    const langKeywords = keywords[lang.toLowerCase()] || [];
-    let highlighted = OSA.escapeHtml(code);
-    if (langKeywords.length > 0) {
-        const keywordRegex = new RegExp(`\\b(${langKeywords.join('|')})\\b`, 'g');
-        highlighted = highlighted.replace(keywordRegex, '<span class="token-keyword">$1</span>');
+    // Tokenize on the RAW text first, then escape per-token at emit time.
+    // The old version escaped first and highlighted with regexes on the HTML,
+    // so the string pass matched its own `class="token-keyword"` attributes
+    // and wrapped them again (the `>"token-keyword">` cascade in previews).
+    const langKeywords = new Set((keywords[(lang || '').toLowerCase()] || []).map(k => k.toLowerCase()));
+    const esc = function(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    };
+    const span = function(cls, text) {
+        return '<span class="' + cls + '">' + esc(text) + '</span>';
+    };
+    const isWordChar = function(ch) {
+        return /[A-Za-z0-9_]/.test(ch || '');
+    };
+    let html = '';
+    let i = 0;
+    const n = code.length;
+    while (i < n) {
+        const ch = code[i];
+        if (ch === '/' && code[i + 1] === '/') {
+            let j = code.indexOf('\n', i);
+            if (j < 0) j = n;
+            html += span('token-comment', code.slice(i, j));
+            i = j;
+        } else if (ch === '#') {
+            const lineStart = i === 0 || code[i - 1] === '\n';
+            if (lineStart) {
+                let j = code.indexOf('\n', i);
+                if (j < 0) j = n;
+                html += span('token-comment', code.slice(i, j));
+                i = j;
+            } else {
+                html += esc(ch);
+                i += 1;
+            }
+        } else if (ch === '"' || ch === "'") {
+            let j = i + 1;
+            while (j < n && code[j] !== ch) {
+                if (code[j] === '\\') j += 1;
+                j += 1;
+            }
+            if (j < n) j += 1;
+            html += span('token-string', code.slice(i, j));
+            i = j;
+        } else if (/[0-9]/.test(ch) && !isWordChar(code[i - 1])) {
+            let j = i;
+            while (j < n && /[0-9]/.test(code[j])) j += 1;
+            if (j < n && code[j] === '.' && /[0-9]/.test(code[j + 1])) {
+                j += 1;
+                while (j < n && /[0-9]/.test(code[j])) j += 1;
+            }
+            if (!isWordChar(code[j])) {
+                html += span('token-number', code.slice(i, j));
+                i = j;
+            } else {
+                html += esc(ch);
+                i += 1;
+            }
+        } else if (/[A-Za-z_]/.test(ch) && !isWordChar(code[i - 1])) {
+            let j = i;
+            while (j < n && /[A-Za-z0-9_]/.test(code[j])) j += 1;
+            const word = code.slice(i, j);
+            if (langKeywords.has(word.toLowerCase())) {
+                html += span('token-keyword', word);
+            } else {
+                html += esc(word);
+            }
+            i = j;
+        } else {
+            html += esc(ch);
+            i += 1;
+        }
     }
-    highlighted = highlighted
-        .replace(/(\/\/.*$)/gm, '<span class="token-comment">$1</span>')
-        .replace(/(#.*$)/gm, '<span class="token-comment">$1</span>')
-        .replace(/("[^"]*")/g, '<span class="token-string">$1</span>')
-        .replace(/('[^']*')/g, '<span class="token-string">$1</span>')
-        .replace(/(\b\d+\b)/g, '<span class="token-number">$1</span>');
-    return highlighted;
+    return html;
 };
 
 OSA.copyCode = function(btn) {

@@ -134,6 +134,20 @@ pub struct MessageTokens {
     pub cache_reason: Option<String>,
 }
 
+impl MessageTokens {
+    pub fn context_tokens(&self) -> usize {
+        let split = self
+            .input
+            .saturating_add(self.cached_read.unwrap_or(0))
+            .saturating_add(self.cached_write.unwrap_or(0));
+        if split > 0 {
+            split
+        } else {
+            self.total
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolUsageStats {
     pub tool_name: String,
@@ -150,11 +164,26 @@ pub struct CompactionStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkingNotes {
+    pub text: String,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_iteration: usize,
+    #[serde(default)]
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionContextState {
     pub estimated_tokens: usize,
     pub context_window: usize,
     pub budget_tokens: usize,
     pub actual_usage: Option<MessageTokens>,
+    #[serde(default)]
+    pub last_request_usage: Option<MessageTokens>,
+    #[serde(default)]
+    pub working_notes: Option<WorkingNotes>,
     #[serde(default)]
     pub cache_provider: Option<String>,
     #[serde(default)]

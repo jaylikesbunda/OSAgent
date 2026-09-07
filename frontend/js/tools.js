@@ -1,31 +1,47 @@
 window.OSA = window.OSA || {};
 
+OSA.contextTokensOf = function(usage) {
+    if (!usage) return 0;
+    const input = usage.input || 0;
+    const read = usage.cached_read || 0;
+    const write = usage.cached_write || 0;
+    const split = input + read + write;
+    if (split > 0) return split;
+    return usage.total || 0;
+};
+
 OSA.getContextRingMetrics = function(contextState) {
     if (!contextState) return null;
 
-    // actual_usage is cumulative session usage, not the size of the current
-    // context. The ring must use the current-request estimate instead.
-    const used = contextState.estimated_tokens || 0;
+    // Provider-reported occupancy once a response exists (input + cache
+    // read + cache write all occupy the window), else the pre-request
+    // chars/4 estimate. actual_usage stays the cumulative billing total.
+    const reported = OSA.contextTokensOf(contextState.last_request_usage);
+    const used = reported > 0 ? reported : (contextState.estimated_tokens || 0);
+    const estimated = reported > 0;
     const window = contextState.context_window || 1;
     const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
     const circumference = 97.4;
     const offset = circumference - (pct / 100) * circumference;
     const colorClass = pct >= 90 ? 'danger' : pct >= 70 ? 'warning' : '';
 
-    return { used, window, pct, circumference, offset, colorClass };
+    return { used, window, pct, circumference, offset, colorClass, estimated };
 };
 
 OSA.buildContextRingHtml = function(contextState, subagentId) {
     const metrics = OSA.getContextRingMetrics(contextState);
     if (!metrics) return '';
+    const title = metrics.estimated
+        ? `Context: ${metrics.pct}% (provider-reported)`
+        : `Context: ${metrics.pct}% (estimate)`;
     return `
-        <div class="context-ring subagent-context-ring ${metrics.colorClass}" id="subagent-context-ring-${subagentId}" title="Context: ${metrics.pct}%">
+        <div class="context-ring subagent-context-ring ${metrics.colorClass}" id="subagent-context-ring-${subagentId}" title="${title}">
             <svg viewBox="0 0 36 36">
                 <circle class="context-ring-bg" cx="18" cy="18" r="15.5"/>
                 <circle class="context-ring-progress" cx="18" cy="18" r="15.5"
                     stroke-dasharray="97.4" stroke-dashoffset="${metrics.offset}"/>
             </svg>
-            <span class="context-ring-text">${metrics.pct}%</span>
+            <span class="context-ring-text">${metrics.pct}%${metrics.estimated ? '' : '~'}</span>
         </div>
     `;
 };
@@ -256,7 +272,17 @@ OSA.handleAgentEvent = function(event) {
             OSA.scheduleSessionInspectorRefresh();
             break;
 
-        case 'compaction':
+        case 'compaction': {
+            const current = OSA.getCurrentSession && OSA.getCurrentSession();
+            if (current && current.id === event.session_id && !OSA.isAgentProcessing()) {
+                if (typeof OSA.selectSession === 'function') OSA.selectSession(event.session_id);
+            } else if (typeof OSA.loadSessions === 'function') {
+                OSA.loadSessions();
+            }
+            OSA.scheduleSessionInspectorRefresh();
+            break;
+        }
+
         case 'step_finish':
         case 'reasoning':
             OSA.scheduleSessionInspectorRefresh();
@@ -368,6 +394,9 @@ OSA.updateContextStatus = function(event) {
 
     ringProgress.style.strokeDashoffset = metrics.offset;
     pctEl.textContent = metrics.pct + '%';
+    indicator.title = metrics.estimated
+        ? 'Context used (provider-reported)'
+        : 'Context used (estimate, no provider usage yet)';
     
     indicator.classList.remove('warning', 'danger');
     if (metrics.pct >= 90) {
@@ -421,10 +450,13 @@ OSA._updateContextModalContent = function() {
     const state = OSA._currentContextSessionId ? OSA._contextStates[OSA._currentContextSessionId] : null;
     if (!state) return;
     
-    const used = state.estimated_tokens || 0;
+    const metrics = OSA.getContextRingMetrics(state) || {};
+    const reported = OSA.contextTokensOf(state.last_request_usage);
+    const used = metrics.used || 0;
+    const estimated = !(reported > 0);
     const window = state.context_window || 1;
     const budget = state.budget_tokens || window;
-    const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
+    const pct = metrics.pct || 0;
     const actualUsage = state.actual_usage;
     
     const formatTokens = (n) => {
@@ -434,7 +466,10 @@ OSA._updateContextModalContent = function() {
     };
     
     document.getElementById('ctx-window').textContent = formatTokens(window);
-    document.getElementById('ctx-used').textContent = formatTokens(used);
+    document.getElementById('ctx-used').textContent = formatTokens(used) + (estimated ? '~' : '');
+    document.getElementById('ctx-used').title = estimated
+        ? 'Pre-request estimate (no provider usage yet)'
+        : 'Provider-reported last-request context';
     document.getElementById('ctx-budget').textContent = formatTokens(budget);
     document.getElementById('ctx-max').textContent = formatTokens(window);
     document.getElementById('ctx-progress-pct').textContent = pct + '%';
@@ -466,6 +501,13 @@ OSA._updateContextModalContent = function() {
     const outputRow = document.getElementById('ctx-output-row');
     const cacheRow = document.getElementById('ctx-cache-row');
     const toolsRow = document.getElementById('ctx-tools-row');
+
+    // Label the cumulative provider total honestly: the ring above is the
+    // live context (estimated_tokens), while "Session Input" is the sum of
+    // every request's input across the session. Cached reads are usually
+    // the bulk of that number on cache-capable providers.
+    const actualLabel = document.querySelector('#ctx-actual-row .context-detail-label');
+    if (actualLabel) actualLabel.textContent = 'Session Input (cumulative)';
 
     if ((state.tool_schema_tokens || 0) > 0) {
         toolsRow.classList.remove('hidden');

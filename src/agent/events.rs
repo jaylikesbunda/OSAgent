@@ -24,6 +24,24 @@ pub struct EventTokenUsage {
     pub cache_reason: Option<String>,
 }
 
+impl EventTokenUsage {
+    /// Provider-reported occupancy of the last request's context, the way
+    /// Claude Code / opencode meters work: input + cache read + cache
+    /// write all occupy the window, even though cached tokens cost less.
+    /// Falls back to `total` when the provider does not split input out.
+    pub fn context_tokens(&self) -> usize {
+        let split = self
+            .input
+            .saturating_add(self.cached_read.unwrap_or(0))
+            .saturating_add(self.cached_write.unwrap_or(0));
+        if split > 0 {
+            split
+        } else {
+            self.total
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -112,6 +130,11 @@ pub enum AgentEvent {
         condensed: bool,
         #[serde(default)]
         actual_usage: Option<EventTokenUsage>,
+        /// Provider-reported usage of the last request, so the ring can
+        /// show real occupancy (input + cache read + cache write) instead
+        /// of the chars/4 estimate once a response exists.
+        #[serde(default)]
+        last_request_usage: Option<EventTokenUsage>,
         /// When a parent session receives a context update emitted by one of
         /// its background children, this identifies the child whose ring must
         /// be updated. The event's `session_id` remains the parent so normal
@@ -603,6 +626,7 @@ impl AgentEvent {
                 tool_schema_tokens,
                 condensed,
                 actual_usage,
+                last_request_usage,
                 subagent_session_id,
                 timestamp,
                 ..
@@ -615,6 +639,7 @@ impl AgentEvent {
                 tool_schema_tokens,
                 condensed,
                 actual_usage,
+                last_request_usage,
                 subagent_session_id,
                 timestamp,
             },

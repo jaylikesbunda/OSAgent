@@ -588,6 +588,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/sessions/:id/messages/truncate",
             post(truncate_session_messages),
         )
+        .route("/api/sessions/:id/compact", post(compact_session))
         .route(
             "/api/sessions/:id",
             get(get_session).patch(patch_session).delete(delete_session),
@@ -2003,6 +2004,52 @@ async fn truncate_session_messages(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompactSessionResponse {
+    pub pruned_messages: usize,
+    pub compacted_messages: usize,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CompactSessionRequest {
+    #[serde(default)]
+    pub focus: Option<String>,
+}
+
+async fn compact_session(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    body: Option<Json<CompactSessionRequest>>,
+) -> Result<Json<CompactSessionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let focus = body
+        .as_ref()
+        .and_then(|payload| payload.focus.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let (pruned, compacted, replayed) = agent.compact_session_now(&id, focus).await.map_err(|e| {
+        let status = if e.to_string().contains("while the agent is running") {
+            StatusCode::CONFLICT
+        } else if e.to_string().contains("not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        (
+            status,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(CompactSessionResponse {
+        pruned_messages: pruned,
+        compacted_messages: compacted,
+        replayed,
+    }))
 }
 
 async fn create_session(

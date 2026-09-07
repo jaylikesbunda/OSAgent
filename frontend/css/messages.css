@@ -720,6 +720,39 @@
     box-shadow: var(--shadow-sm);
 }
 
+.message.compaction {
+    align-items: flex-start;
+    margin-bottom: 12px;
+    padding: 4px 0;
+}
+
+.message.compaction .message-role {
+    font-size: 10px;
+    margin-bottom: 4px;
+    color: var(--text-muted);
+}
+
+.message.compaction .message-content {
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--glass-bg);
+    color: var(--text-secondary);
+}
+
+.message.compaction details summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.message.compaction .compaction-body {
+    margin-top: 8px;
+    max-height: 320px;
+    overflow: auto;
+}
+
 .message-thinking {
     margin: 0 0 13px;
     padding: 9px 12px;

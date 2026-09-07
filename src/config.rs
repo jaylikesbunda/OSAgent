@@ -660,6 +660,17 @@ pub struct CompactionConfig {
     /// Fraction of the usable context window at which compaction
     /// triggers (0.8 = at 80%).
     pub threshold_ratio: f32,
+    /// Fallback context window (tokens) used when the provider and the
+    /// model catalog both fail to report one. Without a window the
+    /// auto-compaction trigger is blind, so a conservative default
+    /// keeps pressure detection working.
+    pub fallback_context_window: usize,
+    /// Tokens reserved for the reply when computing the usable window.
+    pub reserved_output_tokens: usize,
+    /// Token budget for the retained recent tail (opencode-style
+    /// `preserve_recent_tokens`): the split point walks back whole
+    /// turns until the tail fits this budget.
+    pub preserve_recent_tokens: usize,
     /// Model-free tool-result pruning: results over
     /// `prune_threshold_chars` are rewritten to a head/tail slice before
     /// any summarization attempt.
@@ -669,6 +680,14 @@ pub struct CompactionConfig {
     pub prune_tail_chars: usize,
     /// Cap on the transcript fed to the summarization pass.
     pub max_transcript_chars: usize,
+    /// Rolling working notes: the agent keeps a short handoff note current
+    /// during work so a post-compaction agent can continue instantly.
+    pub notes_enabled: bool,
+    /// Max chars kept in the rolling working notes buffer.
+    pub notes_max_chars: usize,
+    /// At compaction time, run a verify-and-correct pass of the notes
+    /// against the transcript instead of a full re-summarization.
+    pub notes_verify_at_compaction: bool,
 }
 
 impl Default for CompactionConfig {
@@ -676,11 +695,17 @@ impl Default for CompactionConfig {
         Self {
             enabled: true,
             threshold_ratio: 0.8,
+            fallback_context_window: 128_000,
+            reserved_output_tokens: 8_192,
+            preserve_recent_tokens: 15_000,
             prune_enabled: true,
             prune_threshold_chars: 8_192,
             prune_head_chars: 4_096,
             prune_tail_chars: 1_024,
             max_transcript_chars: 24_000,
+            notes_enabled: true,
+            notes_max_chars: 2_000,
+            notes_verify_at_compaction: true,
         }
     }
 }
