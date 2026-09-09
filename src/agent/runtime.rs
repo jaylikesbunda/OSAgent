@@ -1601,7 +1601,11 @@ impl AgentRuntime {
             // provider hard-errors.
             let context_window = provider.model_context_window().await.or_else(|| {
                 let fallback = runtime_config.compaction.fallback_context_window;
-                if fallback > 0 { Some(fallback) } else { None }
+                if fallback > 0 {
+                    Some(fallback)
+                } else {
+                    None
+                }
             });
             if let Some(window) = context_window {
                 let model_limit = self
@@ -2165,8 +2169,7 @@ impl AgentRuntime {
 
             if response.context_compressed {
                 if let Some(summary) = response.compressed_summary.clone() {
-                    let provider_compaction =
-                        Self::plan_provider_compaction(&session, &summary);
+                    let provider_compaction = Self::plan_provider_compaction(&session, &summary);
                     if let Some((keep_head, keep_tail, dropped, framed)) = provider_compaction {
                         if let Err(error) = self.storage.archive_messages(&session.id, &dropped) {
                             warn!(
@@ -2174,49 +2177,49 @@ impl AgentRuntime {
                                 session_id, error
                             );
                         } else {
-                        let original_len = session.messages.len();
-                        let tail = session.messages[original_len - keep_tail..].to_vec();
-                        let mut compacted = session.messages[..keep_head].to_vec();
-                        compacted.push(Message::synthetic_assistant(
-                            framed.clone(),
-                            "compaction_summary",
-                        ));
-                        compacted.extend(tail);
-                        let compacted_count = original_len - compacted.len();
-                        session.messages = compacted;
-                        info!(
+                            let original_len = session.messages.len();
+                            let tail = session.messages[original_len - keep_tail..].to_vec();
+                            let mut compacted = session.messages[..keep_head].to_vec();
+                            compacted.push(Message::synthetic_assistant(
+                                framed.clone(),
+                                "compaction_summary",
+                            ));
+                            compacted.extend(tail);
+                            let compacted_count = original_len - compacted.len();
+                            session.messages = compacted;
+                            info!(
                             "Persisting provider-side context compression for session {}: replaced {} messages with summary",
                             session_id, compacted_count
                         );
-                        if let Some(ref mut cs) = session.context_state {
-                            cs.compaction_stats.total_compactions += 1;
-                            cs.compaction_stats.total_compacted_messages += compacted_count;
-                            cs.compaction_stats.estimated_tokens_saved += dropped
-                                .iter()
-                                .map(Self::message_tokens)
-                                .sum::<usize>()
-                                .saturating_sub(Self::estimate_tokens(&framed));
-                        }
-                        self.record_session_event(
-                            &mut session,
-                            "compaction",
-                            serde_json::json!({
-                                "iteration": iteration,
-                                "pruned_messages": 0,
-                                "compacted_messages": compacted_count,
-                                "replayed": false,
-                                "source": "provider_fallback",
-                            }),
-                        )?;
-                        self.event_bus.emit(AgentEvent::Compaction {
-                            session_id: session_id.to_string(),
-                            sequence: 0,
-                            pruned_messages: 0,
-                            compacted_messages: compacted_count,
-                            replayed: false,
-                            timestamp: SystemTime::now(),
-                        });
-                        self.session_manager.update_session(&session).await?;
+                            if let Some(ref mut cs) = session.context_state {
+                                cs.compaction_stats.total_compactions += 1;
+                                cs.compaction_stats.total_compacted_messages += compacted_count;
+                                cs.compaction_stats.estimated_tokens_saved += dropped
+                                    .iter()
+                                    .map(Self::message_tokens)
+                                    .sum::<usize>()
+                                    .saturating_sub(Self::estimate_tokens(&framed));
+                            }
+                            self.record_session_event(
+                                &mut session,
+                                "compaction",
+                                serde_json::json!({
+                                    "iteration": iteration,
+                                    "pruned_messages": 0,
+                                    "compacted_messages": compacted_count,
+                                    "replayed": false,
+                                    "source": "provider_fallback",
+                                }),
+                            )?;
+                            self.event_bus.emit(AgentEvent::Compaction {
+                                session_id: session_id.to_string(),
+                                sequence: 0,
+                                pruned_messages: 0,
+                                compacted_messages: compacted_count,
+                                replayed: false,
+                                timestamp: SystemTime::now(),
+                            });
+                            self.session_manager.update_session(&session).await?;
                         }
                     }
                 }
@@ -3901,14 +3904,23 @@ impl AgentRuntime {
         if content.is_empty() {
             // Tool-call-only assistant turns and image-only user turns still
             // carry signal; describe the shape instead of dropping them.
-            if let Some(calls) = message.tool_calls.as_ref().filter(|calls| !calls.is_empty()) {
+            if let Some(calls) = message
+                .tool_calls
+                .as_ref()
+                .filter(|calls| !calls.is_empty())
+            {
                 let names: Vec<String> = calls.iter().map(|call| call.name.clone()).collect();
                 content = format!("[tool calls: {}]", names.join(", "));
             } else if !message.images.is_empty() {
                 content = format!("[{} attached image(s)]", message.images.len());
             }
         }
-        if let Some(thinking) = message.thinking.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some(thinking) = message
+            .thinking
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
             let short: String = thinking.replace('\n', " ").chars().take(300).collect();
             content = format!("{} [reasoning: {}]", content, short.trim());
         }
@@ -4080,12 +4092,7 @@ impl AgentRuntime {
     ) -> Result<Option<bool>> {
         let before: usize = session.messages.iter().map(Self::message_tokens).sum();
         match self
-            .compact_session_history(
-                session,
-                active_workspace,
-                &runtime_config.compaction,
-                None,
-            )
+            .compact_session_history(session, active_workspace, &runtime_config.compaction, None)
             .await?
         {
             Some((pruned, compacted, replayed)) => {
@@ -4139,7 +4146,10 @@ impl AgentRuntime {
     /// tool-call pairing so the cut never orphans one side of the pair.
     /// When nothing fits (a single turn already exceeds the budget), the
     /// oldest turn boundary still compacts so pressure always shrinks.
-    fn compaction_split_index(messages: &[Message], compaction: &crate::config::CompactionConfig) -> usize {
+    fn compaction_split_index(
+        messages: &[Message],
+        compaction: &crate::config::CompactionConfig,
+    ) -> usize {
         let tail_budget = compaction.preserve_recent_tokens.max(2_000);
         let turns: Vec<usize> = messages
             .iter()
@@ -4186,7 +4196,11 @@ impl AgentRuntime {
         // is one fused tool-pair block: the entire suffix then forms the
         // tail and the split is the earlier turn start we snapped from.
         let snapped = Self::snap_split_to_tool_boundary(messages, split);
-        split = if snapped >= messages.len() { split } else { snapped };
+        split = if snapped >= messages.len() {
+            split
+        } else {
+            snapped
+        };
         split = split.min(messages.len());
         // Single-turn sessions still need compaction when they are large:
         // fall back to keeping the last few messages as the tail.
@@ -4351,8 +4365,8 @@ impl AgentRuntime {
             }
             let framed_notes = Self::frame_working_notes(&verified);
             if let Some(ref mut cs) = session.context_state {
-                cs.compaction_stats.estimated_tokens_saved += prefix_tokens
-                    .saturating_sub(Self::estimate_tokens(&framed_notes));
+                cs.compaction_stats.estimated_tokens_saved +=
+                    prefix_tokens.saturating_sub(Self::estimate_tokens(&framed_notes));
             }
             let mut compacted_messages = vec![Message::synthetic_assistant(
                 framed_notes,
@@ -4438,8 +4452,8 @@ impl AgentRuntime {
             });
         }
         if let Some(ref mut cs) = session.context_state {
-            cs.compaction_stats.estimated_tokens_saved += prefix_tokens
-                .saturating_sub(Self::estimate_tokens(&final_summary));
+            cs.compaction_stats.estimated_tokens_saved +=
+                prefix_tokens.saturating_sub(Self::estimate_tokens(&final_summary));
         }
 
         session.messages = compacted_messages;
@@ -7491,7 +7505,8 @@ mod external_path_scan_tests {
     }
 
     #[test]
-    fn compaction_split_walks_back_whole_turns() {        let compaction = crate::config::CompactionConfig {
+    fn compaction_split_walks_back_whole_turns() {
+        let compaction = crate::config::CompactionConfig {
             preserve_recent_tokens: 2_000,
             ..crate::config::CompactionConfig::default()
         };
@@ -7527,7 +7542,10 @@ mod external_path_scan_tests {
             test_message("assistant", "done"),
         ];
         let split = AgentRuntime::compaction_split_index(&messages, &compaction);
-        assert!(split <= 1, "split must not strand the tool pair, got {split}");
+        assert!(
+            split <= 1,
+            "split must not strand the tool pair, got {split}"
+        );
     }
 
     #[test]
@@ -7563,11 +7581,15 @@ mod external_path_scan_tests {
     #[test]
     fn compactable_content_unwraps_prior_summaries() {
         let msg = Message::synthetic_assistant(
-            "<compacted-summary>\n## Next Step\nDo X\n</compacted-summary>\n\nDo not acknowledge.".to_string(),
+            "<compacted-summary>\n## Next Step\nDo X\n</compacted-summary>\n\nDo not acknowledge."
+                .to_string(),
             "compaction_summary",
         );
         let content = AgentRuntime::compactable_message_content(&msg).unwrap();
-        assert!(!content.to_lowercase().contains("compacted-summary"), "{content}");
+        assert!(
+            !content.to_lowercase().contains("compacted-summary"),
+            "{content}"
+        );
         assert!(content.contains("Do X"), "{content}");
     }
 

@@ -2029,21 +2029,22 @@ async fn compact_session(
         .and_then(|payload| payload.focus.as_deref())
         .map(str::trim)
         .filter(|text| !text.is_empty());
-    let (pruned, compacted, replayed) = agent.compact_session_now(&id, focus).await.map_err(|e| {
-        let status = if e.to_string().contains("while the agent is running") {
-            StatusCode::CONFLICT
-        } else if e.to_string().contains("not found") {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        (
-            status,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let (pruned, compacted, replayed) =
+        agent.compact_session_now(&id, focus).await.map_err(|e| {
+            let status = if e.to_string().contains("while the agent is running") {
+                StatusCode::CONFLICT
+            } else if e.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
     Ok(Json(CompactSessionResponse {
         pruned_messages: pruned,

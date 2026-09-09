@@ -303,6 +303,7 @@ fn build_validation_section(mode: PromptMode) -> Vec<String> {
         PromptMode::Full => vec![
             "# Validation".to_string(),
             "- After making code changes, it is MANDATORY to run the repo's lint, typecheck, test, or build command when one exists — do not skip it".to_string(),
+            "- After each edit, re-read the changed hunk and fix any reported LSP diagnostics before continuing".to_string(),
             "- Prefer repo-native commands and focused validation first".to_string(),
             "- Check the README or manifest files to determine the correct validation command; never assume a test framework".to_string(),
             "- Report whether validation passed, failed, or was unavailable".to_string(),

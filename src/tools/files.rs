@@ -1,8 +1,9 @@
 use crate::agent::instruction::format_system_reminder;
 use crate::config::Config;
 use crate::error::{OSAgentError, Result};
+use crate::lsp::client::LspClient;
 use crate::tools::file_cache::FileReadCache;
-use crate::tools::fuzzy_edit::{apply_replacement, fuzzy_find};
+use crate::tools::fuzzy_edit::{apply_replacement, fuzzy_find, is_disproportionate_match};
 use crate::tools::guard::{ensure_relative_path_not_backups, path_touches_backups};
 use crate::tools::output::path_touches_tool_outputs;
 use crate::tools::registry::{Tool, ToolAttachment, ToolOutcome, ToolResult};
@@ -10,9 +11,130 @@ use async_trait::async_trait;
 use base64::Engine;
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+fn edit_locks() -> &'static dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>> {
+    static LOCKS: OnceLock<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>> =
+        OnceLock::new();
+    LOCKS.get_or_init(dashmap::DashMap::new)
+}
+
+fn file_lock_for(canonical: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let key = canonical.to_string_lossy().to_string();
+    edit_locks()
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn detect_eol_and_bom(raw: &[u8]) -> (&'static str, bool) {
+    let eol = if raw.windows(2).any(|w| w == b"\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let bom = raw.starts_with(&[0xEF, 0xBB, 0xBF]);
+    (eol, bom)
+}
+
+fn to_eol(text: &str, eol: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if eol == "\r\n" {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized
+    }
+}
+
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{FEFF}').unwrap_or(text)
+}
+
+/// Small unified-style diff (capped) so the model sees what changed.
+fn unified_diff_snippet(old: &str, new: &str, max_lines: usize) -> (String, usize, usize) {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    // Simple prefix/suffix trim to keep the snippet focused.
+    let mut pre = 0usize;
+    while pre < a.len() && pre < b.len() && a[pre] == b[pre] {
+        pre += 1;
+    }
+    let mut suf = 0usize;
+    while suf < a.len().saturating_sub(pre)
+        && suf < b.len().saturating_sub(pre)
+        && a[a.len() - 1 - suf] == b[b.len() - 1 - suf]
+    {
+        suf += 1;
+    }
+    let a_mid = &a[pre..a.len() - suf];
+    let b_mid = &b[pre..b.len() - suf];
+    let mut out = Vec::new();
+    for line in a_mid.iter().take(max_lines / 2 + 1) {
+        out.push(format!("-{}", line));
+    }
+    for line in b_mid.iter().take(max_lines / 2 + 1) {
+        out.push(format!("+{}", line));
+    }
+    if a_mid.len() + b_mid.len() > out.len() {
+        out.push("...[diff truncated]".to_string());
+    }
+    (out.join("\n"), a_mid.len(), b_mid.len())
+}
+
+async fn lsp_diagnostics_snippet(
+    lsp: &LspClient,
+    file_path: &Path,
+    display_path: &str,
+    workspace: &Path,
+) -> String {
+    let path_str = file_path.to_string_lossy().to_string();
+    let ws = workspace.to_path_buf();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        lsp.diagnostics(&path_str, &ws),
+    )
+    .await;
+    let Ok(diagnostics) = result else {
+        return String::new();
+    };
+    let interesting: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity <= 2 && !d.message.is_empty())
+        .take(10)
+        .collect();
+    if interesting.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("LSP diagnostics for {}:\n", display_path);
+    for d in interesting {
+        let level = if d.severity == 1 { "error" } else { "warning" };
+        out.push_str(&format!(
+            "- line {}:{}: {}: {}\n",
+            d.line + 1,
+            d.character + 1,
+            level,
+            d.message
+        ));
+    }
+    out
+}
+
+fn require_prior_read(
+    cache: &Arc<FileReadCache>,
+    canonical: &Path,
+    display: &str,
+) -> Result<()> {
+    if cache.check(canonical).is_none() {
+        return Err(OSAgentError::ToolExecution(format!(
+            "You must read '{}' with read_file first, then retry the edit.",
+            display
+        )));
+    }
+    Ok(())
+}
 
 fn workspace_is_read_only(config: &Config) -> bool {
     if let Some(workspace) = config.get_workspace_by_path(&config.agent.workspace) {
@@ -70,7 +192,11 @@ const CACHE_TEXT_MAX_BYTES: usize = 1024 * 1024;
 /// line is complete; the remainder is newline-counted with memchr over
 /// raw bytes (no UTF-8 validation, no per-line allocation). Full text is
 /// retained only for small files so the content cache can serve repeats.
-fn read_window_from_disk(path: &std::path::Path, start_line: usize, limit: usize) -> Result<WindowRead> {
+fn read_window_from_disk(
+    path: &std::path::Path,
+    start_line: usize,
+    limit: usize,
+) -> Result<WindowRead> {
     use std::io::{BufRead, Read};
 
     let file = std::fs::File::open(path)
@@ -99,7 +225,10 @@ fn read_window_from_disk(path: &std::path::Path, start_line: usize, limit: usize
     }
     let mut reader = head.chain(reader);
 
-    let end_line = start_line.saturating_add(limit).saturating_sub(1).max(start_line);
+    let end_line = start_line
+        .saturating_add(limit)
+        .saturating_sub(1)
+        .max(start_line);
     let mut lines: Vec<String> = Vec::new();
     let mut total_lines = 0usize;
     let mut pending: Vec<u8> = Vec::new();
@@ -144,9 +273,9 @@ fn read_window_from_disk(path: &std::path::Path, start_line: usize, limit: usize
             let mut extra_newlines = 0usize;
             let mut last_was_newline = pending.is_empty();
             loop {
-                let chunk = reader
-                    .fill_buf()
-                    .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+                let chunk = reader.fill_buf().map_err(|e| {
+                    OSAgentError::ToolExecution(format!("Failed to read file: {}", e))
+                })?;
                 if chunk.is_empty() {
                     break;
                 }
@@ -517,11 +646,12 @@ impl ReadFileTool {
         let start_line = offset.max(1);
         // Stream only the needed window: stop reading once the last
         // requested line is complete. Large files cost O(window), not O(file).
-        let window = tokio::task::spawn_blocking(move || {
-            read_window_from_disk(&fp, start_line, limit)
-        })
-        .await
-        .map_err(|e| OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e)))??;
+        let window =
+            tokio::task::spawn_blocking(move || read_window_from_disk(&fp, start_line, limit))
+                .await
+                .map_err(|e| {
+                    OSAgentError::ToolExecution(format!("spawn_blocking error: {}", e))
+                })??;
 
         match window {
             WindowRead::Found {
@@ -554,7 +684,8 @@ impl ReadFileTool {
                         }
                     }
                 }
-                let mut result = render_lines(&lines, start_line, total_lines, limit, requested_path);
+                let mut result =
+                    render_lines(&lines, start_line, total_lines, limit, requested_path);
                 Self::append_instructions(&mut result, &self.workspaces, &self.config, file_path);
                 Ok(result)
             }
@@ -685,12 +816,9 @@ impl ReadFileTool {
             .filter(|workspace| file_path.starts_with(workspace))
             .max_by_key(|workspace| workspace.components().count())
             .unwrap_or(&workspaces[0]);
-        if let Some(reminder) =
-            format_system_reminder(&crate::agent::instruction::cached_nearby_blocks(
-                instruction_root,
-                file_path,
-            ))
-        {
+        if let Some(reminder) = format_system_reminder(
+            &crate::agent::instruction::cached_nearby_blocks(instruction_root, file_path),
+        ) {
             *output = format!("{}\n\n{}", reminder, output);
         }
         let _ = config;
@@ -936,10 +1064,12 @@ pub struct WriteFileTool {
     backup_dir: PathBuf,
     config: Config,
     cache: Arc<FileReadCache>,
+    lsp: LspClient,
 }
 
 impl WriteFileTool {
     pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
+        let lsp = LspClient::new(HashMap::new());
         if workspace_is_read_only(&config) {
             let workspaces: Vec<PathBuf> = config
                 .get_active_workspace()
@@ -955,6 +1085,7 @@ impl WriteFileTool {
                 backup_dir: PathBuf::new(),
                 config,
                 cache,
+                lsp,
             };
         }
 
@@ -983,6 +1114,7 @@ impl WriteFileTool {
             backup_dir,
             config,
             cache,
+            lsp,
         }
     }
 
@@ -1084,13 +1216,33 @@ impl Tool for WriteFileTool {
         })?;
 
         let file_path = self.validate_path(path)?;
+        let canonical = file_path.canonicalize().unwrap_or(file_path.clone());
+        let lock = file_lock_for(&canonical);
+        let _guard = lock.lock().await;
+
+        // Enforce read-before-overwrite for existing files.
+        if file_path.exists() {
+            require_prior_read(&self.cache, &canonical, path)?;
+        }
+
+        let old_raw = fs::read(&file_path).unwrap_or_default();
+        let old_text_for_diff = String::from_utf8_lossy(&old_raw).to_string();
+        let (eol, had_bom) = if file_path.exists() {
+            detect_eol_and_bom(&old_raw)
+        } else {
+            ("\n", false)
+        };
 
         let backup = self.create_backup(&file_path)?;
 
+        let mut to_write = to_eol(content, eol);
+        if had_bom && !to_write.starts_with('\u{FEFF}') {
+            to_write.insert(0, '\u{FEFF}');
+        }
         let fp = file_path.clone();
-        let content_owned = content.to_string();
+        let owned = to_write.clone();
         tokio::task::spawn_blocking(move || {
-            std::fs::write(&fp, content_owned)
+            std::fs::write(&fp, owned)
                 .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))
         })
         .await
@@ -1106,7 +1258,15 @@ impl Tool for WriteFileTool {
             String::new()
         };
 
-        Ok(format!("Successfully wrote to {}{}", path, backup_msg))
+        let (snippet, dels, adds) = unified_diff_snippet(&old_text_for_diff, &to_write, 60);
+        let mut out = format!("Successfully wrote to {}{} (+{} -{})\n{}", path, backup_msg, adds, dels, snippet);
+        let ws = self.workspaces.first().cloned().unwrap_or(PathBuf::from("."));
+        let diag = lsp_diagnostics_snippet(&self.lsp, &file_path, path, &ws).await;
+        if !diag.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&diag);
+        }
+        Ok(out)
     }
 }
 
@@ -1115,10 +1275,12 @@ pub struct EditFileTool {
     backup_dir: PathBuf,
     config: Config,
     cache: Arc<FileReadCache>,
+    lsp: LspClient,
 }
 
 impl EditFileTool {
     pub fn new(config: Config, cache: Arc<FileReadCache>) -> Self {
+        let lsp = LspClient::new(HashMap::new());
         if workspace_is_read_only(&config) {
             let workspaces: Vec<PathBuf> = config
                 .get_active_workspace()
@@ -1134,6 +1296,7 @@ impl EditFileTool {
                 backup_dir: PathBuf::new(),
                 config,
                 cache,
+                lsp,
             };
         }
 
@@ -1162,6 +1325,7 @@ impl EditFileTool {
             backup_dir,
             config,
             cache,
+            lsp,
         }
     }
 
@@ -1276,65 +1440,82 @@ impl Tool for EditFileTool {
                 "'old_text' cannot be empty".to_string(),
             ));
         }
+        if old_text == new_text {
+            return Err(OSAgentError::ToolExecution(
+                "No changes to apply: old_text and new_text are identical.".to_string(),
+            ));
+        }
 
         let file_path = self.validate_path(path)?;
-
-        if let Ok(canonical) = file_path.canonicalize() {
-            if let Some(entry) = self.cache.check(&canonical) {
-                if let Ok(meta) = fs::metadata(&canonical) {
-                    let current_mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    if current_mtime != entry.mtime_secs {
-                        return Err(OSAgentError::ToolExecution(
-                            "File has been modified since last read. Re-read the file first with read_file, then retry the edit.".to_string(),
-                        ));
-                    }
-                }
-            }
-        }
+        let canonical = file_path.canonicalize().unwrap_or(file_path.clone());
+        // Enforce read-before-edit (freshness is checked inside `check`).
+        require_prior_read(&self.cache, &canonical, path)?;
+        let lock = file_lock_for(&canonical);
+        let _guard = lock.lock().await;
 
         let _backup_path = self.create_backup(&file_path)?;
 
-        let content = fs::read_to_string(&file_path)
+        let raw = fs::read(&file_path)
             .map_err(|e| OSAgentError::ToolExecution(format!("Failed to read file: {}", e)))?;
+        let (eol, had_bom) = detect_eol_and_bom(&raw);
+        let content_owned = String::from_utf8_lossy(&raw).to_string();
+        let content = strip_bom(&content_owned);
+        // Normalize to LF for matching; convert back on write.
+        let content_lf = content.replace("\r\n", "\n").replace('\r', "\n");
+        let old_lf = old_text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut new_lf = new_text.replace("\r\n", "\n").replace('\r', "\n");
+
+        // Helper to finalize: EOL/BOM restore, write, diff + LSP.
+        async fn finalize(
+            this: &EditFileTool,
+            file_path: &PathBuf,
+            path: &str,
+            old_for_diff: &str,
+            new_lf_inner: &str,
+            eol: &str,
+            had_bom: bool,
+            how: String,
+        ) -> Result<String> {
+            let mut to_write = to_eol(new_lf_inner, eol);
+            if had_bom && !to_write.starts_with('\u{FEFF}') {
+                to_write.insert(0, '\u{FEFF}');
+            }
+            fs::write(file_path, &to_write)
+                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
+            if let Ok(canonical) = file_path.canonicalize() {
+                this.cache.invalidate(&canonical);
+            }
+            let (snippet, dels, adds) = unified_diff_snippet(old_for_diff, &to_write, 60);
+            let mut out = format!(
+                "Successfully edited {} ({} +{} -{})\n{}",
+                path, how, adds, dels, snippet
+            );
+            let ws = this.workspaces.first().cloned().unwrap_or(PathBuf::from("."));
+            let diag = lsp_diagnostics_snippet(&this.lsp, file_path, path, &ws).await;
+            if !diag.is_empty() {
+                out.push_str("\n\n");
+                out.push_str(&diag);
+            }
+            Ok(out)
+        }
 
         if replace_all {
-            let match_count = content.match_indices(old_text).count();
+            let match_count = content_lf.match_indices(&old_lf).count();
             if match_count == 0 {
                 return Err(OSAgentError::ToolExecution(
                     "Text not found in file (exact match for replace_all)".to_string(),
                 ));
             }
-            let new_content = content.replace(old_text, new_text);
-            fs::write(&file_path, new_content)
-                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
-            if let Ok(canonical) = file_path.canonicalize() {
-                self.cache.invalidate(&canonical);
-            }
-            return Ok(format!(
-                "Successfully edited {} ({} replacement{})",
-                path,
-                match_count,
-                if match_count == 1 { "" } else { "s" }
-            ));
+            new_lf = content_lf.replace(&old_lf, &new_lf);
+            return finalize(self, &file_path, path, &content_owned, &new_lf, eol, had_bom,
+                format!("{} replacement{}", match_count, if match_count == 1 { "" } else { "s" })).await;
         }
 
-        let exact_count = content.match_indices(old_text).count();
+        let exact_count = content_lf.match_indices(&old_lf).count();
         if exact_count == 1 {
-            let new_content = content.replacen(old_text, new_text, 1);
-            fs::write(&file_path, new_content)
-                .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
-            if let Ok(canonical) = file_path.canonicalize() {
-                self.cache.invalidate(&canonical);
-            }
-            return Ok(format!(
-                "Successfully edited {} (1 replacement, exact match)",
-                path
-            ));
+            let new_content = content_lf.replacen(&old_lf, &new_lf, 1);
+            return finalize(self, &file_path, path, &content_owned, &new_content, eol, had_bom,
+                "1 replacement, exact match".to_string()).await;
         }
 
         if exact_count > 1 {
@@ -1344,27 +1525,23 @@ impl Tool for EditFileTool {
             )));
         }
 
-        let match_result = fuzzy_find(&content, old_text).ok_or_else(|| {
+        let match_result = fuzzy_find(&content_lf, &old_lf).ok_or_else(|| {
             OSAgentError::ToolExecution(
                 "Text not found in file (tried exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, trimmed-boundary, block-anchor, and context-aware matching)".to_string(),
             )
         })?;
 
-        let new_content = apply_replacement(&content, &match_result, old_text, new_text);
-
-        fs::write(&file_path, new_content)
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to write file: {}", e)))?;
-
-        if let Ok(canonical) = file_path.canonicalize() {
-            self.cache.invalidate(&canonical);
+        let matched_span = &content_lf[match_result.start..match_result.end.min(content_lf.len())];
+        if is_disproportionate_match(matched_span, &old_lf) {
+            return Err(OSAgentError::ToolExecution(
+                "Refusing replacement because the matched span is much larger than old_text. Re-read the file and provide the full exact old_text for the intended replacement.".to_string(),
+            ));
         }
 
-        Ok(format!(
-            "Successfully edited {} (1 replacement via {} matching, confidence: {:.0}%)",
-            path,
-            match_result.strategy,
-            match_result.confidence * 100.0
-        ))
+        let new_content = apply_replacement(&content_lf, &match_result, &old_lf, &new_lf);
+
+        finalize(self, &file_path, path, &content_owned, &new_content, eol, had_bom,
+            format!("1 replacement via {} matching, confidence: {:.0}%", match_result.strategy, match_result.confidence * 100.0)).await
     }
 }
 
@@ -1774,7 +1951,10 @@ mod tests {
     #[tokio::test]
     async fn read_file_window_matches_full_read() {
         let dir = tempdir().expect("tempdir");
-        let body: String = (1..=500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let body: String = (1..=500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(dir.path().join("big.txt"), &body).expect("write file");
 
         let config = config_for_workspace(&dir.path().to_string_lossy());
@@ -1799,9 +1979,14 @@ mod tests {
         std::fs::write(&path, "a\r\nb\r\nc").expect("write file");
         let window = read_window_from_disk(&path, 1, 10).expect("window");
         match window {
-            WindowRead::Found { lines, total_lines, .. } => {
+            WindowRead::Found {
+                lines, total_lines, ..
+            } => {
                 assert_eq!(total_lines, 3);
-                assert_eq!(lines, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+                assert_eq!(
+                    lines,
+                    vec!["a".to_string(), "b".to_string(), "c".to_string()]
+                );
             }
             other => panic!("unexpected window: {other:?}"),
         }

@@ -139,16 +139,20 @@ impl FileReadCache {
                 drop(entry);
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 if let Some((_, removed)) = self.entries.remove(&key) {
-                    self.bytes_used
-                        .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
+                    self.bytes_used.fetch_sub(
+                        removed.content.map(|c| c.len()).unwrap_or(0),
+                        Ordering::Relaxed,
+                    );
                 }
                 None
             }
             None => {
                 drop(entry);
                 if let Some((_, removed)) = self.entries.remove(&key) {
-                    self.bytes_used
-                        .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
+                    self.bytes_used.fetch_sub(
+                        removed.content.map(|c| c.len()).unwrap_or(0),
+                        Ordering::Relaxed,
+                    );
                 }
                 None
             }
@@ -233,8 +237,7 @@ impl FileReadCache {
         }
 
         let oversize = size > MAX_CACHED_FILE_BYTES || content.len() as u64 > MAX_CACHED_FILE_BYTES;
-        let fits_budget =
-            self.bytes_used.load(Ordering::Relaxed) + content.len() <= self.max_bytes;
+        let fits_budget = self.bytes_used.load(Ordering::Relaxed) + content.len() <= self.max_bytes;
         let (stored_content, line_starts) = if !oversize && fits_budget {
             let starts = line_starts_for(&content);
             (Some(content), Some(starts))
@@ -256,8 +259,10 @@ impl FileReadCache {
             .unwrap_or(size.wrapping_mul(1099511628211));
 
         if let Some((_, removed)) = self.entries.remove(&key) {
-            self.bytes_used
-                .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
+            self.bytes_used.fetch_sub(
+                removed.content.map(|c| c.len()).unwrap_or(0),
+                Ordering::Relaxed,
+            );
         }
         self.bytes_used.fetch_add(stored_len, Ordering::Relaxed);
         self.entries.insert(
@@ -279,8 +284,10 @@ impl FileReadCache {
     pub fn invalidate(&self, canonical_path: &Path) {
         let key = canonical_path.to_string_lossy().to_string();
         if let Some((_, removed)) = self.entries.remove(&key) {
-            self.bytes_used
-                .fetch_sub(removed.content.map(|c| c.len()).unwrap_or(0), Ordering::Relaxed);
+            self.bytes_used.fetch_sub(
+                removed.content.map(|c| c.len()).unwrap_or(0),
+                Ordering::Relaxed,
+            );
             debug!("File cache invalidated: {}", key);
         }
     }

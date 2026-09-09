@@ -68,7 +68,10 @@ fn decode_bing_url(raw: &str) -> Option<String> {
                 for (key, value) in parsed.query_pairs() {
                     if key == "u" {
                         let payload = value.strip_prefix("a1").unwrap_or(value.as_ref());
-                        let padded = format!("{payload:=<width$}", width = payload.len().next_multiple_of(4));
+                        let padded = format!(
+                            "{payload:=<width$}",
+                            width = payload.len().next_multiple_of(4)
+                        );
                         if let Ok(decoded) = URL_SAFE.decode(padded.as_bytes()) {
                             if let Ok(url) = String::from_utf8(decoded) {
                                 let url = url.trim().to_string();
@@ -180,7 +183,9 @@ mod tests {
     #[test]
     fn decodes_ck_redirects() {
         assert_eq!(
-            decode_bing_url("https://www.bing.com/ck/a?!&&p=abc&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS9kb2Nz"),
+            decode_bing_url(
+                "https://www.bing.com/ck/a?!&&p=abc&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS9kb2Nz"
+            ),
             Some("https://example.com/docs".to_string()),
         );
         assert_eq!(
@@ -188,10 +193,7 @@ mod tests {
             Some("https://rust-lang.org/learn/async".to_string()),
         );
         assert_eq!(decode_bing_url("https://www.bing.com/ck/a?!&&p=abc"), None);
-        assert_eq!(
-            decode_bing_url("https://r.bing.com/rp/abc123.gz.css"),
-            None,
-        );
+        assert_eq!(decode_bing_url("https://r.bing.com/rp/abc123.gz.css"), None,);
     }
 
     #[test]

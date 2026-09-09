@@ -657,15 +657,13 @@ impl ToolRegistry {
                 .workspace_tools
                 .write()
                 .expect("workspace tool cache lock");
-            let map = cached
-                .entry(workspace_path.to_string())
-                .or_insert_with(|| {
-                    // Seed with the already-built tool so the first call
-                    // doesn't rebuild it below.
-                    let mut seed = HashMap::new();
-                    seed.insert(tool_name.to_string(), tool.clone());
-                    Arc::new(seed)
-                });
+            let map = cached.entry(workspace_path.to_string()).or_insert_with(|| {
+                // Seed with the already-built tool so the first call
+                // doesn't rebuild it below.
+                let mut seed = HashMap::new();
+                seed.insert(tool_name.to_string(), tool.clone());
+                Arc::new(seed)
+            });
             if !map.contains_key(tool_name) {
                 let mut grown = HashMap::new();
                 for (name, existing) in map.iter() {
@@ -1198,15 +1196,10 @@ impl ToolRegistry {
         // workspace root.
         let expanded = shellexpand::tilde(path).to_string();
         let candidate = std::path::Path::new(&expanded);
-        base.get_active_workspace()
-            .paths
-            .iter()
-            .any(|wp| {
-                let root = std::path::PathBuf::from(shellexpand::tilde(&wp.path).to_string());
-                candidate.starts_with(&root)
-            })
-            .then_some(false)
-            .unwrap_or(true)
+        !base.get_active_workspace().paths.iter().any(|wp| {
+            let root = std::path::PathBuf::from(shellexpand::tilde(&wp.path).to_string());
+            candidate.starts_with(&root)
+        })
     }
 
     pub fn file_cache(&self) -> &Arc<FileReadCache> {

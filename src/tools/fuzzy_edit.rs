@@ -75,16 +75,51 @@ impl MatchStrategy for WhitespaceNormalizedMatcher {
     }
 
     fn find(&self, content: &str, old_text: &str) -> Option<MatchResult> {
-        let norm_content = normalize_whitespace(content);
-        let norm_old = normalize_whitespace(old_text);
-
-        let start = norm_content.find(&norm_old)?;
-        Some(MatchResult {
-            start,
-            end: start + norm_old.len(),
-            strategy: self.name(),
-            confidence: 0.85,
-        })
+        // NOTE: byte offsets must refer to `content`, not to a normalized
+        // copy. Match line-window-wise so the returned span is valid.
+        fn norm(s: &str) -> String {
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let norm_old = norm(old_text);
+        if norm_old.is_empty() {
+            return None;
+        }
+        let content_lines: Vec<&str> = content.lines().collect();
+        let old_line_count = old_text.lines().count().max(1);
+        // Single-line: scan line by line for substring match.
+        if old_line_count == 1 {
+            for (i, line) in content_lines.iter().enumerate() {
+                if norm(line) == norm_old {
+                    let byte_start = line_byte_offset(content, i)?;
+                    return Some(MatchResult {
+                        start: byte_start,
+                        end: byte_start + line.len(),
+                        strategy: self.name(),
+                        confidence: 0.85,
+                    });
+                }
+            }
+            return None;
+        }
+        // Multi-line: sliding window over lines.
+        if content_lines.len() < old_line_count {
+            return None;
+        }
+        for window_start in 0..=(content_lines.len() - old_line_count) {
+            let window = content_lines[window_start..window_start + old_line_count].join("\n");
+            if norm(&window) == norm_old {
+                let byte_start = line_byte_offset(content, window_start)?;
+                let byte_end = line_byte_offset(content, window_start + old_line_count)
+                    .unwrap_or(content.len());
+                return Some(MatchResult {
+                    start: byte_start,
+                    end: byte_end,
+                    strategy: self.name(),
+                    confidence: 0.85,
+                });
+            }
+        }
+        None
     }
 }
 
@@ -269,6 +304,18 @@ impl MatchStrategy for EscapeNormalizedMatcher {
             confidence: 0.80,
         })
     }
+}
+
+pub fn is_disproportionate_match(matched: &str, old_text: &str) -> bool {
+    let old_lines = old_text.split('\n').count();
+    let matched_lines = matched.split('\n').count();
+    if matched_lines >= old_lines.max(1) + 3 && matched_lines as f64 >= old_lines as f64 * 2.0 {
+        return true;
+    }
+    if old_lines == 1 {
+        return false;
+    }
+    matched.trim().len() > (old_text.trim().len() + 500).max(old_text.trim().len() * 4)
 }
 
 pub fn fuzzy_find(content: &str, old_text: &str) -> Option<MatchResult> {

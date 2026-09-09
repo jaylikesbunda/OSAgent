@@ -233,7 +233,11 @@ impl FastWalk {
     }
 
     fn relative(&self, entry: &Path) -> Option<String> {
-        let rel = display_relative(entry, &self.workspace_normalized, &self.search_root_normalized);
+        let rel = display_relative(
+            entry,
+            &self.workspace_normalized,
+            &self.search_root_normalized,
+        );
         if rel.is_empty() {
             return None;
         }
@@ -276,7 +280,7 @@ impl FastWalk {
         let mut out = Vec::new();
         for entry in walker {
             let Ok(entry) = entry else { continue };
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) != true {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 continue;
             }
             let Some(rel) = self.relative(entry.path()) else {

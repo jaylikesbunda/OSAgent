@@ -965,7 +965,11 @@ impl Handler {
                     }
                 };
                 let embed = match session_id {
-                    Some(session_id) => match self.agent.compact_session_now(&session_id, None).await {
+                    Some(session_id) => match self
+                        .agent
+                        .compact_session_now(&session_id, None)
+                        .await
+                    {
                         Ok((pruned, compacted, _)) => {
                             let mut lines = Vec::new();
                             if compacted > 0 {
@@ -982,11 +986,7 @@ impl Handler {
                                 )
                             } else {
                                 lines.push("Recent messages are untouched.".to_string());
-                                ui::embed(
-                                    "Session Compacted",
-                                    lines.join("\n"),
-                                    ui::COLOR_SUCCESS,
-                                )
+                                ui::embed("Session Compacted", lines.join("\n"), ui::COLOR_SUCCESS)
                             }
                         }
                         Err(e) => {

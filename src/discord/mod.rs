@@ -176,7 +176,17 @@ impl Handler {
             || role_ids
                 .iter()
                 .any(|role_id| discord.trusted_roles.contains(role_id));
+        // Chat stays Community inside a community location — including for
+        // the owner — so community turns never see the real workspace (control
+        // access is handled separately and still honors trusted identity).
+        let in_community_location = guild_id.is_some_and(|guild_id| {
+            !discord.allowed_guilds.is_empty()
+                && discord.allowed_guilds.contains(&guild_id)
+                && (discord.allowed_channels.is_empty()
+                    || discord.allowed_channels.contains(&channel_id))
+        });
         if trusted_identity
+            && !in_community_location
             && (guild_id.is_none() && discord.allow_dms && discord.trusted_users.contains(&user_id)
                 || guild_id.is_some()
                     && in_location(&discord.trusted_guilds, &discord.trusted_channels))

@@ -10,6 +10,11 @@ v0.5.3 changes:
 * Fixed read loop guard blocking page-forward reads: it now keys on `filePath`/`offset`/`limit`
 * Fixed grep/glob scanning build and dependency trees: generic junk skipped, project trees via new `exclude_dirs` config
 * Fixed walkdir grep missing matches in files under 4KB and on `\\?\` Windows paths
+* edit_file/write_file now return diff + LSP diagnostics
+* Tightened fuzzy edit with disproportionate-match guard
+* Enforced read-before-edit
+* Added per-file edit lock with line-ending/BOM preserve
+* Prompt now requires re-read of changed hunk + LSP fix
 
 v0.5.2 changes:
 

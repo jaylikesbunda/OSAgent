@@ -590,6 +590,7 @@
 }
 
 .new-chat-btn span {
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -598,9 +599,28 @@
     border: 1px solid var(--border-hover);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 16px;
-    font-weight: 400;
-    line-height: 1;
+    /* Geometric plus via bars: font glyph ink sits off-center in the box,
+       so draw the mark instead of trusting + metrics. Text kept for a11y. */
+    font-size: 0;
+    flex-shrink: 0;
+}
+
+.new-chat-btn span::before,
+.new-chat-btn span::after {
+    content: '';
+    position: absolute;
+    background: currentColor;
+    border-radius: 1px;
+}
+
+.new-chat-btn span::before {
+    width: 10px;
+    height: 2px;
+}
+
+.new-chat-btn span::after {
+    width: 2px;
+    height: 10px;
 }
 
 .new-chat-btn:hover {

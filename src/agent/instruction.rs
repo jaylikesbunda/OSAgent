@@ -192,7 +192,11 @@ fn scan_nearby_mtimes(workspace: &Path, target: &Path) -> (Vec<PathBuf>, u64) {
         }
         current = dir.parent().map(PathBuf::from);
     }
-    let newest = dirs.iter().map(|dir| dir_mtime_secs(dir)).max().unwrap_or(0);
+    let newest = dirs
+        .iter()
+        .map(|dir| dir_mtime_secs(dir))
+        .max()
+        .unwrap_or(0);
     (dirs, newest)
 }
 
