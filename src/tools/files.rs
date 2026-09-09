@@ -17,8 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 fn edit_locks() -> &'static dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>> {
-    static LOCKS: OnceLock<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>> =
-        OnceLock::new();
+    static LOCKS: OnceLock<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>> = OnceLock::new();
     LOCKS.get_or_init(dashmap::DashMap::new)
 }
 
@@ -122,11 +121,7 @@ async fn lsp_diagnostics_snippet(
     out
 }
 
-fn require_prior_read(
-    cache: &Arc<FileReadCache>,
-    canonical: &Path,
-    display: &str,
-) -> Result<()> {
+fn require_prior_read(cache: &Arc<FileReadCache>, canonical: &Path, display: &str) -> Result<()> {
     if cache.check(canonical).is_none() {
         return Err(OSAgentError::ToolExecution(format!(
             "You must read '{}' with read_file first, then retry the edit.",
@@ -1259,8 +1254,15 @@ impl Tool for WriteFileTool {
         };
 
         let (snippet, dels, adds) = unified_diff_snippet(&old_text_for_diff, &to_write, 60);
-        let mut out = format!("Successfully wrote to {}{} (+{} -{})\n{}", path, backup_msg, adds, dels, snippet);
-        let ws = self.workspaces.first().cloned().unwrap_or(PathBuf::from("."));
+        let mut out = format!(
+            "Successfully wrote to {}{} (+{} -{})\n{}",
+            path, backup_msg, adds, dels, snippet
+        );
+        let ws = self
+            .workspaces
+            .first()
+            .cloned()
+            .unwrap_or(PathBuf::from("."));
         let diag = lsp_diagnostics_snippet(&self.lsp, &file_path, path, &ws).await;
         if !diag.is_empty() {
             out.push_str("\n\n");
@@ -1490,7 +1492,11 @@ impl Tool for EditFileTool {
                 "Successfully edited {} ({} +{} -{})\n{}",
                 path, how, adds, dels, snippet
             );
-            let ws = this.workspaces.first().cloned().unwrap_or(PathBuf::from("."));
+            let ws = this
+                .workspaces
+                .first()
+                .cloned()
+                .unwrap_or(PathBuf::from("."));
             let diag = lsp_diagnostics_snippet(&this.lsp, file_path, path, &ws).await;
             if !diag.is_empty() {
                 out.push_str("\n\n");
@@ -1507,15 +1513,37 @@ impl Tool for EditFileTool {
                 ));
             }
             new_lf = content_lf.replace(&old_lf, &new_lf);
-            return finalize(self, &file_path, path, &content_owned, &new_lf, eol, had_bom,
-                format!("{} replacement{}", match_count, if match_count == 1 { "" } else { "s" })).await;
+            return finalize(
+                self,
+                &file_path,
+                path,
+                &content_owned,
+                &new_lf,
+                eol,
+                had_bom,
+                format!(
+                    "{} replacement{}",
+                    match_count,
+                    if match_count == 1 { "" } else { "s" }
+                ),
+            )
+            .await;
         }
 
         let exact_count = content_lf.match_indices(&old_lf).count();
         if exact_count == 1 {
             let new_content = content_lf.replacen(&old_lf, &new_lf, 1);
-            return finalize(self, &file_path, path, &content_owned, &new_content, eol, had_bom,
-                "1 replacement, exact match".to_string()).await;
+            return finalize(
+                self,
+                &file_path,
+                path,
+                &content_owned,
+                &new_content,
+                eol,
+                had_bom,
+                "1 replacement, exact match".to_string(),
+            )
+            .await;
         }
 
         if exact_count > 1 {
@@ -1540,8 +1568,21 @@ impl Tool for EditFileTool {
 
         let new_content = apply_replacement(&content_lf, &match_result, &old_lf, &new_lf);
 
-        finalize(self, &file_path, path, &content_owned, &new_content, eol, had_bom,
-            format!("1 replacement via {} matching, confidence: {:.0}%", match_result.strategy, match_result.confidence * 100.0)).await
+        finalize(
+            self,
+            &file_path,
+            path,
+            &content_owned,
+            &new_content,
+            eol,
+            had_bom,
+            format!(
+                "1 replacement via {} matching, confidence: {:.0}%",
+                match_result.strategy,
+                match_result.confidence * 100.0
+            ),
+        )
+        .await
     }
 }
 
