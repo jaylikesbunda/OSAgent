@@ -1,5 +1,9 @@
 use crate::error::OSAgentError;
-use crate::skills::config::{parse_frontmatter, ConfigField, MaskedValue, SkillConfigStore};
+use crate::skills::bundle::get_skills_base_dir;
+use crate::skills::config::{
+    parse_frontmatter, ConfigField, MaskedValue, SkillActionSchema, SkillConfigStore,
+};
+use crate::skills::{save_skill, SkillSaveInput};
 use crate::skills::installer::{InstallResult, SkillInstaller};
 use crate::skills::store::{SkillInfo, SkillStore};
 use std::collections::HashMap;
@@ -48,7 +52,41 @@ impl SkillService {
     }
 
     pub fn install_skill(&self, bundle_data: &[u8]) -> Result<InstallResult, OSAgentError> {
+        // Legacy path: `.oskill` zip import. Kept for backwards compat.
+        // New skills should use `save_skill` (plain SKILL.md, no bundle).
         self.installer.install_from_bundle(bundle_data)
+    }
+
+    /// Runtime authoring path (no bundle): upsert a plain `SKILL.md`
+    /// directory. Used by the Settings UI "new skill" form and mirrored by
+    /// the agent's `skill_create` / `skill_update` tools.
+    pub fn save_skill(
+        &self,
+        name: &str,
+        description: &str,
+        instructions: &str,
+        emoji: Option<String>,
+        config: Vec<ConfigField>,
+        actions: Vec<SkillActionSchema>,
+        scripts: HashMap<String, String>,
+    ) -> Result<SkillInfo, OSAgentError> {
+        let base = get_skills_base_dir();
+        std::fs::create_dir_all(&base)
+            .map_err(|e| OSAgentError::Unknown(format!("Skills directory unavailable: {}", e)))?;
+        let input = SkillSaveInput {
+            description: description.to_string(),
+            emoji,
+            instructions: instructions.to_string(),
+            config,
+            actions,
+            token_refresh: None,
+            scripts,
+        };
+        save_skill(&base, name, input, true)
+            .map_err(|e| OSAgentError::Unknown(e.to_string()))?;
+        self.store
+            .get_skill_info(name.trim())
+            .map_err(|e| OSAgentError::Unknown(format!("Failed to get skill info: {}", e)))
     }
 
     pub fn uninstall_skill(&self, name: &str) -> Result<(), OSAgentError> {

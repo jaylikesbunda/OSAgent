@@ -1,0 +1,30 @@
+baseURL = "/"
+title = "OSAgent Documentation"
+theme = "osagent"
+defaultContentLanguage = "en"
+canonifyURLs = false
+enableRobotsTXT = true
+
+[params]
+  subtitle = "Local-first AI agent · Rust-powered"
+  defaultDescription = "OSAgent is an open source local-first AI agent. Point it at a folder and it refactors code, fixes scripts, researches the web, or briefs you every morning."
+
+[outputs]
+  home = ["HTML", "JSON"]
+  section = ["HTML", "JSON"]
+  page = ["HTML"]
+
+[sitemap]
+  changefreq = "weekly"
+  priority = 0.5
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    noClasses = false
+    style = "github-dark"
+  [markup.tableOfContents]
+    startLevel = 2
+    endLevel = 3

@@ -31,11 +31,11 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect a loaded skill's safe metadata and available runtime actions"
+        "Read a skill's full instructions and available runtime actions so you can follow them"
     }
 
     fn when_to_use(&self) -> &str {
-        "Use to inspect a skill's actions before calling skill_action"
+        "Use to read a skill's instructions before using it, or to inspect its actions before calling skill_action"
     }
 
     fn when_not_to_use(&self) -> &str {
@@ -780,6 +780,8 @@ fn render_skill_summary(skill: &Skill) -> String {
                 }
             ));
         }
+    } else {
+        output.push_str("\n(no runtime actions declared — follow the instructions below using your existing tools)");
     }
 
     if let Some(metadata) = &skill.metadata {
@@ -800,8 +802,33 @@ fn render_skill_summary(skill: &Skill) -> String {
         }
     }
 
-    output.push_str("\nSkill configuration is managed separately and is not exposed to the model.");
+    // Prompt-style skills carry their behavior as markdown instructions.
+    // Return them (bounded) so the agent can actually follow the skill.
+    let body = extract_instructions_body(&skill.content);
+    if !body.trim().is_empty() {
+        const MAX_BODY_CHARS: usize = 6000;
+        let mut chars = body.chars();
+        let truncated: String = chars.by_ref().take(MAX_BODY_CHARS).collect();
+        let rest = chars.next().is_some();
+        output.push_str("\n\nInstructions:\n");
+        output.push_str(truncated.trim());
+        if rest {
+            output.push_str("\n\n[...instructions truncated — read the SKILL.md file directly for the remainder]");
+        }
+    }
+
+    output.push_str("\n\nSkill configuration is managed separately and is not exposed to the model.");
     output
+}
+
+/// Strip YAML frontmatter from a SKILL.md so only the markdown instructions remain.
+fn extract_instructions_body(skill_md: &str) -> String {
+    if skill_md.starts_with("---") {
+        if let Some(end) = skill_md[3..].find("\n---") {
+            return skill_md[3 + end + 4..].trim_start_matches('\n').to_string();
+        }
+    }
+    skill_md.to_string()
 }
 
 fn format_action_signature(action: &SkillActionSchema) -> String {

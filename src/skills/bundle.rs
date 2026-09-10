@@ -1,3 +1,10 @@
+//! Legacy `.oskill` bundle format (zip + `manifest.toml`).
+//!
+//! Kept for importing old skills only (`SkillInstaller::install_from_bundle`).
+//! New skills are plain `SKILL.md` directories created at runtime via
+//! `skill_create` / `skill_update` — see `crate::skills::authoring`.
+//! Do not build new features on bundles.
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};

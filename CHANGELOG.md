@@ -1,3 +1,7 @@
+v0.6.0 changes:
+
+* Added runtime skill authoring: OSA can now create/update/delete skills live 
+
 v0.5.3 changes:
 
 * Added rolling working notes + real `/compact` (verify-and-correct handoff, resets context)

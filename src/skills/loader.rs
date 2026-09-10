@@ -229,6 +229,13 @@ impl SkillLoader {
     pub fn names(&self) -> Vec<String> {
         self.skills.read().unwrap().keys().cloned().collect()
     }
+
+    /// Primary directory new runtime-authored skills are written to
+    /// (the configured `tools.skills.directory`). Additional dirs are
+    /// read-only fallbacks (legacy workspaces).
+    pub fn primary_dir(&self) -> PathBuf {
+        self.skills_dir.clone()
+    }
 }
 
 fn parse_skill_md(

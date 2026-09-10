@@ -12,8 +12,8 @@ use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     bash, batch, calendar, code, codesearch, coordinator, decision_memory, files, lsp, memory,
     native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process, question,
-    scheduler, search, sessions, skill, subagent, system_status, task, todo, tool_script,
-    tool_search, weather, web,
+    scheduler, search, sessions, skill, skill_authoring, subagent, system_status, task, todo,
+    tool_script, tool_search, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -520,6 +520,18 @@ impl ToolRegistry {
                 "skill_list".to_string(),
                 Arc::new(skill::SkillListTool::new(sl.clone())),
             );
+            tools.insert(
+                "skill_create".to_string(),
+                Arc::new(skill_authoring::SkillCreateTool::new(sl.clone())),
+            );
+            tools.insert(
+                "skill_update".to_string(),
+                Arc::new(skill_authoring::SkillUpdateTool::new(sl.clone())),
+            );
+            tools.insert(
+                "skill_delete".to_string(),
+                Arc::new(skill_authoring::SkillDeleteTool::new(sl.clone())),
+            );
             let skill_action_tool: Arc<dyn Tool> =
                 Arc::new(skill::SkillActionTool::new(sl.clone()));
             tools.insert("skill_action".to_string(), skill_action_tool.clone());
@@ -864,12 +876,19 @@ impl ToolRegistry {
     /// installed.
     pub fn skill_summary_prompt(&self) -> Option<String> {
         let loader = self.skill_loader.as_ref()?;
+        // Refresh counts per turn: runtime-authored skills must show up
+        // without a restart. `list()` reads the in-memory map; authoring
+        // tools call `load_all()` after every save/delete so this is fresh.
         let skills = loader.list();
         if skills.is_empty() {
-            return None;
+            // Even with zero skills, advertise authoring so the model knows
+            // it can create one on demand ("make a skill that...").
+            return Some(
+                "# Available Skills\nNo skills installed yet. Call `skill_list` to confirm, `skill` to read one, `skill_action` to run its actions. You can create new skills at runtime with `skill_create` (update with `skill_update`, remove with `skill_delete`) — they apply immediately, no restart.\n".to_string(),
+            );
         }
         Some(format!(
-            "# Available Skills\n{} skill(s) installed. Call `skill_list` to browse them by name and description, then `skill` to run one.\n",
+            "# Available Skills\n{} skill(s) installed. Call `skill_list` to browse them by name and description, then `skill` to read instructions (and `skill_action` to run a declared action). You can create new skills at runtime with `skill_create` (update with `skill_update`, remove with `skill_delete`) — they apply immediately, no restart.\n",
             skills.len()
         ))
     }

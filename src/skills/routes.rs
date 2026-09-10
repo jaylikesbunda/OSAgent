@@ -115,6 +115,7 @@ pub fn create_skills_router(skill_service: Arc<SkillService>) -> Router {
         .route("/api/skills/:name/authorize", post(authorize_skill))
         .route("/api/skills/:name/export", get(export_skill))
         .route("/api/skills/install", post(install_skill))
+        .route("/api/skills/save", post(save_skill))
         .route("/api/skills/uninstall", post(uninstall_skill))
         .route("/api/skills/reload", post(reload_skills))
         .layer(Extension(skill_service))
@@ -323,6 +324,8 @@ async fn install_skill(
     Extension(service): Extension<Arc<SkillService>>,
     body: bytes::Bytes,
 ) -> Result<Json<InstallResponse>, OSAgentError> {
+    // Legacy: `.oskill` zip import. Kept for backwards compat;
+    // new skills should POST JSON to `/api/skills/save` instead.
     let data = body.to_vec();
 
     if data.is_empty() {
@@ -342,6 +345,44 @@ async fn install_skill(
         name: result.name,
         version: result.version,
         description: result.description,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveSkillRequest {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub emoji: Option<String>,
+    #[serde(default)]
+    pub config: Vec<crate::skills::ConfigField>,
+    #[serde(default)]
+    pub actions: Vec<crate::skills::SkillActionSchema>,
+    #[serde(default)]
+    pub scripts: HashMap<String, String>,
+}
+
+/// Runtime authoring path (no bundle): create or update a plain `SKILL.md`
+/// skill. Mirrors what the agent does via `skill_create` / `skill_update`.
+async fn save_skill(
+    Extension(service): Extension<Arc<SkillService>>,
+    Json(payload): Json<SaveSkillRequest>,
+) -> Result<Json<InstallResponse>, OSAgentError> {
+    let info = service.save_skill(
+        &payload.name,
+        &payload.description,
+        &payload.instructions,
+        payload.emoji,
+        payload.config,
+        payload.actions,
+        payload.scripts,
+    )?;
+    Ok(Json(InstallResponse {
+        success: true,
+        name: info.name,
+        version: info.version.unwrap_or_else(|| "1.0.0".to_string()),
+        description: info.description,
     }))
 }
 

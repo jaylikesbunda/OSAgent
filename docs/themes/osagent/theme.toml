@@ -1,0 +1,5 @@
+name = "osagent"
+license = "MIT"
+description = "OSAgent documentation theme (sidebar + search + dark mode), adapted from the GhostESP docs layout"
+homepage = "https://github.com/jaylikesbunda/OSAgent"
+min_version = "0.120.0"

@@ -30,6 +30,7 @@ pub mod scheduler;
 pub mod search;
 pub mod sessions;
 pub mod skill;
+pub mod skill_authoring;
 pub mod spill;
 pub mod subagent;
 pub mod system_status;
