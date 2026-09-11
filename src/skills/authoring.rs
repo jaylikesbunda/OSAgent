@@ -115,7 +115,7 @@ pub struct SkillSaveInput {
 pub fn save_skill(
     skills_dir: &Path,
     name: &str,
-    input: SkillSaveInput,
+    mut input: SkillSaveInput,
     overwrite: bool,
 ) -> Result<PathBuf, String> {
     validate_skill_name(name)?;
@@ -161,25 +161,31 @@ pub fn save_skill(
         }
     }
     // Every `type: script` action must reference a script that is either
-    // shipped in this save or already on disk (for updates).
+    // shipped in this save or already on disk — otherwise the action can be
+    // saved but never run. Fail here with the exact fix instead.
     for action in &input.actions {
-        if let crate::skills::config::SkillActionRunner::Script { script, .. } = &action.runner {
-            let referenced = script
-                .rsplit('/')
-                .next()
-                .unwrap_or(script)
-                .rsplit('\\')
-                .next()
-                .unwrap_or(script);
-            let provided = input.scripts.keys().any(|k| {
-                k == script
-                    || k == referenced
-                    || k.trim_start_matches("scripts/") == script.trim_start_matches("scripts/")
-            });
-            if !provided && !overwrite {
-                // For creates we require the script up front; for updates the
-                // file may already exist from a previous save — checked below.
+        if let crate::skills::config::SkillActionRunner::Script { script, .. } = &action.runner
+        {
+            if !script_satisfied(skills_dir, &name, script, &input.scripts) {
+                return Err(format!(
+                    "Action '{}' references script '{}' but no such script was provided in 'scripts' and none exists on disk. Include it as {{\"{}\": \"<file content>\"}} in 'scripts' (file must end in .py, .sh, .ps1 or .js).",
+                    action.name,
+                    script,
+                    script_basename(script),
+                ));
             }
+        }
+    }
+
+    // Canonicalize script references to where the files are actually
+    // written (`scripts/<basename>`). The model writes `stats.py`,
+    // `scripts/stats.py`, `./stats.py` interchangeably — all of those must
+    // resolve to the same file at run time instead of failing with
+    // "script not found".
+    for action in &mut input.actions {
+        if let crate::skills::config::SkillActionRunner::Script { script, .. } = &mut action.runner
+        {
+            *script = format!("scripts/{}", script_basename(script));
         }
     }
 
@@ -228,6 +234,40 @@ pub fn save_skill(
     }
 
     Ok(skill_dir)
+}
+
+/// Basename of a script reference (`scripts/run.py` -> `run.py`).
+fn script_basename(script: &str) -> &str {
+    script
+        .rsplit('/')
+        .next()
+        .unwrap_or(script)
+        .rsplit('\\')
+        .next()
+        .unwrap_or(script)
+}
+
+/// True when a script action's file is covered by this save's payload or
+/// already exists under the skill directory on disk.
+fn script_satisfied(
+    skills_dir: &Path,
+    skill_name: &str,
+    script: &str,
+    payload: &HashMap<String, String>,
+) -> bool {
+    let base = script_basename(script);
+    let stripped = script
+        .trim_start_matches("scripts/")
+        .trim_start_matches("scripts\\");
+    if payload.keys().any(|k| {
+        k == script || k == base || k.trim_start_matches("scripts/") == stripped
+    }) {
+        return true;
+    }
+    let dir = skills_dir.join(skill_name);
+    dir.join(script).exists()
+        || dir.join("scripts").join(base).exists()
+        || dir.join(stripped).exists()
 }
 
 /// Load the existing skill parts so `skill_update` can merge partial edits.
@@ -338,5 +378,49 @@ mod tests {
 
         delete_skill(temp.path(), "my-skill").expect("delete");
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn rejects_dangling_script_reference() {        let temp = tempfile::TempDir::new().expect("temp");
+        let action: SkillActionSchema = serde_json::from_value(serde_json::json!({
+            "name": "check",
+            "description": "Check links",
+            "type": "script",
+            "script": "scripts/missing.py",
+            "args": ["{{ args.url }}"],
+            "parameters": [{"name": "url", "type": "string", "required": true}]
+        }))
+        .expect("fixture");
+        let input = SkillSaveInput {
+            description: "Test skill".to_string(),
+            emoji: None,
+            instructions: "# Test".to_string(),
+            actions: vec![action],
+            ..Default::default()
+        };
+        let err = save_skill(temp.path(), "broken", input, false).expect_err("must reject");
+        assert!(err.contains("missing.py"), "error names the script: {}", err);
+
+        // Same action saves fine when the script ships alongside.
+        let action: SkillActionSchema = serde_json::from_value(serde_json::json!({
+            "name": "check",
+            "description": "Check links",
+            "type": "script",
+            "script": "scripts/run.py",
+            "args": ["{{ args.url }}"],
+            "parameters": [{"name": "url", "type": "string", "required": true}]
+        }))
+        .expect("fixture");
+        let mut scripts = HashMap::new();
+        scripts.insert("run.py".to_string(), "print('hi')".to_string());
+        let input = SkillSaveInput {
+            description: "Test skill".to_string(),
+            emoji: None,
+            instructions: "# Test".to_string(),
+            actions: vec![action],
+            scripts,
+            ..Default::default()
+        };
+        save_skill(temp.path(), "works", input, false).expect("save with script");
     }
 }

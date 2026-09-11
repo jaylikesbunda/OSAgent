@@ -1,5 +1,4 @@
 use crate::error::OSAgentError;
-use crate::skills::bundle::get_skills_base_dir;
 use crate::skills::config::{
     parse_frontmatter, ConfigField, MaskedValue, SkillActionSchema, SkillConfigStore,
 };
@@ -22,6 +21,22 @@ impl SkillService {
     pub fn new() -> Self {
         let store = Arc::new(SkillStore::new());
         let installer = Arc::new(SkillInstaller::new());
+        let config_store = Arc::new(SkillConfigStore::new(
+            crate::skills::config::get_config_base_dir(),
+        ));
+
+        Self {
+            store,
+            installer,
+            config_store,
+        }
+    }
+
+    /// Primary = configured `tools.skills.directory` so the Settings UI and
+    /// the agent's `skill_create` tools converge on one writable location.
+    pub fn with_primary(primary: PathBuf) -> Self {
+        let store = Arc::new(SkillStore::with_primary(primary.clone()));
+        let installer = Arc::new(SkillInstaller::with_primary(primary));
         let config_store = Arc::new(SkillConfigStore::new(
             crate::skills::config::get_config_base_dir(),
         ));
@@ -70,7 +85,7 @@ impl SkillService {
         actions: Vec<SkillActionSchema>,
         scripts: HashMap<String, String>,
     ) -> Result<SkillInfo, OSAgentError> {
-        let base = get_skills_base_dir();
+        let base = self.store.primary_root();
         std::fs::create_dir_all(&base)
             .map_err(|e| OSAgentError::Unknown(format!("Skills directory unavailable: {}", e)))?;
         let input = SkillSaveInput {

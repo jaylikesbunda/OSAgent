@@ -70,7 +70,9 @@ pub struct SkillActionSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillActionParameter {
     pub name: String,
-    #[serde(rename = "type")]
+    /// Defaults to `string` when omitted so the model can write
+    /// `{"name": "url", "required": true}` and nothing else.
+    #[serde(rename = "type", default)]
     pub parameter_type: SkillActionParameterType,
     #[serde(default)]
     pub description: String,
@@ -78,9 +80,10 @@ pub struct SkillActionParameter {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillActionParameterType {
+    #[default]
     String,
     Number,
     Boolean,

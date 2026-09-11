@@ -13,10 +13,14 @@ pub struct SkillInstaller {
 
 impl SkillInstaller {
     pub fn new() -> Self {
-        let skills_dir = get_skills_base_dir();
+        Self::with_primary(SkillStore::new().primary_root())
+    }
+
+    pub fn with_primary(primary: PathBuf) -> Self {
+        let skills_dir = primary.clone();
         let icons_dir = get_icons_base_dir();
         let config_store = SkillConfigStore::new(get_config_base_dir());
-        let store = SkillStore::new();
+        let store = SkillStore::with_primary(primary);
 
         Self {
             skills_dir,
@@ -24,6 +28,10 @@ impl SkillInstaller {
             config_store,
             store,
         }
+    }
+
+    fn primary_dir(&self) -> PathBuf {
+        self.store.primary_root()
     }
 
     pub fn install_from_bundle(&self, bundle_data: &[u8]) -> Result<InstallResult, OSAgentError> {

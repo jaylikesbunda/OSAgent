@@ -510,7 +510,9 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
 
     let workflow_router = crate::workflow::api::create_workflow_router(workflow_state);
 
-    let skill_service = Arc::new(SkillService::new());
+    let skill_service = Arc::new(SkillService::with_primary(PathBuf::from(
+        shellexpand::tilde(&config.tools.skills.directory).to_string(),
+    )));
     let skills_router = crate::skills::create_skills_router(skill_service);
 
     let public_routes = Router::new()

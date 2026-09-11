@@ -5,7 +5,7 @@ weight: 50
 toc: true
 ---
 
-## v0.6.0 (upcoming)
+## v0.6.0
 
 - Runtime skill authoring: OSA can create/update/delete skills live via
   `skill_create` / `skill_update` / `skill_delete` (plain `SKILL.md`, no

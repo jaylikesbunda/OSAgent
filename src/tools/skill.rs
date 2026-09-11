@@ -348,7 +348,7 @@ impl SkillActionTool {
             ));
         };
 
-        let script_path = skill.base_dir.join(script);
+        let script_path = resolve_skill_script(&skill.base_dir, script);
         if !script_path.exists() {
             return Err(OSAgentError::ToolExecution(format!(
                 "Skill action script not found: {}",
@@ -616,11 +616,6 @@ impl Tool for SkillActionTool {
         let action_name = args["action"]
             .as_str()
             .ok_or_else(|| OSAgentError::ToolExecution("Missing 'action' parameter".to_string()))?;
-        let action_args = args
-            .get("args")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
 
         self.loader.load_all()?;
 
@@ -649,8 +644,10 @@ impl Tool for SkillActionTool {
             )));
         }
 
+        let mut action_args = resolve_action_args(&args, &action);
+
         ensure_skill_is_configured(&skill, &config.settings)?;
-        validate_action_args(&action, &action_args)?;
+        validate_action_args(&action, &mut action_args)?;
 
         if let Some(ref tr) = skill.token_refresh {
             let access_token_key = &tr.access_token_field;
@@ -736,27 +733,81 @@ fn ensure_skill_is_configured(skill: &Skill, settings: &HashMap<String, String>)
     Ok(())
 }
 
-fn validate_action_args(action: &SkillActionSchema, args: &Map<String, Value>) -> Result<()> {
-    for parameter in &action.parameters {
-        let value = args.get(&parameter.name);
-        if parameter.required && value.is_none() {
-            return Err(OSAgentError::ToolExecution(format!(
-                "Action '{}' is missing required argument '{}'.",
-                action.name, parameter.name
-            )));
-        }
+/// Lenient `args` resolution: models sometimes send `args` as a JSON string,
+/// or hoist parameters to the top level (`{"domain": ...}` instead of
+/// `{"args": {"domain": ...}}`). Accept those shapes rather than failing.
+fn resolve_action_args(call: &Value, action: &SkillActionSchema) -> Map<String, Value> {
+    let mut merged = Map::new();
 
-        if let Some(value) = value {
-            let is_valid = match parameter.parameter_type {
-                SkillActionParameterType::String => value.is_string(),
-                SkillActionParameterType::Number => value.is_number(),
-                SkillActionParameterType::Boolean => value.is_boolean(),
-            };
-            if !is_valid {
-                return Err(OSAgentError::ToolExecution(format!(
-                    "Action '{}' argument '{}' has the wrong type.",
-                    action.name, parameter.name
-                )));
+    if let Some(obj) = call.get("args").and_then(Value::as_object) {
+        for (key, value) in obj {
+            merged.insert(key.clone(), value.clone());
+        }
+    } else if let Some(text) = call.get("args").and_then(Value::as_str) {
+        let trimmed = text.trim();
+        if let Ok(Value::Object(obj)) = serde_json::from_str(trimmed) {
+            for (key, value) in obj {
+                merged.insert(key, value);
+            }
+        } else if !trimmed.is_empty() {
+            // Bare string with a single required string parameter:
+            // treat it as that parameter's value.
+            let required_strings: Vec<&SkillActionParameter> = action
+                .parameters
+                .iter()
+                .filter(|p| {
+                    p.required && p.parameter_type == SkillActionParameterType::String
+                })
+                .collect();
+            if required_strings.len() == 1 && !merged.contains_key(&required_strings[0].name) {
+                merged.insert(
+                    required_strings[0].name.clone(),
+                    Value::String(trimmed.to_string()),
+                );
+            }
+        }
+    }
+
+    // Top-level hoisted params: {"skill","action","domain":"example.com"}.
+    if let Some(obj) = call.as_object() {
+        for parameter in &action.parameters {
+            if !merged.contains_key(&parameter.name) {
+                if let Some(value) = obj.get(&parameter.name) {
+                    if !value.is_null() {
+                        merged.insert(parameter.name.clone(), value.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    merged
+}
+
+fn validate_action_args(action: &SkillActionSchema, args: &mut Map<String, Value>) -> Result<()> {
+    for parameter in &action.parameters {
+        let coerced = match args.get(&parameter.name) {
+            None => None,
+            Some(value) => Some(
+                coerce_param_value(&parameter.parameter_type, value).ok_or_else(|| {
+                    OSAgentError::ToolExecution(format!(
+                        "Action '{}' argument '{}' has the wrong type.",
+                        action.name, parameter.name
+                    ))
+                })?,
+            ),
+        };
+        match coerced {
+            None => {
+                if parameter.required {
+                    return Err(OSAgentError::ToolExecution(format!(
+                        "Action '{}' is missing required argument '{}'.",
+                        action.name, parameter.name
+                    )));
+                }
+            }
+            Some(value) => {
+                args.insert(parameter.name.clone(), value);
             }
         }
     }
@@ -764,8 +815,81 @@ fn validate_action_args(action: &SkillActionSchema, args: &Map<String, Value>) -
     Ok(())
 }
 
+/// Coerce one argument value into a parameter type. Returns `None` when the
+/// value cannot sensibly convert.
+fn coerce_param_value(parameter_type: &SkillActionParameterType, value: &Value) -> Option<Value> {
+    match parameter_type {
+        SkillActionParameterType::String => match value {
+            Value::String(_) => Some(value.clone()),
+            Value::Number(n) => Some(Value::String(n.to_string())),
+            Value::Bool(b) => Some(Value::String(b.to_string())),
+            _ => None,
+        },
+        SkillActionParameterType::Number => match value {
+            Value::Number(_) => Some(value.clone()),
+            Value::String(text) => text
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+            _ => None,
+        },
+        SkillActionParameterType::Boolean => match value {
+            Value::Bool(_) => Some(value.clone()),
+            Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+                "true" => Some(Value::Bool(true)),
+                "false" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            _ => None,
+        },
+    }
+}
+
+/// Resolve a script action's file. The declared reference may be a bare
+/// basename (`stats.py`), a `scripts/`-prefixed path, or `./`-prefixed —
+/// all spellings resolve to the same file, with the literal join tried
+/// first so explicit layouts keep working.
+fn resolve_skill_script(base_dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+    let direct = base_dir.join(script);
+    if direct.exists() {
+        return direct;
+    }
+    let trimmed = script
+        .trim_start_matches("./")
+        .trim_start_matches(".\\")
+        .trim_start_matches("scripts/")
+        .trim_start_matches("scripts\\");
+    let basename = trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or(trimmed)
+        .rsplit('\\')
+        .next()
+        .unwrap_or(trimmed);
+    for candidate in [
+        base_dir.join("scripts").join(basename),
+        base_dir.join(trimmed),
+        base_dir.join(basename),
+    ] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    direct
+}
+
 fn render_skill_summary(skill: &Skill) -> String {
-    let mut output = format!("Skill: {}\nDescription: {}", skill.name, skill.description);
+    let location = skill
+        .base_dir
+        .display()
+        .to_string()
+        .replace('/', &std::path::MAIN_SEPARATOR.to_string());
+    let mut output = format!(
+        "Skill: {}\nDescription: {}\nLocation: {}",
+        skill.name, skill.description, location
+    );
 
     if !skill.actions.is_empty() {
         output.push_str("\nActions:\n");
@@ -1040,5 +1164,103 @@ mod tests {
         let rendered = render_json_templates(&body, &config, &args).expect("json templates render");
         assert_eq!(rendered["device_id"], "abc123");
         assert_eq!(rendered["uris"][0], "spotify:track:123");
+    }
+
+    fn recon_action() -> SkillActionSchema {
+        SkillActionSchema {
+            name: "recon".to_string(),
+            description: String::new(),
+            parameters: vec![SkillActionParameter {
+                name: "domain".to_string(),
+                parameter_type: SkillActionParameterType::String,
+                description: String::new(),
+                required: true,
+            }],
+            runner: SkillActionRunner::Script {
+                script: "scripts/recon.py".to_string(),
+                args: vec!["{{ args.domain }}".to_string()],
+            },
+        }
+    }
+
+    #[test]
+    fn resolves_stringified_args_object() {
+        let action = recon_action();
+        let call = json!({
+            "skill": "osint-quick",
+            "action": "recon",
+            "args": "{\"domain\": \"example.com\"}"
+        });
+        let resolved = resolve_action_args(&call, &action);
+        assert_eq!(
+            resolved.get("domain").and_then(Value::as_str),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn resolves_hoisted_top_level_params() {
+        let action = recon_action();
+        let call = json!({
+            "skill": "osint-quick",
+            "action": "recon",
+            "domain": "example.com"
+        });
+        let resolved = resolve_action_args(&call, &action);
+        assert_eq!(
+            resolved.get("domain").and_then(Value::as_str),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn coerces_friendly_type_shapes() {
+        let string_action = SkillActionSchema {
+            name: "s".to_string(),
+            description: String::new(),
+            parameters: vec![SkillActionParameter {
+                name: "text".to_string(),
+                parameter_type: SkillActionParameterType::String,
+                description: String::new(),
+                required: true,
+            }],
+            runner: SkillActionRunner::Script {
+                script: "scripts/s.py".to_string(),
+                args: vec![],
+            },
+        };
+        let mut args = serde_json::json!({"text": 5})
+            .as_object()
+            .cloned()
+            .unwrap();
+        validate_action_args(&string_action, &mut args).expect("number coerces to string");
+        assert_eq!(args["text"], json!("5"));
+
+        let number_action = SkillActionSchema {
+            name: "n".to_string(),
+            description: String::new(),
+            parameters: vec![SkillActionParameter {
+                name: "volume".to_string(),
+                parameter_type: SkillActionParameterType::Number,
+                description: String::new(),
+                required: true,
+            }],
+            runner: SkillActionRunner::Script {
+                script: "scripts/s.py".to_string(),
+                args: vec![],
+            },
+        };
+        let mut args = serde_json::json!({"volume": "50"})
+            .as_object()
+            .cloned()
+            .unwrap();
+        validate_action_args(&number_action, &mut args).expect("numeric string parses");
+        assert_eq!(args["volume"], json!(50.0));
+
+        let mut args = serde_json::json!({"volume": [1, 2]})
+            .as_object()
+            .cloned()
+            .unwrap();
+        assert!(validate_action_args(&number_action, &mut args).is_err());
     }
 }
