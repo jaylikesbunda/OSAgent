@@ -18,7 +18,7 @@ OSA.getContextRingMetrics = function(contextState) {
     // chars/4 estimate. actual_usage stays the cumulative billing total.
     const reported = OSA.contextTokensOf(contextState.last_request_usage);
     const used = reported > 0 ? reported : (contextState.estimated_tokens || 0);
-    const estimated = reported > 0;
+    const estimated = !(reported > 0);
     const window = contextState.context_window || 1;
     const pct = Math.min(100, Math.round((used / Math.max(window, 1)) * 100));
     const circumference = 97.4;
@@ -32,8 +32,8 @@ OSA.buildContextRingHtml = function(contextState, subagentId) {
     const metrics = OSA.getContextRingMetrics(contextState);
     if (!metrics) return '';
     const title = metrics.estimated
-        ? `Context: ${metrics.pct}% (provider-reported)`
-        : `Context: ${metrics.pct}% (estimate)`;
+        ? `Context: ${metrics.pct}% (estimate)`
+        : `Context: ${metrics.pct}% (provider-reported)`;
     return `
         <div class="context-ring subagent-context-ring ${metrics.colorClass}" id="subagent-context-ring-${subagentId}" title="${title}">
             <svg viewBox="0 0 36 36">
@@ -41,7 +41,7 @@ OSA.buildContextRingHtml = function(contextState, subagentId) {
                 <circle class="context-ring-progress" cx="18" cy="18" r="15.5"
                     stroke-dasharray="97.4" stroke-dashoffset="${metrics.offset}"/>
             </svg>
-            <span class="context-ring-text">${metrics.pct}%${metrics.estimated ? '' : '~'}</span>
+            <span class="context-ring-text">${metrics.pct}%${metrics.estimated ? '~' : ''}</span>
         </div>
     `;
 };
@@ -222,6 +222,7 @@ OSA.handleAgentEvent = function(event) {
             chain.lastAssistantDomId = null;
             OSA.setHasReceivedResponse(true);
             if (OSA.getCurrentSession()) OSA.getCurrentSession().task_status = 'active';
+            OSA.updateContextFromResponseUsage(event.usage || null, event.session_id);
             OSA.completeAssistantResponse(event.usage || null);
             OSA.hideThinkingIndicator();
             OSA.stopToolSync();
@@ -395,8 +396,8 @@ OSA.updateContextStatus = function(event) {
     ringProgress.style.strokeDashoffset = metrics.offset;
     pctEl.textContent = metrics.pct + '%';
     indicator.title = metrics.estimated
-        ? 'Context used (provider-reported)'
-        : 'Context used (estimate, no provider usage yet)';
+        ? 'Context used (estimate, no provider usage yet)'
+        : 'Context used (provider-reported)';
     
     indicator.classList.remove('warning', 'danger');
     if (metrics.pct >= 90) {
@@ -406,6 +407,19 @@ OSA.updateContextStatus = function(event) {
     }
     
     indicator.classList.remove('hidden');
+};
+
+// ResponseComplete carries the provider's usage for the request that just
+// finished, but there is no following preflight ContextUpdate on a turn that
+// has no tool calls. Apply it directly so the meter leaves estimate mode
+// immediately and survives the next session reload via the backend state.
+OSA.updateContextFromResponseUsage = function(usage, sessionId) {
+    const currentSessionId = OSA._currentContextSessionId;
+    if (!currentSessionId || (sessionId && sessionId !== currentSessionId)) return;
+    const state = OSA._contextStates[currentSessionId];
+    if (!state) return;
+    state.last_request_usage = usage || null;
+    OSA.updateContextStatus(state);
 };
 
 OSA.restoreContextState = function(sessionId, contextState) {

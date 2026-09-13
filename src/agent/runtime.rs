@@ -3112,6 +3112,23 @@ impl AgentRuntime {
             }
         }
 
+        // Persist the usage from the final provider request. A turn that ends
+        // without another iteration has no later preflight ContextUpdate to
+        // copy this into session state, which otherwise leaves the next load
+        // showing the old chars/4 estimate after compaction.
+        if let Some(context_state) = session.context_state.as_mut() {
+            context_state.last_request_usage =
+                last_request_usage.as_ref().map(|usage| MessageTokens {
+                    input: usage.input,
+                    output: usage.output,
+                    total: usage.total,
+                    cached_read: usage.cached_read,
+                    cached_write: usage.cached_write,
+                    reasoning: usage.reasoning,
+                    cache_reason: usage.cache_reason.clone(),
+                });
+        }
+
         info!("process_message: Loop complete, finalizing session");
         self.session_manager.update_session(&session).await?;
 

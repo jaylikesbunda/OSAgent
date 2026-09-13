@@ -7,6 +7,7 @@ v0.6.0 changes:
 * Fixed thinking loss and transcript flicker during tool calls
 * Preserved live cards across session syncs
 * Fixed buffered lines and unnecessary row redraws
+* Fixed context meter after compaction
 
 v0.5.3 changes:
 
