@@ -1,6 +1,12 @@
 v0.6.0 changes:
 
 * Added runtime skill authoring: OSA can now create/update/delete skills live 
+* Fixed Bash read-only false positives in quoted code
+* Improved script-backed skill creation
+* Added Community badges for Discord sessions
+* Fixed thinking loss and transcript flicker during tool calls
+* Preserved live cards across session syncs
+* Fixed buffered lines and unnecessary row redraws
 
 v0.5.3 changes:
 

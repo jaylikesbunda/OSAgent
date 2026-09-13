@@ -150,6 +150,10 @@ impl Tool for SkillListTool {
             output.push('\n');
         }
 
+        output.push_str("\nTo run an action, call skill_action with the canonical shape: ");
+        output.push_str("skill_action(skill=\"<skill name>\", action=\"<action>\", args={...}). ");
+        output.push_str("Use `skill` for the installed skill name and `args` for action parameters; do not use `name` or `arguments`.\n");
+
         Ok(output)
     }
 }
@@ -610,10 +614,16 @@ impl Tool for SkillActionTool {
     }
 
     async fn execute(&self, args: Value) -> Result<String> {
-        let skill_name = args["skill"]
+        // Some OpenAI-compatible providers/models emit the generic wrapper
+        // names `name` and `arguments` even though the advertised schema uses
+        // `skill` and `args`. Accept those aliases at the boundary so a
+        // malformed model call does not prevent an otherwise valid action from
+        // running. The canonical names remain what we advertise to the model.
+        let normalized_call = normalize_skill_action_call(&args);
+        let skill_name = normalized_call["skill"]
             .as_str()
             .ok_or_else(|| OSAgentError::ToolExecution("Missing 'skill' parameter".to_string()))?;
-        let action_name = args["action"]
+        let action_name = normalized_call["action"]
             .as_str()
             .ok_or_else(|| OSAgentError::ToolExecution("Missing 'action' parameter".to_string()))?;
 
@@ -644,7 +654,7 @@ impl Tool for SkillActionTool {
             )));
         }
 
-        let mut action_args = resolve_action_args(&args, &action);
+        let mut action_args = resolve_action_args(&normalized_call, &action);
 
         ensure_skill_is_configured(&skill, &config.settings)?;
         validate_action_args(&action, &mut action_args)?;
@@ -782,6 +792,26 @@ fn resolve_action_args(call: &Value, action: &SkillActionSchema) -> Map<String, 
     }
 
     merged
+}
+
+fn normalize_skill_action_call(call: &Value) -> Value {
+    let Some(object) = call.as_object() else {
+        return call.clone();
+    };
+
+    let mut normalized = object.clone();
+    if !normalized.contains_key("skill") {
+        if let Some(name) = object.get("name") {
+            normalized.insert("skill".to_string(), name.clone());
+        }
+    }
+    if !normalized.contains_key("args") {
+        if let Some(arguments) = object.get("arguments") {
+            normalized.insert("args".to_string(), arguments.clone());
+        }
+    }
+
+    Value::Object(normalized)
 }
 
 fn validate_action_args(action: &SkillActionSchema, args: &mut Map<String, Value>) -> Result<()> {
@@ -1211,6 +1241,19 @@ mod tests {
             resolved.get("domain").and_then(Value::as_str),
             Some("example.com")
         );
+    }
+
+    #[test]
+    fn normalizes_provider_skill_action_aliases() {
+        let call = json!({
+            "name": "word-counter",
+            "action": "count",
+            "arguments": "{\"text\":\"hello world\"}"
+        });
+        let normalized = normalize_skill_action_call(&call);
+
+        assert_eq!(normalized["skill"], "word-counter");
+        assert_eq!(normalized["args"], "{\"text\":\"hello world\"}");
     }
 
     #[test]

@@ -434,7 +434,7 @@ impl Tool for SkillCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Create a new runtime skill from instructions (and optional config/actions/scripts) so it can be used immediately in this session"
+        "Create a new runtime skill from instructions so it can be used immediately in this session. For executable actions, include the action definition and its script source in the same call; skill_create writes the files itself."
     }
 
     fn when_to_use(&self) -> &str {
@@ -446,14 +446,34 @@ impl Tool for SkillCreateTool {
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
-        vec![crate::tools::registry::ToolExample {
-            description: "Save a prompt-only skill for triaging inbox mail".to_string(),
-            input: json!({
-                "name": "inbox-triage",
-                "description": "Triage inbox mail into urgent, follow-up and archive",
-                "instructions": "# Inbox Triage\n1. Fetch recent mail.\n2. Classify each as urgent/follow-up/archive.\n3. Summarize with suggested replies."
-            }),
-        }]
+        vec![
+            crate::tools::registry::ToolExample {
+                description: "Save a prompt-only skill for triaging inbox mail".to_string(),
+                input: json!({
+                    "name": "inbox-triage",
+                    "description": "Triage inbox mail into urgent, follow-up and archive",
+                    "instructions": "# Inbox Triage\n1. Fetch recent mail.\n2. Classify each as urgent/follow-up/archive.\n3. Summarize with suggested replies."
+                }),
+            },
+            crate::tools::registry::ToolExample {
+                description: "Create a script-backed runtime action".to_string(),
+                input: json!({
+                    "name": "text-normalizer",
+                    "description": "Normalize text for downstream processing",
+                    "instructions": "# Text Normalizer\nUse the normalize action for reusable text cleanup.",
+                    "actions": [{
+                        "name": "normalize",
+                        "description": "Trim whitespace and lowercase text",
+                        "type": "script",
+                        "script": "scripts/normalize.py",
+                        "parameters": [{ "name": "text", "type": "string", "required": true }]
+                    }],
+                    "scripts": {
+                        "normalize.py": "import sys\nprint(sys.argv[1].strip().lower())\n"
+                    }
+                }),
+            },
+        ]
     }
 
     fn parameters(&self) -> Value {
@@ -465,9 +485,9 @@ impl Tool for SkillCreateTool {
                 "instructions": { "type": "string", "description": "Full markdown instructions the agent follows when the skill is used: purpose, workflows, tool calls, examples" },
                 "emoji": { "type": "string", "description": "Optional single emoji for the UI" },
                 "config": { "type": "array", "description": "Optional config fields needing user secrets (each: {name, type: string|api_key|password|number|boolean, description, required, default})", "items": { "type": "object" } },
-                "actions": { "type": "array", "description": "Optional runtime actions. Script action shape: {name, description, script: 'scripts/file.py', parameters: [{name, required}]} — CLI args and type are automatic, omit them. Only use {type: http, method, url, ...} for a trivial single REST call; prefer scripts.", "items": { "type": "object" } },
+                "actions": { "type": "array", "description": "Optional runtime actions. If the user asks for an executable action, include it here and provide its implementation in the scripts map in this same call. Script action shape: {name, description, type: 'script', script: 'scripts/file.py', parameters: [{name, required}]} — CLI args and type are automatic, omit them. Only use {type: http, method, url, ...} for a trivial single REST call; prefer scripts.", "items": { "type": "object" } },
                 "token_refresh": { "type": "object", "description": "Optional OAuth refresh block (advanced).", "additionalProperties": true },
-                "scripts": { "type": "object", "description": "Optional map of script filename (scripts/*.py|sh|ps1|js) to file content, for script actions.", "additionalProperties": { "type": "string" } }
+                "scripts": { "type": "object", "description": "Map of script filename (scripts/*.py|sh|ps1|js) to source code for script actions. Include the complete script here; skill_create writes it automatically. Do not use shell or file tools to create the script.", "additionalProperties": { "type": "string" } }
             },
             "required": ["name", "description", "instructions"]
         })
@@ -517,6 +537,9 @@ impl Tool for SkillCreateTool {
             skill.actions.len(),
             skill.name
         );
+        if skill.actions.is_empty() {
+            out.push_str(" This is a prompt-only skill: no runnable skill_action actions were created. For an executable action, use skill_update with an actions entry and its complete source in scripts.");
+        }
         if !skill.config_fields.is_empty() {
             let required: Vec<_> = skill
                 .config_fields

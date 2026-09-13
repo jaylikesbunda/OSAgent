@@ -56,6 +56,20 @@ OSA.tmodelStreamingItem = function() {
     return (last && last.kind === 'message' && last.role === 'assistant' && last.streaming) ? last : null;
 };
 
+OSA.tmodelHasLiveAgentActivity = function() {
+    return OSA.TModel.items.some(function(item) {
+        if (!item || !item.live) return false;
+        if (item.kind === 'message') return item.role === 'assistant';
+        return item.kind === 'tool' || item.kind === 'subagent';
+    });
+};
+
+OSA.tmodelSettleLiveItems = function() {
+    OSA.TModel.items.forEach(function(item) {
+        if (item) item.live = false;
+    });
+};
+
 OSA.tmodelLiveKey = function(prefix) {
     OSA.TModel.liveSeq += 1;
     return prefix + ':' + Date.now().toString(36) + ':' + OSA.TModel.liveSeq;
@@ -178,16 +192,22 @@ OSA.tmodelToolStart = function(event) {
     // The narration the model streamed just before this call is the tool's
     // prelude: fold it into the card instead of leaving a separate bubble.
     const streaming = OSA.tmodelStreamingItem();
-    let prelude = '';
+    let prelude = typeof event.prelude === 'string' ? event.prelude.trim() : '';
     if (streaming) {
-        prelude = OSA.stripSpeakBlock
+        const streamedPrelude = OSA.stripSpeakBlock
             ? OSA.stripSpeakBlock(streaming.content || '')
             : (streaming.content || '');
-        prelude = prelude.trim();
+        if (streamedPrelude.trim()) prelude = streamedPrelude.trim();
     }
     let item = OSA.tmodelGet(key);
     if (item) {
-        if (item.completed) return item;
+        if (item.completed) {
+            if (prelude && !item.prelude) {
+                item.prelude = prelude;
+                OSA.tmodelMarkDirty('tool-prelude-recovered');
+            }
+            return item;
+        }
         item.toolName = event.tool_name || item.toolName;
         item.args = event.arguments || item.args;
         item.completed = false;
@@ -308,6 +328,7 @@ OSA.tmodelSubagentItem = function(data, live) {
         currentTool: '',
         retryText: '',
         tools: [],
+        createdAt: data.created_at || data.timestamp || '',
         durationMs: data.duration_ms || OSA.completedDurationMs(data.created_at, data.completed_at) || null,
         contextState: data.context_state || null,
         anchorIndex: null,
@@ -494,9 +515,22 @@ OSA.tmodelEnsureAssistantSegment = function() {
 
 OSA.tmodelFinalizeSegmentForToolCall = function() {
     const item = OSA.tmodelStreamingItem();
-    if (!item) return;
-    OSA.tmodelRemove(item.key);
+    if (!item) return '';
+
+    // The visible response text immediately before a tool call is rendered as
+    // that card's prelude. Reasoning is a separate part of the transcript and
+    // must survive the boundary: removing the whole segment made its thinking
+    // block disappear between consecutive tool calls.
+    const display = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
+    item.streaming = false;
+    item.thinkingStreaming = false;
+    if ((item.thinking || '').trim()) {
+        item.content = '';
+    } else {
+        OSA.tmodelRemove(item.key);
+    }
     OSA.tmodelMarkDirty('segment-boundary');
+    return display.trim();
 };
 
 OSA.tmodelPruneEmptyStreamingSegment = function() {
@@ -586,6 +620,7 @@ OSA.getMessageRenderSignature = function(message) {
 
 OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTasks = [], options = {}) {
     const messages = (session && Array.isArray(session.messages)) ? session.messages : [];
+    const priorItems = OSA.TModel.items.slice();
     const items = [];
 
     messages.forEach(function(message, idx) {
@@ -605,10 +640,17 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         if (message.role === 'assistant') {
             const kind = message.metadata && message.metadata.kind;
             // Tool-prelude narration renders inside its tool card; skip the
-            // separate bubble but keep the message model-visible for anchors.
+            // response text from the separate bubble. Keep any reasoning as a
+            // thinking-only transcript item so reload matches the live view.
             if (kind === 'tool_prelude'
                 && Array.isArray(message.tool_calls)
-                && message.tool_calls.length > 0) return;
+                && message.tool_calls.length > 0) {
+                const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
+                if (!hasVisibleThinking) return;
+                const thinkingOnly = Object.assign({}, message, { content: '' });
+                items.push(OSA.tmodelMessageItem(OSA.getMessageRenderKey(message, idx), thinkingOnly, idx));
+                return;
+            }
             const hasContent = !!(message.content || '').trim();
             const hasVisibleThinking = OSA.getShowThinkingBlocks() && !!(message.thinking || '').trim();
             const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
@@ -633,7 +675,27 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         });
     });
 
-    const tools = (Array.isArray(toolEvents) ? toolEvents : [])
+    const toolSource = (Array.isArray(toolEvents) ? toolEvents : []).slice();
+    if (options.keepCurrentArtifacts) {
+        const seenToolIds = new Set(toolSource.map(function(tool) { return tool && tool.tool_call_id; }).filter(Boolean));
+        priorItems.forEach(function(item) {
+            if (!item || item.kind !== 'tool' || seenToolIds.has(item.callId)) return;
+            seenToolIds.add(item.callId);
+            toolSource.push({
+                tool_call_id: item.callId,
+                tool_name: item.toolName,
+                arguments: item.args,
+                output: item.output,
+                title: item.title,
+                metadata: item.metadata,
+                message_index: item.anchorIndex,
+                timestamp: item.ts,
+                completed: item.completed,
+                success: item.success,
+            });
+        });
+    }
+    const tools = toolSource
         .filter(function(t) { return t && t.tool_call_id && t.tool_name !== 'subagent'; })
         .sort(function(a, b) {
             const delta = (a.message_index || 0) - (b.message_index || 0);
@@ -692,7 +754,28 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         items.splice(pos, 0, item);
     });
 
-    const subagents = (Array.isArray(subagentTasks) ? subagentTasks : [])
+    const subagentSource = (Array.isArray(subagentTasks) ? subagentTasks : []).slice();
+    if (options.keepCurrentArtifacts) {
+        const seenSubagentIds = new Set(subagentSource.map(function(task) { return task && task.session_id; }).filter(Boolean));
+        priorItems.forEach(function(item) {
+            if (!item || item.kind !== 'subagent' || seenSubagentIds.has(item.subagentId)) return;
+            seenSubagentIds.add(item.subagentId);
+            subagentSource.push({
+                session_id: item.subagentId,
+                description: item.description,
+                agent_type: item.agentType,
+                prompt: item.prompt,
+                status: item.status,
+                is_running: item.isRunning,
+                tool_count: item.toolCount,
+                result: item.result,
+                duration_ms: item.durationMs,
+                context_state: item.contextState,
+                created_at: item.createdAt,
+            });
+        });
+    }
+    const subagents = subagentSource
         .slice()
         .sort(function(a, b) {
             return (OSA.eventTimestampMs(a.created_at) || 0) - (OSA.eventTimestampMs(b.created_at) || 0);
@@ -732,6 +815,31 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         }
         items.splice(pos, 0, item);
     });
+
+    if (options.preserveKeys) {
+        items.forEach(function(item) {
+            if (item.kind === 'message') {
+                const prior = priorItems.find(function(candidate) {
+                    if (!candidate || candidate.kind !== 'message' || candidate.role !== item.role) return false;
+                    if (item.clientMessageId && candidate.clientMessageId) {
+                        return candidate.clientMessageId === item.clientMessageId;
+                    }
+                    return item.messageIndex !== null && candidate.messageIndex === item.messageIndex;
+                });
+                if (prior) item.key = prior.key;
+            } else if (item.kind === 'subagent') {
+                const prior = priorItems.find(function(candidate) {
+                    return candidate && candidate.kind === 'subagent' && candidate.subagentId === item.subagentId;
+                });
+                if (prior) {
+                    item.tools = prior.tools;
+                    item.currentTool = prior.currentTool;
+                    item.retryText = prior.retryText;
+                    item.key = prior.key;
+                }
+            }
+        });
+    }
 
     const running = (session && session.task_status === 'running')
         || (typeof OSA.isAgentProcessing === 'function' && OSA.isAgentProcessing());
@@ -1315,11 +1423,16 @@ OSA.patchMessageUnit = function(wrapper, unit) {
         const body = thinkingWrap.querySelector('.thinking-body');
         const thinkingText = item.thinking || '';
         if ((body.dataset.rawText || '') !== thinkingText) {
-            if (item.thinkingStreaming || item.streaming) {
+            if (item.thinkingStreaming) {
                 OSA.renderStreamingText(body, thinkingText);
             } else {
                 OSA.setStaticMessageHtml(body, thinkingText);
             }
+        } else if (!item.thinkingStreaming && body._md) {
+            // A thinking phase can end without a trailing newline. Flush its
+            // intentionally buffered final line at the phase boundary instead
+            // of leaving it invisible until the whole response completes.
+            OSA.flushIncrementalMarkdown(body, thinkingText);
         }
         thinkingWrap.classList.toggle('streaming', !!item.thinkingStreaming);
         OSA.setThinkingPreview(thinkingWrap, thinkingText);
@@ -1364,12 +1477,26 @@ OSA.patchMessageUnit = function(wrapper, unit) {
 };
 
 OSA.patchMessageAttachments = function(msgEl, item) {
-    const sig = item.images.length + '|' + item.attachments.length;
+    const sig = JSON.stringify([
+        item.images.map(function(image) {
+            return [image.filename || '', image.mime || '', image.preview_url || image.previewUrl || ''];
+        }),
+        item.attachments.map(function(attachment) {
+            return [
+                attachment.filename || '',
+                attachment.mime || '',
+                attachment.kind || '',
+                attachment.previewUrl || attachment.preview_url || '',
+                attachment.size_bytes || attachment.sizeBytes || 0,
+                attachment.truncated ? 1 : 0,
+            ];
+        }),
+    ]);
     if (msgEl.dataset.attachmentsSig === sig) return;
     msgEl.dataset.attachmentsSig = sig;
 
     let wrap = msgEl.querySelector(':scope > .message-attachments');
-    if (!sig || sig === '0|0') {
+    if (item.images.length === 0 && item.attachments.length === 0) {
         if (wrap) wrap.remove();
         return;
     }
@@ -1631,19 +1758,33 @@ OSA.patchContextToolRow = function(row, item) {
     const isCompleted = item.completed === true;
     const isSuccess = item.success === true;
     const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : (item.status || 'running').toLowerCase();
-    row.innerHTML = `
-        <span class="context-inline-action">${OSA.escapeHtml(OSA.toolLabel(item.toolName))}</span>
-        <span class="context-inline-detail">${OSA.escapeHtml(OSA.summarizeToolArgs(item.toolName, item.args))}</span>
-        <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton('${row.id}', event)" title="Open in preview" aria-label="Open in preview">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 5h18"></path>
-                <path d="M3 12h7"></path>
-                <path d="M3 19h7"></path>
-                <rect x="12" y="8" width="9" height="11" rx="1"></rect>
-            </svg>
-        </button>
-        <span class="context-inline-status ${isCompleted ? (isSuccess ? 'done' : 'failed') : 'pending'}">${statusText}</span>
-    `;
+    if (!row.dataset.initialized) {
+        row.dataset.initialized = '1';
+        row.innerHTML = `
+            <span class="context-inline-action"></span>
+            <span class="context-inline-detail"></span>
+            <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton('${row.id}', event)" title="Open in preview" aria-label="Open in preview">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 5h18"></path>
+                    <path d="M3 12h7"></path>
+                    <path d="M3 19h7"></path>
+                    <rect x="12" y="8" width="9" height="11" rx="1"></rect>
+                </svg>
+            </button>
+            <span class="context-inline-status"></span>
+        `;
+    }
+    const actionEl = row.querySelector('.context-inline-action');
+    const detailEl = row.querySelector('.context-inline-detail');
+    const statusEl = row.querySelector('.context-inline-status');
+    const action = OSA.toolLabel(item.toolName);
+    const detail = OSA.summarizeToolArgs(item.toolName, item.args);
+    if (actionEl && actionEl.textContent !== action) actionEl.textContent = action;
+    if (detailEl && detailEl.textContent !== detail) detailEl.textContent = detail;
+    if (statusEl) {
+        if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
+        statusEl.className = 'context-inline-status ' + (isCompleted ? (isSuccess ? 'done' : 'failed') : 'pending');
+    }
     OSA.setContextToolPreviewData(row, OSA.tmodelToolEventView(item));
 };
 
@@ -1675,16 +1816,19 @@ OSA.patchParallelGroupUnit = function(wrapper, unit) {
     if (!group || !group.classList.contains('parallel-group')) {
         group = document.createElement('div');
         group.className = 'parallel-group';
+        const header = document.createElement('div');
+        header.className = 'parallel-group-header';
+        const count = document.createElement('span');
+        count.className = 'parallel-count';
+        header.appendChild(count);
+        group.appendChild(header);
         wrapper.replaceChildren(group);
     }
 
     const anyRunning = unit.items.some(function(item) { return !item.completed; });
     const headerLabel = unit.items.length + ' tools ' + (anyRunning ? 'running' : 'executed') + ' concurrently';
-    const headerSig = unit.items.length + (anyRunning ? '|r' : '|d');
-    if (group.dataset.headerSig !== headerSig) {
-        group.dataset.headerSig = headerSig;
-        group.innerHTML = '<div class="parallel-group-header"><span class="parallel-count">' + OSA.escapeHtml(headerLabel) + '</span></div>';
-    }
+    const count = group.querySelector(':scope > .parallel-group-header > .parallel-count');
+    if (count && count.textContent !== headerLabel) count.textContent = headerLabel;
 
     unit.items.forEach(function(item) {
         const card = OSA.ensureToolContainerNode(item);

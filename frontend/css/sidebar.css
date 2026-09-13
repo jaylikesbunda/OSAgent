@@ -302,6 +302,11 @@
     color: #a9b2ff;
 }
 
+.session-source-badge.source-discord-community {
+    border-color: rgba(167, 114, 255, 0.55);
+    color: #d0b4ff;
+}
+
 .session-source-badge.source-discord-shared {
     border-color: rgba(86, 204, 242, 0.5);
     color: #88d8f0;

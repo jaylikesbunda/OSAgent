@@ -102,8 +102,11 @@ impl BashTool {
 
         let is_mutating = mutating_tokens.iter().any(|token| {
             if token.contains('>') {
-                // Redirection operators are punctuation, not words.
-                lowered.contains(token)
+                // Redirection operators are punctuation, not words. Ignore
+                // operators inside quoted arguments (for example Python code
+                // passed to `python -c`) and comparison operators such as
+                // `>=`.
+                Self::contains_unquoted_output_redirection(command)
             } else if let Some((head, tail)) = token.split_once(' ') {
                 // Multi-word forms like "git add" must appear adjacently.
                 words
@@ -121,6 +124,45 @@ impl BashTool {
         }
 
         Ok(())
+    }
+
+    fn contains_unquoted_output_redirection(command: &str) -> bool {
+        let chars: Vec<char> = command.chars().collect();
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escaped = false;
+
+        for (index, ch) in chars.iter().enumerate() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            if *ch == '\\' && !in_single_quote {
+                escaped = true;
+                continue;
+            }
+
+            match ch {
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                '>' if !in_single_quote && !in_double_quote => {
+                    // `>=` is a comparison operator, not shell output
+                    // redirection. `>>`, `>&1`, and ordinary `> file` remain
+                    // blocked.
+                    if chars.get(index + 1) != Some(&'=') {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        false
     }
 
     fn ensure_read_only_safe(&self, command: &str) -> Result<()> {
@@ -738,5 +780,29 @@ mod readonly_validation_tests {
                 "should be blocked: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn allows_comparisons_and_redirection_characters_inside_quoted_code() {
+        for cmd in [
+            r#"python -c "print(1 >= 0)""#,
+            r#"python -c "print('left > right')""#,
+        ] {
+            assert!(
+                BashTool::validate_explicit_read_only(cmd).is_ok(),
+                "quoted code should not be treated as shell redirection: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn still_blocks_unquoted_redirection_and_comparison_safe_checks() {
+        for cmd in ["echo hi > out.txt", "echo hi >> out.txt", "cmd /c echo hi > out.txt"] {
+            assert!(
+                BashTool::validate_explicit_read_only(cmd).is_err(),
+                "unquoted redirection should be blocked: {cmd}"
+            );
+        }
+        assert!(BashTool::validate_explicit_read_only("echo 1 >= 0").is_ok());
     }
 }

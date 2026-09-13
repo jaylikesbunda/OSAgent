@@ -191,9 +191,9 @@ OSA.handleAgentEvent = function(event) {
                 chain.pendingToolCallIds.push(event.tool_call_id);
             }
             OSA.completeThinkingDisplay();
-            OSA.tmodelFinalizeSegmentForToolCall();
+            const prelude = OSA.tmodelFinalizeSegmentForToolCall();
             OSA.resetSpeechStream?.();
-            OSA.tmodelToolStart(event);
+            OSA.tmodelToolStart(prelude ? Object.assign({}, event, { prelude }) : event);
             OSA.persistToolStart(event);
             OSA.renderQueuedMessages(OSA.getSessionQueue());
             break;
@@ -1530,6 +1530,7 @@ OSA.syncToolsFromBackend = async function() {
         });
         if (res.ok) {
             const tools = await res.json();
+            if (Array.isArray(tools)) OSA.setSessionToolEvents(tools);
             if (Array.isArray(tools) && tools.length > 0) {
                 let changed = false;
                 tools.forEach(t => {

@@ -169,12 +169,13 @@ OSA.getSessionSourceKey = function(session) {
     const source = (session && session.metadata && typeof session.metadata.source === 'string')
         ? session.metadata.source.trim().toLowerCase()
         : '';
-    if (source === 'discord' || source === 'web') return source;
+    if (source === 'discord' || source === 'discord-community' || source === 'web') return source;
     if (source === 'discord-shared' || source === 'shared') return 'discord-shared';
 
     const owner = (session && session.metadata && typeof session.metadata.owner === 'string')
         ? session.metadata.owner
         : '';
+    if (owner.startsWith('discord-community:')) return 'discord-community';
     if (owner.startsWith('discord-channel:')) return 'discord-shared';
     if (owner.startsWith('discord:')) return 'discord';
     return 'web';
@@ -182,6 +183,7 @@ OSA.getSessionSourceKey = function(session) {
 
 OSA.getSessionSourceLabel = function(sourceKey) {
     if (sourceKey === 'discord') return 'Discord';
+    if (sourceKey === 'discord-community') return 'Community';
     if (sourceKey === 'discord-shared') return 'Shared';
     return 'Web';
 };
@@ -583,6 +585,7 @@ OSA.loadSessions = async function() {
                     <option value="all">All sources</option>
                     <option value="web">Web</option>
                     <option value="discord">Discord</option>
+                    <option value="discord-community">Community</option>
                     <option value="discord-shared">Shared</option>
                 </select>
             </div>
@@ -742,33 +745,39 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
         if (OSA._runningSnapshotRequestId !== requestId) return;
         if (!OSA.getCurrentSession() || OSA.getCurrentSession().id !== sessionId) return;
 
-        const hasLiveItems = OSA.TModel.items.some(item => item.live);
+        const hasLiveAgentActivity = OSA.tmodelHasLiveAgentActivity();
         if (session.task_status !== 'running') {
-            currentSession.task_status = session.task_status;
-
-            if (hasLiveItems || OSA.isAgentProcessing() || OSA.getStreamingAssistantMessage()) {
+            if (hasLiveAgentActivity) {
                 OSA.completeThinkingDisplay();
                 OSA.completeAssistantResponse();
-                OSA.hideThinkingIndicator();
-                OSA.stopToolSync();
-                OSA.setProcessing(false);
-                OSA.setStopping(false);
-                OSA.resetSendButton();
-                OSA.refreshCurrentSessionQueue();
-                OSA.loadSessions();
-            } else {
-                OSA.setCurrentSession(session);
-                OSA.rebuildTranscriptFromSession(session, OSA.getSessionToolEvents() || [], OSA.getSessionSubagentTasks() || [], { reason: 'snapshot-final' });
-                OSA.hideThinkingIndicator();
-                OSA.stopToolSync();
             }
+            OSA.setCurrentSession(session);
+            OSA.rebuildTranscriptFromSession(
+                session,
+                OSA.getSessionToolEvents() || [],
+                OSA.getSessionSubagentTasks() || [],
+                {
+                    reason: 'snapshot-final',
+                    preserveKeys: true,
+                    keepCurrentArtifacts: true,
+                    adoptStreaming: false,
+                },
+            );
+            OSA.hideThinkingIndicator();
+            OSA.stopToolSync();
+            OSA.setProcessing(false);
+            OSA.setStopping(false);
+            OSA.resetSendButton();
+            OSA.refreshCurrentSessionQueue();
+            OSA.loadSessions();
             return;
         }
 
         // Mid-turn the live event stream owns the transcript; a fetched snapshot
-        // only lags it. Fall back to it exclusively when no live items exist
-        // (fresh page attach to an already-running turn).
-        if (hasLiveItems) {
+        // only lags it. Fall back to it exclusively when no live agent output
+        // exists (fresh page attach or an optimistic send whose events were
+        // missed by both transports).
+        if (hasLiveAgentActivity) {
             currentSession.task_status = session.task_status;
             return;
         }

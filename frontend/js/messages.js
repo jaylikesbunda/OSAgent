@@ -47,9 +47,8 @@ OSA.isHiddenSyntheticMessage = function(message) {
 };
 
 OSA.showThinkingIndicator = function() {
-    const messagesDiv = document.getElementById('messages');
     const existing = document.getElementById('thinking-indicator');
-    if (existing) existing.remove();
+    if (existing) return existing;
 
     OSA.setTurnStartTime(Date.now());
 
@@ -84,6 +83,7 @@ OSA.showThinkingIndicator = function() {
         labelIdx = (labelIdx + 1) % sublabels.length;
         el.textContent = sublabels[labelIdx];
     }, 3000);
+    return indicator;
 };
 
 OSA._initThinkingCanvas = function(canvas) {
@@ -551,6 +551,7 @@ OSA.completeAssistantResponse = function(usage) {
 
     OSA.setTurnStartTime(null);
     OSA.resetStreamingMessage();
+    OSA.tmodelSettleLiveItems?.();
     OSA.updateTodoDock();
     const currentSession = OSA.getCurrentSession();
     if (currentSession && currentSession.id && typeof OSA.loadSessionCheckpoints === 'function') {
