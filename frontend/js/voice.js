@@ -54,15 +54,46 @@ OSA.setPreferredInputDevice = function(deviceId) {
     }
 };
 
-OSA.listInputDevices = async function() {
+// Speaker selection, mirroring the microphone choice: browser-profile scoped,
+// so it lives in localStorage and never in the server config.
+OSA.getPreferredOutputDevice = function() {
+    try {
+        return localStorage.getItem('osa.voice.outputDevice') || '';
+    } catch (err) {
+        return '';
+    }
+};
+
+OSA.setPreferredOutputDevice = function(deviceId) {
+    try {
+        if (deviceId) {
+            localStorage.setItem('osa.voice.outputDevice', deviceId);
+        } else {
+            localStorage.removeItem('osa.voice.outputDevice');
+        }
+    } catch (err) {
+        console.warn('Could not persist speaker choice:', err);
+    }
+};
+
+OSA.listAudioDevices = async function() {
     if (!navigator.mediaDevices?.enumerateDevices) return [];
     try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        return devices.filter(device => device.kind === 'audioinput');
+        return await navigator.mediaDevices.enumerateDevices();
     } catch (err) {
-        console.warn('Could not enumerate microphones:', err);
+        console.warn('Could not enumerate audio devices:', err);
         return [];
     }
+};
+
+OSA.listInputDevices = async function() {
+    const devices = await OSA.listAudioDevices();
+    return devices.filter(device => device.kind === 'audioinput');
+};
+
+OSA.listOutputDevices = async function() {
+    const devices = await OSA.listAudioDevices();
+    return devices.filter(device => device.kind === 'audiooutput');
 };
 
 // Browsers hide device labels until the page has been granted mic access once,
@@ -70,6 +101,107 @@ OSA.listInputDevices = async function() {
 OSA.inputDeviceLabelsAvailable = async function() {
     const devices = await OSA.listInputDevices();
     return devices.length > 0 && devices.some(device => !!device.label);
+};
+
+// Requests a throwaway mic stream so enumerateDevices starts returning real
+// labels. Resolves either way: a declined prompt still leaves a usable picker.
+OSA.primeDeviceLabels = async function() {
+    if (!navigator.mediaDevices?.getUserMedia) return false;
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(track => track.stop());
+        return true;
+    } catch (err) {
+        console.warn('Microphone permission not granted; device names stay hidden:', err);
+        return false;
+    }
+};
+
+// Routes playback to the chosen speaker when the engine supports it. The Web
+// Speech API has no output-device hook, so browser voices always follow the
+// system default; this covers Local Piper audio.
+OSA.applyOutputDevice = function(audio) {
+    if (!audio || typeof audio.setSinkId !== 'function') return;
+    const deviceId = OSA.getPreferredOutputDevice();
+    if (!deviceId) return;
+    try {
+        const result = audio.setSinkId(deviceId);
+        if (result && typeof result.catch === 'function') {
+            result.catch(err => console.warn('Could not use the selected speaker:', err));
+        }
+    } catch (err) {
+        console.warn('Could not use the selected speaker:', err);
+    }
+};
+
+// Fills one of the Settings device <select>s. `kindLabel` names the entries
+// when the browser hides their labels.
+OSA.populateDeviceSelect = function(select, devices, preferred, defaultLabel, kindLabel) {
+    if (!select) return;
+    select.innerHTML = '';
+
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = devices.length ? defaultLabel : `No ${kindLabel.toLowerCase()} found`;
+    select.appendChild(auto);
+
+    devices.forEach((device, index) => {
+        const option = document.createElement('option');
+        option.value = device.deviceId;
+        option.textContent = device.label || `${kindLabel} ${index + 1}`;
+        select.appendChild(option);
+    });
+
+    select.value = devices.some(device => device.deviceId === preferred) ? preferred : '';
+};
+
+// Builds the input (microphone) and output (speaker) pickers in the Voice
+// settings pane and wires them to the localStorage preferences.
+OSA.populateSettingsDevicePickers = async function() {
+    const inputSelect = document.getElementById('setting-input-device');
+    const outputSelect = document.getElementById('setting-output-device');
+    if (!inputSelect && !outputSelect) return;
+
+    let devices = await OSA.listAudioDevices();
+
+    // Labels stay blank until the page has held a mic stream once. Prime it so
+    // the pickers can show real names rather than "Microphone 1".
+    if (devices.length && !devices.some(device => !!device.label)) {
+        if (await OSA.primeDeviceLabels()) {
+            devices = await OSA.listAudioDevices();
+        }
+    }
+
+    const inputs = devices.filter(device => device.kind === 'audioinput');
+    const outputs = devices.filter(device => device.kind === 'audiooutput');
+
+    OSA.populateDeviceSelect(
+        inputSelect,
+        inputs,
+        OSA.getPreferredInputDevice(),
+        'System default microphone',
+        'Microphone'
+    );
+    OSA.populateDeviceSelect(
+        outputSelect,
+        outputs,
+        OSA.getPreferredOutputDevice(),
+        'System default speaker',
+        'Speaker'
+    );
+
+    if (inputSelect) {
+        inputSelect.onchange = () => {
+            OSA.setPreferredInputDevice(inputSelect.value);
+            OSA.setVoiceStatus('Microphone updated.', 'ready');
+        };
+    }
+    if (outputSelect) {
+        outputSelect.onchange = () => {
+            OSA.setPreferredOutputDevice(outputSelect.value);
+            OSA.setVoiceStatus('Speaker updated.', 'ready');
+        };
+    }
 };
 
 OSA.buildAudioConstraints = function() {
@@ -1304,6 +1436,7 @@ OSA.pumpSpeechQueue = function() {
             OSA.setCurrentAudioUrl(url);
             const audio = new Audio(url);
             OSA.setCurrentAudio(audio);
+            OSA.applyOutputDevice(audio);
             audio.playbackRate = voiceConfig?.voice_speed || 1.0;
             audio.onended = finish;
             audio.onerror = finish;

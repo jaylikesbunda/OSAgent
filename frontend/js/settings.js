@@ -234,8 +234,9 @@ OSA.loadSettings = async function() {
         
         const voice = OSA.normalizeVoiceConfig(config.voice || {});
         document.getElementById('setting-voice-enabled').checked = !!voice.enabled;
-        OSA.setVoiceProviderToggle('stt-provider-toggle', 'setting-stt-provider', voice.stt_provider || 'browser');
-        OSA.setVoiceProviderToggle('tts-provider-toggle', 'setting-tts-provider', voice.tts_provider || 'browser');
+        document.getElementById('setting-stt-provider').value = voice.stt_provider || 'browser';
+        document.getElementById('setting-tts-provider').value = voice.tts_provider || 'browser';
+        await OSA.populateSettingsDevicePickers();
         document.getElementById('setting-voice-language').value = voice.language || 'en';
         document.getElementById('setting-auto-send').checked = !!voice.auto_send;
         document.getElementById('setting-auto-speak').checked = !!voice.auto_speak;
@@ -489,48 +490,14 @@ OSA.saveSettings = async function() {
     }
 };
 
-OSA.setVoiceProviderToggle = function(toggleId, hiddenId, value) {
-    const hidden = document.getElementById(hiddenId);
-    if (!hidden) return;
-
-    const normalizedValue = hiddenId === 'setting-stt-provider'
-        ? OSA.normalizeSttProvider(value)
-        : OSA.normalizeTtsProvider(value);
-
-    hidden.value = normalizedValue;
-
-    if (hiddenId === 'setting-stt-provider') {
-        const checkbox = document.getElementById('setting-stt-local');
-        if (checkbox) checkbox.checked = normalizedValue === 'whisper-local';
-    } else if (hiddenId === 'setting-tts-provider') {
-        const checkbox = document.getElementById('setting-tts-local');
-        if (checkbox) checkbox.checked = normalizedValue === 'piper-local';
-    }
-};
-
-OSA.bindVoiceProviderToggles = function() {
-    const toggleMap = [
-        {
-            checkboxId: 'setting-stt-local',
-            hiddenId: 'setting-stt-provider',
-            onValue: 'whisper-local',
-            offValue: 'browser'
-        },
-        {
-            checkboxId: 'setting-tts-local',
-            hiddenId: 'setting-tts-provider',
-            onValue: 'piper-local',
-            offValue: 'browser'
+// Device lists change when hardware is plugged in or mic permission is granted.
+// Rebuild the Voice pickers whenever the browser reports a change.
+OSA.bindVoiceDeviceListeners = function() {
+    if (!navigator.mediaDevices?.addEventListener) return;
+    navigator.mediaDevices.addEventListener('devicechange', function() {
+        if (document.getElementById('setting-input-device') || document.getElementById('setting-output-device')) {
+            OSA.populateSettingsDevicePickers();
         }
-    ];
-
-    toggleMap.forEach(function(entry) {
-        const checkbox = document.getElementById(entry.checkboxId);
-        if (!checkbox || checkbox.dataset.bound === 'true') return;
-        checkbox.addEventListener('change', function() {
-            OSA.setVoiceProviderToggle(entry.checkboxId, entry.hiddenId, checkbox.checked ? entry.onValue : entry.offValue);
-        });
-        checkbox.dataset.bound = 'true';
     });
 };
 
@@ -613,6 +580,7 @@ OSA.switchSettingsTab = async function(tabId) {
         if (browser) {
             browser.innerHTML = '<div class="loading-placeholder">Loading models...</div>';
         }
+        await OSA.populateSettingsDevicePickers();
         try {
             await OSA.loadVoiceModels();
             OSA.renderVoiceModelBrowser();
@@ -1845,4 +1813,4 @@ window.saveSettings = OSA.saveSettings;
 window.installVoiceModels = OSA.installVoiceModels;
 window.switchSettingsTab = OSA.switchSettingsTab;
 
-document.addEventListener('DOMContentLoaded', OSA.bindVoiceProviderToggles);
+document.addEventListener('DOMContentLoaded', OSA.bindVoiceDeviceListeners);

@@ -874,28 +874,40 @@
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-stt-local">Local Whisper Speech-to-Text</label>
-                                <span class="toggle-desc">Off uses browser speech recognition. On records from the mic and sends audio to Local Whisper, then places the transcript into the chat box.</span>
+                        <div class="settings-field-row">
+                            <div class="settings-field flex-1">
+                                <label for="setting-stt-provider">Input &mdash; speech to text</label>
+                                <select id="setting-stt-provider">
+                                    <option value="browser">Browser built-in</option>
+                                    <option value="whisper-local">Local Whisper</option>
+                                </select>
+                                <span class="settings-field-hint">Where dictated mic audio is transcribed. Local Whisper needs the runtime and a model installed below.</span>
                             </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-stt-local">
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
-                        <input type="hidden" id="setting-stt-provider" value="browser">
-                        <div class="toggle-field">
-                            <div class="toggle-info">
-                                <label class="toggle-label" for="setting-tts-local">Local Piper Text-to-Speech</label>
-                                <span class="toggle-desc">Off uses browser speech. On uses Local Piper for offline speech playback after you install a voice.</span>
+                            <div class="settings-field flex-1">
+                                <label for="setting-tts-provider">Output &mdash; text to speech</label>
+                                <select id="setting-tts-provider">
+                                    <option value="browser">Browser built-in</option>
+                                    <option value="piper-local">Local Piper</option>
+                                </select>
+                                <span class="settings-field-hint">Which engine speaks replies. Local Piper needs the runtime and a voice installed below.</span>
                             </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="setting-tts-local">
-                                <span class="toggle-slider"></span>
-                            </label>
                         </div>
-                        <input type="hidden" id="setting-tts-provider" value="browser">
+                        <div class="settings-field-row">
+                            <div class="settings-field flex-1">
+                                <label for="setting-input-device">Input device &mdash; microphone</label>
+                                <select id="setting-input-device">
+                                    <option value="">System default microphone</option>
+                                </select>
+                                <span class="settings-field-hint" id="setting-input-device-hint">Used for browser and Local Whisper recording. Device names appear after you grant mic access.</span>
+                            </div>
+                            <div class="settings-field flex-1">
+                                <label for="setting-output-device">Output device &mdash; speaker</label>
+                                <select id="setting-output-device">
+                                    <option value="">System default speaker</option>
+                                </select>
+                                <span class="settings-field-hint" id="setting-output-device-hint">Routes Local Piper playback. Browser speech always follows the system default speaker.</span>
+                            </div>
+                        </div>
                         <details class="settings-advanced">
                             <summary>Advanced</summary>
                             <div class="settings-advanced-body">

@@ -8,6 +8,7 @@ v0.6.0 changes:
 * Preserved live cards across session syncs
 * Fixed buffered lines and unnecessary row redraws
 * Fixed context meter after compaction
+* Voice settings now choose input and output directly: pick browser vs Local Whisper/Piper plus the microphone and speaker devices
 
 v0.5.3 changes:
 
