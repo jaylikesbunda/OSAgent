@@ -1842,8 +1842,8 @@
 
 /* ---- Queue panel (attached above the composer input) ---- */
 .queue-panel {
-    margin: 0 0 8px;
-    padding: 6px;
+    margin: 0 0 6px;
+    padding: 3px 4px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
@@ -1854,8 +1854,8 @@
 }
 
 .queue-count {
-    padding: 2px 8px 6px;
-    font-size: 11px;
+    padding: 1px 6px 3px;
+    font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1865,18 +1865,17 @@
 .queue-list {
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    max-height: 148px;
+    max-height: 116px;
     overflow-y: auto;
 }
 
 .queue-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-height: 32px;
-    padding: 4px 8px 4px 4px;
-    border-radius: 6px;
+    gap: 6px;
+    min-height: 26px;
+    padding: 1px 4px 1px 2px;
+    border-radius: 5px;
 }
 
 .queue-row:hover {
@@ -1894,9 +1893,9 @@
 
 .queue-order {
     flex-shrink: 0;
-    min-width: 18px;
+    min-width: 14px;
     text-align: center;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     color: var(--text-muted);
 }
@@ -1909,9 +1908,9 @@
     white-space: nowrap;
     background: transparent;
     border: none;
-    padding: 4px;
+    padding: 2px;
     text-align: left;
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text-primary);
     cursor: text;
     border-radius: 4px;
@@ -1952,12 +1951,12 @@
 }
 
 .queue-btn {
-    padding: 2px 8px;
+    padding: 1px 6px;
     background: transparent;
     border: 1px solid transparent;
     border-radius: 4px;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: 11px;
     cursor: pointer;
     white-space: nowrap;
 }
