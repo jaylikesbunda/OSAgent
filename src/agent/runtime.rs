@@ -4832,6 +4832,11 @@ impl AgentRuntime {
             "web_fetch",
             "web_search",
             "reflect",
+            "codesearch",
+            "lsp",
+            "todoread",
+            "skill",
+            "skill_list",
         ];
 
         for call in tool_calls {
@@ -6847,6 +6852,25 @@ impl AgentRuntime {
             return None;
         }
 
+        // Batch read_file `paths[]`: every entry must be in-workspace for
+        // parallel fan-out; first outside-workspace path blocks it.
+        if tool_name == "read_file" {
+            if let Some(paths) = args.get("paths").and_then(|v| v.as_array()) {
+                for entry in paths {
+                    if let Some(key) = entry.as_str() {
+                        if let Some(outside) = Self::resolve_key_path(key, workspace_root) {
+                            // Absolute-outside or escaping `..` — block parallel.
+                            // Confirm it is genuinely outside before blocking:
+                            // resolve_key_path already returns None for
+                            // in-workspace absolute paths.
+                            return Some(outside);
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+
         let key = match tool_name {
             "read_file" => args
                 .get("filePath")
@@ -6864,6 +6888,13 @@ impl AgentRuntime {
     fn resolve_key_path(key: &str, workspace_root: Option<&Path>) -> Option<String> {
         let expanded = shellexpand::tilde(key).to_string();
         if Path::new(&expanded).is_absolute() {
+            // Absolute but inside the workspace is fine for parallel fan-out
+            // (Codex-style: gate on outside-workspace, not on absolute).
+            if let Some(root) = workspace_root {
+                if Path::new(&expanded).starts_with(root) {
+                    return None;
+                }
+            }
             return Some(expanded);
         }
 
@@ -6871,7 +6902,7 @@ impl AgentRuntime {
             if expanded.contains("..") {
                 let resolved = root.join(&expanded);
                 let canonical = resolved.canonicalize().unwrap_or(resolved);
-                if canonical.is_absolute() {
+                if canonical.is_absolute() && !canonical.starts_with(root) {
                     return Some(canonical.to_string_lossy().to_string());
                 }
             }

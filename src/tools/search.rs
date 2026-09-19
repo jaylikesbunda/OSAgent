@@ -543,6 +543,9 @@ impl GrepTool {
         search_path: &Path,
         file_pattern: Option<&str>,
         case_sensitive: bool,
+        literal: bool,
+        offset: usize,
+        limit: usize,
         timeout_secs: u64,
     ) -> Result<(LargeOutputResult, usize)> {
         let mut cmd = tokio::process::Command::new(rg_binary_name());
@@ -559,6 +562,10 @@ impl GrepTool {
 
         if !case_sensitive {
             cmd.arg("-i");
+        }
+        // Literal mode (Pi/Minimax-style): no regex escaping needed.
+        if literal {
+            cmd.arg("--fixed-strings");
         }
 
         if let Some(fp) = file_pattern {
@@ -607,12 +614,37 @@ impl GrepTool {
         }
 
         let matches = stdout.lines().count();
+        // Continuation-style paging (Minimax next_offset pattern): slice the
+        // raw match list first so offset/limit page the full result set,
+        // not the truncated preview.
+        let total = matches;
+        let start = offset.saturating_sub(1);
+        let window: String = if start >= total {
+            format!(
+                "offset {} is past end of results ({} matches).",
+                offset, total
+            )
+        } else {
+            let end = (start + limit).min(total);
+            let mut w: String = stdout.lines().skip(start).take(end - start).collect::<Vec<_>>().join("\n");
+            if end < total {
+                w.push_str(&format!(
+                    "\n\n[showing matches {}-{} of {}. Use offset={} limit={} to continue.]",
+                    start + 1,
+                    end,
+                    total,
+                    end + 1,
+                    limit
+                ));
+            }
+            w
+        };
         Ok((
             maybe_store_large_output_result(
                 &self.default_workspace()?,
                 self.writable,
                 "grep",
-                &stdout,
+                &window,
             ),
             matches,
         ))
@@ -624,6 +656,9 @@ impl GrepTool {
         search_path: &Path,
         file_pattern: Option<&str>,
         case_sensitive: bool,
+        literal: bool,
+        offset: usize,
+        limit: usize,
         timeout_secs: u64,
     ) -> Result<(LargeOutputResult, usize)> {
         let workspace = self.default_workspace()?;
@@ -649,7 +684,11 @@ impl GrepTool {
             ));
         }
 
-        let pattern_str_owned = pattern_str.to_string();
+        let pattern_str_owned = if literal {
+            regex::escape(pattern_str)
+        } else {
+            pattern_str.to_string()
+        };
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel = cancelled.clone();
 
@@ -712,11 +751,32 @@ impl GrepTool {
         } else {
             let match_count = matches.len();
             matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            let mut output = matches
+            let lines: Vec<String> = matches
                 .into_iter()
                 .map(|(_, line)| line)
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+            let total = lines.len();
+            let start = offset.saturating_sub(1);
+            let mut output = if start >= total {
+                format!(
+                    "offset {} is past end of results ({} matches).",
+                    offset, total
+                )
+            } else {
+                let end = (start + limit).min(total);
+                let mut w = lines[start..end].join("\n");
+                if end < total {
+                    w.push_str(&format!(
+                        "\n\n[showing matches {}-{} of {}. Use offset={} limit={} to continue.]",
+                        start + 1,
+                        end,
+                        total,
+                        end + 1,
+                        limit
+                    ));
+                }
+                w
+            };
             if truncated {
                 output.push_str(&format!(
                     "\n\n[Search hit the {} match cap; results truncated]",
@@ -747,7 +807,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents with regular expressions. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Pattern is a regular expression (e.g. 'fn\\\\s+\\\\w+' to find function definitions).\n- Use file_pattern to filter by file type (e.g. '**/*.rs', '*.{ts,tsx}').\n- Results include file path, line number, and matching line content.\n- Case sensitive by default; set case_sensitive to false for case-insensitive search.\n- Performs exact regex matching - escape special characters if searching for literals.\n- Use this tool to locate code before reading or editing files.\n- If nothing matches, do not conclude the code does not exist: retry with reformulations - synonyms, camelCase/snake_case variants, shorter fragments, case-insensitive search.\n- When doing an open-ended search that may require multiple rounds of grepping and globbing, use the task or subagent tool with an explore agent instead, to reduce context usage."
+        "Search file contents with regular expressions. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Pattern is a regular expression (e.g. 'fn\\\\s+\\\\w+' to find function definitions). Set literal:true to search exact text without regex escaping.\n- Use file_pattern to filter by file type (e.g. '**/*.rs', '*.{ts,tsx}').\n- Results include file path, line number, and matching line content.\n- Case sensitive by default; set case_sensitive to false for case-insensitive search.\n- Paged: offset (1-based, default 1) + limit (default 100, max 500) slice the match list; oversized output appends a next-offset hint.\n- Use this tool to locate code before reading or editing files.\n- If nothing matches, do not conclude the code does not exist: retry with reformulations - synonyms, camelCase/snake_case variants, shorter fragments, case-insensitive search.\n- When doing an open-ended search that may require multiple rounds of grepping and globbing, use the task or subagent tool with an explore agent instead, to reduce context usage."
     }
 
     fn when_to_use(&self) -> &str {
@@ -783,7 +843,7 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regular expression pattern to search for"
+                    "description": "Regular expression pattern to search for (or literal text with literal:true)"
                 },
                 "path": {
                     "type": "string",
@@ -796,6 +856,21 @@ impl Tool for GrepTool {
                 "case_sensitive": {
                     "type": "boolean",
                     "description": "Case sensitive search (default: true)"
+                },
+                "literal": {
+                    "type": "boolean",
+                    "description": "Treat pattern as literal text, no regex escaping needed (default: false)"
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based match offset for paging (default: 1)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "Max matches to return (default: 100, max: 500)"
                 }
             },
             "required": ["pattern"]
@@ -815,6 +890,9 @@ impl Tool for GrepTool {
         let path = args["path"].as_str().unwrap_or(".");
         let file_pattern = args["file_pattern"].as_str();
         let case_sensitive = args["case_sensitive"].as_bool().unwrap_or(true);
+        let literal = args["literal"].as_bool().unwrap_or(false);
+        let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
+        let limit = (args["limit"].as_u64().unwrap_or(100) as usize).clamp(1, 500);
 
         let search_path = self.validate_path(path)?;
 
@@ -825,6 +903,9 @@ impl Tool for GrepTool {
                     &search_path,
                     file_pattern,
                     case_sensitive,
+                    literal,
+                    offset,
+                    limit,
                     self.timeout_seconds,
                 )
                 .await
@@ -842,7 +923,10 @@ impl Tool for GrepTool {
                             "original_lines": result.original_lines,
                             "path": path,
                             "file_pattern": file_pattern,
-                            "case_sensitive": case_sensitive
+                            "case_sensitive": case_sensitive,
+                            "literal": literal,
+                            "offset": offset,
+                            "limit": limit
                         }),
                         attachments: Vec::new(),
                     })
@@ -859,6 +943,9 @@ impl Tool for GrepTool {
                 &search_path,
                 file_pattern,
                 case_sensitive,
+                literal,
+                offset,
+                limit,
                 self.timeout_seconds,
             )
             .await?;
@@ -875,7 +962,10 @@ impl Tool for GrepTool {
                 "original_lines": result.original_lines,
                 "path": path,
                 "file_pattern": file_pattern,
-                "case_sensitive": case_sensitive
+                "case_sensitive": case_sensitive,
+                "literal": literal,
+                "offset": offset,
+                "limit": limit
             }),
             attachments: Vec::new(),
         })
@@ -957,6 +1047,8 @@ impl GlobTool {
         &self,
         pattern: &str,
         search_path: &Path,
+        offset: usize,
+        limit: usize,
         timeout_secs: u64,
     ) -> Result<(LargeOutputResult, usize)> {
         let mut cmd = tokio::process::Command::new(rg_binary_name());
@@ -1013,12 +1105,34 @@ impl GlobTool {
         }
 
         let count = relative_lines.len();
+        let total = count;
+        let start = offset.saturating_sub(1);
+        let window: String = if start >= total {
+            format!(
+                "offset {} is past end of results ({} files).",
+                offset, total
+            )
+        } else {
+            let end = (start + limit).min(total);
+            let mut w = relative_lines[start..end].join("\n");
+            if end < total {
+                w.push_str(&format!(
+                    "\n\n[showing files {}-{} of {}. Use offset={} limit={} to continue.]",
+                    start + 1,
+                    end,
+                    total,
+                    end + 1,
+                    limit
+                ));
+            }
+            w
+        };
         Ok((
             maybe_store_large_output_result(
                 &self.default_workspace()?,
                 self.writable,
                 "glob",
-                &relative_lines.join("\n"),
+                &window,
             ),
             count,
         ))
@@ -1028,6 +1142,8 @@ impl GlobTool {
         &self,
         pattern: &str,
         search_path: &Path,
+        offset: usize,
+        limit: usize,
         timeout_secs: u64,
     ) -> Result<(LargeOutputResult, usize)> {
         let matcher = match Glob::new(pattern) {
@@ -1078,11 +1194,32 @@ impl GlobTool {
             ))
         } else {
             let count = matches.len();
-            let output = matches
+            let total = count;
+            let paths: Vec<String> = matches
                 .into_iter()
                 .map(|(_, path)| path)
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+            let start = offset.saturating_sub(1);
+            let output = if start >= total {
+                format!(
+                    "offset {} is past end of results ({} files).",
+                    offset, total
+                )
+            } else {
+                let end = (start + limit).min(total);
+                let mut w = paths[start..end].join("\n");
+                if end < total {
+                    w.push_str(&format!(
+                        "\n\n[showing files {}-{} of {}. Use offset={} limit={} to continue.]",
+                        start + 1,
+                        end,
+                        total,
+                        end + 1,
+                        limit
+                    ));
+                }
+                w
+            };
             Ok((
                 maybe_store_large_output_result(
                     &self.default_workspace()?,
@@ -1107,7 +1244,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by name pattern using glob matching. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Use glob patterns like '**/*.rs', 'src/**/*.ts', or '*.{json,yaml}'.\n- Results are sorted by modification time (most recent first).\n- Returns relative paths from the workspace root.\n- Use this to locate files before reading or to understand project structure.\n- If you need to search file contents, use grep instead.\n- When doing an open-ended search that may require multiple rounds of globbing and grepping, use the task or subagent tool with an explore agent instead, to reduce context usage."
+        "Find files by name pattern using glob matching. Uses ripgrep when available for significantly faster searches.\n\nUsage:\n- Use glob patterns like '**/*.rs', 'src/**/*.ts', or '*.{json,yaml}'.\n- Results are sorted by modification time (most recent first).\n- Returns relative paths from the workspace root.\n- Paged: offset (1-based, default 1) + limit (default 200, max 1000); oversized output appends a next-offset hint.\n- Use this to locate files before reading or to understand project structure.\n- If you need to search file contents, use grep instead.\n- When doing an open-ended search that may require multiple rounds of globbing and grepping, use the task or subagent tool with an explore agent instead, to reduce context usage."
     }
 
     fn when_to_use(&self) -> &str {
@@ -1147,6 +1284,17 @@ impl Tool for GlobTool {
                 "path": {
                     "type": "string",
                     "description": "Relative path to search in (default: workspace root)"
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based result offset for paging (default: 1)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Max paths to return (default: 200, max: 1000)"
                 }
             },
             "required": ["pattern"]
@@ -1163,11 +1311,13 @@ impl Tool for GlobTool {
             OSAgentError::ToolExecution("Missing 'pattern' parameter".to_string())
         })?;
         let path = args["path"].as_str().unwrap_or(".");
+        let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
+        let limit = (args["limit"].as_u64().unwrap_or(200) as usize).clamp(1, 1000);
         let search_path = self.validate_path(path)?;
 
         if ensure_rg_checked() {
             match self
-                .execute_rg_glob(pattern, &search_path, self.timeout_seconds)
+                .execute_rg_glob(pattern, &search_path, offset, limit, self.timeout_seconds)
                 .await
             {
                 Ok((result, count)) => {
@@ -1182,7 +1332,9 @@ impl Tool for GlobTool {
                             "original_chars": result.original_chars,
                             "original_lines": result.original_lines,
                             "path": path,
-                            "pattern": pattern
+                            "pattern": pattern,
+                            "offset": offset,
+                            "limit": limit
                         }),
                         attachments: Vec::new(),
                     })
@@ -1194,7 +1346,7 @@ impl Tool for GlobTool {
         }
 
         let (result, count) = self
-            .execute_walkdir_glob(pattern, &search_path, self.timeout_seconds)
+            .execute_walkdir_glob(pattern, &search_path, offset, limit, self.timeout_seconds)
             .await?;
         Ok(ToolResult {
             output: result.display_output,
@@ -1207,7 +1359,9 @@ impl Tool for GlobTool {
                 "original_chars": result.original_chars,
                 "original_lines": result.original_lines,
                 "path": path,
-                "pattern": pattern
+                "pattern": pattern,
+                "offset": offset,
+                "limit": limit
             }),
             attachments: Vec::new(),
         })
@@ -1344,7 +1498,7 @@ mod tests {
         assert!(!search_explicitly_requested);
 
         let result = tool
-            .execute_walkdir_grep("needle", &search_root, None, true, 30)
+            .execute_walkdir_grep("needle", &search_root, None, true, false, 1, 100, 30)
             .await
             .expect("grep result");
         assert!(
@@ -1360,7 +1514,7 @@ mod tests {
 
         let direct_root = workspace.join("vendored-copy");
         let direct = tool
-            .execute_walkdir_grep("needle", &direct_root, None, true, 30)
+            .execute_walkdir_grep("needle", &direct_root, None, true, false, 1, 100, 30)
             .await
             .expect("direct grep result");
         assert!(

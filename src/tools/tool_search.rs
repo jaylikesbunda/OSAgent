@@ -6,8 +6,9 @@
 //! low-frequency built-ins (weather, calendar, memory management, ...)
 //! and for every MCP server tool out of every request.
 //!
-//! The always-loaded native core (files, bash, search, web, edits) is not
-//! searchable here — those tools are in context on every turn by design.
+//! The always-loaded native core (files, edits, bash + process background,
+//! search, web, todos, skills) is not searchable here — those tools are in
+//! context on every turn by design.
 
 use crate::error::Result;
 use crate::mcp::McpHandle;
@@ -95,7 +96,7 @@ impl Tool for ToolSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Find and load tools that are not loaded by default. Core tools (files, edit, bash, search, web) are always loaded; this searches the deferred catalogs: low-frequency built-ins (weather, calendar, news, system status, memory, decisions, goals, ...) and connected MCP server tools. Their schemas are not in context until you search for them; matches returned here become callable immediately by name."
+        "Find and load tools that are not loaded by default. Core tools (files, edits, bash + process background, search, web, todos, skills) are always loaded; this searches the deferred catalogs: low-frequency built-ins (weather, calendar, news, system status, memory, decisions, goals, skill authoring, public web, ...) and connected MCP server tools. Their schemas are not in context until you search for them; matches returned here become callable immediately by name."
     }
 
     fn when_to_use(&self) -> &str {
@@ -103,7 +104,7 @@ impl Tool for ToolSearchTool {
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for core tools (files, bash, search, web, edits) — those are always loaded"
+        "Do not use for core tools (files, bash/process, search, web, todos, skills) — those are always loaded"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

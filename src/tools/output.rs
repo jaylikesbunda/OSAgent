@@ -6,8 +6,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 pub const TOOL_OUTPUT_DIR_NAME: &str = ".osa_tool_outputs";
-const MAX_INLINE_LINES: usize = 200;
-const MAX_INLINE_CHARS: usize = 12_000;
+const MAX_INLINE_LINES: usize = 400;
+const MAX_INLINE_CHARS: usize = 24_000;
 const RETENTION_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

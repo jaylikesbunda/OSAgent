@@ -377,7 +377,7 @@ impl Tool for ProcessTool {
     }
 
     fn description(&self) -> &str {
-        "Manage background processes: list, start, poll, log, kill"
+        "Manage background processes: list, start, poll, log, kill. Core companion to bash: start long-running commands (servers, watch mode, slow builds/tests) here with `start`, then `poll`/`log` for output and `kill` to stop — no blocking, no timeout retries."
     }
 
     fn parameters(&self) -> Value {

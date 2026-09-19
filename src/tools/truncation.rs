@@ -147,15 +147,16 @@ pub fn is_tool_result_oversized(text: &str, context_window_tokens: usize) -> boo
     text.len() > max_chars
 }
 
-/// Session-context preview budget. Deliberately tighter than opencode's
-/// ~2000-line / 50KB per-result budget: 80 lines / 4K chars per tool
-/// result, head-only, so paged tools (read_file offset/limit) keep a
-/// coherent, re-pageable window instead of a spliced head+tail.
-pub const CONTEXT_PREVIEW_MAX_LINES: usize = 80;
-pub const CONTEXT_PREVIEW_MAX_CHARS: usize = 4_000;
+/// Session-context preview budget. Matches the raised inline budget
+/// (400 lines / 24KB per tool result, Minimax-style 24KB caps): 200 lines /
+/// 12K chars per tool result, head-only, so paged tools (read_file
+/// offset/limit, grep/glob offset/limit) keep a coherent, re-pageable
+/// window instead of a spliced head+tail.
+pub const CONTEXT_PREVIEW_MAX_LINES: usize = 200;
+pub const CONTEXT_PREVIEW_MAX_CHARS: usize = 12_000;
 /// Head lines kept before the truncation notice; the remainder is
 /// reserved for navigational trailers (paging footers, spill paths).
-const CONTEXT_PREVIEW_HEAD_LINES: usize = 74;
+const CONTEXT_PREVIEW_HEAD_LINES: usize = 194;
 const MAX_TRAILER_LINES: usize = 4;
 const MAX_TRAILER_CHARS: usize = 600;
 
@@ -261,7 +262,7 @@ pub fn preview_tool_output_for_context(tool_name: &str, output: &str) -> String 
             .map(|(start, end, total)| (start + shown_lines).min(end.saturating_add(1).min(total)))
             .unwrap_or(shown_lines + 1);
         rendered.push_str(&format!(
-            "\nUse read_file with offset={next_offset} limit=80 to continue paging."
+            "\nUse read_file with offset={next_offset} limit=200 to continue paging."
         ));
     }
     for trailer in trailers {
@@ -411,16 +412,16 @@ mod tests {
 
     #[test]
     fn context_preview_continuation_offset_follows_paging_footer() {
-        // 79 content lines + footer push past the 80-line budget, so the
-        // preview keeps the first 74 and must point at start+74.
-        let mut lines = numbered_lines(79);
+        // 199 content lines + footer push past the 200-line budget, so the
+        // preview keeps the first 194 and must point at start+194.
+        let mut lines = numbered_lines(199);
         lines.push_str(
             "\n200: resumed\n\n[Showing lines 200-549 of 880. Use offset=550 to continue.]",
         );
         let preview = preview_tool_output_for_context("read_file", &lines);
-        // Window started at 200 and the preview kept 74 lines, so paging
-        // must continue at 274 — never beyond the window the tool returned.
-        assert!(preview.contains("offset=274"), "{preview}");
+        // Window started at 200 and the preview kept 194 lines, so paging
+        // must continue at 394 — never beyond the window the tool returned.
+        assert!(preview.contains("offset=394"), "{preview}");
         assert!(!preview.contains("offset=550"), "{preview}");
     }
 

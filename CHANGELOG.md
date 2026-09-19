@@ -1,5 +1,10 @@
 v0.6.0 changes:
 
+* Slimmed default toolset: skill authoring, public web fetch, working notes now load via tool_search; background process promoted to core
+* read_file batch paths[] (10) and edit_file atomic edits[] (20) with better not-found errors
+* grep literal + offset/limit paging, glob offset/limit paging, list_files sizes
+* Raised inline/preview budgets (400 lines/24KB, preview 200/12KB); in-workspace absolute paths stay parallel
+* batch accepts codesearch/lsp/todoread/skill lookups; prompts list core tools + batching
 * Added runtime skill authoring: OSA can now create/update/delete skills live 
 * Fixed Bash read-only false positives in quoted code
 * Improved script-backed skill creation

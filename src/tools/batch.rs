@@ -28,7 +28,7 @@ impl Tool for BatchTool {
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when multiple reads, searches, web fetches, or explicitly read-only bash commands can run at the same time"
+        "Use when multiple reads, searches (grep/glob/codesearch/lsp), web fetches, todo reads, skill lookups, or explicitly read-only bash commands can run at the same time"
     }
 
     fn when_not_to_use(&self) -> &str {

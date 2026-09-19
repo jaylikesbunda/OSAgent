@@ -513,6 +513,19 @@ impl ReadFileTool {
         Ok((1, Self::DEFAULT_LIMIT))
     }
 
+    /// Single-path read shared by normal and `paths[]` batch mode.
+    async fn execute_single(&self, args: Value) -> Result<ToolResult> {
+        let path = self.normalize_read_target(&args)?.to_string();
+        let target_path = self.validate_path(&path)?;
+        let (offset, limit) = self.normalize_paging(&args, target_path.is_dir())?;
+
+        if target_path.is_dir() {
+            return self.read_directory(&target_path, offset, limit, &path);
+        }
+
+        self.read_file_text(&target_path, offset, limit, &path).await
+    }
+
     fn format_directory_entry(&self, absolute: &PathBuf, base: &PathBuf) -> String {
         let relative = absolute.strip_prefix(base).unwrap_or(absolute.as_path());
         if relative.as_os_str().is_empty() {
@@ -962,7 +975,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- Paths are relative to the workspace root.\n- By default, returns up to 200 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by pattern.\n- Contents are returned with each line prefixed by its line number.\n- For directories, entries are returned one per line with a trailing / for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- Image files (png/jpeg/gif/webp) are attached to the conversation as images so you can see them.\n- PDF files are read as extracted text with the same offset/limit pagination."
+        "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- Paths are relative to the workspace root.\n- By default, returns up to 200 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Batch mode: pass `paths` (up to 10) to read several files/dirs in one call instead of N parallel calls; per-path errors fail only their section.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by pattern.\n- Contents are returned with each line prefixed by its line number.\n- For directories, entries are returned one per line with a trailing / for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- Image files (png/jpeg/gif/webp) are attached to the conversation as images so you can see them.\n- PDF files are read as extracted text with the same offset/limit pagination."
     }
 
     fn when_to_use(&self) -> &str {
@@ -1010,7 +1023,12 @@ impl Tool for ReadFileTool {
                 },
                 "filePath": {
                     "type": "string",
-                    "description": "Relative path to the file or directory within workspace"
+                    "description": "Relative path to the file or directory within workspace (single-file mode)"
+                },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional batch mode: up to 10 workspace-relative file/directory paths to read in one call with the same offset/limit. Prefer this over N parallel read_file calls."
                 },
                 "offset": {
                     "type": "integer",
@@ -1020,7 +1038,7 @@ impl Tool for ReadFileTool {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum lines/entries to return (default: 200, max: 2000). Reads over ~80 lines are previewed head-only in context, so prefer limit<=80 and page with offset for large files."
+                    "description": "Maximum lines/entries to return per path (default: 200, max: 2000). Reads over ~200 lines are previewed head-only in context, so prefer limit<=200 and page with offset for large files."
                 },
                 "start_line": {
                     "type": "integer",
@@ -1042,15 +1060,60 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute_result(&self, args: Value) -> Result<ToolResult> {
-        let path = self.normalize_read_target(&args)?;
-        let target_path = self.validate_path(path)?;
-        let (offset, limit) = self.normalize_paging(&args, target_path.is_dir())?;
-
-        if target_path.is_dir() {
-            return self.read_directory(&target_path, offset, limit, path);
+        // Batch mode: read up to 10 paths in one call (Pi/Codex-style fan-in).
+        // Each path is validated independently; one bad path fails only its
+        // section, not the whole call.
+        if let Some(paths) = args.get("paths").and_then(|v| v.as_array()) {
+            if paths.is_empty() {
+                return Err(OSAgentError::ToolExecution(
+                    "Missing 'filePath' parameter (or compatibility alias 'path')".to_string(),
+                ));
+            }
+            if paths.len() > 10 {
+                return Err(OSAgentError::ToolExecution(
+                    "read_file batch supports at most 10 paths per call".to_string(),
+                ));
+            }
+            let mut sections = Vec::with_capacity(paths.len());
+            let mut kinds = Vec::with_capacity(paths.len());
+            for entry in paths {
+                let path_str = entry.as_str().ok_or_else(|| {
+                    OSAgentError::ToolExecution(
+                        "Each entry in 'paths' must be a string".to_string(),
+                    )
+                })?;
+                let mut single = serde_json::Map::new();
+                single.insert("filePath".to_string(), Value::String(path_str.to_string()));
+                for key in ["offset", "limit", "start_line", "end_line"] {
+                    if let Some(v) = args.get(key) {
+                        single.insert(key.to_string(), v.clone());
+                    }
+                }
+                match self.execute_single(Value::Object(single)).await {
+                    Ok(res) => {
+                        kinds.push(res.metadata.get("kind").and_then(|k| k.as_str()).unwrap_or("file").to_string());
+                        sections.push(format!("=== {} ===\n{}", path_str, res.output));
+                    }
+                    Err(e) => {
+                        kinds.push("error".to_string());
+                        sections.push(format!("=== {} ===\n[error] {}", path_str, e));
+                    }
+                }
+            }
+            let output = sections.join("\n\n");
+            return Ok(ToolResult {
+                output,
+                outcome: ToolOutcome::Success,
+                title: Some(format!("{} paths", paths.len())),
+                metadata: json!({
+                    "kind": "batch",
+                    "count": paths.len(),
+                    "kinds": kinds,
+                }),
+                attachments: Vec::new(),
+            });
         }
-
-        self.read_file_text(&target_path, offset, limit, path).await
+        self.execute_single(args).await
     }
 }
 
@@ -1272,6 +1335,69 @@ impl Tool for WriteFileTool {
     }
 }
 
+/// Apply one normalized (LF) edit to `content_lf`. Shared by single-hunk
+/// and atomic `edits[]` batch mode so both stay identical.
+fn apply_one_edit_to_content(
+    content_lf: &str,
+    old_lf: &str,
+    new_lf: &str,
+    replace_all: bool,
+) -> Result<(String, String)> {
+    if replace_all {
+        let match_count = content_lf.match_indices(old_lf).count();
+        if match_count == 0 {
+            return Err(OSAgentError::ToolExecution(format!(
+                "Text not found in file (exact match for replace_all). Searched for:\n---\n{}\n---\nRe-read the file and copy old_text exactly (no line numbers).",
+                old_lf.chars().take(500).collect::<String>()
+            )));
+        }
+        let new_content = content_lf.replace(old_lf, new_lf);
+        return Ok((
+            new_content,
+            format!(
+                "{} replacement{}",
+                match_count,
+                if match_count == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+
+    let exact_count = content_lf.match_indices(old_lf).count();
+    if exact_count == 1 {
+        return Ok((
+            content_lf.replacen(old_lf, new_lf, 1),
+            "1 replacement, exact match".to_string(),
+        ));
+    }
+    if exact_count > 1 {
+        return Err(OSAgentError::ToolExecution(format!(
+            "Text matched {} times; refine 'old_text' with more surrounding context, set replace_all=true, or use apply_patch",
+            exact_count
+        )));
+    }
+    let match_result = fuzzy_find(content_lf, old_lf).ok_or_else(|| {
+        OSAgentError::ToolExecution(format!(
+            "Text not found in file (tried exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, trimmed-boundary, block-anchor, and context-aware matching). Searched for:\n---\n{}\n---\nRe-read the file and copy old_text exactly (no line numbers).",
+            old_lf.chars().take(500).collect::<String>()
+        ))
+    })?;
+    let matched_span = &content_lf[match_result.start..match_result.end.min(content_lf.len())];
+    if is_disproportionate_match(matched_span, old_lf) {
+        return Err(OSAgentError::ToolExecution(
+            "Refusing replacement because the matched span is much larger than old_text. Re-read the file and provide the full exact old_text for the intended replacement.".to_string(),
+        ));
+    }
+    let new_content = apply_replacement(content_lf, &match_result, old_lf, new_lf);
+    Ok((
+        new_content,
+        format!(
+            "1 replacement via {} matching, confidence: {:.0}%",
+            match_result.strategy,
+            match_result.confidence * 100.0
+        ),
+    ))
+}
+
 pub struct EditFileTool {
     workspaces: Vec<PathBuf>,
     backup_dir: PathBuf,
@@ -1380,15 +1506,15 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Performs exact string replacements in files with fuzzy matching fallbacks.\n\nUsage:\n- You MUST use read_file at least once before editing a file. The tool will error if you attempt an edit without reading the file first.\n- When editing text from read_file output, copy the exact text you want to replace, preserving indentation (tabs/spaces).\n- The tool will FAIL if old_text is not found in the file. Read the file first and copy the exact text.\n- The tool will FAIL if old_text is found multiple times. Provide more surrounding context to make the match unique, or use replace_all to change every instance.\n- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.\n- If the exact text is not found, the tool falls back to fuzzy matching (whitespace, indentation, and small context differences).\n- Creates an automatic backup in .osagent_backups before modifying."
+        "Performs exact string replacements in files with fuzzy matching fallbacks.\n\nUsage:\n- You MUST use read_file at least once before editing a file. The tool will error if you attempt an edit without reading the file first.\n- When editing text from read_file output, copy the exact text you want to replace, preserving indentation (tabs/spaces).\n- Single-hunk mode: pass old_text + new_text. Batch mode: pass `edits` (up to 20 {old_text, new_text, replace_all?}) for atomic multi-hunk changes in one call — all edits apply or none does. Prefer `edits` over N sequential edit_file calls.\n- The tool will FAIL if old_text is not found in the file. Read the file first and copy the exact text. Not-found errors include a context snippet plus the closest fuzzy candidate location to copy from.\n- The tool will FAIL if old_text is found multiple times. Provide more surrounding context to make the match unique, or use replace_all to change every instance.\n- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.\n- If the exact text is not found, the tool falls back to fuzzy matching (whitespace, indentation, and small context differences).\n- Creates an automatic backup in .osagent_backups before modifying."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for targeted inline changes to existing files. For multi-hunk changes across a file, prefer apply_patch."
+        "Use for targeted inline changes to existing files, single- or multi-hunk (via `edits`). For changes across several files, prefer apply_patch."
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for creating new files (use write_file), full file rewrites (use write_file), or multi-hunk changes (use apply_patch)."
+        "Do not use for creating new files (use write_file) or full file rewrites (use write_file)."
     }
 
     fn parameters(&self) -> Value {
@@ -1401,18 +1527,32 @@ impl Tool for EditFileTool {
                 },
                 "old_text": {
                     "type": "string",
-                    "description": "Text to find and replace"
+                    "description": "Text to find and replace (single-hunk mode)"
                 },
                 "new_text": {
                     "type": "string",
-                    "description": "Text to replace with"
+                    "description": "Text to replace with (single-hunk mode)"
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all occurrences (default: false)"
+                    "description": "Replace all occurrences (default: false, single-hunk mode)"
+                },
+                "edits": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                            "replace_all": {"type": "boolean"}
+                        },
+                        "required": ["old_text", "new_text"]
+                    },
+                    "description": "Atomic batch mode: up to 20 disjoint edits applied in order; aborts with no write if any edit fails"
                 }
             },
-            "required": ["path", "old_text", "new_text"]
+            "required": ["path"]
         })
     }
 
@@ -1427,26 +1567,81 @@ impl Tool for EditFileTool {
             .as_str()
             .ok_or_else(|| OSAgentError::ToolExecution("Missing 'path' parameter".to_string()))?;
 
-        let old_text = args["old_text"].as_str().ok_or_else(|| {
-            OSAgentError::ToolExecution("Missing 'old_text' parameter".to_string())
-        })?;
+        // Atomic batch mode: `edits[]` applies up to 20 hunks in one call.
+        // Collect + validate first so a bad entry fails before any disk I/O.
+        let batch: Option<Vec<(String, String, bool)>> = match args.get("edits") {
+            Some(Value::Array(items)) => {
+                if items.is_empty() || items.len() > 20 {
+                    return Err(OSAgentError::ToolExecution(
+                        "edits supports 1-20 entries per call".to_string(),
+                    ));
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for (idx, item) in items.iter().enumerate() {
+                    let old = item.get("old_text").and_then(|v| v.as_str()).ok_or_else(|| {
+                        OSAgentError::ToolExecution(format!(
+                            "edits[{}] missing 'old_text'",
+                            idx
+                        ))
+                    })?;
+                    let new = item.get("new_text").and_then(|v| v.as_str()).ok_or_else(|| {
+                        OSAgentError::ToolExecution(format!(
+                            "edits[{}] missing 'new_text'",
+                            idx
+                        ))
+                    })?;
+                    if old.is_empty() {
+                        return Err(OSAgentError::ToolExecution(format!(
+                            "edits[{}] 'old_text' cannot be empty",
+                            idx
+                        )));
+                    }
+                    if old == new {
+                        return Err(OSAgentError::ToolExecution(format!(
+                            "edits[{}]: old_text and new_text are identical",
+                            idx
+                        )));
+                    }
+                    out.push((
+                        old.to_string(),
+                        new.to_string(),
+                        item.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+                    ));
+                }
+                Some(out)
+            }
+            Some(_) => {
+                return Err(OSAgentError::ToolExecution(
+                    "'edits' must be an array".to_string(),
+                ));
+            }
+            None => None,
+        };
 
-        let new_text = args["new_text"].as_str().ok_or_else(|| {
-            OSAgentError::ToolExecution("Missing 'new_text' parameter".to_string())
-        })?;
-
-        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-
-        if old_text.is_empty() {
-            return Err(OSAgentError::ToolExecution(
-                "'old_text' cannot be empty".to_string(),
-            ));
-        }
-        if old_text == new_text {
-            return Err(OSAgentError::ToolExecution(
-                "No changes to apply: old_text and new_text are identical.".to_string(),
-            ));
-        }
+        let (old_text_owned, new_text_owned, replace_all_owned);
+        let (old_text, new_text, replace_all) = match &batch {
+            Some(_) => ("", "", false),
+            None => {
+                old_text_owned = args["old_text"].as_str().ok_or_else(|| {
+                    OSAgentError::ToolExecution("Missing 'old_text' parameter (or 'edits' array)".to_string())
+                })?.to_string();
+                new_text_owned = args["new_text"].as_str().ok_or_else(|| {
+                    OSAgentError::ToolExecution("Missing 'new_text' parameter (or 'edits' array)".to_string())
+                })?.to_string();
+                replace_all_owned = args["replace_all"].as_bool().unwrap_or(false);
+                if old_text_owned.is_empty() {
+                    return Err(OSAgentError::ToolExecution(
+                        "'old_text' cannot be empty".to_string(),
+                    ));
+                }
+                if old_text_owned == new_text_owned {
+                    return Err(OSAgentError::ToolExecution(
+                        "No changes to apply: old_text and new_text are identical.".to_string(),
+                    ));
+                }
+                (old_text_owned.as_str(), new_text_owned.as_str(), replace_all_owned)
+            }
+        };
 
         let file_path = self.validate_path(path)?;
         let canonical = file_path.canonicalize().unwrap_or(file_path.clone());
@@ -1464,8 +1659,6 @@ impl Tool for EditFileTool {
         let content = strip_bom(&content_owned);
         // Normalize to LF for matching; convert back on write.
         let content_lf = content.replace("\r\n", "\n").replace('\r', "\n");
-        let old_lf = old_text.replace("\r\n", "\n").replace('\r', "\n");
-        let mut new_lf = new_text.replace("\r\n", "\n").replace('\r', "\n");
 
         // Helper to finalize: EOL/BOM restore, write, diff + LSP.
         async fn finalize(
@@ -1505,68 +1698,45 @@ impl Tool for EditFileTool {
             Ok(out)
         }
 
-        if replace_all {
-            let match_count = content_lf.match_indices(&old_lf).count();
-            if match_count == 0 {
-                return Err(OSAgentError::ToolExecution(
-                    "Text not found in file (exact match for replace_all)".to_string(),
-                ));
+        // Batch mode: apply each edit in order to the in-memory buffer.
+        // Any failure aborts with NO write (atomic).
+        if let Some(items) = batch {
+            let mut working = content_lf.clone();
+            let mut hows = Vec::with_capacity(items.len());
+            for (idx, (old, new, replace_all)) in items.iter().enumerate() {
+                let old_lf = old.replace("\r\n", "\n").replace('\r', "\n");
+                let new_lf = new.replace("\r\n", "\n").replace('\r', "\n");
+                match apply_one_edit_to_content(&working, &old_lf, &new_lf, *replace_all) {
+                    Ok((next, how)) => {
+                        working = next;
+                        hows.push(how);
+                    }
+                    Err(OSAgentError::ToolExecution(msg)) => {
+                        return Err(OSAgentError::ToolExecution(format!(
+                            "edits[{}] failed: {}",
+                            idx, msg
+                        )));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            new_lf = content_lf.replace(&old_lf, &new_lf);
             return finalize(
                 self,
                 &file_path,
                 path,
                 &content_owned,
-                &new_lf,
+                &working,
                 eol,
                 had_bom,
-                format!(
-                    "{} replacement{}",
-                    match_count,
-                    if match_count == 1 { "" } else { "s" }
-                ),
+                format!("{} replacements (atomic batch of {})", items.len(), hows.join("; ")),
             )
             .await;
         }
 
-        let exact_count = content_lf.match_indices(&old_lf).count();
-        if exact_count == 1 {
-            let new_content = content_lf.replacen(&old_lf, &new_lf, 1);
-            return finalize(
-                self,
-                &file_path,
-                path,
-                &content_owned,
-                &new_content,
-                eol,
-                had_bom,
-                "1 replacement, exact match".to_string(),
-            )
-            .await;
-        }
-
-        if exact_count > 1 {
-            return Err(OSAgentError::ToolExecution(format!(
-                "Text matched {} times; refine 'old_text', set replace_all=true, or use apply_patch",
-                exact_count
-            )));
-        }
-
-        let match_result = fuzzy_find(&content_lf, &old_lf).ok_or_else(|| {
-            OSAgentError::ToolExecution(
-                "Text not found in file (tried exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, trimmed-boundary, block-anchor, and context-aware matching)".to_string(),
-            )
-        })?;
-
-        let matched_span = &content_lf[match_result.start..match_result.end.min(content_lf.len())];
-        if is_disproportionate_match(matched_span, &old_lf) {
-            return Err(OSAgentError::ToolExecution(
-                "Refusing replacement because the matched span is much larger than old_text. Re-read the file and provide the full exact old_text for the intended replacement.".to_string(),
-            ));
-        }
-
-        let new_content = apply_replacement(&content_lf, &match_result, &old_lf, &new_lf);
+        let old_lf = old_text.replace("\r\n", "\n").replace('\r', "\n");
+        let new_lf = new_text.replace("\r\n", "\n").replace('\r', "\n");
+        let (new_content, how) =
+            apply_one_edit_to_content(&content_lf, &old_lf, &new_lf, replace_all)?;
 
         finalize(
             self,
@@ -1576,11 +1746,7 @@ impl Tool for EditFileTool {
             &new_content,
             eol,
             had_bom,
-            format!(
-                "1 replacement via {} matching, confidence: {:.0}%",
-                match_result.strategy,
-                match_result.confidence * 100.0
-            ),
+            how,
         )
         .await
     }
@@ -1639,7 +1805,7 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "List files and directories in the workspace.\n\nUsage:\n- Returns entries sorted alphabetically.\n- Directories are shown with a trailing /.\n- Skips common noise directories like node_modules, target, .git by default.\n- Use recursive:true to list all files under a directory tree.\n- Use glob for pattern-based file discovery instead."
+        "List files and directories in the workspace.\n\nUsage:\n- Returns entries sorted alphabetically as `[FILE <size>B] path` / `[DIR] path`.\n- Directories are shown with a trailing /.\n- Skips common noise directories like node_modules, target, .git by default.\n- Use recursive:true to list all files under a directory tree.\n- Use glob for pattern-based file discovery instead."
     }
 
     fn when_to_use(&self) -> &str {
@@ -1711,7 +1877,17 @@ impl Tool for ListFilesTool {
                 }
 
                 let type_str = if path.is_dir() { "DIR" } else { "FILE" };
-                results.push(format!("[{}] {}", type_str, relative.display()));
+                // Size metadata saves a stat round trip (Pi/Codex list with
+                // sizes; OSA previously returned bare names only).
+                let size_suffix = if path.is_dir() {
+                    String::new()
+                } else {
+                    match entry.metadata() {
+                        Ok(meta) => format!(" {}B", meta.len()),
+                        Err(_) => String::new(),
+                    }
+                };
+                results.push(format!("[{}{}] {}", type_str, size_suffix, relative.display()));
 
                 if recursive && path.is_dir() {
                     list_dir(&path, base, results, recursive)?;

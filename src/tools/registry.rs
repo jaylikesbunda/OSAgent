@@ -499,10 +499,16 @@ impl ToolRegistry {
             "web_search".to_string(),
             Arc::new(web::WebSearchTool::new(config.clone())),
         );
+        let public_web_fetch_tool: Arc<dyn Tool> = Arc::new(web::PublicWebFetchTool::new());
         tools.insert(
             "public_web_fetch".to_string(),
-            Arc::new(web::PublicWebFetchTool::new()),
+            public_web_fetch_tool.clone(),
         );
+        // Deferred: HTTPS-only public reads are low-frequency. Community
+        // profile (web_search + public_web_fetch) activates it via
+        // tool_search; keeping it out of the always-loaded core shrinks
+        // every request's tool-choice space.
+        native_catalog.register(public_web_fetch_tool);
 
         if let Some(ref eb) = event_bus {
             tools.insert(
@@ -520,18 +526,21 @@ impl ToolRegistry {
                 "skill_list".to_string(),
                 Arc::new(skill::SkillListTool::new(sl.clone())),
             );
-            tools.insert(
-                "skill_create".to_string(),
-                Arc::new(skill_authoring::SkillCreateTool::new(sl.clone())),
-            );
-            tools.insert(
-                "skill_update".to_string(),
-                Arc::new(skill_authoring::SkillUpdateTool::new(sl.clone())),
-            );
-            tools.insert(
-                "skill_delete".to_string(),
-                Arc::new(skill_authoring::SkillDeleteTool::new(sl.clone())),
-            );
+            // Deferred: skill authoring is low-frequency (create/update/delete
+            // a reusable skill). Core stays at skill (read) + skill_list
+            // (browse); authoring loads via tool_search like other specialties.
+            let skill_create_tool: Arc<dyn Tool> =
+                Arc::new(skill_authoring::SkillCreateTool::new(sl.clone()));
+            tools.insert("skill_create".to_string(), skill_create_tool.clone());
+            native_catalog.register(skill_create_tool);
+            let skill_update_tool: Arc<dyn Tool> =
+                Arc::new(skill_authoring::SkillUpdateTool::new(sl.clone()));
+            tools.insert("skill_update".to_string(), skill_update_tool.clone());
+            native_catalog.register(skill_update_tool);
+            let skill_delete_tool: Arc<dyn Tool> =
+                Arc::new(skill_authoring::SkillDeleteTool::new(sl.clone()));
+            tools.insert("skill_delete".to_string(), skill_delete_tool.clone());
+            native_catalog.register(skill_delete_tool);
             let skill_action_tool: Arc<dyn Tool> =
                 Arc::new(skill::SkillActionTool::new(sl.clone()));
             tools.insert("skill_action".to_string(), skill_action_tool.clone());
@@ -556,9 +565,12 @@ impl ToolRegistry {
 
         tools.insert("plan_exit".to_string(), Arc::new(plan::PlanExitTool::new()));
 
+        // Core: background sessions (exec_command + poll/log pattern like
+        // Codex). Long-running builds/tests/servers start here, output is
+        // polled via poll/log — no tool_search round trip for the most
+        // common async need.
         let process_tool: Arc<dyn Tool> = Arc::new(process::ProcessTool::new(config.clone()));
-        tools.insert("process".to_string(), process_tool.clone());
-        native_catalog.register(process_tool);
+        tools.insert("process".to_string(), process_tool);
         let calendar_tool: Arc<dyn Tool> = Arc::new(calendar::CalendarTool::new(config.clone()));
         tools.insert("calendar".to_string(), calendar_tool.clone());
         native_catalog.register(calendar_tool);
@@ -611,11 +623,14 @@ impl ToolRegistry {
         }
 
         if config.compaction.notes_enabled {
+            // Deferred: rolling working-notes are compaction plumbing, not
+            // per-turn core. Activates via tool_search when needed.
             let notes_tool: Arc<dyn Tool> = Arc::new(notes::UpdateNotesTool::new(
                 storage.clone(),
                 config.compaction.notes_max_chars,
             ));
-            tools.insert("update_notes".to_string(), notes_tool);
+            tools.insert("update_notes".to_string(), notes_tool.clone());
+            native_catalog.register(notes_tool);
         }
 
         Ok(Self {
@@ -790,6 +805,8 @@ impl ToolRegistry {
                 | "system_status"
                 | "sessions"
                 | "lsp"
+                | "skill"
+                | "skill_list"
         )
     }
 

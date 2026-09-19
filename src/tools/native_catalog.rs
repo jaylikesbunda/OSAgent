@@ -2,10 +2,11 @@
 //!
 //! The same idea as the MCP catalog, applied to our own specialty tools:
 //! weather, calendar, news, system status, memory/decision management,
-//! goals, and the like stay out of every request and are loaded on demand
-//! through `tool_search`. One extra round trip in exchange for keeping a
-//! couple dozen schemas out of the prompt, and for keeping the model's
-//! tool-choice space small enough to pick well.
+//! goals, skill authoring (create/update/delete), public web fetch,
+//! working-notes plumbing, and the like stay out of every request and are
+//! loaded on demand through `tool_search`. One extra round trip in
+//! exchange for keeping a couple dozen schemas out of the prompt, and for
+//! keeping the model's tool-choice space small enough to pick well.
 //!
 //! Activation appends schemas after the always-loaded native block, so a
 //! discovery invalidates only the tail of the provider's cached prompt
