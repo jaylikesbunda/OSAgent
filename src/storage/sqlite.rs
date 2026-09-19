@@ -2613,6 +2613,96 @@ impl SqliteStorage {
         })
     }
 
+    /// Delete a queued message scoped to its session. Returns false when the
+    /// row does not exist (or belongs to another session).
+    pub fn delete_session_queued_message(&self, session_id: &str, id: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let removed = conn
+                .execute(
+                    "DELETE FROM queued_messages WHERE id = ?1 AND session_id = ?2",
+                    params![id, session_id],
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok(removed > 0)
+        })
+    }
+
+    /// Replace the text of a pending queued message, keeping its id, position
+    /// and attachments. Returns false when the row is missing, belongs to
+    /// another session, or is already dispatching.
+    pub fn update_session_queued_message_content(
+        &self,
+        session_id: &str,
+        id: &str,
+        content: &str,
+    ) -> Result<bool> {
+        self.with_conn(|conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE queued_messages SET content = ?1, updated_at = ?2
+                     WHERE id = ?3 AND session_id = ?4 AND status = ?5",
+                    params![
+                        content,
+                        Utc::now().timestamp(),
+                        id,
+                        session_id,
+                        QueuedMessageStatus::Pending.as_str()
+                    ],
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok(updated > 0)
+        })
+    }
+
+    /// Reorder pending queued messages to match the given id sequence. Ids
+    /// that do not exist (or are not pending) are ignored; any pending rows
+    /// not listed keep their relative order after the listed ones.
+    pub fn reorder_session_queued_messages(&self, session_id: &str, ids: &[String]) -> Result<()> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+            let mut stmt = tx
+                .prepare_cached(
+                    "SELECT id FROM queued_messages
+                     WHERE session_id = ?1 AND status = ?2
+                     ORDER BY position ASC, created_at ASC",
+                )
+                .map_err(OSAgentError::Storage)?;
+            let current: Vec<String> = stmt
+                .query_map(
+                    params![session_id, QueuedMessageStatus::Pending.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            drop(stmt);
+
+            let mut ordered: Vec<String> = Vec::with_capacity(current.len());
+            for id in ids {
+                if current.contains(id) && !ordered.contains(id) {
+                    ordered.push(id.clone());
+                }
+            }
+            for id in &current {
+                if !ordered.contains(id) {
+                    ordered.push(id.clone());
+                }
+            }
+
+            let now = Utc::now().timestamp();
+            for (position, id) in ordered.iter().enumerate() {
+                tx.execute(
+                    "UPDATE queued_messages SET position = ?1, updated_at = ?2
+                     WHERE id = ?3 AND session_id = ?4",
+                    params![position as i64, now, id, session_id],
+                )
+                .map_err(OSAgentError::Storage)?;
+            }
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
     pub fn create_subagent_task(&self, task: &SubagentTask) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
@@ -3114,6 +3204,127 @@ mod pool_tests {
             POOL_SIZE,
             "pool did not recover every connection"
         );
+        cleanup(&path);
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn temp_storage() -> (SqliteStorage, PathBuf) {
+        let path = std::env::temp_dir().join(format!("osagent-queue-{}.db", Uuid::new_v4()));
+        let storage = SqliteStorage::new(path.to_str().expect("utf8 path")).expect("open");
+        (storage, path)
+    }
+
+    fn cleanup(path: &PathBuf) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    fn enqueue(storage: &SqliteStorage, session_id: &str, client_id: &str, content: &str) -> QueuedMessage {
+        storage
+            .enqueue_message(session_id, client_id, content, &[], None, &[])
+            .expect("enqueue")
+            .0
+    }
+
+    fn ordered_ids(storage: &SqliteStorage, session_id: &str) -> Vec<String> {
+        storage
+            .list_queued_messages(session_id)
+            .expect("list")
+            .into_iter()
+            .map(|item| item.id)
+            .collect()
+    }
+
+    #[test]
+    fn reorder_edits_and_deletes_stay_session_scoped() {
+        let (storage, path) = temp_storage();
+        let session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+        let other = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+
+        let a = enqueue(&storage, &session.id, "c-a", "first");
+        let b = enqueue(&storage, &session.id, "c-b", "second");
+        let c = enqueue(&storage, &session.id, "c-c", "third");
+        assert_eq!(
+            ordered_ids(&storage, &session.id),
+            vec![a.id.clone(), b.id.clone(), c.id.clone()]
+        );
+
+        // Reorder to c, a, b.
+        storage
+            .reorder_session_queued_messages(&session.id, &[c.id.clone(), a.id.clone(), b.id.clone()])
+            .expect("reorder");
+        assert_eq!(
+            ordered_ids(&storage, &session.id),
+            vec![c.id.clone(), a.id.clone(), b.id.clone()]
+        );
+
+        // Edit keeps id and position.
+        assert!(storage
+            .update_session_queued_message_content(&session.id, &a.id, "first-edited")
+            .expect("edit"));
+        let edited = storage
+            .list_queued_messages(&session.id)
+            .expect("list")
+            .into_iter()
+            .find(|item| item.id == a.id)
+            .expect("edited row");
+        assert_eq!(edited.content, "first-edited");
+        assert_eq!(
+            ordered_ids(&storage, &session.id),
+            vec![c.id.clone(), a.id.clone(), b.id.clone()]
+        );
+
+        // Cross-session access is rejected.
+        assert!(!storage
+            .delete_session_queued_message(&other.id, &a.id)
+            .expect("scoped delete"));
+        assert!(!storage
+            .update_session_queued_message_content(&other.id, &a.id, "hijacked")
+            .expect("scoped edit"));
+
+        // Delete removes just that row.
+        assert!(storage
+            .delete_session_queued_message(&session.id, &c.id)
+            .expect("delete"));
+        assert_eq!(
+            ordered_ids(&storage, &session.id),
+            vec![a.id.clone(), b.id.clone()]
+        );
+        assert!(!storage
+            .delete_session_queued_message(&session.id, &c.id)
+            .expect("repeat delete"));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn dispatching_rows_cannot_be_edited() {
+        let (storage, path) = temp_storage();
+        let session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("create");
+        let item = enqueue(&storage, &session.id, "c-x", "soon-running");
+
+        // Simulate the claim path marking the row dispatching.
+        let claimed = storage
+            .claim_next_queued_message(&session.id)
+            .expect("claim")
+            .expect("claimed row");
+        assert_eq!(claimed.id, item.id);
+
+        assert!(!storage
+            .update_session_queued_message_content(&session.id, &item.id, "too late")
+            .expect("edit dispatching"));
+
         cleanup(&path);
     }
 }

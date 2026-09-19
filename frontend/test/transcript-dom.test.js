@@ -15,7 +15,8 @@ test.before(async () => {
     global.cancelAnimationFrame = () => {};
     global.OSA = window.OSA = {};
 
-    require('../js/utils.js');
+    require('../js/state.js');
+require('../js/utils.js');
     require('../js/messages.js');
     require('../js/transcript.js');
 

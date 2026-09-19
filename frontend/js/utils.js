@@ -6,6 +6,21 @@ OSA.escapeHtml = function(text) {
     return div.innerHTML;
 };
 
+// Deterministic hue per session id for the letter-avatar fallback.
+OSA.sessionHueFor = function(sessionId) {
+    let hash = 0;
+    String(sessionId || '').split('').forEach(function(ch) {
+        hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0;
+    });
+    return Math.abs(hash) % 360;
+};
+
+// First letter of the session name; '#' only when there is nothing to show.
+OSA.sessionInitialFor = function(displayName) {
+    const match = String(displayName || '').trim().match(/[A-Za-z0-9]/);
+    return match ? match[0].toUpperCase() : '#';
+};
+
 // Quote-safe escaping for HTML *attribute* values. escapeHtml round-trips
 // through textContent -> innerHTML, which escapes &, < and > but leaves quotes
 // intact; interpolating that into value="..." lets a quoted value close the

@@ -144,26 +144,31 @@ OSA.isDefaultSessionName = function(name) {
     return typeof name === 'string' && /^Session \d+$/.test(name.trim());
 };
 
-OSA.maybeAutoNameSession = function() {
-    const session = OSA.getCurrentSession();
+OSA.maybeAutoNameSession = function(sessionId) {
+    const session = sessionId ? OSA.getSessionObjectFor(sessionId) : OSA.getCurrentSession();
     if (!session?.id) return;
     const existingName = session.metadata?.name;
     if (existingName && !OSA.isDefaultSessionName(existingName)) return;
+    OSA._autoNamedSessions = OSA._autoNamedSessions || new Set();
     if (OSA._autoNamedSessions.has(session.id)) return;
     OSA._autoNamedSessions.add(session.id);
     OSA.fetchWithAuth('/api/sessions/' + encodeURIComponent(session.id) + '/auto-name', { method: 'POST' })
         .then(function(res) { return res.json(); })
         .then(function(data) {
-            // The user may have switched away while the name was generating;
-            // don't stamp the old name onto the new session's header.
-            if (OSA.getCurrentSession()?.id !== session.id) return;
-            if (data?.name) {
-                if (session.metadata) session.metadata.name = data.name;
-                document.getElementById('header-title').textContent = data.name;
-                OSA.setHeaderBaseTitle(data.name);
-                OSA.setHeaderTitleRenameable(true);
+            if (!data?.name) return;
+            // The entry may have been replaced by a snapshot refetch while the
+            // name was generating; write through to whichever object holds it.
+            const target = OSA.getSessionObjectFor(session.id) || session;
+            if (target.metadata) target.metadata.name = data.name;
+            // Only touch the header when this session is actually viewed.
+            if (OSA.getCurrentSession()?.id !== session.id) {
                 OSA.loadSessions();
+                return;
             }
+            document.getElementById('header-title').textContent = data.name;
+            OSA.setHeaderBaseTitle(data.name);
+            OSA.setHeaderTitleRenameable(true);
+            OSA.loadSessions();
         })
         .catch(function() {});
 };
@@ -318,6 +323,12 @@ OSA.login = async function() {
 OSA.logout = function() {
     OSA.clearToken();
     OSA.setCurrentSession(null);
+    OSA.SessionStore = {};
+    OSA.unreadSessions = {};
+    OSA.saveUnreadMap();
+    OSA.sessionQueue = [];
+    OSA.sessionToolEvents = [];
+    OSA.sessionSubagentTasks = [];
     OSA.resetSessionCheckpoints();
     OSA.setSessionInspectorState({ history: [], snapshots: [] });
 
@@ -351,6 +362,30 @@ OSA.disconnectLiveSessionChannel = function() {
         ws._osaSuppressReconnect = true;
         ws.close();
         OSA.setWebSocket(null);
+    }
+    OSA.wsSubscribedSessions = {};
+
+    if (typeof OSA.setEventSourceSessionId === 'function') {
+        OSA.setEventSourceSessionId(null);
+    }
+    if (typeof OSA.cancelSpeechOutput === 'function') {
+        OSA.cancelSpeechOutput();
+    }
+};
+
+// Session switch keeps the multiplexed WebSocket (background turns stay
+// subscribed) and only tears down the per-session SSE fallback channel.
+OSA.disconnectSessionChannel = function() {
+    const es = OSA.getEventSource();
+    if (es) {
+        es.close();
+        OSA.setEventSource(null);
+    }
+
+    const reconnectTimer = OSA.getEventReconnectTimer();
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        OSA.setEventReconnectTimer(null);
     }
 
     if (typeof OSA.setEventSourceSessionId === 'function') {
@@ -476,6 +511,7 @@ OSA.loadSessions = async function() {
         }
 
         const sessionIds = new Set(sessions.map(function(session) { return session.id; }));
+        OSA.pruneUnreadMap(Array.from(sessionIds));
 
         const childMap = new Map();
         const rootSessions = [];
@@ -519,11 +555,14 @@ OSA.loadSessions = async function() {
             const workspaceLabel = OSA.getSessionWorkspaceLabel(s);
             const dateLabel = OSA.formatSessionListDate(s.created_at);
             const isRunning = s.task_status === 'running' || hasRunningChildren;
+            const unread = !isActive && OSA.isSessionUnread(s.id);
             const iconHtml = isRunning
                 ? OSA.sessionRunningOrbitHtml()
-                : (isChild ? 'A' : '#');
-            const iconStyle = isChild && !isRunning ? 'style="width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"' : '';
-            const iconClass = isRunning ? ' session-icon-running' : '';
+                : (isChild ? 'A' : OSA.escapeHtml(OSA.sessionInitialFor(displayName)));
+            const iconStyle = isChild && !isRunning
+                ? 'style="width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"'
+                : (!isRunning ? `style="--session-hue:${OSA.sessionHueFor(s.id)}"` : '');
+            const iconClass = isRunning ? ' session-icon-running' : (isChild ? '' : ' session-letter');
             const badgeHtml = sourceKey !== 'web'
                 ? `<span class="session-source-badge source-${OSA.escapeAttr(sourceKey)}">${OSA.escapeHtml(sourceLabel)}</span>`
                 : '';
@@ -535,7 +574,8 @@ OSA.loadSessions = async function() {
                     </button>`
                 : '';
             return `
-            <div class="session-item${childClass} ${isActive ? 'active' : ''}" data-session-id="${OSA.escapeAttr(s.id)}" data-session-source="${OSA.escapeAttr(sourceKey)}" onclick="OSA.selectSession(${OSA.jsArg(s.id)})" style="${indent}">
+            <div class="session-item${childClass} ${isActive ? 'active' : ''}${unread ? ' has-unread' : ''}" data-session-id="${OSA.escapeAttr(s.id)}" data-session-source="${OSA.escapeAttr(sourceKey)}" onclick="OSA.selectSession(${OSA.jsArg(s.id)})" style="${indent}">
+                <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}${unread ? '<span class="session-unread-dot" aria-label="Unread response"></span>' : ''}</div>
                 <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}</div>
                 <div class="session-info">
                     <div class="session-name">${OSA.escapeHtml(displayName)}</div>
@@ -637,6 +677,7 @@ OSA.createSession = async function() {
             throw new Error(session.error || `Could not create session (HTTP ${res.status})`);
         }
         OSA.setCurrentSession(session);
+        OSA.markSessionSeen(session.id);
         OSA.setSessionCheckpoints(session.id, []);
         OSA.getActiveTools().clear();
         OSA.parallelToolGroups = [];
@@ -763,6 +804,7 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
                 OSA.completeAssistantResponse();
             }
             OSA.setCurrentSession(session);
+        OSA.markSessionSeen(session.id);
             OSA.rebuildTranscriptFromSession(
                 session,
                 OSA.getSessionToolEvents() || [],
@@ -794,6 +836,7 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
         }
 
         OSA.setCurrentSession(session);
+        OSA.markSessionSeen(session.id);
         OSA.rebuildTranscriptFromSession(session, OSA.getSessionToolEvents() || [], OSA.getSessionSubagentTasks() || [], { reason: 'snapshot-adopt' });
 
         if (!OSA.getActiveTurnAssistantMessage(session)) {
@@ -876,47 +919,80 @@ OSA.selectSession = async function(sessionId) {
         });
 
         OSA.setCurrentSession(session);
+        OSA.markSessionSeen(session.id);
+        OSA.markSessionSeen(sessionId);
+        const entry = OSA.getSessionEntry(sessionId);
+        // Merge the fresh snapshot over live entry state instead of wiping it:
+        // background events may have arrived after the GET was issued. Server
+        // wins for persisted messages, except local-only optimistic user
+        // messages (client_message_id) not yet echoed back.
+        (function mergeSessionSnapshot() {
+            const freshMessages = Array.isArray(session.messages) ? session.messages : [];
+            const freshIds = new Set();
+            freshMessages.forEach(function(m) {
+                const cid = m && m.metadata && m.metadata.client_message_id;
+                if (cid) freshIds.add(cid);
+            });
+            const priorMessages = entry.session && Array.isArray(entry.session.messages)
+                ? entry.session.messages : [];
+            const localOnly = priorMessages.filter(function(m) {
+                const cid = m && m.metadata && m.metadata.client_message_id;
+                return m && m.role === 'user' && cid && !freshIds.has(cid);
+            });
+            if (localOnly.length) session.messages = freshMessages.concat(localOnly);
+            entry.session = session;
+            // A live turn that started after this snapshot was taken must not
+            // be downgraded to idle.
+            if (entry.processing) session.task_status = 'running';
+        })();
         OSA.restoreContextState(session.id, session.context_state || null);
-        OSA.setSessionQueue([]);
-        OSA.setSessionToolEvents([]);
-        OSA.setSessionSubagentTasks([]);
-        
+
         OSA.getActiveTools().clear();
         OSA.parallelToolGroups = [];
         OSA._contextGroupState = null;
-        OSA.resetMessageChain();
         OSA.stopToolSync();
-        OSA.disconnectLiveSessionChannel();
+        OSA.disconnectSessionChannel();
 
         OSA.hideThinkingIndicator();
         OSA.setTurnStartTime(null);
         OSA.resetStreamingMessage();
-        
+
         const sessionName = OSA.getSessionDisplayName(session);
         OSA.setHeaderBaseTitle(sessionName);
         document.getElementById('header-title').textContent = sessionName;
         OSA.setHeaderTitleRenameable(true);
-        
+
         const messagesDiv = document.getElementById('messages');
         OSA.resetTranscriptView();
+
+        // Snapshot of live entry state to merge against fetch results: events
+        // arriving while the artifact requests are in flight must not be
+        // clobbered by slightly-stale responses.
+        const preToolsById = {};
+        (entry.tools || []).forEach(function(t) { if (t && t.tool_call_id) preToolsById[t.tool_call_id] = t; });
+        const preQueueIds = new Set((entry.queue || []).map(function(q) { return q && q.id; }).filter(Boolean));
+        const preSubById = {};
+        (entry.subagents || []).forEach(function(s) { if (s && s.session_id) preSubById[s.session_id] = s; });
 
         if (session.messages.length === 0) {
             OSA.renderEmptyTranscript('Type a message below');
         } else {
-            OSA.rebuildTranscriptFromSession(session, [], [], { reason: 'session-switch' });
-            if (session.task_status === 'running' && !OSA.tmodelStreamingItem()
+            OSA.rebuildTranscriptFromSession(session, entry.tools || [], entry.subagents || [], { reason: 'session-switch' });
+            if ((session.task_status === 'running' || entry.processing) && !OSA.tmodelStreamingItem()
                 && OSA.shouldShowThinkingIndicatorForRunningSession(session)) {
                 OSA.showThinkingIndicator();
             }
         }
 
-        const sessionIsRunning = session.task_status === 'running';
+        const sessionIsRunning = session.task_status === 'running' || entry.processing === true;
         if (sessionIsRunning) {
+            entry.processing = true;
             OSA.setProcessing(true);
             OSA.setStopping(false);
             OSA.setSendButtonStopMode(true);
             OSA.startToolSync();
         } else {
+            entry.processing = false;
             OSA.setProcessing(false);
             OSA.setStopping(false);
             OSA.resetSendButton();
@@ -951,41 +1027,123 @@ OSA.selectSession = async function(sessionId) {
             ? Number(historyData[historyData.length - 1]?.sequence || 0)
             : 0;
         const chain = OSA.getMessageChain();
-        chain.eventSeqNumber = Number.isFinite(latestEventSequence) ? latestEventSequence : 0;
+        // Never move the counter backwards: live events may have arrived while
+        // the history request was in flight, and rewinding would re-apply
+        // them as duplicates (stuttered chunks) or force a full replay.
+        if (Number.isFinite(latestEventSequence)) {
+            chain.eventSeqNumber = Math.max(chain.eventSeqNumber || 0, latestEventSequence);
+        }
+        chain.eventSessionId = sessionId;
 
-        OSA.setSessionQueue(queueItems);
-        OSA.setSessionToolEvents(tools);
-        OSA.setSessionSubagentTasks(subagentsData && Array.isArray(subagentsData.subagents) ? subagentsData.subagents : []);
-        OSA.rebuildTranscriptFromSession(session, tools, subagentsData && Array.isArray(subagentsData.subagents)
-            ? subagentsData.subagents
-            : [], { reason: 'session-artifacts' });
+        // Merge fetched artifacts with live entry state (see pre-fetch
+        // snapshots above): union tools/subagents by id with the live version
+        // winning on completion, and drop queue items dispatched mid-load.
+        const fetchedTools = Array.isArray(tools) ? tools : [];
+        const mergedToolsById = {};
+        fetchedTools.forEach(function(t) { if (t && t.tool_call_id) mergedToolsById[t.tool_call_id] = t; });
+        Object.keys(preToolsById).forEach(function(id) {
+            const live = preToolsById[id];
+            const fetched = mergedToolsById[id];
+            if (!fetched) {
+                // Live-only tool (started after the GET): keep it.
+                mergedToolsById[id] = {
+                    tool_call_id: live.tool_call_id,
+                    tool_name: live.tool_name,
+                    arguments: live.arguments,
+                    output: live.output,
+                    title: live.title,
+                    metadata: live.metadata,
+                    message_index: live.message_index,
+                    timestamp: live.timestamp,
+                    completed: live.completed,
+                    success: live.success,
+                };
+            } else if (live.completed && !fetched.completed) {
+                mergedToolsById[id] = fetched;
+                mergedToolsById[id].completed = true;
+                mergedToolsById[id].success = live.success;
+                if (live.output) mergedToolsById[id].output = live.output;
+            }
+        });
+        // Also fold in anything the live channel added while awaiting.
+        (entry.tools || []).forEach(function(t) {
+            if (t && t.tool_call_id && !mergedToolsById[t.tool_call_id]) {
+                mergedToolsById[t.tool_call_id] = {
+                    tool_call_id: t.tool_call_id,
+                    tool_name: t.tool_name,
+                    arguments: t.arguments,
+                    output: t.output,
+                    title: t.title,
+                    metadata: t.metadata,
+                    message_index: t.message_index,
+                    timestamp: t.timestamp,
+                    completed: t.completed,
+                    success: t.success,
+                };
+            }
+        });
+        const mergedTools = Object.keys(mergedToolsById).map(function(id) { return mergedToolsById[id]; });
+
+        const fetchedSubs = (subagentsData && Array.isArray(subagentsData.subagents)) ? subagentsData.subagents : [];
+        const mergedSubsById = {};
+        fetchedSubs.forEach(function(s) { if (s && s.session_id) mergedSubsById[s.session_id] = s; });
+        Object.keys(preSubById).forEach(function(id) {
+            if (!mergedSubsById[id]) mergedSubsById[id] = preSubById[id];
+        });
+        (entry.subagents || []).forEach(function(s) {
+            if (s && s.session_id && !mergedSubsById[s.session_id]) mergedSubsById[s.session_id] = s;
+        });
+        const mergedSubs = Object.keys(mergedSubsById).map(function(id) { return mergedSubsById[id]; });
+
+        // Queue: server wins, except items dispatched (removed from the entry)
+        // while the GET was in flight must stay removed, and local-only
+        // optimistic items must stay.
+        const fetchedQueue = Array.isArray(queueItems) ? queueItems : [];
+        const postQueueIds = new Set((entry.queue || []).map(function(q) { return q && q.id; }).filter(Boolean));
+        const dispatchedDuringLoad = new Set();
+        preQueueIds.forEach(function(id) { if (!postQueueIds.has(id)) dispatchedDuringLoad.add(id); });
+        const mergedQueue = fetchedQueue.filter(function(q) { return q && !dispatchedDuringLoad.has(q.id); });
+        (entry.queue || []).forEach(function(q) {
+            if (q && q.id && !mergedQueue.some(function(m) { return m.id === q.id; })) mergedQueue.push(q);
+        });
+
+        OSA.setSessionQueue(mergedQueue);
+        OSA.setSessionToolEvents(mergedTools);
+        OSA.setSessionSubagentTasks(mergedSubs);
+        OSA.rebuildTranscriptFromSession(session, mergedTools, mergedSubs, { reason: 'session-artifacts' });
         OSA.perfLog?.('selectSession:artifacts', {
             sessionId,
             requestId,
-            tools: tools.length,
-            subagents: Array.isArray(subagentsData?.subagents) ? subagentsData.subagents.length : 0,
-            queue: queueItems.length,
+            tools: mergedTools.length,
+            subagents: mergedSubs.length,
+            queue: mergedQueue.length,
             totalMs: Math.round((OSA.perfNow ? OSA.perfNow() : Date.now()) - perfStart),
         });
 
-        OSA.renderQueuedMessages(queueItems);
+        OSA.renderQueuedMessages(mergedQueue);
 
         const subagentsRunning = !!(subagentsData && subagentsData.has_running);
-        const isDirectlyRunning = sessionIsRunning && !subagentsRunning;
+        // Re-check liveness: a turn may have started via the live channel while
+        // the snapshot was loading. Entry flags are authoritative over the
+        // possibly-stale fetch-time task_status.
+        const liveRunning = entry.processing === true || session.task_status === 'running';
+        const isDirectlyRunning = (sessionIsRunning || liveRunning) && !subagentsRunning;
 
         OSA.connectEventSource(sessionId);
 
-        if (sessionIsRunning || subagentsRunning) {
+        if (liveRunning || subagentsRunning) {
+            entry.processing = true;
             OSA.setProcessing(true);
             OSA.setStopping(false);
             OSA.setSendButtonStopMode(true);
         } else {
+            entry.processing = false;
             OSA.setProcessing(false);
             OSA.setStopping(false);
             OSA.resetSendButton();
         }
 
-        if (isDirectlyRunning && OSA.shouldShowThinkingIndicatorForRunningSession(session, tools) && !OSA.getStreamingAssistantMessage()) {
+        if (isDirectlyRunning && OSA.shouldShowThinkingIndicatorForRunningSession(session, mergedTools) && !OSA.getStreamingAssistantMessage()) {
             OSA.showThinkingIndicator();
         }
 
@@ -1076,6 +1234,7 @@ OSA.setSessionSidebarRunning = function(sessionId, running) {
     const isChild = item.classList.contains('session-child');
     if (running) {
         icon.classList.add('session-icon-running');
+        icon.classList.remove('session-letter');
         icon.removeAttribute('style');
         icon.innerHTML = OSA.sessionRunningOrbitHtml();
         return;
@@ -1085,8 +1244,10 @@ OSA.setSessionSidebarRunning = function(sessionId, running) {
         icon.setAttribute('style', 'width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);');
         icon.textContent = 'A';
     } else {
-        icon.removeAttribute('style');
-        icon.textContent = '#';
+        const name = item.querySelector('.session-name')?.textContent || '';
+        icon.classList.add('session-letter');
+        icon.setAttribute('style', `--session-hue:${OSA.sessionHueFor(sessionId)}`);
+        icon.textContent = OSA.sessionInitialFor(name);
     }
 };
 
@@ -1102,6 +1263,9 @@ OSA.clearSessions = async function() {
             throw new Error(data.error || `HTTP ${res.status}`);
         }
         OSA.setCurrentSession(null);
+        OSA.SessionStore = {};
+        OSA.unreadSessions = {};
+        OSA.saveUnreadMap();
         OSA.resetSessionCheckpoints();
         const es = OSA.getEventSource();
         if (es) {
@@ -1348,6 +1512,8 @@ OSA.sendMessage = async function() {
                 OSA.connectEventSource(currentSession.id);
             }
         }
+        // Returned so follow-up steer can promote the queued item.
+        return data;
     } catch (error) {
         console.error('Failed to send message:', error);
         OSA.debug?.warn('send.failed', 'dispatch', error?.message || String(error));
@@ -1387,6 +1553,7 @@ OSA.sendMessage = async function() {
             OSA.resetSendButton();
             OSA.hideThinkingIndicator();
         }
+        return null;
     }
 };
 
@@ -1465,6 +1632,11 @@ OSA.resetSendButton = function() {
 };
 
 window.handleSendButtonClick = function() {
+    // Confirming a queue edit takes precedence over sending.
+    if (OSA.queueEditingId) {
+        OSA.confirmQueueEdit();
+        return;
+    }
     // While a turn is running the button is the Stop control. It must never
     // dispatch a draft: a half-typed message being fired off on what the user
     // read as "stop" is worse than making them use the keyboard to send.
@@ -2065,6 +2237,8 @@ OSA.deleteSession = async function(sessionId) {
             throw new Error(data.error || `HTTP ${res.status}`);
         }
         OSA.clearSessionCheckpoints(sessionId);
+        OSA.markSessionSeen(sessionId);
+        if (OSA.SessionStore) delete OSA.SessionStore[sessionId];
         if (OSA.getCurrentSession() && OSA.getCurrentSession().id === sessionId) {
             OSA.setCurrentSession(null);
             const es = OSA.getEventSource();

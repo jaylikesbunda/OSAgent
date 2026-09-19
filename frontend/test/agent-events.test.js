@@ -4,6 +4,7 @@ const test = require('node:test');
 global.window = global;
 global.requestAnimationFrame = () => 1;
 global.cancelAnimationFrame = () => {};
+require('../js/state.js');
 require('../js/utils.js');
 require('../js/messages.js');
 require('../js/transcript.js');
@@ -15,12 +16,11 @@ function setup() {
         task_status: 'running',
         messages: [{ role: 'user', content: 'Run the checks', metadata: {} }],
     };
+    OSA.SessionStore = {};
+    OSA.setCurrentSession(session);
     OSA.tmodelReset();
-    OSA.resetMessageChain();
-    OSA.getMessageChain = () => OSA.messageChain;
-    OSA.getCurrentSession = () => session;
+    OSA.resetMessageChain(session.id);
     OSA.getShowThinkingBlocks = () => true;
-    OSA.isAgentStopping = () => false;
     OSA.setHasReceivedResponse = () => {};
     OSA.setProcessing = () => {};
     OSA.setStopping = () => {};

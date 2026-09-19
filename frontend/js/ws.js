@@ -21,6 +21,18 @@ OSA.removeWsEventListener = function(listener) {
     OSA.wsEventListeners.delete(listener);
 };
 
+OSA.wsSubscribedSessions = OSA.wsSubscribedSessions || {};
+
+OSA.wsLastSeqFor = function(sessionId) {
+    try {
+        const entry = OSA.getSessionEntry ? OSA.getSessionEntry(sessionId) : null;
+        const seq = entry && entry.chain ? entry.chain.eventSeqNumber : 0;
+        return Number.isFinite(seq) ? seq : 0;
+    } catch (err) {
+        return 0;
+    }
+};
+
 OSA.wsSubscribeSession = function(sessionId, lastSeq = 0) {
     if (!OSA.wsRequest) {
         return Promise.reject(new Error('WebSocket RPC unavailable'));
@@ -70,10 +82,26 @@ OSA.connectWebSocket = function(sessionId) {
         return false;
     }
 
+    // Multiplexed connection: one socket carries all subscribed sessions, so
+    // switching chats subscribes the new session without dropping background
+    // turns. The server already supports concurrent subscriptions.
     const existing = OSA.getWebSocket();
+    if (existing && existing.readyState === WebSocket.OPEN) {
+        if (sessionId) {
+            OSA.wsSubscribeSession(sessionId, OSA.wsLastSeqFor(sessionId)).catch(err => {
+                console.error('Failed to subscribe over websocket:', err);
+            });
+            OSA.wsSubscribedSessions[sessionId] = true;
+            const session = OSA.getCurrentSession ? OSA.getCurrentSession() : null;
+            if (session && session.id === sessionId && session.task_status === 'running') {
+                if (OSA.syncRunningSessionSnapshot) OSA.syncRunningSessionSnapshot(sessionId);
+            }
+        }
+        return true;
+    }
     if (existing) {
         existing._osaSuppressReconnect = true;
-        existing.close();
+        try { existing.close(); } catch (err) {}
         OSA.setWebSocket(null);
     }
 
@@ -83,7 +111,7 @@ OSA.connectWebSocket = function(sessionId) {
         OSA.setWsReconnectTimer(null);
     }
 
-    OSA.wsSessionId = sessionId;
+    OSA.wsSessionId = null;
     const token = OSA.getToken ? OSA.getToken() : '';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
@@ -99,17 +127,22 @@ OSA.connectWebSocket = function(sessionId) {
     }
 
     ws.onopen = () => {
-        if (OSA.wsSessionId !== sessionId) {
+        if (OSA.getWebSocket() && OSA.getWebSocket() !== ws) {
             ws._osaSuppressReconnect = true;
             ws.close();
             return;
         }
         OSA.setWebSocket(ws);
         OSA.showConnectionStatus('connected', 'Connected');
-        const chain = OSA.getMessageChain ? OSA.getMessageChain() : null;
-        const lastSeq = chain && Number.isFinite(chain.eventSeqNumber) ? chain.eventSeqNumber : 0;
-        OSA.wsSubscribeSession(sessionId, lastSeq).catch(err => {
-            console.error('Failed to subscribe over websocket:', err);
+        // (Re)subscribe every known session so background turns resume after a
+        // reconnect without revisiting each chat.
+        const ids = Object.keys(OSA.wsSubscribedSessions || {});
+        if (sessionId && ids.indexOf(sessionId) === -1) ids.push(sessionId);
+        ids.forEach(function(id) {
+            OSA.wsSubscribeSession(id, OSA.wsLastSeqFor(id)).catch(err => {
+                console.error('Failed to subscribe over websocket:', err);
+            });
+            OSA.wsSubscribedSessions[id] = true;
         });
         const session = OSA.getCurrentSession ? OSA.getCurrentSession() : null;
         if (session && session.id === sessionId && session.task_status === 'running') {
@@ -128,10 +161,6 @@ OSA.connectWebSocket = function(sessionId) {
     };
 
     ws.onmessage = event => {
-        if (OSA.wsSessionId !== sessionId) {
-            return;
-        }
-
         let payload;
         try {
             payload = JSON.parse(event.data);
@@ -166,11 +195,9 @@ OSA.connectWebSocket = function(sessionId) {
             }
         });
 
-        const currentSession = OSA.getCurrentSession ? OSA.getCurrentSession() : null;
-        if (!currentSession || currentSession.id !== payload.session_id) {
-            return;
-        }
-
+        // No current-session filter: handleAgentEvent routes by event
+        // session_id into the per-session store, so background turns keep
+        // accumulating while another chat is viewed.
         // Do not touch chain.eventSeqNumber here: the envelope sequence is the
         // event's own sequence, and handleAgentEvent drops anything at or below
         // the counter as an already-seen replay. Advancing it first would make
@@ -183,9 +210,6 @@ OSA.connectWebSocket = function(sessionId) {
     };
 
     ws.onerror = err => {
-        if (OSA.wsSessionId !== sessionId) {
-            return;
-        }
         console.error('WebSocket error:', err);
     };
 
@@ -194,15 +218,17 @@ OSA.connectWebSocket = function(sessionId) {
             OSA.setWebSocket(null);
         }
 
-        if (ws._osaSuppressReconnect || OSA.wsSessionId !== sessionId) {
+        if (ws._osaSuppressReconnect) {
             return;
         }
 
         OSA.showConnectionStatus('disconnected', 'Disconnected');
-        if (OSA.wsSessionId && OSA.getCurrentSession() && OSA.getCurrentSession().id === OSA.wsSessionId) {
+        // Reconnect the multiplexed socket as long as any session needs it.
+        if (Object.keys(OSA.wsSubscribedSessions || {}).length > 0 || OSA.getCurrentSession()) {
             const reconnectTimer = setTimeout(() => {
                 OSA.setWsReconnectTimer(null);
-                OSA.connectWebSocket(OSA.wsSessionId);
+                const currentId = OSA.getCurrentSessionId ? OSA.getCurrentSessionId() : null;
+                OSA.connectWebSocket(currentId);
             }, 2000);
             OSA.setWsReconnectTimer(reconnectTimer);
         }

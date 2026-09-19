@@ -6197,6 +6197,59 @@ impl AgentRuntime {
         Ok(true)
     }
 
+    /// Cancel (remove) a queued message. Returns false when the row does not
+    /// exist or belongs to another session.
+    pub async fn cancel_queued_message(
+        &self,
+        session_id: &str,
+        queue_entry_id: &str,
+    ) -> Result<bool> {
+        if self.get_session(session_id).await?.is_none() {
+            return Err(OSAgentError::Session("Session not found".to_string()));
+        }
+        Ok(self
+            .storage
+            .delete_session_queued_message(session_id, queue_entry_id)?)
+    }
+
+    /// Replace the text of a pending queued message, keeping its id, position
+    /// and attachments. Returns false when the row is missing, belongs to
+    /// another session, or is already dispatching.
+    pub async fn edit_queued_message(
+        &self,
+        session_id: &str,
+        queue_entry_id: &str,
+        content: &str,
+    ) -> Result<bool> {
+        if self.get_session(session_id).await?.is_none() {
+            return Err(OSAgentError::Session("Session not found".to_string()));
+        }
+        if content.trim().is_empty() {
+            return Err(OSAgentError::Session(
+                "Queued message content cannot be empty".to_string(),
+            ));
+        }
+        Ok(self.storage.update_session_queued_message_content(
+            session_id,
+            queue_entry_id,
+            content,
+        )?)
+    }
+
+    /// Reorder pending queued messages to match the given id sequence.
+    pub async fn reorder_queued_messages(
+        &self,
+        session_id: &str,
+        ids: &[String],
+    ) -> Result<()> {
+        if self.get_session(session_id).await?.is_none() {
+            return Err(OSAgentError::Session("Session not found".to_string()));
+        }
+        Ok(self
+            .storage
+            .reorder_session_queued_messages(session_id, ids)?)
+    }
+
     pub async fn list_session_history(
         &self,
         session_id: &str,

@@ -280,21 +280,89 @@ OSA.resetStreamingMessage = function() {
     OSA.setStreamingAssistantDomId(null);
 };
 
-OSA.resetMessageChain = function() {
-    const eventSessionId = OSA.messageChain?.eventSessionId || null;
-    OSA.messageChain = {
-        lastEventType: null,
-        lastAssistantDomId: null,
-        pendingToolCallIds: [],
-        eventSessionId,
-        eventSeqNumber: 0,
-        lastThinkingEndSeq: 0,
-        lastToolStartSeq: 0,
-    };
+OSA.resetMessageChain = function(sessionId) {
+    const targetId = sessionId || OSA.getCurrentSessionId();
+    const chain = targetId ? OSA.getMessageChainFor(targetId) : OSA.messageChain;
+    chain.lastEventType = null;
+    chain.lastAssistantDomId = null;
+    chain.pendingToolCallIds = [];
+    chain.eventSessionId = targetId || chain.eventSessionId || null;
+    chain.eventSeqNumber = 0;
+    chain.lastThinkingEndSeq = 0;
+    chain.lastToolStartSeq = 0;
 };
 
-OSA.ensureCurrentSessionAssistantMessage = function(forceNew = false) {
-    const session = OSA.getCurrentSession();
+// Session-scoped mirror writes. Streaming events for background sessions must
+// update that session's stored messages, never the currently viewed session.
+OSA.getSessionObjectFor = function(sessionId) {
+    if (!sessionId) return OSA.getCurrentSession();
+    const entry = OSA.getSessionEntry(sessionId);
+    if (entry.session) return entry.session;
+    const current = OSA.getCurrentSession();
+    if (current && current.id === sessionId) return current;
+    return null;
+};
+
+// Appends a user message to a specific entry's stored session without touching
+// the transcript DOM or TModel (used for background queue dispatches).
+OSA.appendUserMessageToEntry = function(sessionId, content, opts = {}) {
+    const session = OSA.getSessionObjectFor(sessionId);
+    if (!session) return null;
+    if (!Array.isArray(session.messages)) session.messages = [];
+    const clientMessageId = opts.clientMessageId || '';
+    const exists = session.messages.some(function(message) {
+        if (message.role !== 'user') return false;
+        const existingClientId = message.metadata && message.metadata.client_message_id;
+        if (clientMessageId) return existingClientId === clientMessageId;
+        return message.content === content;
+    });
+    if (exists) return null;
+    const entry = {
+        role: 'user',
+        content,
+        thinking: null,
+        timestamp: opts.timestamp || new Date().toISOString(),
+        tool_calls: null,
+        tool_call_id: null,
+        metadata: clientMessageId ? { client_message_id: clientMessageId } : {},
+        tokens: null,
+        images: [],
+    };
+    session.messages.push(entry);
+    return entry;
+};
+
+// Merges a live tool event into a background entry's tool list so returning to
+// the session shows the work even before the server snapshot is refetched.
+OSA.upsertEntryToolEvent = function(entry, event, completed) {
+    if (!entry || !event || !event.tool_call_id || event.tool_name === 'subagent') return;
+    const tools = entry.tools;
+    const existing = tools.find(function(t) { return t && t.tool_call_id === event.tool_call_id; });
+    if (existing) {
+        if (completed) {
+            existing.completed = true;
+            existing.success = event.success === true;
+            if (typeof event.output === 'string') existing.output = event.output;
+            if (typeof event.title === 'string') existing.title = event.title;
+        }
+        return;
+    }
+    tools.push({
+        tool_call_id: event.tool_call_id,
+        tool_name: event.tool_name,
+        arguments: event.arguments || {},
+        output: (completed && typeof event.output === 'string') ? event.output : '',
+        title: typeof event.title === 'string' ? event.title : '',
+        metadata: event.metadata,
+        message_index: event.message_index,
+        timestamp: event.timestamp,
+        completed: !!completed,
+        success: event.success === true,
+    });
+};
+
+OSA.ensureCurrentSessionAssistantMessage = function(forceNew = false, sessionId) {
+    const session = sessionId ? OSA.getSessionObjectFor(sessionId) : OSA.getCurrentSession();
     if (!session) return null;
     if (!Array.isArray(session.messages)) session.messages = [];
     const last = session.messages[session.messages.length - 1];
@@ -314,18 +382,18 @@ OSA.ensureCurrentSessionAssistantMessage = function(forceNew = false) {
     return next;
 };
 
-OSA.appendCurrentSessionAssistantThinking = function(content) {
+OSA.appendCurrentSessionAssistantThinking = function(content, sessionId) {
     if (!content) return;
-    const message = OSA.ensureCurrentSessionAssistantMessage();
+    const message = OSA.ensureCurrentSessionAssistantMessage(false, sessionId);
     if (!message) return;
     const current = message.thinking || '';
     if (content.length >= 4 && current.endsWith(content)) return;
     message.thinking = current + content;
 };
 
-OSA.appendCurrentSessionAssistantContent = function(content) {
+OSA.appendCurrentSessionAssistantContent = function(content, sessionId) {
     if (!content) return;
-    const message = OSA.ensureCurrentSessionAssistantMessage();
+    const message = OSA.ensureCurrentSessionAssistantMessage(false, sessionId);
     if (!message) return;
     const current = message.content || '';
     if (content.length >= 4 && current.endsWith(content)) return;
@@ -343,7 +411,8 @@ OSA.resetCurrentSessionAssistantContent = function() {
 };
 
 OSA.insertCurrentSessionToolBoundary = function(event) {
-    const session = OSA.getCurrentSession();
+    const sessionId = event && event.session_id ? event.session_id : null;
+    const session = sessionId ? OSA.getSessionObjectFor(sessionId) : OSA.getCurrentSession();
     if (!session) return null;
     if (!Array.isArray(session.messages)) session.messages = [];
 
@@ -1686,9 +1755,111 @@ OSA.copyCode = function(btn) {
 };
 
 OSA.removeQueuedMessageElements = function() {
-    const floatingRoot = OSA.getTranscriptView().floatingRoot;
-    if (!floatingRoot) return;
-    floatingRoot.querySelectorAll('.queued-notice').forEach(el => el.remove());
+    // Legacy floating notices (pre-panel UI) plus the current panel rows.
+    const view = OSA.getTranscriptView ? OSA.getTranscriptView() : null;
+    if (view && view.floatingRoot) {
+        view.floatingRoot.querySelectorAll('.queued-notice').forEach(el => el.remove());
+    }
+    const panel = document.getElementById('queue-panel');
+    if (panel) panel.innerHTML = '';
+};
+
+// Follow-up behavior while the agent is working: "queue" appends behind the
+// current turn, "steer" interrupts it and runs the message next. Stored per
+// browser like the mic/speaker choices.
+OSA.getFollowUpBehavior = function() {
+    try {
+        const value = localStorage.getItem('osa.queue.followUp');
+        if (value === 'steer' || value === 'queue') return value;
+    } catch (err) {}
+    return 'queue';
+};
+
+OSA.setFollowUpBehavior = function(behavior) {
+    const next = behavior === 'steer' ? 'steer' : 'queue';
+    try {
+        localStorage.setItem('osa.queue.followUp', next);
+    } catch (err) {}
+    OSA.updateFollowUpToggle();
+    return next;
+};
+
+OSA.toggleFollowUpBehavior = function() {
+    OSA.setFollowUpBehavior(OSA.getFollowUpBehavior() === 'queue' ? 'steer' : 'queue');
+};
+
+OSA.updateFollowUpToggle = function(queueItems) {
+    const toggle = document.getElementById('followup-toggle');
+    if (!toggle) return;
+    const items = Array.isArray(queueItems) ? queueItems : (OSA.getSessionQueue() || []);
+    const visible = OSA.isAgentProcessing() || items.length > 0 || !!OSA.queueEditingId;
+    toggle.classList.toggle('hidden', !visible);
+    const behavior = OSA.getFollowUpBehavior();
+    const alternate = behavior === 'queue' ? 'steer' : 'queue';
+    toggle.textContent = behavior === 'queue' ? 'Queue' : 'Steer';
+    toggle.dataset.behavior = behavior;
+    toggle.title = `Follow-ups will ${behavior} while working. Click for ${alternate}. Ctrl+Enter sends ${alternate}.`;
+    toggle.setAttribute('aria-label', `Follow-up behavior: ${behavior}. Activate to switch to ${alternate}.`);
+};
+
+// Single Enter handler for the composer: edit confirmation, follow-up
+// delivery (Enter = preference, Ctrl/Cmd+Enter = alternate), plain send.
+OSA.handleComposerKeydown = function(event) {
+    if (!event) return;
+    if (event.key === 'Escape' && OSA.queueEditingId) {
+        event.preventDefault();
+        // Stop the global Escape handler (modal dismissal, stop-generation)
+        // from also firing while cancelling a queue edit.
+        if (event.stopPropagation) event.stopPropagation();
+        OSA.cancelQueueEdit();
+        return;
+    }
+    if (event.key !== 'Enter' || event.shiftKey) return;
+    if (event.isComposing) return;
+    event.preventDefault();
+    if (OSA.queueEditingId) {
+        OSA.confirmQueueEdit();
+        return;
+    }
+    const working = OSA.isAgentProcessing() || (OSA.getSessionQueue() || []).length > 0;
+    if (!working) {
+        OSA.runSendMessage();
+        return;
+    }
+    const behavior = OSA.getFollowUpBehavior();
+    const alternate = event.ctrlKey || event.metaKey;
+    OSA.sendFollowUp(alternate ? (behavior === 'queue' ? 'steer' : 'queue') : behavior);
+};
+
+// Sends a follow-up while the agent is working. "steer" queues then
+// immediately promotes the message so it interrupts the current turn.
+OSA.sendFollowUp = async function(delivery) {
+    if (OSA.queueEditingId) {
+        OSA.confirmQueueEdit();
+        return;
+    }
+    const input = document.getElementById('message-input');
+    const text = input ? input.value.trim() : '';
+    if (!text && OSA.getAttachments().length === 0) return;
+    if (!OSA.isAgentProcessing() && (OSA.getSessionQueue() || []).length === 0) {
+        OSA.runSendMessage();
+        return;
+    }
+    if (delivery !== 'steer') {
+        OSA.runSendMessage();
+        return;
+    }
+    try {
+        const data = await OSA.sendMessage();
+        const item = data && data.queue_item;
+        if (data && data.queued && item && item.id) {
+            await OSA.sendQueuedMessageNow(item);
+        } else if (!data) {
+            OSA.showErrorCard?.('Follow-up was not queued.');
+        }
+    } catch (error) {
+        console.error('Failed to steer follow-up:', error);
+    }
 };
 
 OSA.renderAttachmentMarkup = function(attachments = []) {
@@ -1884,51 +2055,212 @@ OSA.handleQueuedMessageDispatched = function(event) {
 };
 
 OSA.renderQueuedMessages = function(queueItems) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return;
-    const floatingRoot = OSA.getFloatingRoot();
-    if (!floatingRoot) return;
-
     OSA.removeQueuedMessageElements();
 
     const items = Array.isArray(queueItems) ? queueItems : [];
-    if (items.length === 0) {
+    OSA.updateFollowUpToggle(items);
+
+    // A queued turn still owns the composer: drop the empty-state hint so the
+    // panel is the visible state, matching the pre-panel behavior.
+    if (items.length > 0) {
+        const messagesDiv = document.getElementById('messages');
+        const emptyState = messagesDiv ? messagesDiv.querySelector('.empty-state') : null;
+        if (emptyState) emptyState.remove();
+    }
+
+    const panel = document.getElementById('queue-panel');
+    if (!panel) {
         OSA.tmodelMarkDirty('queue');
         return;
     }
+    if (items.length === 0) {
+        panel.classList.add('hidden');
+        OSA.tmodelMarkDirty('queue');
+        return;
+    }
+    panel.classList.remove('hidden');
 
-    const emptyState = messagesDiv.querySelector('.empty-state');
-    if (emptyState) emptyState.remove();
-
-    items.forEach((item, index) => {
-        const message = document.createElement('div');
+    const working = OSA.isAgentProcessing();
+    let html = '';
+    if (items.length > 3) {
+        html += `<div class="queue-count">${items.length} queued</div>`;
+    }
+    html += '<div class="queue-list">';
+    items.forEach(function(item, index) {
+        const id = item.id || '';
         const isDispatching = item.status === 'dispatching';
-        message.className = `queued-notice${isDispatching ? ' dispatching' : ''}`;
-        if (item.id) message.dataset.queueId = item.id;
-        const label = isDispatching ? 'Sending next' : `Queued ${index + 1}`;
-        const preview = (item.content || '').slice(0, 80) + ((item.content || '').length > 80 ? '…' : '');
-        const timeHtml = `<span class="queued-notice-time">${OSA.escapeHtml(OSA.formatRelativeDateTime(item.created_at))}</span>`;
-        // Send-now interrupts the current turn (if any) and runs this queued
-        // message next. Hidden on the item that is already being dispatched.
-        const sendNowHtml = isDispatching
-            ? ''
-            : `<button type="button" class="queued-notice-send-now" data-queue-id="${OSA.escapeHtml(item.id || '')}" data-queue-client-id="${OSA.escapeHtml(item.client_message_id || '')}" title="Stop the current turn and send this now" aria-label="Send this queued message now">Send now</button>`;
-        message.innerHTML = `<span class="queued-notice-label">${label}</span><span class="queued-notice-text">${OSA.escapeHtml(preview)}</span>${sendNowHtml}${timeHtml}`;
-        floatingRoot.appendChild(message);
+        const isEditing = !!OSA.queueEditingId && OSA.queueEditingId === id;
+        const text = item.content || '';
+        const preview = text.length > 140 ? text.slice(0, 140) + '…' : text;
+        const attCount = (Array.isArray(item.images) ? item.images.length : 0)
+            + (Array.isArray(item.attachments) ? item.attachments.length : 0);
+        const parked = !working && index === 0;
+        const disabled = (isDispatching || OSA.queueBusy) ? ' disabled' : '';
+        html += `<div class="queue-row${isEditing ? ' editing' : ''}${isDispatching ? ' dispatching' : ''}" data-queue-id="${OSA.escapeAttr(id)}">`
+            + `<span class="queue-order" title="Position ${index + 1} of ${items.length}">${index + 1}</span>`
+            + `<button type="button" class="queue-text" data-action="edit" title="${isEditing ? 'Editing — press Enter to confirm, Esc to cancel' : 'Edit queued message'}"${disabled}>${OSA.escapeHtml(preview) || '(empty)'}</button>`
+            + (attCount ? `<span class="queue-atts" title="${attCount} attachment${attCount === 1 ? '' : 's'}">${attCount} file${attCount === 1 ? '' : 's'}</span>` : '')
+            + `<span class="queue-actions${parked ? ' always' : ''}">`
+            + (index > 0 && !isDispatching ? `<button type="button" class="queue-btn" data-action="up" title="Move up" aria-label="Move queued message up"${OSA.queueBusy ? ' disabled' : ''}>↑</button>` : '')
+            + (index < items.length - 1 && !isDispatching ? `<button type="button" class="queue-btn" data-action="down" title="Move down" aria-label="Move queued message down"${OSA.queueBusy ? ' disabled' : ''}>↓</button>` : '')
+            + (!isDispatching ? `<button type="button" class="queue-btn queue-steer" data-action="steer" title="Stop the current turn and send this now"${OSA.queueBusy ? ' disabled' : ''}>${parked ? 'Send' : 'Steer'}</button>` : '')
+            + (!isDispatching ? `<button type="button" class="queue-btn queue-remove" data-action="remove" title="Remove from queue" aria-label="Remove queued message"${OSA.queueBusy ? ' disabled' : ''}>×</button>` : '')
+            + `</span>`
+            + `</div>`;
     });
+    html += '</div>';
+    panel.innerHTML = html;
 
-    floatingRoot.querySelectorAll('.queued-notice-send-now').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const queueId = btn.dataset.queueId;
-            const clientId = btn.dataset.queueClientId;
-            const item = (OSA.getSessionQueue() || []).find(q =>
-                (queueId && q.id === queueId) || (!queueId && clientId && q.client_message_id === clientId)
-            );
-            if (item) OSA.sendQueuedMessageNow(item);
+    if (!panel.dataset.bound) {
+        panel.dataset.bound = 'true';
+        panel.addEventListener('click', function(event) {
+            const btn = event.target.closest('[data-action]');
+            if (!btn || btn.disabled) return;
+            const row = event.target.closest('.queue-row');
+            const queueId = row ? row.dataset.queueId : '';
+            if (!queueId) return;
+            const action = btn.dataset.action;
+            if (action === 'edit') OSA.editQueuedMessage(queueId);
+            else if (action === 'steer') OSA.steerQueuedMessage(queueId);
+            else if (action === 'remove') OSA.removeQueuedMessage(queueId);
+            else if (action === 'up') OSA.moveQueuedMessage(queueId, -1);
+            else if (action === 'down') OSA.moveQueuedMessage(queueId, 1);
         });
-    });
+    }
 
     OSA.tmodelMarkDirty('queue');
+};
+
+OSA.findQueuedItem = function(queueId) {
+    return (OSA.getSessionQueue() || []).find(function(q) { return q && q.id === queueId; }) || null;
+};
+
+// Steer: interrupt the current turn (if any) and run this message next.
+OSA.steerQueuedMessage = function(queueId) {
+    const item = OSA.findQueuedItem(queueId);
+    if (item) OSA.sendQueuedMessageNow(item);
+};
+
+OSA.removeQueuedMessage = async function(queueId) {
+    const currentSession = OSA.getCurrentSession();
+    if (!currentSession || !queueId || OSA.queueBusy) return;
+    if (OSA.queueEditingId === queueId) OSA.cancelQueueEdit();
+    OSA.queueBusy = true;
+    OSA.renderQueuedMessages(OSA.getSessionQueue());
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(currentSession.id)}/queue/${encodeURIComponent(queueId)}`, {
+            method: 'DELETE',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    } catch (error) {
+        console.error('Failed to remove queued message:', error);
+        OSA.showErrorCard?.(error.message || 'Failed to remove queued message');
+    } finally {
+        OSA.queueBusy = false;
+    }
+    OSA.refreshCurrentSessionQueue?.();
+};
+
+OSA.moveQueuedMessage = async function(queueId, direction) {
+    const currentSession = OSA.getCurrentSession();
+    const queue = OSA.getSessionQueue() || [];
+    if (!currentSession || !queueId || OSA.queueBusy) return;
+    const index = queue.findIndex(function(q) { return q && q.id === queueId; });
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= queue.length) return;
+    const ids = queue.map(function(q) { return q.id; });
+    const moved = ids.splice(index, 1)[0];
+    ids.splice(target, 0, moved);
+    OSA.queueBusy = true;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(currentSession.id)}/queue/reorder`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    } catch (error) {
+        console.error('Failed to reorder queue:', error);
+        OSA.showErrorCard?.(error.message || 'Failed to reorder queue');
+    } finally {
+        OSA.queueBusy = false;
+    }
+    OSA.refreshCurrentSessionQueue?.();
+};
+
+// Edit: load the queued text into the composer, stashing the current draft.
+// Enter confirms (PATCH), Escape restores the stash.
+OSA.editQueuedMessage = function(queueId) {
+    if (OSA.queueBusy) return;
+    const item = OSA.findQueuedItem(queueId);
+    if (!item || item.status === 'dispatching') return;
+    const input = document.getElementById('message-input');
+    if (!input) return;
+    if (OSA.queueEditingId === queueId) {
+        input.focus();
+        return;
+    }
+    if (OSA.queueEditingId) OSA.cancelQueueEdit();
+    OSA.queueEditingId = queueId;
+    OSA.queueEditStash = { text: input.value, cursor: input.selectionStart || input.value.length };
+    input.value = item.content || '';
+    OSA.resizeMessageInput(input);
+    input.focus();
+    try { input.setSelectionRange(input.value.length, input.value.length); } catch (err) {}
+    OSA.renderQueuedMessages(OSA.getSessionQueue());
+};
+
+OSA.cancelQueueEdit = function() {
+    const input = document.getElementById('message-input');
+    const stash = OSA.queueEditStash;
+    OSA.queueEditingId = null;
+    OSA.queueEditStash = null;
+    if (input && stash) {
+        input.value = stash.text || '';
+        OSA.resizeMessageInput(input);
+        input.focus();
+        try { input.setSelectionRange(stash.cursor || 0, stash.cursor || 0); } catch (err) {}
+    }
+    OSA.renderQueuedMessages(OSA.getSessionQueue());
+};
+
+OSA.confirmQueueEdit = async function() {
+    const queueId = OSA.queueEditingId;
+    const currentSession = OSA.getCurrentSession();
+    const input = document.getElementById('message-input');
+    if (!queueId || !currentSession || !input) {
+        OSA.queueEditingId = null;
+        return;
+    }
+    const text = input.value.trim();
+    if (!text) {
+        OSA.cancelQueueEdit();
+        return;
+    }
+    OSA.queueBusy = true;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(currentSession.id)}/queue/${encodeURIComponent(queueId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: text }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const stash = OSA.queueEditStash;
+        OSA.queueEditingId = null;
+        OSA.queueEditStash = null;
+        input.value = (stash && stash.text) || '';
+        OSA.resizeMessageInput(input);
+        input.focus();
+    } catch (error) {
+        console.error('Failed to edit queued message:', error);
+        OSA.showErrorCard?.(error.message || 'Failed to edit queued message');
+    } finally {
+        OSA.queueBusy = false;
+    }
+    OSA.refreshCurrentSessionQueue?.();
 };
 
 // Interrupt the current turn and run this queued message now.

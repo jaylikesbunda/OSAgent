@@ -605,6 +605,14 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         )
         .route("/api/sessions/:id/queue", get(list_session_queue))
         .route(
+            "/api/sessions/:id/queue/reorder",
+            post(reorder_session_queue),
+        )
+        .route(
+            "/api/sessions/:id/queue/:queue_id",
+            delete(cancel_queued_message).patch(edit_queued_message),
+        )
+        .route(
             "/api/sessions/:id/queue/:queue_id/send-now",
             post(send_queued_message_now),
         )
@@ -2657,6 +2665,104 @@ async fn send_queued_message_now(
             }),
         )),
     }
+}
+
+/// Remove a queued message (the queue panel's delete button).
+async fn cancel_queued_message(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path((id, queue_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    match agent.cancel_queued_message(&id, &queue_id).await {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "success": true,
+            "session_id": id,
+            "queue_entry_id": queue_id,
+        }))),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Queued message not found".to_string(),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EditQueuedMessageRequest {
+    pub content: String,
+}
+
+/// Replace the text of a pending queued message (the queue panel's edit
+/// flow). Id, position and attachments are preserved.
+async fn edit_queued_message(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path((id, queue_id)): Path<(String, String)>,
+    Json(payload): Json<EditQueuedMessageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if payload.content.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Queued message content cannot be empty".to_string(),
+            }),
+        ));
+    }
+    match agent
+        .edit_queued_message(&id, &queue_id, &payload.content)
+        .await
+    {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "success": true,
+            "session_id": id,
+            "queue_entry_id": queue_id,
+        }))),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Queued message not found, already dispatching, or belongs to another session".to_string(),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderQueueRequest {
+    pub ids: Vec<String>,
+}
+
+/// Reorder pending queued messages to match the given id sequence.
+async fn reorder_session_queue(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    Json(payload): Json<ReorderQueueRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    agent
+        .reorder_queued_messages(&id, &payload.ids)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "session_id": id,
+    })))
 }
 
 async fn cancel_session(

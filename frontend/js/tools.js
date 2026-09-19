@@ -87,6 +87,156 @@ OSA.TOOL_ICONS = {
 OSA.ROW_TOOLS = new Set(['read_file', 'list_files', 'task', 'skill', 'web_fetch', 'subagent']);
 OSA.CONTEXT_TOOLS = new Set(['read_file', 'list_files', 'glob', 'grep']);
 
+OSA.applyBackgroundSessionEvent = function(entry, sessionId, event, chain) {
+    if (!entry || !sessionId || !event) return;
+    const session = entry.session;
+    const touchSidebar = function(running) {
+        if (typeof OSA.setSessionSidebarRunning === 'function') {
+            try { OSA.setSessionSidebarRunning(sessionId, !!running); } catch (err) {}
+        }
+    };
+    switch (event.type) {
+        case 'thinking':
+            entry.hasReceivedResponse = false;
+            entry.processing = true;
+            entry.stopping = false;
+            if (session) session.task_status = 'running';
+            touchSidebar(true);
+            break;
+        case 'thinking_delta':
+            if (session) OSA.appendCurrentSessionAssistantThinking(event.content || '', sessionId);
+            break;
+        case 'response_start':
+            if (session) {
+                const msgs = session.messages;
+                const last = msgs[msgs.length - 1];
+                if (!(last && last.role === 'assistant' && !(last.content || '').trim() && !(last.thinking || '').trim())) {
+                    OSA.ensureCurrentSessionAssistantMessage(true, sessionId);
+                }
+            }
+            entry.processing = true;
+            if (session) session.task_status = 'running';
+            touchSidebar(true);
+            break;
+        case 'response_chunk':
+            if (session) OSA.appendCurrentSessionAssistantContent(event.content || '', sessionId);
+            entry.hasReceivedResponse = true;
+            entry.processing = true;
+            break;
+        case 'tool_start':
+            if (event.tool_call_id && !(chain.pendingToolCallIds || []).includes(event.tool_call_id)) {
+                chain.pendingToolCallIds = chain.pendingToolCallIds || [];
+                chain.pendingToolCallIds.push(event.tool_call_id);
+            }
+            if (session) OSA.insertCurrentSessionToolBoundary(event);
+            OSA.upsertEntryToolEvent(entry, event, false);
+            entry.processing = true;
+            if (session) session.task_status = 'running';
+            touchSidebar(true);
+            break;
+        case 'tool_complete':
+            if (event.tool_call_id) {
+                chain.pendingToolCallIds = (chain.pendingToolCallIds || []).filter(function(id) { return id !== event.tool_call_id; });
+            }
+            OSA.upsertEntryToolEvent(entry, event, true);
+            break;
+        case 'response_complete':
+            chain.pendingToolCallIds = [];
+            chain.lastAssistantDomId = null;
+            entry.hasReceivedResponse = true;
+            if (session) session.task_status = 'active';
+            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
+            touchSidebar(false);
+            if ((entry.queue || []).length === 0) {
+                entry.processing = false;
+                entry.stopping = false;
+            }
+            if (typeof OSA.maybeAutoNameSession === 'function') OSA.maybeAutoNameSession(sessionId);
+            // Finished while the user looks elsewhere: flag the row so the
+            // sidebar shows an unread dot until the session is opened.
+            OSA.markSessionUnread(sessionId);
+            // Reconcile against the server queue: the local copy may still
+            // list an item the server already dispatched.
+            if (typeof OSA.refreshSessionQueue === 'function') {
+                OSA.refreshSessionQueue(sessionId).then(function(queue) {
+                    const fresh = Array.isArray(queue) ? queue : [];
+                    OSA.setSessionQueueFor(sessionId, fresh);
+                    const ent = OSA.getSessionEntry(sessionId);
+                    const sess = ent.session;
+                    if (fresh.length === 0 && (!sess || sess.task_status !== 'running')) {
+                        ent.processing = false;
+                        ent.stopping = false;
+                        if (typeof OSA.setSessionSidebarRunning === 'function') {
+                            try { OSA.setSessionSidebarRunning(sessionId, false); } catch (err) {}
+                        }
+                    }
+                }).catch(function() {});
+            }
+            break;
+        case 'queued_message_dispatched': {
+            chain.lastAssistantDomId = null;
+            const dispatchedId = event.queue_entry_id || '';
+            const dispatchedClientId = event.client_message_id || '';
+            entry.queue = (entry.queue || []).filter(function(item) {
+                if (dispatchedId && item.id === dispatchedId) return false;
+                if (dispatchedClientId && item.client_message_id === dispatchedClientId) return false;
+                return true;
+            });
+            OSA.appendUserMessageToEntry(sessionId, event.content || '', {
+                clientMessageId: event.client_message_id || '',
+                timestamp: event.timestamp,
+            });
+            entry.processing = true;
+            entry.stopping = false;
+            if (session) session.task_status = 'running';
+            touchSidebar(true);
+            break;
+        }
+        case 'error':
+            chain.pendingToolCallIds = [];
+            entry.stopping = false;
+            if (session) session.task_status = 'active';
+            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
+            touchSidebar(false);
+            if ((entry.queue || []).length === 0) entry.processing = false;
+            OSA.markSessionUnread(sessionId);
+            if (typeof OSA.refreshSessionQueue === 'function') {
+                OSA.refreshSessionQueue(sessionId).then(function(queue) {
+                    const fresh = Array.isArray(queue) ? queue : [];
+                    OSA.setSessionQueueFor(sessionId, fresh);
+                    const ent = OSA.getSessionEntry(sessionId);
+                    const sess = ent.session;
+                    if (fresh.length === 0 && (!sess || sess.task_status !== 'running')) {
+                        ent.processing = false;
+                        if (typeof OSA.setSessionSidebarRunning === 'function') {
+                            try { OSA.setSessionSidebarRunning(sessionId, false); } catch (err) {}
+                        }
+                    }
+                }).catch(function() {});
+            }
+            break;
+        case 'cancelled':
+            chain.pendingToolCallIds = [];
+            if (session) session.task_status = 'active';
+            entry.processing = false;
+            entry.stopping = false;
+            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
+            touchSidebar(false);
+            break;
+        case 'subagent_created':
+        case 'subagent_progress':
+        case 'subagent_completed':
+        case 'subagent_retrying':
+            entry.processing = true;
+            if (session) session.task_status = 'running';
+            touchSidebar(true);
+            break;
+        default:
+            break;
+    }
+    chain.lastEventType = event.type;
+};
+
 OSA.handleAgentEvent = function(event) {
     if (OSA.debug) {
         const summary = {};
@@ -98,18 +248,22 @@ OSA.handleAgentEvent = function(event) {
         if (event.sequence !== undefined) summary.seq = event.sequence;
         OSA.debug.log('event.' + event.type, summary);
     }
-    const isStopping = OSA.isAgentStopping();
+    const currentId = OSA.getCurrentSessionId();
+    const targetId = event.session_id || currentId;
+    const entry = targetId ? OSA.getSessionEntry(targetId) : null;
+    const chain = entry ? entry.chain : OSA.getMessageChain();
+    const isCurrent = !targetId || targetId === currentId;
+    const isStopping = entry ? !!entry.stopping : OSA.isAgentStopping();
     const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_retrying', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked', 'workflow_started', 'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed', 'workflow_completed', 'workflow_failed'];
     
     if (isStopping && ignoreDuringStop.includes(event.type)) {
         return;
     }
 
-    const chain = OSA.getMessageChain();
-    // The sequence counter is per-session. A counter left over from another
-    // session must not filter this one: the server resumes the live channel
-    // from it, and a stale high value makes the server drop every event
-    // (endless "thinking"), while a zeroed one replays the whole history.
+    // The sequence counter is per-session entry. A counter left over from
+    // another session must not filter this one: the server resumes the live
+    // channel from it, and a stale high value makes the server drop every
+    // event (endless "thinking"), while a zeroed one replays the whole history.
     const eventSessionId = event.session_id || '';
     if (eventSessionId && chain.eventSessionId !== eventSessionId) {
         chain.eventSessionId = eventSessionId;
@@ -129,6 +283,14 @@ OSA.handleAgentEvent = function(event) {
     // reconnect, and the synthetic sequence-0 event must not wipe it.
     chain.eventSeqNumber = Math.max(chain.eventSeqNumber, seq);
     const prevType = chain.lastEventType;
+
+    // Background sessions accumulate into their store entry without touching
+    // the transcript DOM, TModel, or global indicators. Returning to the
+    // session rebuilds from the entry, so nothing streamed while away is lost.
+    if (!isCurrent && entry && targetId) {
+        OSA.applyBackgroundSessionEvent(entry, targetId, event, chain);
+        return;
+    }
 
     switch (event.type) {
         case 'thinking':
@@ -237,7 +399,25 @@ OSA.handleAgentEvent = function(event) {
                 OSA.setSendButtonStopMode(true);
             }
             OSA.scheduleSessionInspectorRefresh();
-            if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
+            // The queue refresh is async: if it empties a locally-stale queue,
+            // settle to idle then. Without this, a response_complete that lands
+            // before the refresh returns leaves processing=true (and the
+            // sidebar orbit) stuck on forever.
+            if (OSA.refreshCurrentSessionQueue) {
+                OSA.refreshCurrentSessionQueue().then(function(queue) {
+                    const fresh = Array.isArray(queue) ? queue : (OSA.getSessionQueue() || []);
+                    if (fresh.length !== 0) return;
+                    const cur = OSA.getCurrentSession();
+                    if (cur && cur.task_status === 'running') return;
+                    OSA.setProcessing(false);
+                    OSA.setStopping(false);
+                    OSA.resetSendButton();
+                    OSA.hideThinkingIndicator();
+                    if (cur && cur.id && typeof OSA.setSessionSidebarRunning === 'function') {
+                        OSA.setSessionSidebarRunning(cur.id, false);
+                    }
+                }).catch(function() {});
+            }
             OSA.maybeAutoNameSession();
             // Paint the static icon immediately; the loadSessions refresh that
             // corrects every other row follows right behind it.
@@ -309,6 +489,22 @@ OSA.handleAgentEvent = function(event) {
                 OSA.resetSendButton();
             } else {
                 OSA.setSendButtonStopMode(true);
+            }
+            // Same async-queue race as response_complete: reconcile once the
+            // fresh queue lands (see above).
+            if (OSA.refreshCurrentSessionQueue) {
+                OSA.refreshCurrentSessionQueue().then(function(queue) {
+                    const fresh = Array.isArray(queue) ? queue : (OSA.getSessionQueue() || []);
+                    if (fresh.length !== 0) return;
+                    const cur = OSA.getCurrentSession();
+                    if (cur && cur.task_status === 'running') return;
+                    OSA.setProcessing(false);
+                    OSA.resetSendButton();
+                    OSA.hideThinkingIndicator();
+                    if (cur && cur.id && typeof OSA.setSessionSidebarRunning === 'function') {
+                        OSA.setSessionSidebarRunning(cur.id, false);
+                    }
+                }).catch(function() {});
             }
             break;
 

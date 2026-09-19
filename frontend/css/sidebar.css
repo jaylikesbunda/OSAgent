@@ -698,6 +698,7 @@
 }
 
 .session-icon {
+    position: relative;
     width: 22px;
     height: 22px;
     border: 1px solid var(--border);
@@ -705,6 +706,31 @@
     background: var(--bg-tertiary);
     color: var(--text-muted);
     font-size: 10px;
+}
+
+/* Letter-avatar fallback: deterministic per-session tint. */
+.session-icon.session-letter {
+    background: hsla(var(--session-hue, 220), 65%, 55%, 0.14);
+    border-color: transparent;
+    color: hsl(var(--session-hue, 220), 65%, 42%);
+    font-weight: 700;
+}
+
+.session-item.active .session-icon.session-letter {
+    background: hsla(var(--session-hue, 220), 65%, 55%, 0.22);
+}
+
+/* Unread-response dot on sessions that finished while unviewed. */
+.session-unread-dot {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg-secondary);
+    pointer-events: none;
 }
 
 .session-item.active .session-icon {

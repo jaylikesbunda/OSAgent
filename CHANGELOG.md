@@ -14,6 +14,9 @@ v0.6.0 changes:
 * Fixed push-to-talk binding twice per login, failed/queued sends leaving a phantom bubble, and OAuth/voice streams not stopping on close
 * Fixed tool and subagent cards: they now stop spinning on Stop/error, no longer jump on entry, and subagent results show in full with copy
 * Fixed Stop sending a draft instead of stopping, new chats opening blank, failed sends losing the message, phones losing the Workspace menu, and the question card having no way to close
+* Reworked chat session state: each session keeps its own messages, queue, tools and event position, and the live channel stays subscribed in the background, so switching chats no longer loses responses or stalls queued messages
+* Follow-up queue now works like opencode: queued messages live in a panel above the composer with edit, reorder, steer/send-now and remove, plus a queue/steer preference (Enter vs Ctrl+Enter)
+* Sidebar shows an unread dot on sessions that finish while unviewed, and session icons use the name initial with a per-session tint instead of #
 
 v0.5.3 changes:
 

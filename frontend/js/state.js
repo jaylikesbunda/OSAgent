@@ -1,7 +1,59 @@
 window.OSA = window.OSA || {};
 
-OSA.token = localStorage.getItem('token');
+// Safe storage access: the Node test harness loads this file without a DOM.
+OSA._safeStorageGet = function(key) {
+    try {
+        if (typeof localStorage !== 'undefined' && localStorage.getItem) return localStorage.getItem(key);
+    } catch (err) {}
+    return null;
+};
+OSA._safeStorageSet = function(key, value) {
+    try {
+        if (typeof localStorage !== 'undefined' && localStorage.setItem) localStorage.setItem(key, value);
+    } catch (err) {}
+};
+
+OSA.token = OSA._safeStorageGet('token');
 OSA.currentSession = null;
+OSA.currentSessionId = null;
+// Per-session store. Previously every piece of live state (session object,
+// queue, tool events, subagent tasks, event-sequence chain, processing flag)
+// was a single global that selectSession wiped on every switch — so background
+// turns kept running on the server while the UI dropped their events, and
+// returning to a session depended on a racy snapshot refetch. Each entry keeps
+// its own copy; the legacy get*/set* helpers below are thin views onto the
+// currently viewed entry, so most call sites are unchanged.
+OSA.SessionStore = {};
+OSA.getSessionEntry = function(sessionId) {
+    if (!sessionId) return null;
+    let entry = OSA.SessionStore[sessionId];
+    if (!entry) {
+        entry = OSA.SessionStore[sessionId] = {
+            session: null,
+            queue: [],
+            tools: [],
+            subagents: [],
+            chain: {
+                lastEventType: null,
+                lastAssistantDomId: null,
+                pendingToolCallIds: [],
+                eventSeqNumber: 0,
+                eventSessionId: sessionId,
+                lastThinkingEndSeq: 0,
+                lastToolStartSeq: 0,
+            },
+            processing: false,
+            stopping: false,
+            hasReceivedResponse: false,
+            streamText: '',
+            streamThinking: '',
+        };
+    }
+    return entry;
+};
+OSA.getCurrentSessionId = function() {
+    return OSA.currentSessionId || (OSA.currentSession && OSA.currentSession.id) || null;
+};
 OSA.currentModelId = null;
 OSA.currentModelProviderId = null;
 OSA.eventSource = null;
@@ -30,6 +82,68 @@ OSA.workspaceState = { activeWorkspace: 'default', workspaces: [] };
 OSA.cachedConfig = null;
 OSA.sessionTodos = [];
 OSA.sessionQueue = [];
+OSA.queueBusy = false;
+OSA.queueEditingId = null;
+OSA.queueEditStash = null;
+// Sidebar unread markers: session ids with a finished turn the user hasn't
+// opened yet. Explicit flags (not timestamps) so clock skew between client
+// and server can never flip them.
+OSA.unreadSessions = null;
+OSA.getUnreadMap = function() {
+    if (!OSA.unreadSessions) {
+        try {
+            OSA.unreadSessions = JSON.parse(localStorage.getItem('osa.sidebar.unread') || '{}') || {};
+        } catch (err) {
+            OSA.unreadSessions = {};
+        }
+    }
+    return OSA.unreadSessions;
+};
+OSA.saveUnreadMap = function() {
+    try {
+        const map = OSA.getUnreadMap();
+        const ids = Object.keys(map);
+        // Bound growth: drop the oldest beyond 200 entries.
+        if (ids.length > 200) {
+            ids.sort(function(a, b) { return (map[a] || 0) - (map[b] || 0); });
+            ids.slice(0, ids.length - 200).forEach(function(id) { delete map[id]; });
+        }
+        localStorage.setItem('osa.sidebar.unread', JSON.stringify(map));
+    } catch (err) {}
+};
+OSA.isSessionUnread = function(sessionId) {
+    return !!sessionId && !!OSA.getUnreadMap()[sessionId];
+};
+OSA.markSessionUnread = function(sessionId) {
+    if (!sessionId || sessionId === OSA.getCurrentSessionId()) return;
+    OSA.getUnreadMap()[sessionId] = Date.now();
+    OSA.saveUnreadMap();
+};
+OSA.markSessionSeen = function(sessionId) {
+    if (!sessionId) return;
+    const map = OSA.getUnreadMap();
+    if (map[sessionId]) {
+        delete map[sessionId];
+        OSA.saveUnreadMap();
+    }
+    const esc = (window.CSS && window.CSS.escape) ? window.CSS.escape(sessionId) : String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+    const row = document.querySelector(`.session-item[data-session-id="${esc}"]`);
+    if (row) {
+        row.classList.remove('has-unread');
+        row.querySelectorAll('.session-unread-dot').forEach(function(dot) { dot.remove(); });
+    }
+};
+OSA.pruneUnreadMap = function(validIds) {
+    const map = OSA.getUnreadMap();
+    let changed = false;
+    Object.keys(map).forEach(function(id) {
+        if (validIds.indexOf(id) === -1) {
+            delete map[id];
+            changed = true;
+        }
+    });
+    if (changed) OSA.saveUnreadMap();
+};
 OSA.sessionCheckpoints = {};
 OSA.sessionToolEvents = [];
 OSA.sessionSubagentTasks = [];
@@ -50,8 +164,14 @@ OSA.pendingFormattedFrame = null;
 OSA.sessionSelectionRequestId = 0;
 OSA.sessionSelectionAbortController = null;
 OSA._toolSyncInterval = null;
-OSA.perfDebugEnabled = localStorage.getItem('osa-debug-perf') === '1'
-    || new URLSearchParams(window.location.search).get('debugPerf') === '1';
+OSA.perfDebugEnabled = OSA._safeStorageGet('osa-debug-perf') === '1'
+    || (function() {
+        try {
+            return new URLSearchParams(window.location.search).get('debugPerf') === '1';
+        } catch (err) {
+            return false;
+        }
+    })();
 OSA.transcriptView = {
     initialized: false,
     transcriptRoot: null,
@@ -87,27 +207,62 @@ OSA.transcriptView = {
 };
 
 OSA.getToken = () => OSA.token;
-OSA.setToken = t => { OSA.token = t; localStorage.setItem('token', t); };
-OSA.clearToken = () => { OSA.token = null; localStorage.removeItem('token'); };
+OSA.setToken = t => { OSA.token = t; OSA._safeStorageSet('token', t); };
+OSA.clearToken = () => { OSA.token = null; try { if (typeof localStorage !== 'undefined' && localStorage.removeItem) localStorage.removeItem('token'); } catch (err) {} };
 OSA.getCurrentSession = () => OSA.currentSession;
-OSA.setCurrentSession = s => OSA.currentSession = s;
+OSA.setCurrentSession = function(s) {
+    OSA.currentSession = s;
+    OSA.currentSessionId = (s && s.id) || null;
+    if (s && s.id) {
+        const entry = OSA.getSessionEntry(s.id);
+        entry.session = s;
+        // Keep the entry's processing flag consistent with the snapshot so a
+        // fresh entry created by background events starts from server truth.
+        if (s.task_status !== 'running' && !entry.processing) entry.processing = false;
+    }
+    return s;
+};
 OSA.getEventSource = () => OSA.eventSource;
 OSA.setEventSource = es => OSA.eventSource = es;
 OSA.getActiveTools = () => OSA.activeTools;
-OSA.isAgentProcessing = () => OSA.isProcessing;
+OSA.isAgentProcessing = () => {
+    const id = OSA.getCurrentSessionId();
+    if (id && OSA.SessionStore[id]) return !!OSA.SessionStore[id].processing;
+    return !!OSA.isProcessing;
+};
 // Notifies the voice-mode orb. Processing is set from several places
 // (send, turn complete, stop, forced reset) and none of them touched the mic
 // button, which was previously the only thing that re-rendered voice mode — so
 // the orb sat on "Tap to speak" for the whole time the agent was thinking.
-OSA.setProcessing = p => {
-    OSA.isProcessing = p;
+OSA.setProcessing = function(p) {
+    OSA.isProcessing = !!p;
+    const id = OSA.getCurrentSessionId();
+    if (id) OSA.getSessionEntry(id).processing = !!p;
     OSA.renderVoiceModeState?.();
     return p;
 };
-OSA.isAgentStopping = () => OSA.isStopping;
-OSA.setStopping = s => OSA.isStopping = s;
-OSA.getHasReceivedResponse = () => OSA.hasReceivedResponse;
-OSA.setHasReceivedResponse = v => OSA.hasReceivedResponse = v;
+OSA.isAgentStopping = () => {
+    const id = OSA.getCurrentSessionId();
+    if (id && OSA.SessionStore[id]) return !!OSA.SessionStore[id].stopping;
+    return !!OSA.isStopping;
+};
+OSA.setStopping = function(s) {
+    OSA.isStopping = !!s;
+    const id = OSA.getCurrentSessionId();
+    if (id) OSA.getSessionEntry(id).stopping = !!s;
+    return s;
+};
+OSA.getHasReceivedResponse = () => {
+    const id = OSA.getCurrentSessionId();
+    if (id && OSA.SessionStore[id]) return !!OSA.SessionStore[id].hasReceivedResponse;
+    return !!OSA.hasReceivedResponse;
+};
+OSA.setHasReceivedResponse = function(v) {
+    OSA.hasReceivedResponse = !!v;
+    const id = OSA.getCurrentSessionId();
+    if (id) OSA.getSessionEntry(id).hasReceivedResponse = !!v;
+    return v;
+};
 OSA.getHeaderBaseTitle = () => OSA.headerBaseTitle;
 OSA.setHeaderBaseTitle = t => OSA.headerBaseTitle = t;
 OSA.getSidebarOpen = () => OSA.sidebarOpen;
@@ -148,12 +303,51 @@ OSA.getCachedConfig = () => OSA.cachedConfig;
 OSA.setCachedConfig = c => OSA.cachedConfig = c;
 OSA.getSessionTodos = () => OSA.sessionTodos;
 OSA.setSessionTodos = t => OSA.sessionTodos = t;
-OSA.getSessionQueue = () => OSA.sessionQueue;
-OSA.setSessionQueue = q => OSA.sessionQueue = Array.isArray(q) ? q : [];
-OSA.getSessionToolEvents = () => OSA.sessionToolEvents;
-OSA.setSessionToolEvents = tools => OSA.sessionToolEvents = Array.isArray(tools) ? tools : [];
-OSA.getSessionSubagentTasks = () => OSA.sessionSubagentTasks;
-OSA.setSessionSubagentTasks = tasks => OSA.sessionSubagentTasks = Array.isArray(tasks) ? tasks : [];
+OSA.getSessionQueue = () => {    const id = OSA.getCurrentSessionId();
+    if (id && OSA.SessionStore[id]) return OSA.SessionStore[id].queue;
+    return OSA.sessionQueue;
+};
+OSA.setSessionQueue = function(q) {
+    const next = Array.isArray(q) ? q : [];
+    OSA.sessionQueue = next;
+    const id = OSA.getCurrentSessionId();
+    if (id) OSA.getSessionEntry(id).queue = next;
+    return next;
+};
+OSA.getSessionQueueFor = function(sessionId) {
+    if (sessionId && OSA.SessionStore[sessionId]) return OSA.SessionStore[sessionId].queue;
+    return [];
+};
+OSA.setSessionQueueFor = function(sessionId, q) {
+    const next = Array.isArray(q) ? q : [];
+    if (sessionId) OSA.getSessionEntry(sessionId).queue = next;
+    if (!sessionId || sessionId === OSA.getCurrentSessionId()) OSA.sessionQueue = next;
+    return next;
+};
+OSA.getSessionToolEvents = () => {
+    const id = OSA.getCurrentSessionId();
+    if (id && OSA.SessionStore[id]) return OSA.SessionStore[id].tools;
+    return OSA.sessionToolEvents;
+};
+OSA.setSessionToolEvents = function(tools) {
+    const next = Array.isArray(tools) ? tools : [];
+    OSA.sessionToolEvents = next;
+    const id = OSA.getCurrentSessionId();
+    if (id) OSA.getSessionEntry(id).tools = next;
+    return next;
+};
+OSA.getSessionSubagentTasks = () => {
+    const id = OSA.getCurrentSessionId();
+    if (id && OSA.SessionStore[id]) return OSA.SessionStore[id].subagents;
+    return OSA.sessionSubagentTasks;
+};
+OSA.setSessionSubagentTasks = function(tasks) {
+    const next = Array.isArray(tasks) ? tasks : [];
+    OSA.sessionSubagentTasks = next;
+    const id = OSA.getCurrentSessionId();
+    if (id) OSA.getSessionEntry(id).subagents = next;
+    return next;
+};
 OSA.getSessionCheckpoints = sessionId => {
     if (!sessionId) return [];
     const checkpoints = OSA.sessionCheckpoints[sessionId];
@@ -195,7 +389,7 @@ OSA.setPendingFormattedFrame = f => OSA.pendingFormattedFrame = f;
 OSA.getPerfDebugEnabled = () => OSA.perfDebugEnabled;
 OSA.setPerfDebugEnabled = enabled => {
     OSA.perfDebugEnabled = !!enabled;
-    localStorage.setItem('osa-debug-perf', enabled ? '1' : '0');
+    OSA._safeStorageSet('osa-debug-perf', enabled ? '1' : '0');
 };
 OSA.perfNow = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 OSA.perfLog = (label, data = {}) => {
@@ -225,20 +419,20 @@ OSA.setTodoDockExpanded = e => OSA.todoDockExpanded = e;
 OSA.sessionHierarchy = { parentId: null, children: [], breadcrumb: [] };
 OSA.getSessionHierarchy = () => OSA.sessionHierarchy;
 OSA.setSessionHierarchy = h => OSA.sessionHierarchy = h;
-OSA.sidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
+OSA.sidebarCollapsed = OSA._safeStorageGet('sidebarCollapsed') === 'true';
 OSA.getSidebarCollapsed = () => OSA.sidebarCollapsed;
-OSA.setSidebarCollapsed = c => { OSA.sidebarCollapsed = c; localStorage.setItem('sidebarCollapsed', c); };
-OSA.sessionSourceFilter = localStorage.getItem('osagent-session-source-filter') || 'all';
+OSA.setSidebarCollapsed = c => { OSA.sidebarCollapsed = c; OSA._safeStorageSet('sidebarCollapsed', c); };
+OSA.sessionSourceFilter = OSA._safeStorageGet('osagent-session-source-filter') || 'all';
 OSA.getSessionSourceFilter = () => OSA.sessionSourceFilter;
 OSA.setSessionSourceFilter = value => {
     OSA.sessionSourceFilter = value || 'all';
-    localStorage.setItem('osagent-session-source-filter', OSA.sessionSourceFilter);
+    OSA._safeStorageSet('osagent-session-source-filter', OSA.sessionSourceFilter);
 };
-OSA.showThinkingBlocks = localStorage.getItem('osagent-show-thinking-blocks') !== 'false';
+OSA.showThinkingBlocks = OSA._safeStorageGet('osagent-show-thinking-blocks') !== 'false';
 OSA.getShowThinkingBlocks = () => OSA.showThinkingBlocks;
 OSA.setShowThinkingBlocks = value => {
     OSA.showThinkingBlocks = value;
-    localStorage.setItem('osagent-show-thinking-blocks', value ? 'true' : 'false');
+    OSA._safeStorageSet('osagent-show-thinking-blocks', value ? 'true' : 'false');
 };
 OSA.messageChain = {
     lastEventType: null,
@@ -249,7 +443,15 @@ OSA.messageChain = {
     lastThinkingEndSeq: 0,
     lastToolStartSeq: 0,
 };
-OSA.getMessageChain = () => OSA.messageChain;
+OSA.getMessageChain = () => {
+    const id = OSA.getCurrentSessionId();
+    if (id && OSA.SessionStore[id]) return OSA.SessionStore[id].chain;
+    return OSA.messageChain;
+};
+OSA.getMessageChainFor = function(sessionId) {
+    if (!sessionId) return OSA.messageChain;
+    return OSA.getSessionEntry(sessionId).chain;
+};
 OSA.revokeAttachmentPreviewUrl = attachment => {
     const url = attachment && attachment.previewUrl;
     if (!url || typeof url !== 'string' || !url.startsWith('blob:')) return;

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 global.window = global;
+require('../js/state.js');
 require('../js/utils.js');
 require('../js/tools.js');
 

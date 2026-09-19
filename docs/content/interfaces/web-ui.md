@@ -25,6 +25,9 @@ requests work with no CORS setup.
 - Subagent status/resume controls with preserved timeout results
 - Context ring showing provider-reported input + cache usage
 - Transcript with code blocks, thinking blocks, and attachments
+- Follow-up queue: messages sent mid-turn wait in a panel above the composer,
+  where each can be edited, reordered, steered (interrupt and run next), or
+  removed; Enter follows your queue/steer preference, Ctrl+Enter uses the other
 
 ## Related tasks
 
