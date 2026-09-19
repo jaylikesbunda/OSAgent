@@ -23,8 +23,11 @@ OSA.renderQuestionModal = function() {
     }
 
     const q = pendingQuestions[currentQuestionIndex];
-    title.textContent = q.header || 'Question';
-    
+    const total = pendingQuestions.length;
+    title.textContent = total > 1
+        ? (q.header || 'Question') + ' (' + (currentQuestionIndex + 1) + ' of ' + total + ')'
+        : (q.header || 'Question');
+
     let html = `<div class="question-item">
         <div class="question-text">${OSA.escapeHtml(q.question || '')}</div>
         <div class="question-options">`;
@@ -33,8 +36,9 @@ OSA.renderQuestionModal = function() {
     options.forEach((opt, idx) => {
         const selected = selectedAnswers[currentQuestionIndex]?.includes(opt.label);
         html += `
-            <div class="question-option ${selected ? 'selected' : ''}" 
-                 onclick="OSA.selectQuestionOption(${currentQuestionIndex}, ${idx}, ${q.multiple || false})">
+            <div class="question-option ${selected ? 'selected' : ''}" role="button" tabindex="0"
+                 onclick="OSA.selectQuestionOption(${currentQuestionIndex}, ${idx}, ${q.multiple || false})"
+                 onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();OSA.selectQuestionOption(${currentQuestionIndex}, ${idx}, ${q.multiple || false});}">
                 <div class="question-option-label">
                     ${OSA.escapeHtml(opt.label || '')}
                     ${opt.label?.toLowerCase().includes('recommended') ? '<span class="recommended">(Recommended)</span>' : ''}
@@ -48,12 +52,58 @@ OSA.renderQuestionModal = function() {
         <div class="question-custom-input">
             <input type="text" id="question-custom-input" placeholder="Type your own answer" 
                    oninput="OSA.updateCustomAnswer(${currentQuestionIndex})"
-                   value="${selectedAnswers[currentQuestionIndex]?.find(a => !options.some(o => o.label === a)) || ''}">
+                   value="${OSA.escapeAttr(selectedAnswers[currentQuestionIndex]?.find(a => !options.some(o => o.label === a)) || '')}">
         </div>
     `;
     
     html += '</div></div>';
     body.innerHTML = html;
+
+    // Multi-question prompts need a way forward; the footer is otherwise
+    // Submit-only, which silently submitted empty answers for later questions.
+    const backBtn = document.getElementById('question-back-btn');
+    const nextBtn = document.getElementById('question-next-btn');
+    const submitBtn = document.getElementById('question-submit-btn');
+    const isLast = currentQuestionIndex >= total - 1;
+    if (backBtn) backBtn.classList.toggle('hidden', currentQuestionIndex === 0);
+    if (nextBtn) nextBtn.classList.toggle('hidden', isLast);
+    if (submitBtn) submitBtn.classList.toggle('hidden', !isLast);
+};
+
+OSA.nextQuestion = function() {
+    const pendingQuestions = OSA.getPendingQuestions();
+    if (OSA.getCurrentQuestionIndex() < pendingQuestions.length - 1) {
+        OSA.setCurrentQuestionIndex(OSA.getCurrentQuestionIndex() + 1);
+        OSA.renderQuestionModal();
+    }
+};
+
+OSA.prevQuestion = function() {
+    if (OSA.getCurrentQuestionIndex() > 0) {
+        OSA.setCurrentQuestionIndex(OSA.getCurrentQuestionIndex() - 1);
+        OSA.renderQuestionModal();
+    }
+};
+
+// Dismissing without answering leaves the agent waiting forever, so submit an
+// empty answer set to unblock it rather than just hiding the card.
+OSA.cancelQuestion = function() {
+    const questionId = OSA.getPendingQuestionId();
+    if (questionId) {
+        OSA.fetchWithAuth('/api/questions/answer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question_id: questionId, answers: [] }),
+        }).catch(function(err) {
+            console.error('Failed to cancel question:', err);
+        });
+    }
+    const modal = document.getElementById('question-modal');
+    if (modal) modal.classList.add('hidden');
+    OSA.setPendingQuestions([]);
+    OSA.setPendingQuestionId('');
+    OSA.setCurrentQuestionIndex(0);
+    OSA.setSelectedAnswers([]);
 };
 
 OSA.selectQuestionOption = function(qIdx, optIdx, multiple) {
@@ -170,3 +220,6 @@ window.selectQuestionOption = OSA.selectQuestionOption;
 window.updateCustomAnswer = OSA.updateCustomAnswer;
 window.submitQuestion = OSA.submitQuestion;
 window.handleQuestionResponse = OSA.handleQuestionResponse;
+window.cancelQuestion = OSA.cancelQuestion;
+window.nextQuestion = OSA.nextQuestion;
+window.prevQuestion = OSA.prevQuestion;

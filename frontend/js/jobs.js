@@ -134,13 +134,13 @@ OSA.Jobs = {
                 </div>
             </div>
             <div class="job-card-actions">
-                <button class="job-action-btn job-toggle-btn ${enabled ? 'is-on' : 'is-off'}" onclick="OSA.Jobs.toggle('${job.id}')" title="${enabled ? 'Pause' : 'Resume'}">
+                <button class="job-action-btn job-toggle-btn ${enabled ? 'is-on' : 'is-off'}" onclick="OSA.Jobs.toggle(${OSA.jsArg(job.id)})" title="${enabled ? 'Pause' : 'Resume'}">
                     ${enabled
                         ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
                         : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>'
                     }
                 </button>
-                <button class="job-action-btn job-delete-btn" onclick="OSA.Jobs.confirmDelete('${job.id}')" title="Delete">
+                <button class="job-action-btn job-delete-btn" onclick="OSA.Jobs.confirmDelete(${OSA.jsArg(job.id)})" title="Delete">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 </button>
             </div>

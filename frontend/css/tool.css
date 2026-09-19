@@ -150,6 +150,42 @@
     background: var(--bg-tertiary);
 }
 
+.tool-copy-btn {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+}
+
+.tool-copy-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+    background: var(--bg-tertiary);
+}
+
+.tool-copy-btn.copied {
+    color: #22c55e;
+    border-color: #22c55e;
+}
+
+.tool-copy-btn.copied svg {
+    display: none;
+}
+
+.tool-copy-btn.copied::after {
+    content: '\2713';
+    font-size: 12px;
+    font-weight: 700;
+}
+
 .tool-previewable .tool-trigger-inline:hover {
     background: var(--bg-hover);
 }
@@ -159,7 +195,6 @@
 }
 
 /* ---- Panel variant (expandable) ---- */
-
 .tool-panel {
     background: var(--bg-secondary);
     border: 1px solid var(--border);
@@ -332,10 +367,10 @@
 
 .tool-body.visible {
     display: block;
-    animation: toolSlideIn 0.2s ease-out;
+    animation: toolBodyOpen 0.2s ease-out;
 }
 
-@keyframes toolSlideIn {
+@keyframes toolBodyOpen {
     from { opacity: 0; max-height: 0; }
     to { opacity: 1; max-height: 2000px; }
 }
@@ -681,6 +716,11 @@
     animation: badgePulse 1.5s ease-in-out infinite;
 }
 
+.subagent-status-badge.timeout {
+    color: #f0b429;
+    background: rgba(240, 180, 41, 0.12);
+}
+
 .subagent-live {
     padding: 4px 14px;
     border-top: 1px solid var(--border);
@@ -810,8 +850,33 @@
     padding: 10px 14px;
     background: var(--bg-primary);
     border-bottom: 1px solid var(--border);
-    max-height: 200px;
+    max-height: 320px;
     overflow-y: auto;
+}
+
+.subagent-result-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.subagent-result-copy {
+    padding: 2px 8px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.subagent-result-copy:hover {
+    color: var(--text-primary);
+    border-color: var(--text-primary);
 }
 
 .subagent-result-label {
@@ -1128,4 +1193,17 @@
 .workflow-approval-btn.reject:hover {
     border-color: rgba(239, 68, 68, 0.35);
     background: rgba(239, 68, 68, 0.1);
+}
+
+/* Respect reduced-motion for card entrances and status pulses. */
+@media (prefers-reduced-motion: reduce) {
+    .tool-card,
+    .subagent-card,
+    .coordinator-card,
+    .workflow-card,
+    .tool-body.visible,
+    .tool-status-badge,
+    .subagent-status-badge {
+        animation: none !important;
+    }
 }

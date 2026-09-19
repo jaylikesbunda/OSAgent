@@ -86,7 +86,7 @@ OSA.renderSessionSnapshots = function() {
                 </div>
                 <div class="snapshot-paths">${paths || '<span class="inspector-empty">No paths recorded</span>'}${OSA.escapeHtml(more)}</div>
                 <div class="snapshot-actions">
-                    <button class="snapshot-revert-btn" type="button" onclick="OSA.revertSessionSnapshot('${snapshot.snapshot_id}')">Revert</button>
+                    <button class="snapshot-revert-btn" type="button" onclick="OSA.revertSessionSnapshot(${OSA.jsArg(snapshot.snapshot_id)})">Revert</button>
                 </div>
             </div>
         `;
@@ -112,6 +112,8 @@ OSA.refreshSessionInspector = async function() {
         const snapshotsData = await snapshotsRes.json();
         if (!historyRes.ok) throw new Error(historyData.error || `History HTTP ${historyRes.status}`);
         if (!snapshotsRes.ok) throw new Error(snapshotsData.error || `Snapshots HTTP ${snapshotsRes.status}`);
+        // Ignore a response for a session the user has since navigated away from.
+        if (OSA.getCurrentSession()?.id !== currentSession.id) return;
         OSA.setSessionInspectorState({ history: Array.isArray(historyData) ? historyData : [], snapshots: Array.isArray(snapshotsData) ? snapshotsData : [] });
         OSA.renderSessionHistory();
         OSA.renderSessionSnapshots();

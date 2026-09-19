@@ -559,6 +559,20 @@
     border-color: var(--error);
 }
 
+/* Primary action on an error card (e.g. "Retry send") reads as the default. */
+.error-card-retry-primary {
+    background: var(--text-primary);
+    border-color: var(--text-primary);
+    color: var(--bg-primary);
+    font-weight: 600;
+}
+
+.error-card-retry-primary:hover {
+    background: var(--text-primary);
+    border-color: var(--text-primary);
+    opacity: 0.9;
+}
+
 .thinking-text {
     font-size: 14px;
     color: var(--text-secondary);

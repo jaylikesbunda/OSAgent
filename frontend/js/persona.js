@@ -30,7 +30,7 @@ OSA.renderPersonaMenu = function() {
         const isActive = selectedId === p.id;
         return `
             <div class="menu-row ${isActive ? 'active' : ''}">
-                <button class="menu-row-main" type="button" onclick="event.stopPropagation(); OSA.selectPersonaFromMenu('${OSA.escapeHtml(p.id)}')">
+                <button class="menu-row-main" type="button" onclick="event.stopPropagation(); OSA.selectPersonaFromMenu(${OSA.jsArg(p.id)})">
                     <span class="menu-row-copy">
                         <span class="menu-row-title">${OSA.escapeHtml(p.name || p.id)}</span>
                     </span>

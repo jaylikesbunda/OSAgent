@@ -761,7 +761,7 @@ OSA.renderModalModelDropdown = async function() {
             if (!models.length) { list.innerHTML = '<div class="model-empty">No models found</div>'; return; }
             let html = '';
             for (const m of models) {
-                html += '<div class="model-option" onclick="OSA.selectModalModel(\'' + OSA.escapeHtml(m.id) + '\', \'' + OSA.escapeHtml(m.name) + '\', \'' + OSA.escapeHtml(m.provider_id) + '\')">' +
+                html += '<div class="model-option" onclick="OSA.selectModalModel(' + OSA.jsArg(m.id) + ', ' + OSA.jsArg(m.name) + ', ' + OSA.jsArg(m.provider_id) + ')">' +
                     '<div class="model-option-info">' +
                         '<span class="model-option-name">' + OSA.escapeHtml(m.name) + '</span>' +
                         '<span class="model-option-id">' + OSA.escapeHtml(m.id) + '</span>' +
@@ -798,7 +798,7 @@ OSA.populateModalModelDropdown = function(models, providerId) {
         if (!categories[cat] || categories[cat].length === 0) continue;
         html += '<div class="model-group-title">' + cat.charAt(0).toUpperCase() + cat.slice(1) + '</div>';
         for (const m of categories[cat]) {
-            html += '<div class="model-option" onclick="OSA.selectModalModel(\'' + OSA.escapeHtml(m.id) + '\', \'' + OSA.escapeHtml(m.name) + '\', \'' + OSA.escapeHtml(providerId) + '\')">' +
+            html += '<div class="model-option" onclick="OSA.selectModalModel(' + OSA.jsArg(m.id) + ', ' + OSA.jsArg(m.name) + ', ' + OSA.jsArg(providerId) + ')">' +
                 '<div class="model-option-info">' +
                     '<span class="model-option-name">' + OSA.escapeHtml(m.name) + '</span>' +
                     '<span class="model-option-id">' + OSA.escapeHtml(m.id) + '</span>' +
@@ -925,16 +925,14 @@ OSA.renderRoutingOverview = function(catalog, providersData) {
             const name = provider ? provider.name : entry.id;
             const status = provider && provider.oauth_supported ? 'OAuth' : 'API key';
             const activeBadge = entry.is_default ? '<span class="badge badge-apikey" style="opacity:0.7">active</span>' : '';
-            const safeProviderId = OSA.escapeHtml(entry.id);
-            const safeModelId = OSA.escapeHtml(entry.model || '');
             return `<div class="provider-route-list-item">
                 <div class="provider-route-list-main">
                     <div class="provider-route-list-title">${OSA.escapeHtml(name)}${activeBadge}</div>
                     <div class="provider-route-list-meta">${OSA.escapeHtml(entry.model || 'provider default')} · ${OSA.escapeHtml(status)}</div>
                 </div>
                 <div class="provider-route-actions">
-                    <button class="btn-ghost" onclick="OSA.selectModel('${safeModelId}', '${safeProviderId}')"${entry.model ? '' : ' disabled'}>Use</button>
-                    <button class="btn-ghost" onclick="OSA.openAddProviderModal('${safeProviderId}', '${safeModelId}')">Edit</button>
+                    <button class="btn-ghost" onclick="OSA.selectModel(${OSA.jsArg(entry.model || '')}, ${OSA.jsArg(entry.id)})"${entry.model ? '' : ' disabled'}>Use</button>
+                    <button class="btn-ghost" onclick="OSA.openAddProviderModal(${OSA.jsArg(entry.id)}, ${OSA.jsArg(entry.model || '')})">Edit</button>
                 </div>
             </div>`;
         }).join('');
@@ -980,21 +978,19 @@ OSA.renderSettingsProviders = async function() {
                 statusBadge = '<span class="badge badge-disconnected">Not connected</span>';
             }
 
-            const safeProviderId = OSA.escapeHtml(provider.id);
-            const safeConnectedModel = OSA.escapeHtml((connectedEntry && connectedEntry.model) || '');
             const connectBtn = provider.connected
-                ? `<button class="btn-ghost" onclick="OSA.openAddProviderModal('${safeProviderId}', '${safeConnectedModel}')" style="padding:4px 12px;font-size:12px">Manage</button>`
-                : '<button class="btn-action" onclick="OSA.openAddProviderModal(\'' + safeProviderId + '\')" style="padding:4px 12px;font-size:12px">Connect</button>';
+                ? `<button class="btn-ghost" onclick="OSA.openAddProviderModal(${OSA.jsArg(provider.id)}, ${OSA.jsArg((connectedEntry && connectedEntry.model) || '')})" style="padding:4px 12px;font-size:12px">Manage</button>`
+                : `<button class="btn-action" onclick="OSA.openAddProviderModal(${OSA.jsArg(provider.id)})" style="padding:4px 12px;font-size:12px">Connect</button>`;
 
             let modelSection = '';
             if (modelCount > 0) {
                 const toggleIcon = isExpanded ? '&#9660;' : '&#9654;';
                 const toggleClass = isExpanded ? 'expanded' : '';
                 modelSection =
-                    '<div class="provider-models-toggle ' + toggleClass + '" onclick="OSA.toggleProviderModels(\'' + OSA.escapeHtml(provider.id) + '\')">' +
+                    '<div class="provider-models-toggle ' + toggleClass + '" onclick="OSA.toggleProviderModels(' + OSA.jsArg(provider.id) + ')">' +
                         '<span>' + modelCount + ' model' + (modelCount !== 1 ? 's' : '') + ' ' + toggleIcon + '</span>' +
                     '</div>' +
-                    '<div class="provider-catalog-models ' + (isExpanded ? 'expanded' : '') + '" id="models-' + OSA.escapeHtml(provider.id) + '">' +
+                    '<div class="provider-catalog-models ' + (isExpanded ? 'expanded' : '') + '" id="models-' + OSA.escapeAttr(provider.id) + '">' +
                         (isExpanded ? OSA.renderCategorizedModels(provider.models, provider.id) : '') +
                     '</div>';
             }
@@ -1155,7 +1151,7 @@ OSA.renderCategorizedModels = function(models, providerId) {
             let badges = '';
             if (m.supports_tools) badges += '<span class="model-badge" title="Tool calling">T</span>';
             if (m.supports_vision) badges += '<span class="model-badge" title="Vision">V</span>';
-            html += '<div class="provider-model-tag" onclick="OSA.selectModel(\'' + OSA.escapeHtml(m.id) + '\', \'' + OSA.escapeHtml(m.provider_id || providerId) + '\'); OSA.closeSettings();" title="' + OSA.escapeHtml(m.id) + '">' +
+            html += '<div class="provider-model-tag" onclick="OSA.selectModel(' + OSA.jsArg(m.id) + ', ' + OSA.jsArg(m.provider_id || providerId) + '); OSA.closeSettings();" title="' + OSA.escapeAttr(m.id) + '">' +
                 OSA.escapeHtml(m.name) +
                 '<span class="model-tag-meta">' + ctx + ' ctx ' + badges + '</span>' +
             '</div>';
@@ -1171,7 +1167,7 @@ OSA.renderCategorizedModels = function(models, providerId) {
             let badges = '';
             if (m.supports_tools) badges += '<span class="model-badge" title="Tool calling">T</span>';
             if (m.supports_vision) badges += '<span class="model-badge" title="Vision">V</span>';
-            html += '<div class="provider-model-tag" onclick="OSA.selectModel(\'' + OSA.escapeHtml(m.id) + '\', \'' + OSA.escapeHtml(m.provider_id || providerId) + '\'); OSA.closeSettings();" title="' + OSA.escapeHtml(m.id) + '">' +
+            html += '<div class="provider-model-tag" onclick="OSA.selectModel(' + OSA.jsArg(m.id) + ', ' + OSA.jsArg(m.provider_id || providerId) + '); OSA.closeSettings();" title="' + OSA.escapeAttr(m.id) + '">' +
                 OSA.escapeHtml(m.name) +
                 '<span class="model-tag-meta">' + ctx + ' ctx ' + badges + '</span>' +
             '</div>';
@@ -1241,7 +1237,11 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     if (provider.api_key_url) {
         apiKeyLink.classList.remove('hidden');
         apiKeyLinkName.textContent = provider.name;
-        apiKeyLink.onclick = function() { window.open(provider.api_key_url, '_blank'); return false; };
+        apiKeyLink.onclick = function() {
+            const url = OSA.safeUrl(provider.api_key_url);
+            if (url) window.open(url, '_blank', 'noopener,noreferrer');
+            return false;
+        };
     } else {
         apiKeyLink.classList.add('hidden');
     }
@@ -1424,20 +1424,28 @@ OSA.initiateOAuth = async function() {
 
             // Navigate the already-open window to the auth URL
             if (oauthWindow) {
-                oauthWindow.location.href = data.auth_url;
+                const authUrl = OSA.safeUrl(data.auth_url);
+                if (!authUrl) {
+                    oauthWindow.close();
+                    throw new Error('OAuth provider returned an unsupported authorization URL');
+                }
+                oauthWindow.location.href = authUrl;
                 oauthWindow.focus();
 
                 const pollTimer = setInterval(function() {
                     try {
                         if (oauthWindow.closed) {
                             clearInterval(pollTimer);
+                            OSA.pkcePollTimer = null;
                             OSA.checkOAuthCallback(OSA.currentProviderId);
                         }
                     } catch (e) {}
                 }, 500);
+                OSA.pkcePollTimer = pollTimer;
 
                 window.oauthCallback = function(params) {
                     clearInterval(pollTimer);
+                    OSA.pkcePollTimer = null;
                     if (oauthWindow && !oauthWindow.closed) oauthWindow.close();
                     delete window.oauthCallback;
                     if (params && params.success) {
@@ -1462,9 +1470,18 @@ OSA.initiateOAuth = async function() {
             };
 
             document.getElementById('oauth-device-code-display').textContent = data.user_code;
-            document.getElementById('oauth-device-link').href = data.verification_uri;
-            document.getElementById('oauth-device-link').textContent = 'Open ' + (data.verification_uri || 'verification page');
+            const deviceLink = document.getElementById('oauth-device-link');
+            const verifyUrl = OSA.safeUrl(data.verification_uri);
+            if (verifyUrl) {
+                deviceLink.href = verifyUrl;
+                deviceLink.textContent = 'Open verification page';
+                deviceLink.classList.remove('hidden');
+            } else {
+                deviceLink.removeAttribute('href');
+                deviceLink.classList.add('hidden');
+            }
             document.getElementById('oauth-device-status-text').textContent = 'Waiting for authorization...';
+            OSA.deviceCodePollAttempts = 0;
             OSA.showOAuthView('device');
             OSA.pollDeviceCode();
         }
@@ -1481,6 +1498,14 @@ OSA.pollDeviceCode = function() {
 
     const deviceCode = OSA.currentOAuthFlow.deviceCode;
     const interval = OSA.currentOAuthFlow.interval;
+
+    // Cap the poll so a flow that never completes cannot spin forever.
+    OSA.deviceCodePollAttempts = (OSA.deviceCodePollAttempts || 0) + 1;
+    if (OSA.deviceCodePollAttempts > 200) {
+        const statusEl = document.getElementById('oauth-device-status-text');
+        if (statusEl) statusEl.textContent = 'Timed out waiting for authorization.';
+        return;
+    }
 
     OSA.deviceCodePollTimer = setTimeout(async function() {
         try {
@@ -1665,6 +1690,17 @@ OSA.addProvider = async function() {
 OSA.closeAddProviderModal = function() {
     const modal = document.getElementById('add-provider-modal');
     if (modal) modal.classList.add('hidden');
+    // Stop any in-flight OAuth polling; otherwise a closed modal keeps hitting
+    // /oauth/.../device (or the PKCE popup timer) for the rest of the session.
+    if (typeof OSA.cancelDeviceCode === 'function' && OSA.currentOAuthFlow?.type === 'device_code') {
+        OSA.cancelDeviceCode();
+    }
+    if (OSA.pkcePollTimer) {
+        clearInterval(OSA.pkcePollTimer);
+        OSA.pkcePollTimer = null;
+    }
+    OSA.deviceCodePollAttempts = 0;
+    OSA.currentOAuthFlow = null;
     OSA.currentProviderId = null;
     OSA.currentProviderOAuthSupported = false;
     OSA.currentProviderApiKeyUrl = null;

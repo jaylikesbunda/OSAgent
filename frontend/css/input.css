@@ -351,8 +351,15 @@
         padding: 8px 10px;
     }
 
-    .input-left-controls {
+    /* Keep the Context trigger reachable: it is the only way to open the
+       Workspace & Persona menu on a phone. The attach button still hides at
+       ≤400px, and the label collapses so only the icon shows. */
+    .input-left-controls .input-tab-label {
         display: none;
+    }
+
+    .input-left-controls .input-tab {
+        padding: 6px 8px;
     }
 
     .input-right-bar {
@@ -389,7 +396,7 @@
 }
 
 @media (max-width: 400px) {
-    .input-right-bar #attach-btn {
+    .input-left-controls #attach-btn {
         display: none;
     }
 }

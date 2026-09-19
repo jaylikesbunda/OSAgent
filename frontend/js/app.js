@@ -154,6 +154,9 @@ OSA.maybeAutoNameSession = function() {
     OSA.fetchWithAuth('/api/sessions/' + encodeURIComponent(session.id) + '/auto-name', { method: 'POST' })
         .then(function(res) { return res.json(); })
         .then(function(data) {
+            // The user may have switched away while the name was generating;
+            // don't stamp the old name onto the new session's header.
+            if (OSA.getCurrentSession()?.id !== session.id) return;
             if (data?.name) {
                 if (session.metadata) session.metadata.name = data.name;
                 document.getElementById('header-title').textContent = data.name;
@@ -317,7 +320,14 @@ OSA.logout = function() {
     OSA.setCurrentSession(null);
     OSA.resetSessionCheckpoints();
     OSA.setSessionInspectorState({ history: [], snapshots: [] });
-    
+
+    if (typeof OSA.stopProgressListener === 'function') {
+        OSA.stopProgressListener();
+    }
+    if (typeof OSA.stopToolSync === 'function') {
+        OSA.stopToolSync();
+    }
+
     OSA.disconnectLiveSessionChannel();
     
     OSA.showLogin();
@@ -515,17 +525,17 @@ OSA.loadSessions = async function() {
             const iconStyle = isChild && !isRunning ? 'style="width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"' : '';
             const iconClass = isRunning ? ' session-icon-running' : '';
             const badgeHtml = sourceKey !== 'web'
-                ? `<span class="session-source-badge source-${OSA.escapeHtml(sourceKey)}">${OSA.escapeHtml(sourceLabel)}</span>`
+                ? `<span class="session-source-badge source-${OSA.escapeAttr(sourceKey)}">${OSA.escapeHtml(sourceLabel)}</span>`
                 : '';
             const groupToggleHtml = (!isChild && childCount > 0)
                 ? `
-                    <button class="session-group-toggle${OSA._collapsedGroups.has(s.id) ? '' : ' open'}" onclick="OSA.toggleSessionGroup('${s.id}', event)" title="Show/hide subagents" aria-label="Show/hide subagents">
+                    <button class="session-group-toggle${OSA._collapsedGroups.has(s.id) ? '' : ' open'}" onclick="OSA.toggleSessionGroup(${OSA.jsArg(s.id)}, event)" title="Show/hide subagents" aria-label="Show/hide subagents">
                         <span class="session-group-count">${childCount}</span>
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>`
                 : '';
             return `
-            <div class="session-item${childClass} ${isActive ? 'active' : ''}" data-session-id="${OSA.escapeHtml(s.id)}" data-session-source="${OSA.escapeHtml(sourceKey)}" onclick="OSA.selectSession('${s.id}')" style="${indent}">
+            <div class="session-item${childClass} ${isActive ? 'active' : ''}" data-session-id="${OSA.escapeAttr(s.id)}" data-session-source="${OSA.escapeAttr(sourceKey)}" onclick="OSA.selectSession(${OSA.jsArg(s.id)})" style="${indent}">
                 <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}</div>
                 <div class="session-info">
                     <div class="session-name">${OSA.escapeHtml(displayName)}</div>
@@ -536,13 +546,13 @@ OSA.loadSessions = async function() {
                     </div>
                 </div>${groupToggleHtml}
                 <div class="session-actions">
-                    <button class="session-action-btn rename-btn" onclick="event.stopPropagation(); OSA.startRenameSession('${s.id}', this)" title="Rename">
+                    <button class="session-action-btn rename-btn" onclick="event.stopPropagation(); OSA.startRenameSession(${OSA.jsArg(s.id)}, this)" title="Rename">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                             <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                         </svg>
                     </button>
-                    <button class="session-action-btn delete-btn" onclick="event.stopPropagation(); OSA.deleteSession('${s.id}')" title="Delete">
+                    <button class="session-action-btn delete-btn" onclick="event.stopPropagation(); OSA.deleteSession(${OSA.jsArg(s.id)})" title="Delete">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="3 6 5 6 21 6"/>
                             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -640,6 +650,7 @@ OSA.createSession = async function() {
 
         OSA.resetTranscriptView();
         OSA.resetStreamingMessage();
+        OSA.renderEmptyTranscript('Type a message below to start.');
         const sessionName = OSA.getSessionDisplayName(session);
         OSA.setHeaderBaseTitle(sessionName);
         document.getElementById('header-title').textContent = sessionName;
@@ -1301,6 +1312,11 @@ OSA.sendMessage = async function() {
                 const optimisticMessage = document.getElementById(optimisticDomId);
                 if (optimisticMessage) optimisticMessage.remove();
             }
+            // Drop the optimistic transcript item too, or the next render
+            // rebuilds the bubble even though the message is only queued.
+            if (clientMessageId && OSA.tmodelRemove) {
+                OSA.tmodelRemove('client:' + clientMessageId);
+            }
 
             const nextQueue = Array.isArray(OSA.getSessionQueue()) ? [...OSA.getSessionQueue()] : [];
             if (!nextQueue.some(item => item.client_message_id === clientMessageId)) {
@@ -1348,7 +1364,24 @@ OSA.sendMessage = async function() {
             const optimisticMessage = document.getElementById(optimisticDomId);
             if (optimisticMessage) optimisticMessage.remove();
         }
-        OSA.showErrorCard(error.message);
+        // Remove the optimistic transcript item, otherwise the failed bubble
+        // reappears on the next render (e.g. showErrorCard's mark-dirty).
+        if (clientMessageId && OSA.tmodelRemove) {
+            OSA.tmodelRemove('client:' + clientMessageId);
+        }
+        // Keep the message: restore it into the composer and offer a retry so a
+        // dropped request does not silently discard what the user typed.
+        const failedInput = document.getElementById('message-input');
+        if (failedInput && !failedInput.value.trim()) {
+            failedInput.value = message;
+            OSA.resizeMessageInput(failedInput);
+            failedInput.focus();
+        }
+        OSA.showErrorCard(error.message, {
+            title: 'Message not sent',
+            retryLabel: 'Retry send',
+            onRetry: function() { OSA.runSendMessage(); },
+        });
         if (!shouldQueueLocally) {
             OSA.setProcessing(false);
             OSA.resetSendButton();
@@ -1413,11 +1446,15 @@ OSA.setSendButtonStopMode = function(isStop) {
     if (isStop) {
         sendBtn.classList.add('stop-btn');
         sendBtn.disabled = false;
+        sendBtn.setAttribute('aria-label', 'Stop generating');
+        sendBtn.title = 'Stop generating';
         if (sendIcon) sendIcon.classList.add('hidden');
         if (stopIcon) stopIcon.classList.remove('hidden');
     } else {
         sendBtn.classList.remove('stop-btn');
         sendBtn.disabled = false;
+        sendBtn.setAttribute('aria-label', 'Send message');
+        sendBtn.title = 'Send message';
         if (sendIcon) sendIcon.classList.remove('hidden');
         if (stopIcon) stopIcon.classList.add('hidden');
     }
@@ -1428,13 +1465,11 @@ OSA.resetSendButton = function() {
 };
 
 window.handleSendButtonClick = function() {
+    // While a turn is running the button is the Stop control. It must never
+    // dispatch a draft: a half-typed message being fired off on what the user
+    // read as "stop" is worse than making them use the keyboard to send.
     if (OSA.isAgentProcessing()) {
-        const input = document.getElementById('message-input');
-        if (input && input.value.trim()) {
-            OSA.runSendMessage();
-        } else {
-            OSA.stopGeneration();
-        }
+        OSA.stopGeneration();
     } else {
         OSA.runSendMessage();
     }
@@ -1701,7 +1736,9 @@ document.addEventListener('keydown', (event) => {
         }
         const questionModal = document.getElementById('question-modal');
         if (questionModal && !questionModal.classList.contains('hidden')) {
-            questionModal.classList.add('hidden');
+            // Escape must not just hide the card: the agent is waiting on the
+            // answer, so dismissing has to unblock it too.
+            OSA.cancelQuestion();
             return;
         }
         const contextModal = document.getElementById('context-modal');
@@ -1716,7 +1753,7 @@ document.addEventListener('keydown', (event) => {
         }
         const providerModal = document.getElementById('add-provider-modal');
         if (providerModal && !providerModal.classList.contains('hidden')) {
-            providerModal.classList.add('hidden');
+            OSA.closeAddProviderModal();
             return;
         }
         const jobsModal = document.getElementById('jobs-modal');
@@ -2307,8 +2344,8 @@ OSA.renderAttachmentPreviews = function() {
         if (att.kind === 'image') {
             const src = OSA.getAttachmentImageSrc(att);
             thumb.innerHTML = `
-                <img class="expandable-image" data-image-src="${src}" src="${src}" alt="${OSA.escapeHtml(att.filename)}" />
-                <button class="image-preview-remove" onclick="OSA.handleRemoveAttachment('${att.id}')">&times;</button>
+                <img class="expandable-image" data-image-src="${OSA.escapeAttr(src)}" src="${OSA.escapeAttr(src)}" alt="${OSA.escapeAttr(att.filename)}" />
+                <button class="image-preview-remove" onclick="OSA.handleRemoveAttachment(${OSA.jsArg(att.id)})">&times;</button>
                 <div class="image-preview-filename">${OSA.escapeHtml(att.filename)}</div>
             `;
         } else {
@@ -2316,7 +2353,7 @@ OSA.renderAttachmentPreviews = function() {
             thumb.classList.add('file-preview-thumb');
             thumb.innerHTML = `
                 <div class="file-preview-icon">${OSA.escapeHtml(ext.toUpperCase().slice(0, 4))}</div>
-                <button class="image-preview-remove" onclick="OSA.handleRemoveAttachment('${att.id}')">&times;</button>
+                <button class="image-preview-remove" onclick="OSA.handleRemoveAttachment(${OSA.jsArg(att.id)})">&times;</button>
                 <div class="image-preview-filename">${OSA.escapeHtml(att.filename)}</div>
             `;
         }

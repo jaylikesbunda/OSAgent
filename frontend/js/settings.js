@@ -163,6 +163,11 @@ OSA.openSettings = async function() {
 OSA.closeSettings = function() {
     document.getElementById('settings-modal').classList.add('hidden');
     document.getElementById('settings-error').classList.add('hidden');
+    // The voice-model progress stream is only useful while Settings is open;
+    // otherwise it holds an SSE connection for the whole page lifetime.
+    if (typeof OSA.stopProgressListener === 'function') {
+        OSA.stopProgressListener();
+    }
 };
 
 OSA.loadSettings = async function() {
@@ -1654,8 +1659,11 @@ OSA.checkForUpdates = async function() {
             
             const viewRelease = document.getElementById('btn-view-release');
             if (viewRelease && result.release_url) {
-                viewRelease.href = result.release_url;
-                viewRelease.classList.remove('hidden');
+                const releaseUrl = OSA.safeUrl(result.release_url);
+                if (releaseUrl) {
+                    viewRelease.href = releaseUrl;
+                    viewRelease.classList.remove('hidden');
+                }
             }
             
             if (result.release_notes) {

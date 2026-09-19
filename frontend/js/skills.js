@@ -205,13 +205,14 @@ OSA.SkillsUI = {
 
     renderSkillCard(skill) {
         const isExpanded = this.expandedSkill === skill.name;
+        const safeName = this.escapeAttr(skill.name);
         const iconHtml = skill.icon_url
-            ? `<img class="skill-icon-img" src="${this.escapeHtml(skill.icon_url)}" alt="${this.escapeHtml(skill.name)}">`
+            ? `<img class="skill-icon-img" src="${this.escapeAttr(skill.icon_url)}" alt="${this.escapeAttr(skill.name)}">`
             : `<div class="skill-icon">${this.escapeHtml(skill.emoji || '+')}</div>`;
         
         return `
-            <div class="skill-card ${isExpanded ? 'expanded' : ''}" data-skill="${this.escapeHtml(skill.name)}">
-                <div class="skill-card-header" data-skill="${this.escapeHtml(skill.name)}">
+            <div class="skill-card ${isExpanded ? 'expanded' : ''}" data-skill="${safeName}">
+                <div class="skill-card-header" data-skill="${safeName}">
                     ${iconHtml}
                     <div class="skill-info">
                         <div class="skill-name">
@@ -226,7 +227,7 @@ OSA.SkillsUI = {
                     </div>
                     <div class="skill-actions">
                         <label class="skill-toggle">
-                            <input type="checkbox" data-skill="${this.escapeHtml(skill.name)}" ${skill.enabled ? 'checked' : ''}>
+                            <input type="checkbox" data-skill="${safeName}" ${skill.enabled ? 'checked' : ''}>
                             <span class="skill-toggle-slider"></span>
                         </label>
                         <button class="skill-expand-btn">
@@ -237,17 +238,17 @@ OSA.SkillsUI = {
                     </div>
                 </div>
                 <div class="skill-card-details">
-                    <div class="skill-content-preview" id="content-${this.escapeHtml(skill.name)}">Loading...</div>
-                    <div class="skill-config-section" id="config-${this.escapeHtml(skill.name)}">
+                    <div class="skill-content-preview" id="content-${safeName}">Loading...</div>
+                    <div class="skill-config-section" id="config-${safeName}">
                         <h4>Configuration</h4>
                         <div class="skill-config-grid">
                             <div class="skill-loading"><div class="skill-spinner"></div></div>
                         </div>
                     </div>
                     <div class="skill-card-actions">
-                        <button class="btn-action btn-test-skill" data-skill="${this.escapeHtml(skill.name)}">Test</button>
-                        <button class="btn-ghost btn-export-skill" data-skill="${this.escapeHtml(skill.name)}">Export</button>
-                        <button class="btn-danger btn-uninstall-skill" data-skill="${this.escapeHtml(skill.name)}">Uninstall</button>
+                        <button class="btn-action btn-test-skill" data-skill="${safeName}">Test</button>
+                        <button class="btn-ghost btn-export-skill" data-skill="${safeName}">Export</button>
+                        <button class="btn-danger btn-uninstall-skill" data-skill="${safeName}">Uninstall</button>
                     </div>
                 </div>
             </div>
@@ -301,15 +302,15 @@ OSA.SkillsUI = {
                             : '';
                         return `
                             <div class="skill-config-field">
-                                <label for="config-${this.escapeHtml(name)}-${this.escapeHtml(field.name)}">
+                                <label for="config-${this.escapeAttr(name)}-${this.escapeAttr(field.name)}">
                                     ${this.escapeHtml(field.name)} ${requiredHtml}
                                 </label>
                                 <input type="${inputType}"
-                                       id="config-${this.escapeHtml(name)}-${this.escapeHtml(field.name)}"
-                                       data-skill="${this.escapeHtml(name)}"
-                                       data-key="${this.escapeHtml(field.name)}"
-                                       value="${this.escapeHtml(currentValue)}"
-                                       placeholder="${this.escapeHtml(field.description || '')}">
+                                       id="config-${this.escapeAttr(name)}-${this.escapeAttr(field.name)}"
+                                       data-skill="${this.escapeAttr(name)}"
+                                       data-key="${this.escapeAttr(field.name)}"
+                                       value="${this.escapeAttr(currentValue)}"
+                                       placeholder="${this.escapeAttr(field.description || '')}">
                                 ${hintHtml}
                             </div>
                         `;
@@ -318,8 +319,8 @@ OSA.SkillsUI = {
                     configEl.innerHTML = `
                         <h4>Configuration</h4>
                         <div class="skill-config-grid">${fieldsHtml}</div>
-                        ${response.has_authorize ? `<button class="btn-action" style="margin-top:12px" onclick="OSA.SkillsUI.authorizeSkill('${this.escapeHtml(name)}')">Authorize</button>` : ''}
-                        <button class="btn-action" style="margin-top:12px" onclick="OSA.SkillsUI.saveConfig('${this.escapeHtml(name)}')">Save Configuration</button>
+                        ${response.has_authorize ? `<button class="btn-action" style="margin-top:12px" onclick="OSA.SkillsUI.authorizeSkill(${OSA.jsArg(name)})">Authorize</button>` : ''}
+                        <button class="btn-action" style="margin-top:12px" onclick="OSA.SkillsUI.saveConfig(${OSA.jsArg(name)})">Save Configuration</button>
                     `;
 
                     configEl.querySelectorAll('input').forEach(input => {
@@ -496,6 +497,10 @@ OSA.SkillsUI = {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    },
+
+    escapeAttr(text) {
+        return OSA.escapeAttr(text);
     }
 };
 

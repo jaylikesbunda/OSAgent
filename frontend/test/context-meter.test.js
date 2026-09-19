@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 global.window = global;
+require('../js/utils.js');
 require('../js/tools.js');
 
 test('context meter switches from estimate to provider usage', () => {

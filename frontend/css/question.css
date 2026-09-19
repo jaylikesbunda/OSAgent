@@ -31,6 +31,10 @@
 .question-header {
     padding: 16px 20px;
     border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .question-header h2 {
@@ -108,7 +112,46 @@
     border-top: 1px solid var(--border);
     display: flex;
     gap: 12px;
+    align-items: center;
     justify-content: flex-end;
+}
+
+.question-footer-spacer {
+    flex: 1;
+}
+
+.question-back-btn,
+.question-next-btn {
+    padding: 10px 18px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.question-back-btn:hover,
+.question-next-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--text-primary);
+}
+
+.question-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+    transition: color 0.15s ease;
+}
+
+.question-close:hover {
+    color: var(--text-primary);
 }
 
 .question-submit-btn {

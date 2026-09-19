@@ -35,7 +35,7 @@ OSA.buildContextRingHtml = function(contextState, subagentId) {
         ? `Context: ${metrics.pct}% (estimate)`
         : `Context: ${metrics.pct}% (provider-reported)`;
     return `
-        <div class="context-ring subagent-context-ring ${metrics.colorClass}" id="subagent-context-ring-${subagentId}" title="${title}">
+        <div class="context-ring subagent-context-ring ${metrics.colorClass}" id="subagent-context-ring-${OSA.escapeAttr(subagentId)}" title="${OSA.escapeAttr(title)}">
             <svg viewBox="0 0 36 36">
                 <circle class="context-ring-bg" cx="18" cy="18" r="15.5"/>
                 <circle class="context-ring-progress" cx="18" cy="18" r="15.5"
@@ -614,6 +614,40 @@ OSA.summarizeToolArgs = function(toolName, args) {
         const type = args.subagent_type || 'general';
         return `${type}: ${desc.length > 40 ? desc.slice(0, 40) + '\u2026' : desc}`;
     }
+    if (toolName === 'apply_patch' || toolName === 'delete_file') {
+        const p = args.path || args.filePath || '';
+        const parts = p.replace(/\\/g, '/').split('/');
+        return parts.length > 3 ? '...' + parts.slice(-3).join('/') : p;
+    }
+    if (toolName === 'question') {
+        const q = args.question
+            || (Array.isArray(args.questions) && args.questions[0] && args.questions[0].question)
+            || '';
+        return q.length > 60 ? q.slice(0, 60) + '\u2026' : q;
+    }
+    if (toolName === 'todowrite' || toolName === 'todoread') {
+        const todos = Array.isArray(args.todos) ? args.todos : [];
+        return todos.length ? todos.length + ' item' + (todos.length !== 1 ? 's' : '') : '';
+    }
+    if (toolName === 'skill') {
+        return args.name || args.skill || args.action || '';
+    }
+    if (toolName === 'batch') {
+        const calls = Array.isArray(args.tool_calls) ? args.tool_calls
+            : (Array.isArray(args.calls) ? args.calls : []);
+        return calls.length ? calls.length + ' call' + (calls.length !== 1 ? 's' : '') : '';
+    }
+    if (toolName === 'web_search' || toolName === 'websearch') {
+        const q = args.query || '';
+        return q.length > 60 ? q.slice(0, 60) + '\u2026' : q;
+    }
+    // Generic fallback so MCP/unknown tools still get a scannable subtitle.
+    for (const key of ['path', 'filePath', 'file', 'command', 'query', 'pattern', 'url', 'name', 'description', 'prompt', 'message']) {
+        const value = args[key];
+        if (typeof value === 'string' && value) {
+            return value.length > 60 ? value.slice(0, 60) + '\u2026' : value;
+        }
+    }
     return '';
 };
 
@@ -974,7 +1008,7 @@ OSA.formatToolOutput = function(toolName, output) {
 OSA.linkifySessionIds = function(text) {
     const uuidRegex = /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
     return text.replace(uuidRegex, function(match, uuid) {
-        return `<a class="subagent-link" href="#session=${uuid}" onclick="event.preventDefault(); event.stopPropagation(); OSA.openSubagentSession('${uuid}')">${uuid}</a>`;
+        return `<a class="subagent-link" href="#session=${OSA.escapeAttr(uuid)}" onclick="event.preventDefault(); event.stopPropagation(); OSA.openSubagentSession(${OSA.jsArg(uuid)})">${OSA.escapeHtml(uuid)}</a>`;
     });
 };
 
@@ -1014,6 +1048,8 @@ OSA.handleEventError = function(event) {
     OSA.completeAssistantResponse();
     OSA.hideThinkingIndicator();
 
+    // Finish any tool/subagent left running, or its spinner never stops.
+    OSA.tmodelSettleRunningItems('failed');
     OSA.tmodelAddError(event.error);
     OSA.tmodelMarkDirty('error');
     OSA.renderQueuedMessages(OSA.getSessionQueue());
@@ -1034,6 +1070,9 @@ OSA.handleEventCancelled = function(event) {
     OSA.pruneEmptyStreamingMessage();
     OSA.completeAssistantResponse();
     OSA.hideThinkingIndicator();
+
+    // Finish any tool/subagent left running, or its spinner never stops.
+    OSA.tmodelSettleRunningItems('cancelled');
 
     if (OSA._stopTimeout) {
         clearTimeout(OSA._stopTimeout);
@@ -1179,7 +1218,7 @@ OSA.ensureWorkflowCard = function(runId, workflowName) {
     card.id = `workflow-${runId}`;
     card.className = 'workflow-card';
     card.innerHTML = `
-        <div class="workflow-header" onclick="OSA.toggleWorkflowCard('${runId}')">
+        <div class="workflow-header" onclick="OSA.toggleWorkflowCard(${OSA.jsArg(runId)})">
             <div class="workflow-info">
                 <span class="workflow-icon">WF</span>
                 <span class="workflow-title">${OSA.escapeHtml(workflowName || 'Workflow')}</span>
@@ -1352,8 +1391,8 @@ OSA.handleWorkflowApprovalRequested = function(event) {
     container.innerHTML = `
         <div class="workflow-approval-prompt">${OSA.escapeHtml(event.prompt || 'Approval required')}</div>
         <div class="workflow-approval-actions">
-            <button class="workflow-approval-btn approve" onclick="OSA.answerWorkflowApproval('${OSA.escapeHtml(event.question_id || '')}', '${OSA.escapeHtml(event.approve_label || 'Approve')}', this)">${OSA.escapeHtml(event.approve_label || 'Approve')}</button>
-            <button class="workflow-approval-btn reject" onclick="OSA.answerWorkflowApproval('${OSA.escapeHtml(event.question_id || '')}', '${OSA.escapeHtml(event.reject_label || 'Reject')}', this)">${OSA.escapeHtml(event.reject_label || 'Reject')}</button>
+            <button class="workflow-approval-btn approve" onclick="OSA.answerWorkflowApproval(${OSA.jsArg(event.question_id || '')}, ${OSA.jsArg(event.approve_label || 'Approve')}, this)">${OSA.escapeHtml(event.approve_label || 'Approve')}</button>
+            <button class="workflow-approval-btn reject" onclick="OSA.answerWorkflowApproval(${OSA.jsArg(event.question_id || '')}, ${OSA.jsArg(event.reject_label || 'Reject')}, this)">${OSA.escapeHtml(event.reject_label || 'Reject')}</button>
         </div>
     `;
     nodesEl.appendChild(container);
@@ -1422,14 +1461,25 @@ OSA.cancelSubagent = async function(subagentId) {
             method: 'DELETE'
         });
         if (response.ok) {
-            const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
-            if (statusBadge) {
-                statusBadge.textContent = 'cancelled';
-                statusBadge.className = `subagent-status-badge cancelled`;
-            }
-            const cancelBtn = document.getElementById(`subagent-cancel-${subagentId}`);
-            if (cancelBtn) {
-                cancelBtn.style.display = 'none';
+            // Update the model, not just the DOM: otherwise the next progress
+            // event (or any re-render) resurrects the card as "running".
+            const item = OSA.tmodelGet('subagent:' + subagentId);
+            if (item) {
+                item.isRunning = false;
+                item.status = 'cancelled';
+                item.currentTool = '';
+                item.retryText = '';
+                OSA.tmodelMarkDirty('subagent-cancelled');
+            } else {
+                const statusBadge = document.getElementById(`subagent-status-${subagentId}`);
+                if (statusBadge) {
+                    statusBadge.textContent = 'cancelled';
+                    statusBadge.className = `subagent-status-badge cancelled`;
+                }
+                const cancelBtn = document.getElementById(`subagent-cancel-${subagentId}`);
+                if (cancelBtn) {
+                    cancelBtn.style.display = 'none';
+                }
             }
         }
     } catch (err) {
@@ -1542,6 +1592,9 @@ OSA.syncToolsFromBackend = async function() {
         const res = await fetch(`/api/sessions/${session.id}/tools`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
         });
+        // A session switch during the fetch would otherwise merge the previous
+        // session's tool cards into the new transcript.
+        if (OSA.getCurrentSession()?.id !== session.id) return;
         if (res.ok) {
             const tools = await res.json();
             if (Array.isArray(tools)) OSA.setSessionToolEvents(tools);

@@ -70,6 +70,62 @@ OSA.tmodelSettleLiveItems = function() {
     });
 };
 
+// Terminal events (Stop, error) do not emit tool_complete/subagent_completed
+// for work that was still in flight, so any running card would keep its pulsing
+// badge forever (and reload as "running" from the persisted completed=false
+// event). Finish every running item when the turn ends abnormally.
+OSA.tmodelSettleRunningItems = function(status) {
+    const finalStatus = status || 'cancelled';
+    const success = finalStatus === 'completed';
+    let changed = false;
+    OSA.TModel.items.forEach(function(item) {
+        if (!item) return;
+        item.live = false;
+        if (item.kind === 'tool' && !item.completed) {
+            item.completed = true;
+            item.success = success;
+            item.status = finalStatus;
+            changed = true;
+        } else if (item.kind === 'subagent' && item.isRunning) {
+            item.isRunning = false;
+            item.status = finalStatus;
+            item.currentTool = '';
+            item.retryText = '';
+            changed = true;
+        }
+    });
+    return changed;
+};
+
+// Copies text to the clipboard and flashes a check on the button that asked for
+// it. No-op when the Clipboard API is unavailable.
+OSA.copyTextWithFeedback = function(text, button) {
+    if (!text) return;
+    if (!(navigator.clipboard && navigator.clipboard.writeText)) return;
+    navigator.clipboard.writeText(text).then(function() {
+        if (!button) return;
+        button.classList.add('copied');
+        setTimeout(function() { button.classList.remove('copied'); }, 1500);
+    }).catch(function(err) {
+        console.warn('Copy failed:', err);
+    });
+};
+
+OSA.copyToolCard = function(domId, event) {
+    if (event) event.stopPropagation();
+    const container = document.getElementById(domId);
+    if (!container) return;
+    let args = '';
+    try {
+        args = container._toolArgs ? JSON.stringify(container._toolArgs, null, 2) : '';
+    } catch (err) {
+        args = '';
+    }
+    const output = container._toolOutput || '';
+    const text = [args, output].filter(Boolean).join('\n\n');
+    OSA.copyTextWithFeedback(text, container.querySelector('.tool-copy-btn'));
+};
+
 OSA.tmodelLiveKey = function(prefix) {
     OSA.TModel.liveSeq += 1;
     return prefix + ':' + Date.now().toString(36) + ':' + OSA.TModel.liveSeq;
@@ -1333,7 +1389,7 @@ OSA.patchUnit = function(wrapper, unit) {
             OSA.patchSimpleMessageUnit(wrapper, unit, 'task', 'Tasks', function(item) {
                 const uuidRegex = /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
                 const content = String(item.content || '').replace(uuidRegex, function(match, uuid) {
-                    return `<a class="subagent-link" href="#session=${uuid}" onclick="event.preventDefault(); event.stopPropagation(); OSA.openSubagentSession('${uuid}')">${uuid}</a>`;
+                    return `<a class="subagent-link" href="#session=${OSA.escapeAttr(uuid)}" onclick="event.preventDefault(); event.stopPropagation(); OSA.openSubagentSession(${OSA.jsArg(uuid)})">${OSA.escapeHtml(uuid)}</a>`;
                 });
                 return OSA.formatMessage(content);
             });
@@ -1582,28 +1638,34 @@ OSA.buildToolCardElement = function(item) {
     const subtitle = OSA.summarizeToolArgs(item.toolName, item.args);
     const isCompleted = item.completed === true;
     const isSuccess = item.success === true;
-    const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : 'running';
+    const statusText = isCompleted
+        ? (item.status === 'cancelled' ? 'cancelled' : (isSuccess ? 'done' : 'failed'))
+        : 'running';
     const statusClass = isCompleted ? (isSuccess ? 'done' : 'failed') : 'pending';
     const titleClass = isCompleted ? '' : 'tool-title-pending';
-    const chevronOpacity = isCompleted ? '' : 'opacity:0';
+    const chevronOpacity = isCompleted ? '' : 'opacity:0.35';
 
     const container = document.createElement('div');
     container.id = domId;
     container.className = 'tool-container';
     container.dataset.callId = item.callId;
+    container._toolArgs = item.args;
     container.innerHTML = `
         <div class="tool-card tool-inline" id="card-${domId}" data-tool="${OSA.escapeHtml(item.toolName)}">
-            <div class="tool-trigger tool-trigger-inline" onclick="OSA.handleToolCardClick('${domId}')">
+            <div class="tool-trigger tool-trigger-inline" onclick="OSA.handleToolCardClick(${OSA.jsArg(domId)})">
                 <span class="tool-icon">${icon}</span>
                 <span class="tool-title ${titleClass}" id="title-${domId}">${OSA.escapeHtml(label)}</span>
                 ${subtitle ? `<span class="tool-subtitle" id="subtitle-${domId}">${OSA.escapeHtml(subtitle)}</span>` : ''}
-                <button type="button" class="tool-preview-btn hidden" onclick="OSA.openPreviewFromButton('${domId}', event)" title="Open in preview" aria-label="Open in preview">
+                <button type="button" class="tool-preview-btn hidden" onclick="OSA.openPreviewFromButton(${OSA.jsArg(domId)}, event)" title="Open in preview" aria-label="Open in preview">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M3 5h18"></path>
                         <path d="M3 12h7"></path>
                         <path d="M3 19h7"></path>
                         <rect x="12" y="8" width="9" height="11" rx="1"></rect>
                     </svg>
+                </button>
+                <button type="button" class="tool-copy-btn" onclick="OSA.copyToolCard(${OSA.jsArg(domId)}, event)" title="Copy tool call" aria-label="Copy tool call">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 </button>
                 <span class="tool-status-badge ${statusClass}" id="status-${domId}">${statusText}</span>
                 <span class="tool-chevron" id="chevron-${domId}" style="${chevronOpacity}">&#x25B6;</span>
@@ -1623,10 +1685,13 @@ OSA.patchToolCardElement = function(container, item) {
     const domId = 'tool-' + item.callId;
     const isCompleted = item.completed === true;
     const isSuccess = item.success === true;
+    container._toolArgs = item.args;
 
     const statusEl = container.querySelector('#status-' + OSA.cssEscape(domId));
     if (statusEl) {
-        const statusText = isCompleted ? (isSuccess ? 'done' : 'failed') : (item.status || 'running').toLowerCase();
+        const statusText = isCompleted
+            ? (item.status === 'cancelled' ? 'cancelled' : (isSuccess ? 'done' : 'failed'))
+            : (item.status || 'running').toLowerCase();
         const statusClass = isCompleted ? (isSuccess ? 'done' : 'failed') : 'pending';
         if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
         statusEl.className = 'tool-status-badge ' + statusClass;
@@ -1763,7 +1828,7 @@ OSA.patchContextToolRow = function(row, item) {
         row.innerHTML = `
             <span class="context-inline-action"></span>
             <span class="context-inline-detail"></span>
-            <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton('${row.id}', event)" title="Open in preview" aria-label="Open in preview">
+            <button type="button" class="context-inline-preview-btn hidden" onclick="OSA.openPreviewFromContextButton(${OSA.jsArg(row.id)}, event)" title="Open in preview" aria-label="Open in preview">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M3 5h18"></path>
                     <path d="M3 12h7"></path>
@@ -1826,7 +1891,7 @@ OSA.patchParallelGroupUnit = function(wrapper, unit) {
     }
 
     const anyRunning = unit.items.some(function(item) { return !item.completed; });
-    const headerLabel = unit.items.length + ' tools ' + (anyRunning ? 'running' : 'executed') + ' concurrently';
+    const headerLabel = unit.items.length + ' tools' + (anyRunning ? ' running' : '');
     const count = group.querySelector(':scope > .parallel-group-header > .parallel-count');
     if (count && count.textContent !== headerLabel) count.textContent = headerLabel;
 
@@ -1838,13 +1903,14 @@ OSA.patchParallelGroupUnit = function(wrapper, unit) {
 
 OSA.buildSubagentCardElement = function(item) {
     const subagentId = item.subagentId;
+    const sid = OSA.escapeAttr(subagentId);
     const card = document.createElement('div');
     card.id = 'subagent-' + subagentId;
     card.className = 'subagent-card';
     const contextRingHtml = OSA.buildContextRingHtml(item.contextState, subagentId);
     const durationText = OSA.formatSubagentDuration(item.durationMs);
     card.innerHTML = `
-        <div class="subagent-header" onclick="OSA.toggleSubagentCard('${subagentId}')">
+        <div class="subagent-header" onclick="OSA.toggleSubagentCard(${OSA.jsArg(subagentId)})">
             <div class="subagent-info">
                 <span class="subagent-icon">A</span>
                 <span class="subagent-title">${OSA.escapeHtml(item.description)}</span>
@@ -1852,21 +1918,21 @@ OSA.buildSubagentCardElement = function(item) {
             </div>
             <div class="subagent-status">
                 ${contextRingHtml}
-                <span class="subagent-status-badge" id="subagent-status-${subagentId}"></span>
-                <span class="subagent-tool-count" id="subagent-count-${subagentId}"></span>
-                <span class="subagent-chevron" id="subagent-chevron-${subagentId}">&#x25B6;</span>
+                <span class="subagent-status-badge" id="subagent-status-${sid}"></span>
+                <span class="subagent-tool-count" id="subagent-count-${sid}"></span>
+                <span class="subagent-chevron" id="subagent-chevron-${sid}">&#x25B6;</span>
             </div>
         </div>
-        <div class="subagent-live" id="subagent-live-${subagentId}" style="display:none">
-            <span class="subagent-current-tool" id="subagent-current-${subagentId}"></span>
+        <div class="subagent-live" id="subagent-live-${sid}" style="display:none">
+            <span class="subagent-current-tool" id="subagent-current-${sid}"></span>
         </div>
-        <div class="subagent-body" id="subagent-body-${subagentId}" style="display:none">
+        <div class="subagent-body" id="subagent-body-${sid}" style="display:none">
             <div class="subagent-body-inner">
-                <div class="subagent-prompt" id="subagent-prompt-${subagentId}"></div>
-                <div class="subagent-tools" id="subagent-tools-${subagentId}"></div>
-                <div class="subagent-result" id="subagent-result-${subagentId}" style="display:none"></div>
+                <div class="subagent-prompt" id="subagent-prompt-${sid}"></div>
+                <div class="subagent-tools" id="subagent-tools-${sid}"></div>
+                <div class="subagent-result" id="subagent-result-${sid}" style="display:none"></div>
                 <div class="subagent-actions">
-                    <button class="subagent-btn" onclick="OSA.openSubagentSession('${subagentId}')">Open Session</button>
+                    <button class="subagent-btn" onclick="OSA.openSubagentSession(${OSA.jsArg(subagentId)})">Open Session</button>
                 </div>
             </div>
         </div>
@@ -1887,7 +1953,7 @@ OSA.patchSubagentUnit = function(wrapper, unit) {
     if (statusWrap && item.contextState && !statusWrap.querySelector('.subagent-context-ring')) {
         statusWrap.insertAdjacentHTML('afterbegin', OSA.buildContextRingHtml(item.contextState, subagentId));
     }
-    const badgeStatus = item.isRunning ? 'running' : (item.retryText ? 'retrying' : (item.status || 'running'));
+    const badgeStatus = item.retryText ? 'retrying' : (item.isRunning ? 'running' : (item.status || 'running'));
     const statusBadge = card.querySelector('#subagent-status-' + OSA.cssEscape(subagentId));
     if (statusBadge) {
         if (statusBadge.textContent !== badgeStatus) statusBadge.textContent = badgeStatus;
@@ -1933,10 +1999,22 @@ OSA.patchSubagentUnit = function(wrapper, unit) {
             if (resultEl.dataset.sig !== resultSig) {
                 resultEl.dataset.sig = resultSig;
                 resultEl.style.display = 'block';
-                resultEl.innerHTML = '<div class="subagent-result-label">Result:</div><div class="subagent-result-text">'
-                    + OSA.escapeHtml(item.result.slice(0, 500))
-                    + (item.result.length > 500 ? '…' : '')
-                    + '</div>';
+                resultEl.innerHTML = '<div class="subagent-result-head"><span class="subagent-result-label">Result</span>'
+                    + '<button type="button" class="subagent-result-copy" aria-label="Copy result">Copy</button></div>'
+                    + '<div class="subagent-result-text"></div>';
+                const textEl = resultEl.querySelector('.subagent-result-text');
+                if (textEl) {
+                    const escaped = OSA.escapeHtml(item.result);
+                    textEl.innerHTML = typeof OSA.linkifySessionIds === 'function'
+                        ? OSA.linkifySessionIds(escaped)
+                        : escaped;
+                }
+                const copyBtn = resultEl.querySelector('.subagent-result-copy');
+                if (copyBtn) {
+                    copyBtn.addEventListener('click', function() {
+                        OSA.copyTextWithFeedback(item.result, copyBtn);
+                    });
+                }
             } else {
                 resultEl.style.display = 'block';
             }

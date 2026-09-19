@@ -187,15 +187,15 @@ OSA.renderWorkspaceMenu = function() {
         const permClass = paths[0]?.permission === 'read_only' ? 'ro' : 'rw';
         return `
             <div class="menu-row ${isActive ? 'active' : ''}">
-                <button class="menu-row-main" type="button" onclick="OSA.selectWorkspaceFromMenu('${OSA.escapeHtml(w.id)}')">
+                <button class="menu-row-main" type="button" onclick="OSA.selectWorkspaceFromMenu(${OSA.jsArg(w.id)})">
                     <span class="menu-row-check" aria-hidden="true">${isActive ? '&#10003;' : ''}</span>
                     <span class="menu-row-copy">
                         <span class="menu-row-title">${OSA.escapeHtml(w.name || w.id)}</span>
-                        <span class="menu-row-meta" title="${paths.map(p => p.path).join('\n')}">${OSA.escapeHtml(primaryPath)}${pathCount > 1 ? ` (+${pathCount - 1} more)` : ''}</span>
+                        <span class="menu-row-meta" title="${OSA.escapeAttr(paths.map(p => p.path).join('\n'))}">${OSA.escapeHtml(primaryPath)}${pathCount > 1 ? ` (+${pathCount - 1} more)` : ''}</span>
                     </span>
                     <span class="menu-row-badge ${permClass}">${perm}</span>
                 </button>
-                <button class="menu-icon-btn" type="button" title="Edit workspace" onclick="event.stopPropagation(); OSA.openWorkspaceEditorForEdit('${OSA.escapeHtml(w.id)}')">
+                <button class="menu-icon-btn" type="button" title="Edit workspace" onclick="event.stopPropagation(); OSA.openWorkspaceEditorForEdit(${OSA.jsArg(w.id)})">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                 </button>
             </div>
@@ -437,12 +437,12 @@ OSA.renderWorkspaceList = function() {
             <div class="workspace-item">
                 <div>
                     <div class="decision-key">${OSA.escapeHtml(w.name || w.id)} ${isActive ? '(active)' : ''}</div>
-                    <div class="decision-value" title="${OSA.escapeHtml(paths.map(p => p.path).join('\n'))}">${OSA.escapeHtml(OSA.workspacePathSummary(w))}</div>
+                    <div class="decision-value" title="${OSA.escapeAttr(paths.map(p => p.path).join('\n'))}">${OSA.escapeHtml(OSA.workspacePathSummary(w))}</div>
                     <div class="workspace-meta">id: ${OSA.escapeHtml(w.id)} · ${paths[0]?.permission === 'read_only' ? 'Read only' : 'Read + write'}${paths.length > 1 ? ` · ${paths.length} paths` : ''}</div>
                 </div>
                 <div class="workspace-actions">
-                    <button type="button" class="btn-secondary" onclick="OSA.editWorkspaceInForm('${OSA.escapeHtml(w.id)}')">Edit</button>
-                    ${w.id === 'default' ? '' : `<button type="button" class="btn-danger" onclick="OSA.deleteWorkspace('${OSA.escapeHtml(w.id)}')">Delete</button>`}
+                    <button type="button" class="btn-secondary" onclick="OSA.editWorkspaceInForm(${OSA.jsArg(w.id)})">Edit</button>
+                    ${w.id === 'default' ? '' : `<button type="button" class="btn-danger" onclick="OSA.deleteWorkspace(${OSA.jsArg(w.id)})">Delete</button>`}
                 </div>
             </div>
         `;

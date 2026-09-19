@@ -6,6 +6,45 @@ OSA.escapeHtml = function(text) {
     return div.innerHTML;
 };
 
+// Quote-safe escaping for HTML *attribute* values. escapeHtml round-trips
+// through textContent -> innerHTML, which escapes &, < and > but leaves quotes
+// intact; interpolating that into value="..." lets a quoted value close the
+// attribute early. Use this for anything that lands inside an attribute.
+OSA.escapeAttr = function(value) {
+    return String(value === null || value === undefined ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+};
+
+// Serializes a value as a JavaScript literal that is safe to inline in a
+// double-quoted HTML attribute, e.g. onclick="fn(${OSA.jsArg(id)})". The JSON
+// string survives HTML-decoding intact, so quotes, backslashes and newlines in
+// the value cannot break out of the attribute or the string literal.
+OSA.jsArg = function(value) {
+    const json = JSON.stringify(value === null || value === undefined ? '' : String(value));
+    return json
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+};
+
+// Returns the URL only if it uses an allow-listed scheme, otherwise ''. Keeps
+// javascript:/data: values from server output out of href/src/window.open.
+OSA.safeUrl = function(url, schemes) {
+    if (!url) return '';
+    const allowed = schemes || ['http:', 'https:'];
+    try {
+        const parsed = new URL(String(url), window.location.origin);
+        return allowed.indexOf(parsed.protocol) !== -1 ? parsed.href : '';
+    } catch (err) {
+        return '';
+    }
+};
+
 OSA.timestampToMs = function(value) {
     if (value === null || value === undefined || value === '') return null;
     if (typeof value === 'number' && Number.isFinite(value)) {

@@ -4,6 +4,7 @@ const test = require('node:test');
 global.window = global;
 global.requestAnimationFrame = () => 1;
 global.cancelAnimationFrame = () => {};
+require('../js/utils.js');
 require('../js/messages.js');
 require('../js/transcript.js');
 require('../js/tools.js');

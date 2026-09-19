@@ -197,7 +197,7 @@ OSA.renderRuntimeCard = function(type) {
             </div>
             ${OSA.renderDownloadProgress(progress)}
             <div class="voice-runtime-actions">
-                <button class="voice-action-btn voice-action-btn-primary voice-runtime-btn" onclick="OSA.installVoiceRuntime('${type}')" ${isInstalling ? 'disabled' : ''}>
+                <button class="voice-action-btn voice-action-btn-primary voice-runtime-btn" onclick="OSA.installVoiceRuntime(${OSA.jsArg(type)})" ${isInstalling ? 'disabled' : ''}>
                     ${isInstalling ? 'Installing...' : actionLabel}
                 </button>
                 <span class="voice-runtime-hint">${hintText}</span>
@@ -327,7 +327,7 @@ OSA.renderModelCard = function(model, type) {
             <div class="model-actions">
                 ${isInstalled
                     ? '<span class="installed-badge">Downloaded</span>'
-                    : `<button class="voice-action-btn voice-action-btn-primary" onclick="OSA.downloadModel('${type}', '${model.id}')" ${isDownloading ? 'disabled' : ''}>Download</button>`}
+                    : `<button class="voice-action-btn voice-action-btn-primary" onclick="OSA.downloadModel(${OSA.jsArg(type)}, ${OSA.jsArg(model.id)})" ${isDownloading ? 'disabled' : ''}>Download</button>`}
                 ${!isInstalled ? '<span class="model-help">Download before selecting</span>' : ''}
             </div>
         </div>
@@ -345,7 +345,7 @@ OSA.renderInstalledModels = function() {
                 <span class="installed-model-name">${OSA.escapeHtml(model.name)}</span>
                 <span class="installed-model-size">${(model.size_bytes / (1024 * 1024)).toFixed(1)} MB</span>
             </div>
-            <button class="voice-action-btn voice-action-btn-danger" onclick="OSA.deleteModel('${model.model_type}', '${model.id}')">Delete</button>
+            <button class="voice-action-btn voice-action-btn-danger" onclick="OSA.deleteModel(${OSA.jsArg(model.model_type)}, ${OSA.jsArg(model.id)})">Delete</button>
         </div>
     `).join('');
 };

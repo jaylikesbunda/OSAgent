@@ -1844,6 +1844,10 @@ OSA.resetVoiceModeReply = function() {
 // Push-to-talk. Hold space while not typing to record, release to finish.
 // Ignored whenever focus is in a text field so it never eats a real space.
 OSA.initPushToTalk = function() {
+    // Bind once per page. Re-authenticating calls this again, and duplicate
+    // document listeners would fire toggleRecording twice per Space press.
+    if (OSA._pushToTalkBound) return;
+    OSA._pushToTalkBound = true;
     let held = false;
 
     const isTypingTarget = (el) => {

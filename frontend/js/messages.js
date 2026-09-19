@@ -1165,7 +1165,7 @@ OSA.copyAssistantMessageElement = function(button) {
     });
 };
 
-OSA.showErrorCard = function(errorMsg) {
+OSA.showErrorCard = function(errorMsg, options = {}) {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return;
 
@@ -1175,25 +1175,49 @@ OSA.showErrorCard = function(errorMsg) {
     const truncated = errorMsg.length > 120 ? errorMsg.slice(0, 120) + '...' : errorMsg;
     const card = document.createElement('div');
     card.className = 'error-card';
+    // A send failure offers a retry instead of only a dismiss, so the user does
+    // not have to retype what they already wrote.
+    const retryAction = typeof options.onRetry === 'function' ? 'OSA.retryFailedSend(this)' : '';
+    const retryLabel = options.retryLabel || 'Retry';
     card.innerHTML = `
         <div class="error-card-icon">!</div>
         <div class="error-card-body">
-            <div class="error-card-title">Something went wrong</div>
-            <div class="error-card-message" title="${OSA.escapeHtml(errorMsg)}">${OSA.escapeHtml(truncated)}</div>
+            <div class="error-card-title">${OSA.escapeHtml(options.title || 'Something went wrong')}</div>
+            <div class="error-card-message" title="${OSA.escapeAttr(errorMsg)}">${OSA.escapeHtml(truncated)}</div>
         </div>
+        ${retryAction ? `<button class="error-card-retry error-card-retry-primary" onclick="${retryAction}">${OSA.escapeHtml(retryLabel)}</button>` : ''}
         <button class="error-card-retry" onclick="this.closest('.error-card').remove()">Dismiss</button>
     `;
+    if (typeof options.onRetry === 'function') {
+        OSA._lastFailedSend = options.onRetry;
+        card.querySelector('.error-card-retry-primary').addEventListener('click', function() {
+            card.remove();
+        });
+    }
     OSA.mountFloatingNode(card);
     OSA.tmodelMarkDirty('error-card');
 };
 
+OSA.retryFailedSend = function() {
+    const retry = OSA._lastFailedSend;
+    OSA._lastFailedSend = null;
+    if (typeof retry === 'function') retry();
+};
+
 OSA.formatInlineMarkdown = function(line) {
     let s = line
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(match, label, url) {
+            const href = String(url).trim();
+            // Only http(s) links become anchors: a javascript:/data: URL here
+            // would execute on click. Quotes are percent-encoded because the
+            // surrounding text is already entity-escaped but quotes are not.
+            if (!/^https?:\/\//i.test(href)) return match;
+            return '<a href="' + href.replace(/"/g, '%22').replace(/'/g, '%27') + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+        })
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
         .replace(/\*([^*]+)\*/g, '<em>$1</em>')
         .replace(/`([^`]+)`/g, '<code>$1</code>');
-    s = s.replace(/(^|[^"=])(https?:\/\/[^\s<>"')\]]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    s = s.replace(/(^|[^"=])(https?:\/\/[^\s<>"')\]]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
     return s;
 };
 
@@ -1676,7 +1700,7 @@ OSA.renderAttachmentMarkup = function(attachments = []) {
         html += '<div class="message-image-grid">';
         imageAttachments.forEach(att => {
             const src = OSA.getAttachmentImageSrc(att);
-            html += `<div class="message-image-thumb"><img class="expandable-image" data-image-src="${src}" src="${src}" alt="${OSA.escapeHtml(att.filename || '')}" /></div>`;
+            html += `<div class="message-image-thumb"><img class="expandable-image" data-image-src="${OSA.escapeAttr(src)}" src="${OSA.escapeAttr(src)}" alt="${OSA.escapeAttr(att.filename || '')}" /></div>`;
         });
         html += '</div>';
     }

@@ -18,6 +18,7 @@
     <link rel="stylesheet" href="/static/css/components.css">
     <link rel="stylesheet" href="/static/css/todo.css">
     <link rel="stylesheet" href="/static/css/question.css">
+    <link rel="stylesheet" href="/static/css/permission.css">
     <link rel="stylesheet" href="/static/css/responsive.css">
     <link rel="stylesheet" href="/static/css/skills.css">
     <link rel="stylesheet" href="/static/css/mcp.css">
@@ -258,7 +259,7 @@
                                     <button id="tts-btn" class="input-icon-btn" onclick="toggleTTS()" title="Text-to-speech" aria-pressed="false">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
                                     </button>
-                                     <button id="send-btn" onclick="handleSendButtonClick()">
+                                     <button id="send-btn" aria-label="Send message" onclick="handleSendButtonClick()">
                                          <svg id="send-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                                          <svg id="stop-icon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                                      </button>
@@ -349,11 +350,15 @@
         <div class="question-card">
             <div class="question-header">
                 <h2 id="question-title">Question</h2>
+                <button type="button" class="question-close" onclick="OSA.cancelQuestion()" aria-label="Dismiss question" title="Dismiss">&times;</button>
             </div>
             <div class="question-body" id="question-body">
             </div>
             <div class="question-footer">
-                <button class="question-submit-btn" id="question-submit-btn" onclick="submitQuestion()">Submit</button>
+                <button class="question-back-btn hidden" id="question-back-btn" type="button" onclick="OSA.prevQuestion()">Back</button>
+                <span class="question-footer-spacer"></span>
+                <button class="question-next-btn hidden" id="question-next-btn" type="button" onclick="OSA.nextQuestion()">Next</button>
+                <button class="question-submit-btn" id="question-submit-btn" type="button" onclick="submitQuestion()">Submit</button>
             </div>
         </div>
     </div>
@@ -1245,7 +1250,7 @@
                             <button class="btn-primary hidden" id="btn-install-update" onclick="OSA.installUpdate()">
                                 Install & Restart
                             </button>
-                            <a class="btn-ghost hidden" id="btn-view-release" target="_blank">
+                            <a class="btn-ghost hidden" id="btn-view-release" target="_blank" rel="noopener noreferrer">
                                 View Release
                             </a>
                         </div>
@@ -1328,7 +1333,7 @@
                     <div class="oauth-device-view hidden" id="oauth-device-view">
                         <p class="oauth-flow-desc">Enter this code on the verification page:</p>
                         <div class="oauth-device-code" id="oauth-device-code-display">--------</div>
-                        <a href="#" class="oauth-device-link" id="oauth-device-link" target="_blank">
+                        <a href="#" class="oauth-device-link" id="oauth-device-link" target="_blank" rel="noopener noreferrer">
                             <svg class="icon-inline" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>
                             Open verification page
                         </a>

@@ -519,7 +519,7 @@
     padding: 12px 16px;
     border-radius: var(--radius-md);
     font-size: 13px;
-    z-index: 200;
+    z-index: 2400;
     display: flex;
     align-items: center;
     gap: 10px;

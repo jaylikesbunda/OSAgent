@@ -15,6 +15,7 @@ test.before(async () => {
     global.cancelAnimationFrame = () => {};
     global.OSA = window.OSA = {};
 
+    require('../js/utils.js');
     require('../js/messages.js');
     require('../js/transcript.js');
 
@@ -157,7 +158,7 @@ test('parallel tool status updates never detach or recreate cards', () => {
     assert.equal(group.querySelector('.parallel-group-header'), header);
     assert.equal(document.getElementById('tool-a'), firstCard);
     assert.equal(document.getElementById('tool-b'), secondCard);
-    assert.match(header.textContent, /executed/);
+    assert.match(header.textContent, /2 tools/);
 });
 
 test('forming a parallel group moves the first card without recreating it', () => {

@@ -9,6 +9,11 @@ v0.6.0 changes:
 * Fixed buffered lines and unnecessary row redraws
 * Fixed context meter after compaction
 * Voice settings now choose input and output directly: pick browser vs Local Whisper/Piper plus the microphone and speaker devices
+* Fixed stored XSS in the web UI: markdown links, attributes and inline handlers now escape model/tool/session data
+* Fixed session-switch races writing another session's tools, title or inspector state
+* Fixed push-to-talk binding twice per login, failed/queued sends leaving a phantom bubble, and OAuth/voice streams not stopping on close
+* Fixed tool and subagent cards: they now stop spinning on Stop/error, no longer jump on entry, and subagent results show in full with copy
+* Fixed Stop sending a draft instead of stopping, new chats opening blank, failed sends losing the message, phones losing the Workspace menu, and the question card having no way to close
 
 v0.5.3 changes:
 

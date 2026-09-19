@@ -143,16 +143,16 @@ OSA.McpUI = {
                         <div class="mcp-server-actions">
                             <label class="mcp-toggle">
                                 <input type="checkbox" ${server.enabled ? 'checked' : ''}
-                                       onchange="OSA.McpUI.toggle('${this.attr(server.name)}', this.checked)">
+                                       onchange="OSA.McpUI.toggle(${OSA.jsArg(server.name)}, this.checked)">
                                 <span>Enabled</span>
                             </label>
-                            <button class="btn-ghost" onclick="OSA.McpUI.startEdit('${this.attr(server.name)}')">Edit</button>
-                            <button class="btn-ghost btn-danger" onclick="OSA.McpUI.remove('${this.attr(server.name)}')">Remove</button>
+                            <button class="btn-ghost" onclick="OSA.McpUI.startEdit(${OSA.jsArg(server.name)})">Edit</button>
+                            <button class="btn-ghost btn-danger" onclick="OSA.McpUI.remove(${OSA.jsArg(server.name)})">Remove</button>
                         </div>
                     </div>
                     ${server.error ? `<div class="mcp-server-error">${OSA.escapeHtml(server.error)}</div>` : ''}
                     ${server.connected && server.tool_count > 0
-                        ? `<button class="mcp-link" onclick="OSA.McpUI.showTools('${this.attr(server.name)}')">View tools</button>
+                        ? `<button class="mcp-link" onclick="OSA.McpUI.showTools(${OSA.jsArg(server.name)})">View tools</button>
                            <div id="mcp-tools-${this.attr(server.name)}" class="mcp-tool-list hidden"></div>`
                         : ''}
                 </div>
