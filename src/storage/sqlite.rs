@@ -3224,7 +3224,12 @@ mod queue_tests {
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 
-    fn enqueue(storage: &SqliteStorage, session_id: &str, client_id: &str, content: &str) -> QueuedMessage {
+    fn enqueue(
+        storage: &SqliteStorage,
+        session_id: &str,
+        client_id: &str,
+        content: &str,
+    ) -> QueuedMessage {
         storage
             .enqueue_message(session_id, client_id, content, &[], None, &[])
             .expect("enqueue")
@@ -3260,7 +3265,10 @@ mod queue_tests {
 
         // Reorder to c, a, b.
         storage
-            .reorder_session_queued_messages(&session.id, &[c.id.clone(), a.id.clone(), b.id.clone()])
+            .reorder_session_queued_messages(
+                &session.id,
+                &[c.id.clone(), a.id.clone(), b.id.clone()],
+            )
             .expect("reorder");
         assert_eq!(
             ordered_ids(&storage, &session.id),

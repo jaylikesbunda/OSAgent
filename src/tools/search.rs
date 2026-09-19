@@ -626,7 +626,12 @@ impl GrepTool {
             )
         } else {
             let end = (start + limit).min(total);
-            let mut w: String = stdout.lines().skip(start).take(end - start).collect::<Vec<_>>().join("\n");
+            let mut w: String = stdout
+                .lines()
+                .skip(start)
+                .take(end - start)
+                .collect::<Vec<_>>()
+                .join("\n");
             if end < total {
                 w.push_str(&format!(
                     "\n\n[showing matches {}-{} of {}. Use offset={} limit={} to continue.]",
@@ -751,10 +756,7 @@ impl GrepTool {
         } else {
             let match_count = matches.len();
             matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            let lines: Vec<String> = matches
-                .into_iter()
-                .map(|(_, line)| line)
-                .collect();
+            let lines: Vec<String> = matches.into_iter().map(|(_, line)| line).collect();
             let total = lines.len();
             let start = offset.saturating_sub(1);
             let mut output = if start >= total {
@@ -1195,10 +1197,7 @@ impl GlobTool {
         } else {
             let count = matches.len();
             let total = count;
-            let paths: Vec<String> = matches
-                .into_iter()
-                .map(|(_, path)| path)
-                .collect();
+            let paths: Vec<String> = matches.into_iter().map(|(_, path)| path).collect();
             let start = offset.saturating_sub(1);
             let output = if start >= total {
                 format!(

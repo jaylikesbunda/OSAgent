@@ -643,6 +643,15 @@ pub async fn synthesize(
         ));
     }
 
+    let output_bytes = std::fs::metadata(output_path)
+        .map_err(|e| format!("Piper produced no audio file: {}", e))?
+        .len();
+    if output_bytes <= 44 {
+        return Err(
+            "Piper produced an empty audio file. Check the selected voice model.".to_string(),
+        );
+    }
+
     Ok(())
 }
 

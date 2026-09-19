@@ -164,8 +164,7 @@ pub fn save_skill(
     // shipped in this save or already on disk — otherwise the action can be
     // saved but never run. Fail here with the exact fix instead.
     for action in &input.actions {
-        if let crate::skills::config::SkillActionRunner::Script { script, .. } = &action.runner
-        {
+        if let crate::skills::config::SkillActionRunner::Script { script, .. } = &action.runner {
             if !script_satisfied(skills_dir, &name, script, &input.scripts) {
                 return Err(format!(
                     "Action '{}' references script '{}' but no such script was provided in 'scripts' and none exists on disk. Include it as {{\"{}\": \"<file content>\"}} in 'scripts' (file must end in .py, .sh, .ps1 or .js).",
@@ -226,7 +225,10 @@ pub fn save_skill(
             // Defense in depth: filename validation already rejects
             // separators, but canonicalize-check anyway.
             if !dest.starts_with(&scripts_dir) {
-                return Err(format!("Refusing to write script outside scripts/: {}", filename));
+                return Err(format!(
+                    "Refusing to write script outside scripts/: {}",
+                    filename
+                ));
             }
             std::fs::write(&dest, content)
                 .map_err(|e| format!("Failed to write script '{}': {}", filename, e))?;
@@ -259,9 +261,10 @@ fn script_satisfied(
     let stripped = script
         .trim_start_matches("scripts/")
         .trim_start_matches("scripts\\");
-    if payload.keys().any(|k| {
-        k == script || k == base || k.trim_start_matches("scripts/") == stripped
-    }) {
+    if payload
+        .keys()
+        .any(|k| k == script || k == base || k.trim_start_matches("scripts/") == stripped)
+    {
         return true;
     }
     let dir = skills_dir.join(skill_name);
@@ -271,14 +274,17 @@ fn script_satisfied(
 }
 
 /// Load the existing skill parts so `skill_update` can merge partial edits.
-pub fn load_existing_parts(skills_dir: &Path, name: &str) -> Result<(SkillConfigSchema, String), String> {
+pub fn load_existing_parts(
+    skills_dir: &Path,
+    name: &str,
+) -> Result<(SkillConfigSchema, String), String> {
     validate_skill_name(name)?;
     let skill_md = skills_dir.join(name.trim()).join("SKILL.md");
     if !skill_md.exists() {
         return Err(format!("Skill '{}' not found.", name.trim()));
     }
-    let content =
-        std::fs::read_to_string(&skill_md).map_err(|e| format!("Failed to read SKILL.md: {}", e))?;
+    let content = std::fs::read_to_string(&skill_md)
+        .map_err(|e| format!("Failed to read SKILL.md: {}", e))?;
     let schema = parse_frontmatter(&content)
         .ok_or_else(|| format!("Skill '{}' has no valid frontmatter.", name.trim()))?;
     // Body = everything after the closing `---`.
@@ -381,7 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dangling_script_reference() {        let temp = tempfile::TempDir::new().expect("temp");
+    fn rejects_dangling_script_reference() {
+        let temp = tempfile::TempDir::new().expect("temp");
         let action: SkillActionSchema = serde_json::from_value(serde_json::json!({
             "name": "check",
             "description": "Check links",
@@ -399,7 +406,11 @@ mod tests {
             ..Default::default()
         };
         let err = save_skill(temp.path(), "broken", input, false).expect_err("must reject");
-        assert!(err.contains("missing.py"), "error names the script: {}", err);
+        assert!(
+            err.contains("missing.py"),
+            "error names the script: {}",
+            err
+        );
 
         // Same action saves fine when the script ships alongside.
         let action: SkillActionSchema = serde_json::from_value(serde_json::json!({

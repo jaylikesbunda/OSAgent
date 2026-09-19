@@ -483,6 +483,9 @@ OSA.encodeAudioBufferToWav = function(audioBuffer) {
 OSA.WHISPER_SAMPLE_RATE = 16000;
 
 OSA.audioBlobToWavBase64 = async function(blob) {
+    if (!blob || !blob.size) {
+        throw new Error('No audio was captured from the microphone.');
+    }
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextCtor) {
         throw new Error('Audio decoding is not supported in this browser.');
@@ -500,7 +503,25 @@ OSA.audioBlobToWavBase64 = async function(blob) {
     }
 
     const resampled = await OSA.resampleToWhisperRate(decoded);
-    return OSA.arrayBufferToBase64(OSA.encodeAudioBufferToWav(resampled));
+    if (!resampled || !resampled.length || !resampled.numberOfChannels) {
+        throw new Error('The microphone returned an empty audio buffer. Check the selected input device.');
+    }
+    const wav = OSA.encodeAudioBufferToWav(resampled);
+    if (!wav || wav.byteLength <= 44) {
+        throw new Error('The microphone returned an empty audio buffer. Check the selected input device.');
+    }
+    return OSA.arrayBufferToBase64(wav);
+};
+
+// Whisper implementations use different no-speech sentinels. Keep these out
+// of the composer and the voice-mode transcript even if an older server or a
+// third-party whisper-server returns one without normalizing it first.
+OSA.normalizeVoiceTranscript = function(text) {
+    const value = (text || '').trim();
+    if (/^(?:\[BLANK_AUDIO\]|\[EMPTY_AUDIO\]|\[NO_SPEECH\]|<\|BLANK_AUDIO\|>)$/i.test(value)) {
+        return '';
+    }
+    return value;
 };
 
 OSA.resampleToWhisperRate = async function(audioBuffer) {
@@ -551,7 +572,7 @@ OSA.processLocalWhisperRecording = async function(blob) {
             throw new Error(data.error || `HTTP ${response.status}`);
         }
 
-        const transcript = (data.text || '').trim();
+        const transcript = OSA.normalizeVoiceTranscript(data.text);
         if (!transcript) {
             finalStatus = {
                 message: 'Local Whisper did not hear any text. Try again and speak a little closer to the mic.',
@@ -810,7 +831,7 @@ OSA.startPartialTranscription = function(mimeType) {
             if (!res.ok) return;
 
             const data = await res.json().catch(() => ({}));
-            const text = (data.text || '').trim();
+            const text = OSA.normalizeVoiceTranscript(data.text);
             if (!text || generation !== OSA._partialGeneration) return;
             if (!OSA.getIsRecording()) return;
 
@@ -901,11 +922,11 @@ OSA.startLocalWhisperRecording = async function() {
 
         // Timeslice: without it ondataavailable fires only on stop, so there
         // would be no audio to build a partial transcript from.
+        OSA.setIsRecording(true);
+        OSA.setIsTranscribing(false);
         recorder.start(OSA.canStreamTranscripts() ? 1000 : undefined);
         OSA.startPartialTranscription(recorder.mimeType);
         OSA.startLevelMonitor(stream);
-        OSA.setIsRecording(true);
-        OSA.setIsTranscribing(false);
         OSA.updateMicButton();
     } catch (error) {
         console.error('Failed to start local Whisper recording:', error);
@@ -1424,10 +1445,15 @@ OSA.pumpSpeechQueue = function() {
             body: JSON.stringify({ text: payload }),
             signal: controller.signal
         })
-        .then(res => {
+        .then(async res => {
             clearTimeout(timeout);
-            if (!res.ok) throw new Error('TTS failed');
-            return res.blob();
+            if (!res.ok) {
+                const error = await res.json().catch(() => ({}));
+                throw new Error(error.error || `TTS failed (HTTP ${res.status})`);
+            }
+            const blob = await res.blob();
+            if (!blob.size) throw new Error('TTS returned an empty audio file.');
+            return blob;
         })
         .then(blob => {
             if (generation !== OSA.getSpeechPlaybackGeneration()) return;

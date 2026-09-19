@@ -2,9 +2,9 @@ use crate::error::OSAgentError;
 use crate::skills::config::{
     parse_frontmatter, ConfigField, MaskedValue, SkillActionSchema, SkillConfigStore,
 };
-use crate::skills::{save_skill, SkillSaveInput};
 use crate::skills::installer::{InstallResult, SkillInstaller};
 use crate::skills::store::{SkillInfo, SkillStore};
+use crate::skills::{save_skill, SkillSaveInput};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -97,8 +97,7 @@ impl SkillService {
             token_refresh: None,
             scripts,
         };
-        save_skill(&base, name, input, true)
-            .map_err(|e| OSAgentError::Unknown(e.to_string()))?;
+        save_skill(&base, name, input, true).map_err(|e| OSAgentError::Unknown(e.to_string()))?;
         self.store
             .get_skill_info(name.trim())
             .map_err(|e| OSAgentError::Unknown(format!("Failed to get skill info: {}", e)))

@@ -681,6 +681,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/providers/models", get(models_handler))
         .route("/api/providers/switch", post(switch_provider_model))
         .route("/api/providers/search", get(search_models))
+        .route("/api/providers/find", get(search_providers))
         .route("/api/providers/validate", post(validate_provider))
         .route("/api/providers/:id", delete(delete_provider))
         .route("/api/local-servers/status", get(local_servers_status))
@@ -2725,7 +2726,9 @@ async fn edit_queued_message(
         Ok(false) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: "Queued message not found, already dispatching, or belongs to another session".to_string(),
+                error:
+                    "Queued message not found, already dispatching, or belongs to another session"
+                        .to_string(),
             }),
         )),
         Err(e) => Err((
@@ -3597,6 +3600,18 @@ async fn voice_transcribe(
             )
         })?;
 
+    // The browser path always sends a PCM WAV generated from MediaRecorder.
+    // Reject an empty/headers-only payload before starting Whisper; otherwise
+    // the server can return a misleading no-speech sentinel.
+    if audio_bytes.len() <= 44 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Audio payload is empty. Record for a moment and try again.".to_string(),
+            }),
+        ));
+    }
+
     let temp_dir = tempfile::tempdir().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4146,25 +4161,29 @@ async fn get_providers(
         .providers
         .iter()
         .map(|p| {
+            let key_count = p.key_candidates().len();
             let api_key_preview = if p.auth_type.as_deref() == Some("oauth") {
                 "(oauth)".to_string()
-            } else if p.api_key.is_empty() {
+            } else if key_count == 0 {
                 String::new()
-            } else if p.api_key.len() > 10 {
-                format!(
-                    "{}...{}",
-                    &p.api_key[..7],
-                    &p.api_key[p.api_key.len() - 4..]
-                )
+            } else if key_count > 1 {
+                format!("({} keys)", key_count)
             } else {
                 "(configured)".to_string()
             };
+            let entry_id = p.effective_id().to_string();
             serde_json::json!({
-                "id": p.provider_type,
+                "id": entry_id,
+                "name": p.display_name(),
+                "provider_type": p.provider_type,
+                "custom": p.is_custom(),
                 "base_url": p.base_url,
                 "model": p.model,
+                "models": p.models,
                 "api_key_preview": api_key_preview,
-                "is_default": p.provider_type == config.default_provider,
+                "key_count": key_count,
+                "enabled": config.provider_enabled(&entry_id),
+                "is_default": entry_id == config.default_provider,
             })
         })
         .collect();
@@ -4173,18 +4192,114 @@ async fn get_providers(
         "providers": providers,
         "default_provider": config.default_provider,
         "default_model": config.default_model,
+        "small_provider": config.small_provider,
+        "small_model": config.small_model,
+        "enabled_providers": config.enabled_providers,
+        "disabled_providers": config.disabled_providers,
     })))
+}
+
+/// Searchable provider list: configured entries plus presets, matched on
+/// id / name / description / type / base_url. The picker no longer needs
+/// to scroll the full preset list to find an endpoint.
+async fn search_providers(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Query(params): Query<ModelSearchQuery>,
+) -> Json<serde_json::Value> {
+    let query = params.q.unwrap_or_default().trim().to_lowercase();
+    let config = agent.get_config().await;
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for p in &config.providers {
+        let entry_id = p.effective_id().to_string();
+        let haystack = format!(
+            "{} {} {} {} {}",
+            entry_id,
+            p.display_name(),
+            p.provider_type,
+            p.base_url,
+            p.models.join(" ")
+        )
+        .to_lowercase();
+        if !query.is_empty() && !haystack.contains(&query) {
+            continue;
+        }
+        results.push(serde_json::json!({
+            "id": entry_id,
+            "name": p.display_name(),
+            "provider_type": p.provider_type,
+            "custom": p.is_custom(),
+            "description": "Configured provider",
+            "base_url": p.base_url,
+            "model": p.model,
+            "models": p.models,
+            "configured": true,
+            "key_count": p.key_candidates().len(),
+            "enabled": config.provider_enabled(&entry_id),
+            "is_default": entry_id == config.default_provider,
+        }));
+    }
+    for preset in crate::agent::provider_presets::get_presets() {
+        if config
+            .providers
+            .iter()
+            .any(|p| p.provider_type == preset.id && p.effective_id() == preset.id.as_str())
+        {
+            continue;
+        }
+        let haystack = format!(
+            "{} {} {} {}",
+            preset.id, preset.name, preset.description, preset.base_url
+        )
+        .to_lowercase();
+        if !query.is_empty() && !haystack.contains(&query) {
+            continue;
+        }
+        results.push(serde_json::json!({
+            "id": preset.id,
+            "name": preset.name,
+            "provider_type": preset.id,
+            "custom": false,
+            "description": preset.description,
+            "base_url": preset.base_url,
+            "model": preset.models.first().map(|m| m.id.clone()).unwrap_or_default(),
+            "models": preset.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+            "configured": false,
+            "key_count": 0,
+            "enabled": config.provider_enabled(&preset.id),
+            "is_default": false,
+        }));
+    }
+
+    Json(serde_json::to_value(results).unwrap_or(serde_json::json!([])))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AddProviderRequest {
     pub provider_id: String,
+    /// Stable entry id. Defaults to provider_id, so a second entry with
+    /// the same provider_id (extra key, custom endpoint) gets its own id.
+    pub id: Option<String>,
+    pub name: Option<String>,
     pub api_key: Option<String>,
+    pub api_keys: Option<Vec<String>>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    /// Declared models for custom endpoints (no preset / models.dev entry).
+    pub models: Option<Vec<String>>,
     pub is_default: Option<bool>,
     #[serde(flatten)]
     pub oauth_data: Option<OAuthProviderData>,
+}
+
+/// Custom endpoints have no preset default model: fall back to the first
+/// user-declared model so the entry is immediately usable.
+fn declared_models_fallback_model(models: &Option<Vec<String>>) -> Option<String> {
+    models
+        .as_ref()?
+        .iter()
+        .map(|m| m.trim().to_string())
+        .find(|m| !m.is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -4225,6 +4340,27 @@ async fn add_provider(
         .is_some()
         || stored_oauth.is_some();
     let preset = crate::agent::provider_presets::get_preset(&payload.provider_id);
+    // Custom endpoints have no preset: they must bring their own base_url.
+    // Anything else rides the generic OpenAI-compatible adapter — no code.
+    if preset.is_none()
+        && payload
+            .base_url
+            .as_ref()
+            .map(|u| u.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "base_url is required for custom providers".to_string(),
+            }),
+        ));
+    }
+    let entry_id = payload
+        .id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| payload.provider_id.clone());
     let default_model = if payload.provider_id == "openai" && has_oauth {
         Some("gpt-5.3-codex".to_string())
     } else {
@@ -4233,9 +4369,59 @@ async fn add_provider(
             .and_then(|provider| provider.models.first().map(|model| model.id.clone()))
     };
 
+    // Keys go to auth.toml (0600), never config.toml. Collect first so the
+    // saved ProviderConfig carries none.
+    let mut new_keys: Vec<String> = payload
+        .api_keys
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(payload.api_key.clone())
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    new_keys.sort();
+    if !new_keys.is_empty() {
+        let mut stored = crate::auth_store::load_auth_keys(&config_dir);
+        let bucket = stored.entry(entry_id.clone()).or_default();
+        for key in &new_keys {
+            if !bucket.iter().any(|k| k == key) {
+                bucket.push(key.clone());
+            }
+        }
+        crate::auth_store::save_auth_keys(&config_dir, &stored).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to store API keys: {}", e),
+                }),
+            )
+        })?;
+    }
+
+    let declared_models: Vec<String> = payload
+        .models
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+
     let provider_config = crate::config::ProviderConfig {
+        id: if entry_id == payload.provider_id {
+            String::new()
+        } else {
+            entry_id.clone()
+        },
+        name: payload.name.clone().filter(|n| !n.trim().is_empty()),
         provider_type: payload.provider_id.clone(),
-        api_key: payload.api_key.unwrap_or_default(),
+        api_key: String::new(),
+        api_keys: vec![],
+        models: declared_models,
+        auth_file_keys: new_keys,
         base_url: payload
             .base_url
             .filter(|value| !value.trim().is_empty())
@@ -4245,6 +4431,7 @@ async fn add_provider(
             .model
             .filter(|value| !value.trim().is_empty())
             .or(default_model)
+            .or_else(|| declared_models_fallback_model(&payload.models))
             .unwrap_or_default(),
         fallbacks: vec![],
         auth_type: has_oauth.then(|| "oauth".to_string()),
@@ -4289,13 +4476,14 @@ async fn add_provider(
 
     if payload.is_default.unwrap_or(false) {
         let mut config = agent.get_config().await;
-        config.default_provider = payload.provider_id.clone();
+        config.default_provider = entry_id.clone();
         agent.replace_config(config.clone()).await;
     }
 
     // Persist immediately. Provider keys are entered once and must survive
     // restarts; local providers (Unsloth/Ollama) are typically saved without
     // the default flag, which used to skip the disk write entirely.
+    // Keys already went to auth.toml above; the config save carries none.
     if let Err(e) = agent.save_config(&config_path).await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4308,7 +4496,7 @@ async fn add_provider(
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Provider added successfully",
-        "provider_id": payload.provider_id
+        "provider_id": entry_id
     })))
 }
 
@@ -5843,6 +6031,8 @@ async fn fetch_live_ollama_models_uncached(
                 supports_vision,
                 category: "installed".to_string(),
                 available: true,
+                input_cost_per_1m: 0.0,
+                output_cost_per_1m: 0.0,
             })
         })
         .collect();
@@ -6075,6 +6265,8 @@ async fn fetch_live_unsloth_models_uncached(
                         || id.to_ascii_lowercase().contains("vl"),
                     category: "installed".to_string(),
                     available: true,
+                    input_cost_per_1m: 0.0,
+                    output_cost_per_1m: 0.0,
                 })
             })
             .collect();

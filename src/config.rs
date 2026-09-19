@@ -16,6 +16,20 @@ pub struct Config {
     pub providers: Vec<ProviderConfig>,
     pub default_provider: String,
     pub default_model: String,
+    /// Cheap model slot for background chores (titles, summaries).
+    /// Empty inherits the default model. Format "provider_id:model" or
+    /// plain model (uses small_provider, else the default provider).
+    #[serde(default)]
+    pub small_model: String,
+    #[serde(default)]
+    pub small_provider: String,
+    /// Provider allow/deny lists (opencode-style). Entries are provider
+    /// ids (or legacy types). Deny wins; a non-empty allow list disables
+    /// everything not named.
+    #[serde(default)]
+    pub enabled_providers: Vec<String>,
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
     #[serde(default)]
     pub provider: ProviderConfig,
     pub agent: AgentConfig,
@@ -57,8 +71,30 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
+    /// Stable identity for this entry. Empty means "same as provider_type"
+    /// (legacy behavior). Two entries may share a provider_type with
+    /// different ids — e.g. two OpenRouter keys, or a pinned custom
+    /// endpoint next to the stock preset.
+    #[serde(default)]
+    pub id: String,
+    /// Display name for custom endpoints. Falls back to the preset name.
+    #[serde(default)]
+    pub name: Option<String>,
     pub provider_type: String,
     pub api_key: String,
+    /// Extra keys for the same entry. Requests rotate across
+    /// [api_key] + api_keys + auth-file keys, so every retry and every
+    /// new request may use the next key (rate-limit spreading).
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    /// User-declared models for custom endpoints (no models.dev entry).
+    /// Surfaced in the catalog/picker as `custom`-category models.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Keys loaded from auth.toml (never written to config.toml).
+    /// Populated at load; `#[serde(skip)]` keeps them out of saves.
+    #[serde(skip)]
+    pub auth_file_keys: Vec<String>,
     pub base_url: String,
     pub model: String,
     pub fallbacks: Vec<String>,
@@ -70,6 +106,50 @@ pub struct ProviderConfig {
     pub oauth_scopes: Option<Vec<String>>,
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
     pub redirect_url: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Stable identity: explicit id, else the provider type (legacy).
+    pub fn effective_id(&self) -> &str {
+        if self.id.trim().is_empty() {
+            &self.provider_type
+        } else {
+            self.id.trim()
+        }
+    }
+
+    /// Display name: explicit name, else the preset name, else the id.
+    pub fn display_name(&self) -> String {
+        if let Some(name) = self.name.as_ref().filter(|n| !n.trim().is_empty()) {
+            return name.clone();
+        }
+        if let Some(preset) = crate::agent::provider_presets::get_preset(&self.provider_type) {
+            return preset.name.clone();
+        }
+        self.effective_id().to_string()
+    }
+
+    /// Every usable key for this entry, deduplicated, in priority order:
+    /// explicit config keys first, then auth-file keys.
+    pub fn key_candidates(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for key in std::iter::once(&self.api_key)
+            .chain(self.api_keys.iter())
+            .chain(self.auth_file_keys.iter())
+        {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() && !out.iter().any(|k: &String| k == trimmed) {
+                out.push(trimmed.to_string());
+            }
+        }
+        out
+    }
+
+    /// A `custom` provider_type (or any unknown type) with its own base_url
+    /// runs through the generic OpenAI-compatible adapter — no code needed.
+    pub fn is_custom(&self) -> bool {
+        crate::agent::provider_presets::get_preset(&self.provider_type).is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -680,6 +760,13 @@ pub struct CompactionConfig {
     pub prune_tail_chars: usize,
     /// Cap on the transcript fed to the summarization pass.
     pub max_transcript_chars: usize,
+    /// Model-aware cap for summary input. The actual budget is the smaller
+    /// of this value and the summarizer model's usable context. Unlike the
+    /// legacy character cap, this is large enough to carry substantial
+    /// history and is applied after deterministic facts are reserved.
+    pub max_summary_input_tokens: usize,
+    /// Maximum requested size of a generated checkpoint.
+    pub summary_output_tokens: usize,
     /// Rolling working notes: the agent keeps a short handoff note current
     /// during work so a post-compaction agent can continue instantly.
     pub notes_enabled: bool,
@@ -703,6 +790,8 @@ impl Default for CompactionConfig {
             prune_head_chars: 4_096,
             prune_tail_chars: 1_024,
             max_transcript_chars: 24_000,
+            max_summary_input_tokens: 64_000,
+            summary_output_tokens: 4_096,
             notes_enabled: true,
             notes_max_chars: 2_000,
             notes_verify_at_compaction: true,
@@ -834,8 +923,13 @@ impl Default for ServerConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
+            id: String::new(),
+            name: None,
             provider_type: "openai-compatible".to_string(),
             api_key: "".to_string(),
+            api_keys: vec![],
+            models: vec![],
+            auth_file_keys: vec![],
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4.1".to_string(),
             fallbacks: vec![],
@@ -1147,6 +1241,10 @@ impl Config {
             providers: vec![],
             default_provider: String::new(),
             default_model: String::new(),
+            small_model: String::new(),
+            small_provider: String::new(),
+            enabled_providers: vec![],
+            disabled_providers: vec![],
             provider: ProviderConfig::default(),
             agent: AgentConfig::default(),
             telegram: None,
@@ -1270,7 +1368,43 @@ impl Config {
         cfg.ensure_workspace_defaults();
         cfg.migrate_tool_defaults();
         let migrated_max_tokens = cfg.migrate_max_tokens();
-        if mutated || migrated_max_tokens {
+        // Secrets live in auth.toml, not config.toml: fold the legacy
+        // single-provider block in first so its key migrates too.
+        cfg.migrate_legacy_provider();
+        let config_dir = cfg.config_dir();
+        let stored = crate::auth_store::load_auth_keys(&config_dir);
+        for provider in cfg
+            .providers
+            .iter_mut()
+            .chain(std::iter::once(&mut cfg.provider))
+        {
+            let id = provider.effective_id().to_string();
+            if let Some(keys) = stored.get(&id) {
+                for key in keys {
+                    if !provider.auth_file_keys.iter().any(|k| k == key) {
+                        provider.auth_file_keys.push(key.clone());
+                    }
+                }
+            }
+        }
+        let migrated_keys =
+            crate::auth_store::migrate_inline_keys_to_store(&config_dir, &mut cfg.providers);
+        // Reload what migration just stored so this instance resolves keys
+        // even before the next restart.
+        if migrated_keys {
+            let stored = crate::auth_store::load_auth_keys(&config_dir);
+            for provider in cfg.providers.iter_mut() {
+                let id = provider.effective_id().to_string();
+                if let Some(keys) = stored.get(&id) {
+                    for key in keys {
+                        if !provider.auth_file_keys.iter().any(|k| k == key) {
+                            provider.auth_file_keys.push(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if mutated || migrated_max_tokens || migrated_keys {
             cfg.save(path_ref)?;
         }
         Ok(cfg)
@@ -1422,8 +1556,49 @@ impl Config {
         }
         self.providers
             .iter()
-            .find(|p| p.provider_type == self.default_provider)
-            .or(self.providers.first())
+            .find(|p| {
+                p.effective_id() == self.default_provider.as_str()
+                    && self.provider_enabled(p.effective_id())
+            })
+            .or_else(|| {
+                self.providers.iter().find(|p| {
+                    p.provider_type == self.default_provider
+                        && self.provider_enabled(p.effective_id())
+                })
+            })
+            .or_else(|| {
+                self.providers
+                    .iter()
+                    .find(|p| self.provider_enabled(p.effective_id()))
+            })
+    }
+
+    /// Allow/deny gate for provider ids (legacy types match too).
+    /// Disabled wins; a non-empty allow list disables everything unlisted.
+    pub fn provider_enabled(&self, id: &str) -> bool {
+        if self.disabled_providers.iter().any(|d| d == id) {
+            return false;
+        }
+        if self.enabled_providers.is_empty() {
+            return true;
+        }
+        self.enabled_providers.iter().any(|e| e == id)
+    }
+
+    /// Resolve the cheap-model slot: explicit small_provider/small_model,
+    /// else the default provider/model. Returns (provider_id, model).
+    pub fn small_model_ref(&self) -> (String, String) {
+        let provider = if self.small_provider.trim().is_empty() {
+            self.default_provider.clone()
+        } else {
+            self.small_provider.clone()
+        };
+        let model = if self.small_model.trim().is_empty() {
+            self.default_model.clone()
+        } else {
+            self.small_model.clone()
+        };
+        (provider, model)
     }
 
     pub fn active_model(&self) -> String {
@@ -1439,7 +1614,7 @@ impl Config {
         if let Some(p) = self
             .providers
             .iter_mut()
-            .find(|p| p.provider_type == provider_id)
+            .find(|p| p.effective_id() == provider_id)
         {
             p.model = model.to_string();
         }
@@ -1834,17 +2009,39 @@ impl Config {
 
 fn redact_provider_config(provider: &mut ProviderConfig) {
     provider.api_key.clear();
+    provider.api_keys.clear();
+    provider.auth_file_keys.clear();
     provider.oauth_client_secret = None;
     provider.custom_headers = None;
 }
 
+fn key_count_for_display(provider: &ProviderConfig) -> usize {
+    provider.key_candidates().len()
+}
+
 fn provider_identity_matches(left: &ProviderConfig, right: &ProviderConfig) -> bool {
-    left.provider_type == right.provider_type && left.base_url == right.base_url
+    (!left.id.trim().is_empty() && left.effective_id() == right.effective_id())
+        || (left.provider_type == right.provider_type && left.base_url == right.base_url)
 }
 
 fn preserve_provider_secrets(incoming: &mut ProviderConfig, current: &ProviderConfig) {
     if incoming.api_key.trim().is_empty() {
         incoming.api_key = current.api_key.clone();
+    }
+    if incoming.api_keys.is_empty() {
+        incoming.api_keys.clone_from(&current.api_keys);
+    }
+    // Auth-file keys live outside the config file; never overwrite them
+    // with an (always redacted/empty) incoming copy.
+    incoming.auth_file_keys.clone_from(&current.auth_file_keys);
+    if incoming.id.trim().is_empty() {
+        incoming.id.clone_from(&current.id);
+    }
+    if incoming.name.is_none() {
+        incoming.name.clone_from(&current.name);
+    }
+    if incoming.models.is_empty() {
+        incoming.models.clone_from(&current.models);
     }
     if incoming.oauth_client_secret.is_none() {
         incoming.oauth_client_secret = current.oauth_client_secret.clone();
@@ -1953,8 +2150,13 @@ pub fn setup_wizard(path: &str) -> Result<()> {
     cfg.server.password = password_hash;
     cfg.server.password_enabled = true;
     cfg.providers.push(ProviderConfig {
+        id: String::new(),
+        name: None,
         provider_type: provider_type.to_string(),
         api_key,
+        api_keys: vec![],
+        models: vec![],
+        auth_file_keys: vec![],
         base_url: base_url.to_string(),
         model: default_model.to_string(),
         fallbacks: vec![],
@@ -2177,6 +2379,89 @@ last_channel_id = 1478327393205882900
 
         assert_eq!(redacted.provider.provider_type, "test-provider");
         assert_eq!(redacted.mcp.servers[0].name, "secret-server");
+    }
+
+    #[test]
+    fn provider_identity_prefers_explicit_id() {
+        let entry = ProviderConfig {
+            id: "my-or".to_string(),
+            provider_type: "openrouter".to_string(),
+            ..ProviderConfig::default()
+        };
+        assert_eq!(entry.effective_id(), "my-or");
+        let legacy = ProviderConfig {
+            provider_type: "openrouter".to_string(),
+            ..ProviderConfig::default()
+        };
+        assert_eq!(legacy.effective_id(), "openrouter");
+    }
+
+    #[test]
+    fn key_candidates_dedupe_and_order() {
+        let entry = ProviderConfig {
+            api_key: "a".to_string(),
+            api_keys: vec!["b".to_string(), "a".to_string(), "".to_string()],
+            auth_file_keys: vec!["c".to_string(), "b".to_string()],
+            ..ProviderConfig::default()
+        };
+        assert_eq!(entry.key_candidates(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn provider_allow_and_deny_lists() {
+        let mut config = Config::default_config();
+        assert!(config.provider_enabled("openrouter"));
+        config.disabled_providers = vec!["openrouter".to_string()];
+        assert!(!config.provider_enabled("openrouter"));
+        assert!(config.provider_enabled("openai"));
+        config.enabled_providers = vec!["openai".to_string()];
+        assert!(!config.provider_enabled("openrouter"));
+        assert!(config.provider_enabled("openai"));
+    }
+
+    #[test]
+    fn small_model_slot_falls_back_to_default() {
+        let mut config = Config::default_config();
+        config.default_provider = "openrouter".to_string();
+        config.default_model = "big".to_string();
+        assert_eq!(
+            config.small_model_ref(),
+            ("openrouter".to_string(), "big".to_string())
+        );
+        config.small_provider = "groq".to_string();
+        config.small_model = "fast".to_string();
+        assert_eq!(
+            config.small_model_ref(),
+            ("groq".to_string(), "fast".to_string())
+        );
+    }
+
+    #[test]
+    fn load_moves_inline_keys_to_auth_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[providers]]
+provider_type = "openrouter"
+api_key = "sk-or-inline"
+base_url = "https://openrouter.ai/api/v1"
+model = "x"
+"#,
+        )
+        .expect("write config");
+        let loaded = Config::load(path.to_str().unwrap()).expect("load");
+        assert!(loaded.providers[0].api_key.is_empty());
+        assert_eq!(
+            loaded.providers[0].auth_file_keys,
+            vec!["sk-or-inline".to_string()]
+        );
+        let raw = std::fs::read_to_string(&path).expect("read back");
+        assert!(!raw.contains("sk-or-inline"), "key leaked into config.toml");
+        // Second load is stable (no duplicate keys, no rewrite churn).
+        let reloaded = Config::load(path.to_str().unwrap()).expect("reload");
+        assert_eq!(reloaded.providers[0].auth_file_keys.len(), 1);
     }
 
     #[test]

@@ -684,7 +684,7 @@ pub async fn transcribe(
     // unavailable — only slower.
     if super::whisper_server::is_available() {
         match super::whisper_server::transcribe(audio_path, language, &model_path, threads).await {
-            Ok(text) => return Ok(text),
+            Ok(text) => return Ok(normalize_transcript(&text)),
             Err(err) => {
                 tracing::warn!("whisper-server transcription failed, using CLI: {}", err);
                 super::whisper_server::mark_unhealthy();
@@ -770,12 +770,32 @@ fn parse_transcript(stdout: &str) -> String {
             line
         };
 
-        if !text.is_empty() {
+        if !text.is_empty() && !is_no_speech_marker(text) {
             parts.push(text);
         }
     }
 
     parts.join(" ")
+}
+
+/// whisper.cpp and whisper-server use bracketed placeholders for an utterance
+/// with no recognized speech. They are protocol markers, not user transcript
+/// text. The CLI parser historically dropped them as a side effect of timestamp
+/// parsing, but the resident server returned them directly, which made the
+/// native WebView show strings such as `[EMPTY_AUDIO]`.
+fn is_no_speech_marker(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_uppercase().as_str(),
+        "[BLANK_AUDIO]" | "[EMPTY_AUDIO]" | "[NO_SPEECH]" | "<|BLANK_AUDIO|>"
+    )
+}
+
+fn normalize_transcript(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_no_speech_marker(line))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub async fn install_all(model: WhisperModel) -> Result<(), String> {
@@ -826,6 +846,17 @@ mod transcript_parse_tests {
     fn empty_output_yields_empty_string() {
         assert_eq!(parse_transcript(""), "");
         assert_eq!(parse_transcript("\n\n"), "");
+    }
+
+    #[test]
+    fn filters_no_speech_markers_from_both_paths() {
+        assert_eq!(parse_transcript("[BLANK_AUDIO]\n"), "");
+        assert_eq!(parse_transcript("[EMPTY_AUDIO]\n"), "");
+        assert_eq!(normalize_transcript("[EMPTY_AUDIO]"), "");
+        assert_eq!(
+            normalize_transcript("first words\n[BLANK_AUDIO]"),
+            "first words"
+        );
     }
 
     #[test]

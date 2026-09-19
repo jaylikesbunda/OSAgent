@@ -11,8 +11,8 @@
 
 use crate::error::{OSAgentError, Result};
 use crate::skills::{
-    load_existing_parts, save_skill, ConfigField, SkillActionSchema, SkillLoader,
-    SkillSaveInput, SkillTokenRefreshSchema,
+    load_existing_parts, save_skill, ConfigField, SkillActionSchema, SkillLoader, SkillSaveInput,
+    SkillTokenRefreshSchema,
 };
 use crate::tools::registry::Tool;
 use async_trait::async_trait;
@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn parse_config_fields(value: Option<&Value>) -> Result<Vec<ConfigField>> {
-    let Some(v) = value else { return Ok(Vec::new()) };
+    let Some(v) = value else {
+        return Ok(Vec::new());
+    };
     if v.is_null() {
         return Ok(Vec::new());
     }
@@ -30,7 +32,9 @@ fn parse_config_fields(value: Option<&Value>) -> Result<Vec<ConfigField>> {
 }
 
 fn parse_actions(value: Option<&Value>) -> Result<Vec<SkillActionSchema>> {
-    let Some(v) = value else { return Ok(Vec::new()) };
+    let Some(v) = value else {
+        return Ok(Vec::new());
+    };
     if v.is_null() {
         return Ok(Vec::new());
     }
@@ -61,9 +65,7 @@ fn parse_actions(value: Option<&Value>) -> Result<Vec<SkillActionSchema>> {
 /// Normalize the `parameters` field of one action object in place:
 /// accept the canonical array, or a JSON-Schema style
 /// `{properties: {...}, required: [...]}` map.
-fn normalize_parameters_field(
-    obj: &mut serde_json::Map<String, Value>,
-) -> Result<()> {
+fn normalize_parameters_field(obj: &mut serde_json::Map<String, Value>) -> Result<()> {
     let action_name = obj
         .get("name")
         .and_then(|n| n.as_str())
@@ -100,9 +102,7 @@ fn normalize_parameters_field(
 /// treated as a description and replaced with a `{{{{ args.key }}}}` template.
 /// When `parameters` is absent, derive string parameters from the template
 /// references so the action validates.
-fn normalize_script_args_field(
-    obj: &mut serde_json::Map<String, Value>,
-) -> Result<()> {
+fn normalize_script_args_field(obj: &mut serde_json::Map<String, Value>) -> Result<()> {
     let action_name = obj
         .get("name")
         .and_then(|n| n.as_str())
@@ -144,10 +144,7 @@ fn normalize_script_args_field(
                 };
                 templates.push(Value::String(template));
             }
-            obj.insert(
-                "args".to_string(),
-                Value::Array(templates),
-            );
+            obj.insert("args".to_string(), Value::Array(templates));
             let params_missing = obj
                 .get("parameters")
                 .map(|p| p.is_null() || p.as_array().map(|a| a.is_empty()).unwrap_or(false))
@@ -317,7 +314,9 @@ fn arg_template_refs(template: &str) -> Vec<String> {
             if let Some(name) = expr.strip_prefix("args.") {
                 let name = name.trim();
                 if !name.is_empty()
-                    && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
                 {
                     refs.push(name.to_string());
                 }
@@ -385,12 +384,16 @@ fn parse_token_refresh(value: Option<&Value>) -> Result<Option<SkillTokenRefresh
 }
 
 fn parse_scripts(value: Option<&Value>) -> Result<HashMap<String, String>> {
-    let Some(v) = value else { return Ok(HashMap::new()) };
+    let Some(v) = value else {
+        return Ok(HashMap::new());
+    };
     if v.is_null() {
         return Ok(HashMap::new());
     }
     let obj = v.as_object().ok_or_else(|| {
-        OSAgentError::ToolExecution("'scripts' must be an object of filename -> content.".to_string())
+        OSAgentError::ToolExecution(
+            "'scripts' must be an object of filename -> content.".to_string(),
+        )
     })?;
     let mut out = HashMap::new();
     for (k, v) in obj {
@@ -496,7 +499,8 @@ impl Tool for SkillCreateTool {
     async fn execute(&self, args: Value) -> Result<String> {
         let name = require_string(&args, "name", "skill id like 'inbox-triage'")?;
         let description = require_string(&args, "description", "one-line skill description")?;
-        let instructions = require_string(&args, "instructions", "markdown instructions for the skill")?;
+        let instructions =
+            require_string(&args, "instructions", "markdown instructions for the skill")?;
         let emoji = args
             .get("emoji")
             .and_then(|v| v.as_str())
@@ -784,10 +788,7 @@ impl Tool for SkillDeleteTool {
             let dir = skill.base_dir.clone();
             if dir.join("SKILL.md").exists() || dir.exists() {
                 std::fs::remove_dir_all(&dir).map_err(|e| {
-                    OSAgentError::ToolExecution(format!(
-                        "Failed to delete skill '{}': {}",
-                        name, e
-                    ))
+                    OSAgentError::ToolExecution(format!("Failed to delete skill '{}': {}", name, e))
                 })?;
                 deleted_any = true;
             }
@@ -950,6 +951,10 @@ mod tests {
     fn action_patch_unknown_name_lists_valid() {
         let err = apply_action_patches(&[link_check_action()], &[json!({"name": "nope"})])
             .expect_err("should fail");
-        assert!(err.contains("check"), "error should list valid names: {}", err);
+        assert!(
+            err.contains("check"),
+            "error should list valid names: {}",
+            err
+        );
     }
 }

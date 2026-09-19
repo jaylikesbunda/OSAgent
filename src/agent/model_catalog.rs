@@ -17,6 +17,11 @@ pub struct ModelInfo {
     pub supports_vision: bool,
     pub category: String,
     pub available: bool,
+    /// USD per 1M tokens, straight from models.dev (0 when unpublished).
+    #[serde(default)]
+    pub input_cost_per_1m: f64,
+    #[serde(default)]
+    pub output_cost_per_1m: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,6 +451,8 @@ impl ModelCatalog {
                     supports_vision: m.supports_vision(),
                     category: m.category(),
                     available,
+                    input_cost_per_1m: m.cost.input,
+                    output_cost_per_1m: m.cost.output,
                 }
             })
             .collect()
@@ -515,14 +522,17 @@ impl ModelCatalog {
     }
 
     pub fn get_state(&self, configured_providers: &[ProviderConfig]) -> CatalogState {
+        // Both the entry id ("my-or") and its type ("openrouter") mark a
+        // provider connected: a cloned entry still lights up the stock
+        // model list, and the entry id addresses the custom models below.
         let connected_ids: std::collections::HashSet<String> = configured_providers
             .iter()
-            .map(|p| p.provider_type.clone())
+            .flat_map(|p| [p.effective_id().to_string(), p.provider_type.clone()])
             .collect();
 
         let env_detected = super::provider_presets::detect_env_providers();
 
-        let (providers, mut all_models) = {
+        let (mut providers, mut all_models) = {
             let cache = self.cached_catalog.read().unwrap();
             let live = cache.as_ref().and_then(|(catalog, timestamp)| {
                 (timestamp.elapsed().as_secs() < CACHE_TTL_SECS).then_some(catalog)
@@ -558,7 +568,64 @@ impl ModelCatalog {
                 supports_vision: custom.supports_vision,
                 category: "custom".to_string(),
                 available: connected,
+                input_cost_per_1m: 0.0,
+                output_cost_per_1m: 0.0,
             });
+        }
+
+        // User-declared models on configured entries (custom endpoints).
+        // Each `models = [...]` id becomes a picker-visible model under
+        // the entry's id, with the entry's own model marked current.
+        for provider in configured_providers {
+            let entry_id = provider.effective_id().to_string();
+            if provider.models.is_empty() {
+                continue;
+            }
+            let provider_name = providers
+                .iter()
+                .find(|p| p.id == entry_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| provider.display_name());
+            if !providers.iter().any(|p| p.id == entry_id) {
+                providers.push(ProviderInfo {
+                    id: entry_id.clone(),
+                    name: provider_name.clone(),
+                    base_url: provider.base_url.clone(),
+                    description: "Custom OpenAI-compatible endpoint".to_string(),
+                    connected: true,
+                    api_key_source: if provider.key_candidates().is_empty() {
+                        String::new()
+                    } else {
+                        "config".to_string()
+                    },
+                    oauth_supported: false,
+                    api_key_url: None,
+                    models: Vec::new(),
+                });
+            }
+            for model_id in &provider.models {
+                if all_models
+                    .iter()
+                    .any(|m| m.provider_id == entry_id && m.id == *model_id)
+                {
+                    continue;
+                }
+                all_models.push(ModelInfo {
+                    id: model_id.clone(),
+                    name: model_id.clone(),
+                    provider_id: entry_id.clone(),
+                    provider_name: provider_name.clone(),
+                    context_window: 128_000,
+                    input_limit: None,
+                    output_limit: 0,
+                    supports_tools: true,
+                    supports_vision: false,
+                    category: "custom".to_string(),
+                    available: true,
+                    input_cost_per_1m: 0.0,
+                    output_cost_per_1m: 0.0,
+                });
+            }
         }
 
         CatalogState {

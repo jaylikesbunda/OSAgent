@@ -19,6 +19,7 @@ use tracing::{error, info, Level};
 use tracing_subscriber::EnvFilter;
 
 mod agent;
+mod auth_store;
 mod config;
 mod error;
 mod external;

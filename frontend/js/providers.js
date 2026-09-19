@@ -18,6 +18,35 @@ OSA.providerCatalogPromise = null;
 OSA.modelPickerActiveIndex = -1;
 OSA.modelSearchRequestId = 0;
 OSA.modelOptionDelegationReady = false;
+OSA.modelDropdownRenderCache = new Map();
+OSA.modelDropdownCatalogIds = new WeakMap();
+OSA.nextModelDropdownCatalogId = 1;
+
+OSA.clearModelDropdownRenderCache = function() {
+    OSA.modelDropdownRenderCache.clear();
+};
+
+OSA.modelDropdownCatalogKey = function() {
+    const catalog = OSA.providerCatalog || {};
+    let catalogId = 'none';
+    if (catalog && typeof catalog === 'object') {
+        catalogId = OSA.modelDropdownCatalogIds.get(catalog);
+        if (!catalogId) {
+            catalogId = String(OSA.nextModelDropdownCatalogId++);
+            OSA.modelDropdownCatalogIds.set(catalog, catalogId);
+        }
+    }
+    const favourites = (OSA.favourites || [])
+        .map(function(item) { return (item.id || '') + '|' + (item.provider_id || ''); })
+        .join(',');
+    return [
+        catalogId,
+        OSA.providerCatalogFetchedAt || 0,
+        OSA.currentModelProviderId || '',
+        OSA.currentModelId || '',
+        favourites,
+    ].join('#');
+};
 
 // ── Favourite Models ─────────────────────────────────────────
 
@@ -135,6 +164,7 @@ OSA.loadProviderCatalog = async function(force = false) {
         .then(function(data) {
             OSA.providerCatalog = OSA.hydrateProviderModels(data || { providers: [], all_models: [] });
             OSA.providerCatalogFetchedAt = Date.now();
+            OSA.clearModelDropdownRenderCache();
             if (OSA.currentModelId) {
                 OSA.setModelTrigger(OSA.currentModelProviderId || '', OSA.currentModelId);
             }
@@ -389,10 +419,24 @@ OSA.renderModelDropdown = async function() {
         return;
     }
 
+    const cacheKey = OSA.modelDropdownCatalogKey();
+    const cached = OSA.modelDropdownRenderCache.get(cacheKey);
+    const list = dropdown.querySelector('.model-dropdown-list');
+    if (cached && list) {
+        // The dropdown remains mounted while closed. On a normal reopen this
+        // avoids reparsing hundreds of option nodes and preserves focus state.
+        if (list._osaModelDropdownCacheKey !== cacheKey) {
+            list.innerHTML = cached.html;
+            list._osaModelDropdownCacheKey = cacheKey;
+        }
+        OSA.afterModelDropdownRender();
+        return;
+    }
+
     if (!OSA.providerCatalog?.providers?.length) {
-        const list = dropdown.querySelector('.model-dropdown-list');
         if (list) {
             list.innerHTML = '<div class="model-empty">Loading models...</div>';
+            list._osaModelDropdownCacheKey = '';
         }
         await OSA.loadProviderCatalog();
         if (!OSA.modelDropdownOpen || requestId !== OSA.modelSearchRequestId) return;
@@ -444,6 +488,9 @@ OSA.renderModelDropdown = async function() {
     }
 
     const sortedProviders = OSA.sortProvidersForDropdown(providers);
+    const providerRank = new Map(sortedProviders.map(function(provider, index) {
+        return [provider.name, index];
+    }));
     const providersById = Object.fromEntries((providers || []).map(function(p) { return [p.id, p]; }));
 
     const connectedModels = (all_models || []).filter(function(m) {
@@ -457,12 +504,9 @@ OSA.renderModelDropdown = async function() {
         grouped[m.provider_name || m.provider_id].push(m);
     }
     var connectedGroupKeys = Object.keys(grouped).sort(function(a, b) {
-        var pa = providers.find(function(p) { return p.name === a; });
-        var pb = providers.find(function(p) { return p.name === b; });
-        return OSA.sortProvidersForDropdown([pa || { name: a, connected: true }, pb || { name: b, connected: true }])
-            .map(function(p) { return p.name; }).indexOf(a)
-            - OSA.sortProvidersForDropdown([pb || { name: b, connected: true }, pa || { name: a, connected: true }])
-            .map(function(p) { return p.name; }).indexOf(b);
+        const ai = providerRank.has(a) ? providerRank.get(a) : Number.MAX_SAFE_INTEGER;
+        const bi = providerRank.has(b) ? providerRank.get(b) : Number.MAX_SAFE_INTEGER;
+        return ai - bi || a.localeCompare(b);
     });
     for (var gi = 0; gi < connectedGroupKeys.length; gi++) {
         var groupKey = connectedGroupKeys[gi];
@@ -498,7 +542,14 @@ OSA.renderModelDropdown = async function() {
     }
 
     if (!html) html = '<div class="model-empty">No models available</div>';
-    dropdown.querySelector('.model-dropdown-list').innerHTML = html;
+    list.innerHTML = html;
+    list._osaModelDropdownCacheKey = cacheKey;
+    OSA.modelDropdownRenderCache.set(cacheKey, { html: html });
+    // Keep a few catalog/model combinations warm without retaining old
+    // dropdown markup indefinitely.
+    while (OSA.modelDropdownRenderCache.size > 6) {
+        OSA.modelDropdownRenderCache.delete(OSA.modelDropdownRenderCache.keys().next().value);
+    }
     OSA.afterModelDropdownRender();
 };
 
@@ -507,7 +558,9 @@ OSA.renderModelSearchResults = function(models, currentModel) {
     if (!dropdown) return;
 
     if (!models || models.length === 0) {
-        dropdown.querySelector('.model-dropdown-list').innerHTML = '<div class="model-empty">No models found</div>';
+        const list = dropdown.querySelector('.model-dropdown-list');
+        list.innerHTML = '<div class="model-empty">No models found</div>';
+        list._osaModelDropdownCacheKey = '';
         OSA.afterModelDropdownRender();
         return;
     }
@@ -537,7 +590,9 @@ OSA.renderModelSearchResults = function(models, currentModel) {
         }
     }
 
-    dropdown.querySelector('.model-dropdown-list').innerHTML = html;
+    const list = dropdown.querySelector('.model-dropdown-list');
+    list.innerHTML = html;
+    list._osaModelDropdownCacheKey = '';
     OSA.afterModelDropdownRender();
 };
 

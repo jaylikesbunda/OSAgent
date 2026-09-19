@@ -21,6 +21,14 @@ OSA.sessionInitialFor = function(displayName) {
     return match ? match[0].toUpperCase() : '#';
 };
 
+// Sidebar icon letter: first letter of the workspace the session uses,
+// falling back to the session name when it has no workspace.
+OSA.sessionIconLetterFor = function(workspaceLabel, displayName) {
+    const initial = OSA.sessionInitialFor(workspaceLabel);
+    if (initial !== '#') return initial;
+    return OSA.sessionInitialFor(displayName);
+};
+
 // Quote-safe escaping for HTML *attribute* values. escapeHtml round-trips
 // through textContent -> innerHTML, which escapes &, < and > but leaves quotes
 // intact; interpolating that into value="..." lets a quoted value close the

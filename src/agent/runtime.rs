@@ -260,6 +260,60 @@ impl AgentRuntime {
         self.provider.read().await.clone()
     }
 
+    /// Cheap-model slot for background chores (compaction summaries,
+    /// titles). Resolves `small_provider`/`small_model` from config,
+    /// falling back to the active provider. Builds an ephemeral provider
+    /// when the slot names a different model than the shared entry carries,
+    /// so the main agent's model is never mutated.
+    pub async fn small_slot_provider(&self) -> Arc<dyn Provider> {
+        let (provider_id, model) = self.config.read().await.small_model_ref();
+        let active = self.active_provider().await;
+        let cfg = self.config.read().await;
+        let wanted_id = if provider_id.trim().is_empty() {
+            cfg.default_provider.clone()
+        } else {
+            provider_id
+        };
+        let wanted_model = model.trim().to_string();
+        // Same entry, same model → the active provider already is the slot.
+        if wanted_id == cfg.default_provider
+            && (wanted_model.is_empty() || wanted_model == cfg.default_model)
+        {
+            return active;
+        }
+        let Some(entry) = cfg
+            .providers
+            .iter()
+            .find(|p| p.effective_id() == wanted_id.as_str() || p.provider_type == wanted_id)
+            .cloned()
+        else {
+            return active;
+        };
+        drop(cfg);
+        let mut entry = entry;
+        if !wanted_model.is_empty() {
+            entry.model = wanted_model;
+        }
+        let oauth_dir = PathBuf::from(
+            shellexpand::tilde(&self.config.read().await.storage.database).to_string(),
+        )
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+        match OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
+            entry,
+            Some(self.catalog.clone()),
+            Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+            self.agent_settings.clone(),
+        ) {
+            Ok(provider) => Arc::new(provider),
+            Err(e) => {
+                tracing::warn!("small-model provider failed to build ({}); using active", e);
+                active
+            }
+        }
+    }
+
     pub fn new(config: Config) -> Result<Arc<Self>> {
         let startup_profile = std::env::var("OSAGENT_STARTUP_PROFILE")
             .map(|v| {
@@ -305,6 +359,13 @@ impl AgentRuntime {
         let mut provider_instances: Vec<(String, Arc<dyn Provider>)> = Vec::new();
 
         for provider_cfg in &config.providers {
+            if !config.provider_enabled(provider_cfg.effective_id()) {
+                info!(
+                    "Provider '{}' is disabled by enabled/disabled_providers; skipping",
+                    provider_cfg.effective_id()
+                );
+                continue;
+            }
             let mut cfg = provider_cfg.clone();
 
             if cfg.api_key.is_empty() {
@@ -329,7 +390,7 @@ impl AgentRuntime {
                 Arc::new(event_bus.clone()),
                 storage.clone(),
             )));
-            provider_instances.push((provider_cfg.provider_type.clone(), provider));
+            provider_instances.push((provider_cfg.effective_id().to_string(), provider));
         }
 
         if provider_instances.is_empty() {
@@ -1550,10 +1611,19 @@ impl AgentRuntime {
                         .map(|notes| notes.text.trim().to_string())
                         .filter(|text| !text.is_empty())
                     {
-                        api_messages.push(Message::system(format!(
-                            "# Session Working Notes\n{}\n\nThese notes are your rolling handoff. Keep them current with `update_notes`; a fresh agent reads them first after compaction.",
-                            notes
-                        )));
+                        // A notes-first checkpoint already carries this exact
+                        // text. Do not pay for or privilege a duplicate system
+                        // copy until the rolling notes have changed again.
+                        let checkpoint_has_notes = session.messages.iter().rev().any(|message| {
+                            Self::message_kind(message) == Some("compaction_summary")
+                                && message.content.contains(&notes)
+                        });
+                        if !checkpoint_has_notes {
+                            api_messages.push(Message::system(format!(
+                                "# Session Working Notes\n{}\n\nThese notes are your rolling handoff. Keep them current with `update_notes`; a fresh agent reads them first after compaction.",
+                                notes
+                            )));
+                        }
                     }
                 }
             }
@@ -1688,12 +1758,17 @@ impl AgentRuntime {
                         ),
                     );
 
+                    let stored_conversation_tokens: usize =
+                        session.messages.iter().map(Self::message_tokens).sum();
+                    let conversation_budget = budget
+                        .saturating_sub(pre_tokens.saturating_sub(stored_conversation_tokens));
                     if let Some((pruned, compacted, replayed)) = self
                         .compact_session_history(
                             &mut session,
                             &active_workspace,
                             &runtime_config.compaction,
                             None,
+                            Some(conversation_budget),
                         )
                         .await?
                     {
@@ -3945,8 +4020,16 @@ impl AgentRuntime {
             return None;
         }
 
-        if content.chars().count() > 2_000 {
-            content = content.chars().take(2_000).collect::<String>();
+        // Keep enough exact local evidence for checkpoint generation. The
+        // transcript-level token budget remains the hard bound; this per-item
+        // guard only prevents one giant result from monopolizing it.
+        let per_message_cap = if message.role == "tool" {
+            4_000
+        } else {
+            12_000
+        };
+        if content.chars().count() > per_message_cap {
+            content = content.chars().take(per_message_cap).collect::<String>();
             content.push_str("... [truncated]");
         }
 
@@ -3959,31 +4042,143 @@ impl AgentRuntime {
         Some(format!("{}: {}", label, content))
     }
 
-    /// Newest-first transcript for the summarizer: opencode-style, so the
-    /// most recent prefix content is kept and older content is what gets
-    /// cut at the cap instead of `break`ing on the first overflow.
+    /// Budgeted transcript for the summarizer. Foundational anchors are
+    /// always retained (first request, prior checkpoint, latest requests),
+    /// then remaining room is filled newest-first. This avoids the former
+    /// fixed 24KB tail-only view silently dropping the original objective.
     fn transcript_for_compaction(messages: &[Message], max_chars: usize) -> String {
-        let lines: Vec<String> = messages
+        let lines: Vec<Option<String>> = messages
             .iter()
-            .filter_map(Self::compactable_message_content)
+            .map(Self::compactable_message_content)
             .collect();
-        let mut kept: Vec<&str> = Vec::new();
+        let mut mandatory = std::collections::BTreeSet::new();
+        if let Some(index) = messages.iter().position(Self::is_real_user_message) {
+            mandatory.insert(index);
+        }
+        if let Some(index) = messages
+            .iter()
+            .rposition(|message| Self::message_kind(message) == Some("compaction_summary"))
+        {
+            mandatory.insert(index);
+        }
+        for (index, _) in messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, message)| Self::is_real_user_message(message))
+            .take(2)
+        {
+            mandatory.insert(index);
+        }
+
+        let mut selected = std::collections::BTreeSet::new();
         let mut used = 0usize;
-        for line in lines.iter().rev() {
-            let extra = if kept.is_empty() { 0 } else { 1 };
+        for index in mandatory {
+            let Some(line) = lines.get(index).and_then(Option::as_ref) else {
+                continue;
+            };
+            let remaining = max_chars.saturating_sub(used);
+            if remaining == 0 {
+                break;
+            }
+            let take = line.chars().count().min(remaining);
+            used += take;
+            selected.insert(index);
+        }
+        for index in (0..lines.len()).rev() {
+            if selected.contains(&index) {
+                continue;
+            }
+            let Some(line) = lines[index].as_ref() else {
+                continue;
+            };
+            let extra = usize::from(!selected.is_empty());
             if used + line.chars().count() + extra > max_chars {
                 continue;
             }
             used += line.chars().count() + extra;
-            kept.push(line);
+            selected.insert(index);
         }
-        kept.reverse();
 
-        if kept.is_empty() {
+        if selected.is_empty() {
             "No earlier transcript available.".to_string()
         } else {
-            kept.join("\n")
+            let omitted = lines.iter().filter(|line| line.is_some()).count() - selected.len();
+            let mut rendered = Vec::new();
+            for index in selected {
+                if let Some(line) = lines[index].as_ref() {
+                    let remaining = max_chars.saturating_sub(
+                        rendered
+                            .iter()
+                            .map(|line: &String| line.chars().count() + 1)
+                            .sum(),
+                    );
+                    rendered.push(line.chars().take(remaining).collect());
+                }
+            }
+            if omitted > 0 {
+                rendered.push(format!(
+                    "[{} lower-priority message(s) omitted by checkpoint budget]",
+                    omitted
+                ));
+            }
+            rendered.join("\n")
         }
+    }
+
+    /// Facts that can be recovered exactly from canonical messages should not
+    /// depend on the summarizer remembering them. They are supplied beside the
+    /// prose transcript and carried into the structured checkpoint.
+    fn deterministic_compaction_facts(messages: &[Message]) -> String {
+        let mut read_files = std::collections::BTreeSet::new();
+        let mut modified_files = std::collections::BTreeSet::new();
+        for message in messages {
+            let Some(calls) = message.tool_calls.as_ref() else {
+                continue;
+            };
+            for call in calls {
+                let target = match call.name.as_str() {
+                    "write_file" | "edit_file" | "delete_file" | "apply_patch" => {
+                        &mut modified_files
+                    }
+                    "read_file" | "grep" | "glob" | "codesearch" => &mut read_files,
+                    _ => continue,
+                };
+                if let Some(path) = call.arguments.get("path").and_then(|v| v.as_str()) {
+                    if !path.trim().is_empty() {
+                        target.insert(path.trim().to_string());
+                    }
+                }
+                if let Some(paths) = call.arguments.get("paths").and_then(|v| v.as_array()) {
+                    for path in paths.iter().filter_map(|v| v.as_str()) {
+                        if !path.trim().is_empty() {
+                            target.insert(path.trim().to_string());
+                        }
+                    }
+                }
+                if call.name == "apply_patch" {
+                    if let Some(patch) = call.arguments.get("patch").and_then(|v| v.as_str()) {
+                        modified_files.extend(Self::patch_paths_for_snapshot(patch));
+                    }
+                }
+            }
+        }
+        let latest_requests: Vec<String> = messages
+            .iter()
+            .rev()
+            .filter(|message| Self::is_real_user_message(message))
+            .take(2)
+            .map(|message| message.content.trim().chars().take(4_000).collect())
+            .collect::<Vec<String>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!(
+            "Latest genuine user requests:\n{}\n\nFiles read/searched:\n{}\n\nFiles modified/requested for modification:\n{}",
+            if latest_requests.is_empty() { "(none)".to_string() } else { latest_requests.join("\n---\n") },
+            if read_files.is_empty() { "(none)".to_string() } else { read_files.into_iter().collect::<Vec<_>>().join("\n") },
+            if modified_files.is_empty() { "(none)".to_string() } else { modified_files.into_iter().collect::<Vec<_>>().join("\n") },
+        )
     }
 
     /// Model-free pre-compaction pass: rewrite over-budget tool results
@@ -3992,6 +4187,7 @@ impl AgentRuntime {
     /// no-op because `head + marker + tail <= threshold` is clamped.
     /// Ported from DSH's `compaction-tool-result-pruner`.
     fn prune_old_tool_messages(
+        &self,
         session: &mut Session,
         preserve_from: usize,
         compaction: &crate::config::CompactionConfig,
@@ -4004,6 +4200,14 @@ impl AgentRuntime {
         let tail = compaction
             .prune_tail_chars
             .min(threshold.saturating_sub(head + MIDDLE_MARKER.len()));
+
+        let call_names: std::collections::HashMap<String, String> = session
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_calls.as_ref())
+            .flatten()
+            .map(|call| (call.id.clone(), call.name.clone()))
+            .collect();
 
         // `preserve_from` is the retained-tail split: everything before it is
         // about to be archived byte-identical, so pruning must only touch the
@@ -4036,7 +4240,39 @@ impl AgentRuntime {
                 .into_iter()
                 .rev()
                 .collect();
-            message.content = format!("{}{}{}", head_text, MIDDLE_MARKER, tail_text);
+            // Preserve the exact result as a retrievable artifact before
+            // rewriting active context. Existing spill references are reused.
+            let existing_spill = message
+                .metadata
+                .get("spill_path")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let tool_name = message
+                .tool_call_id
+                .as_ref()
+                .and_then(|id| call_names.get(id))
+                .cloned()
+                .unwrap_or_else(|| "tool-result".to_string());
+            let spill_path = existing_spill.or_else(|| {
+                self.spill_store
+                    .save(
+                        &session.id,
+                        &format!("compaction-{}", tool_name),
+                        &message.content,
+                    )
+                    .ok()
+                    .map(|spill| spill.path.to_string_lossy().to_string())
+            });
+            let recovery = spill_path
+                .as_ref()
+                .map(|path| format!("\n[Full original tool result archived at: {}]", path))
+                .unwrap_or_default();
+            message.content = format!("{}{}{}{}", head_text, MIDDLE_MARKER, tail_text, recovery);
+            if let (Some(path), Some(metadata)) = (spill_path, message.metadata.as_object_mut()) {
+                metadata.insert("spilled".to_string(), serde_json::json!(true));
+                metadata.insert("spill_path".to_string(), serde_json::json!(path));
+                metadata.insert("spill_bytes".to_string(), serde_json::json!(chars));
+            }
             message.metadata["pruned_for_context"] = serde_json::json!(true);
             pruned += 1;
         }
@@ -4093,6 +4329,32 @@ impl AgentRuntime {
         Self::frame_compacted_summary(summary)
     }
 
+    fn valid_checkpoint_summary(summary: &str, max_tokens: usize) -> bool {
+        const HEADINGS: [&str; 6] = [
+            "## Primary Request and Intent",
+            "## Key Technical Concepts",
+            "## Errors and Fixes",
+            "## Files and Code Sections",
+            "## Problem Solving",
+            "## Next Step",
+        ];
+        let trimmed = summary.trim();
+        !trimmed.is_empty()
+            && Self::estimate_tokens(trimmed) <= max_tokens.max(512)
+            && HEADINGS.iter().all(|heading| trimmed.contains(heading))
+    }
+
+    fn deterministic_checkpoint(messages: &[Message], token_budget: usize) -> String {
+        let facts = Self::deterministic_compaction_facts(messages);
+        let recent = Self::summarize_for_context(messages, token_budget.saturating_sub(500));
+        format!(
+            "## Primary Request and Intent\n- See exact latest requests in deterministic context below.\n\n## Key Technical Concepts\n- (deterministic fallback; inspect retained recent context)\n\n## Errors and Fixes\n- (none captured deterministically)\n\n## Files and Code Sections\n{}\n\n## Problem Solving\n{}\n\n## Next Step\n- Continue from the latest retained user request.\n\n### Deterministic Context\n{}",
+            facts,
+            recent,
+            facts,
+        )
+    }
+
     /// Compact-and-retry after a provider context-length rejection.
     /// Returns `Ok(Some(true))` when history shrank and the caller should
     /// rebuild the request (`continue`), `Ok(Some(false))` when compaction
@@ -4109,7 +4371,13 @@ impl AgentRuntime {
     ) -> Result<Option<bool>> {
         let before: usize = session.messages.iter().map(Self::message_tokens).sum();
         match self
-            .compact_session_history(session, active_workspace, &runtime_config.compaction, None)
+            .compact_session_history(
+                session,
+                active_workspace,
+                &runtime_config.compaction,
+                None,
+                None,
+            )
             .await?
         {
             Some((pruned, compacted, replayed)) => {
@@ -4299,6 +4567,7 @@ impl AgentRuntime {
         _active_workspace: &WorkspaceConfig,
         compaction: &crate::config::CompactionConfig,
         focus: Option<&str>,
+        conversation_budget: Option<usize>,
     ) -> Result<Option<(usize, usize, bool)>> {
         let compact_end = Self::compaction_split_index(&session.messages, compaction);
         if compact_end == 0 || compact_end >= session.messages.len() {
@@ -4309,10 +4578,26 @@ impl AgentRuntime {
         // archived would persist pruned text instead of the original content.
         let tail_start_for_prune = compact_end;
         let pruned = if compaction.prune_enabled {
-            Self::prune_old_tool_messages(session, tail_start_for_prune, compaction)
+            self.prune_old_tool_messages(session, tail_start_for_prune, compaction)
         } else {
             0
         };
+        // Tool-result externalization may be sufficient by itself. Avoid an
+        // unnecessary lossy model summary when the remeasured conversation is
+        // now below the exact preflight conversation allowance.
+        if pruned > 0
+            && conversation_budget.is_some_and(|budget| {
+                session
+                    .messages
+                    .iter()
+                    .map(Self::message_tokens)
+                    .sum::<usize>()
+                    <= budget
+            })
+        {
+            self.session_manager.update_session(session).await?;
+            return Ok(Some((pruned, 0, false)));
+        }
         // Re-split after pruning, since pruning never changes message count
         // but the tail token cost may have dropped; keep the same split.
         let prefix = session.messages[..compact_end].to_vec();
@@ -4346,6 +4631,21 @@ impl AgentRuntime {
             .and_then(|state| state.working_notes.as_ref())
             .map(|notes| notes.text.trim().to_string())
             .filter(|text| !text.is_empty());
+        let summarizer = self.small_slot_provider().await;
+        let summarizer_window = summarizer
+            .model_context_window()
+            .await
+            .unwrap_or(compaction.fallback_context_window);
+        let summary_input_tokens = compaction.max_summary_input_tokens.max(8_000).min(
+            summarizer_window
+                .saturating_sub(compaction.summary_output_tokens.max(1_024))
+                .saturating_sub(2_048),
+        );
+        let facts = Self::deterministic_compaction_facts(&prefix);
+        let transcript_chars = summary_input_tokens
+            .saturating_sub(Self::estimate_tokens(&facts))
+            .saturating_mul(4)
+            .max(compaction.max_transcript_chars);
 
         // Notes-first compaction (opencode-style): when rolling working notes
         // exist, verify-and-correct them against the transcript instead of a
@@ -4362,17 +4662,31 @@ impl AgentRuntime {
         {
             let focus_text = focus.map(str::trim).filter(|text| !text.is_empty());
             let (verified, verify_ok) = self
-                .verify_working_notes(session, &prefix, compaction, focus_text)
+                .verify_working_notes(
+                    session,
+                    &prefix,
+                    compaction,
+                    focus_text,
+                    transcript_chars,
+                    &facts,
+                )
                 .await;
             let prefix_len = prefix.len();
-            if let Err(error) = self.storage.archive_messages(&session.id, &prefix) {
+            let framed_notes = Self::frame_working_notes(&verified);
+            let mut compacted_messages = vec![Message::synthetic_assistant(
+                framed_notes.clone(),
+                "compaction_summary",
+            )];
+            compacted_messages.extend(tail);
+            let post_tokens: usize = compacted_messages.iter().map(Self::message_tokens).sum();
+            let post_budget = conversation_budget.unwrap_or_else(|| {
+                summarizer_window.saturating_sub(compaction.reserved_output_tokens)
+            });
+            if post_tokens > post_budget {
                 warn!(
-                    "Failed to archive compacted messages for {}: {}",
-                    session.id, error
+                    "Verified-notes checkpoint would remain over budget ({} > {}); preserving history",
+                    post_tokens, post_budget
                 );
-                // Fail closed: the prefix is still intact both in memory and
-                // in the transcript table, so keep prune-only progress (if
-                // any) instead of replacing history that was never archived.
                 return Ok(if pruned > 0 {
                     self.session_manager.update_session(session).await?;
                     Some((pruned, 0, false))
@@ -4380,16 +4694,22 @@ impl AgentRuntime {
                     None
                 });
             }
-            let framed_notes = Self::frame_working_notes(&verified);
+            if let Err(error) = self.storage.archive_messages(&session.id, &prefix) {
+                warn!(
+                    "Failed to archive compacted messages for {}: {}",
+                    session.id, error
+                );
+                return Ok(if pruned > 0 {
+                    self.session_manager.update_session(session).await?;
+                    Some((pruned, 0, false))
+                } else {
+                    None
+                });
+            }
             if let Some(ref mut cs) = session.context_state {
                 cs.compaction_stats.estimated_tokens_saved +=
                     prefix_tokens.saturating_sub(Self::estimate_tokens(&framed_notes));
             }
-            let mut compacted_messages = vec![Message::synthetic_assistant(
-                framed_notes,
-                "compaction_summary",
-            )];
-            compacted_messages.extend(tail);
             session.messages = compacted_messages;
             self.store_working_notes(session, verified, verify_ok);
             return Ok(Some((pruned, prefix_len, true)));
@@ -4404,12 +4724,12 @@ impl AgentRuntime {
         }
         let mut compact_messages = vec![Message::system(prompt_text)];
         compact_messages.push(Message::user(format!(
-            "Earlier conversation transcript:\n{}",
-            Self::transcript_for_compaction(&prefix, compaction.max_transcript_chars)
+            "Deterministically extracted state (authoritative):\n{}\n\nEarlier conversation transcript:\n{}",
+            facts,
+            Self::transcript_for_compaction(&prefix, transcript_chars)
         )));
 
-        let provider = self.active_provider().await;
-        let summary = match provider
+        let mut summary = match summarizer
             .complete(Some(&session.id), &compact_messages, &[])
             .await
         {
@@ -4419,6 +4739,32 @@ impl AgentRuntime {
                 None
             }
         };
+        if let Some(candidate) = summary.as_ref() {
+            if !Self::valid_checkpoint_summary(candidate, compaction.summary_output_tokens) {
+                warn!("Compaction checkpoint failed schema validation; requesting one correction");
+                let correction = vec![
+                    Message::system(COMPACTION_PROMPT.to_string()),
+                    Message::user(format!(
+                        "Rewrite this candidate to obey the required headings exactly, remain under {} tokens, and output only the checkpoint:\n\n{}",
+                        compaction.summary_output_tokens, candidate
+                    )),
+                ];
+                summary = summarizer
+                    .complete(Some(&session.id), &correction, &[])
+                    .await
+                    .ok()
+                    .and_then(|response| response.content)
+                    .filter(|corrected| {
+                        Self::valid_checkpoint_summary(corrected, compaction.summary_output_tokens)
+                    });
+                if summary.is_none() {
+                    summary = Some(Self::deterministic_checkpoint(
+                        &prefix,
+                        compaction.summary_output_tokens.min(2_500),
+                    ));
+                }
+            }
+        }
         // Never delete history on a failed summary call: opencode aborts and
         // preserves history, and so do we. Keep prune-only progress if the
         // tail prune did anything.
@@ -4441,7 +4787,7 @@ impl AgentRuntime {
                 "Compaction summary did not shrink ({} est. tokens vs {}): using deterministic fallback",
                 framed_tokens, prefix_tokens
             );
-            Self::frame_compacted_summary(&Self::summarize_for_context(&prefix, 2_500))
+            Self::frame_compacted_summary(&Self::deterministic_checkpoint(&prefix, 2_500))
         } else {
             framed
         };
@@ -4451,6 +4797,21 @@ impl AgentRuntime {
             "compaction_summary",
         )];
         compacted_messages.extend(tail);
+        let post_tokens: usize = compacted_messages.iter().map(Self::message_tokens).sum();
+        let post_budget = conversation_budget
+            .unwrap_or_else(|| summarizer_window.saturating_sub(compaction.reserved_output_tokens));
+        if post_tokens > post_budget {
+            warn!(
+                "Compaction checkpoint failed final fit validation ({} > {}); preserving history",
+                post_tokens, post_budget
+            );
+            return Ok(if pruned > 0 {
+                self.session_manager.update_session(session).await?;
+                Some((pruned, 0, false))
+            } else {
+                None
+            });
+        }
 
         // Preserve what is about to be summarized away so the `sessions`
         // tool can still search and read pre-compaction content. Fail closed
@@ -4511,6 +4872,8 @@ impl AgentRuntime {
         prefix: &[Message],
         compaction: &crate::config::CompactionConfig,
         focus: Option<&str>,
+        transcript_chars: usize,
+        deterministic_facts: &str,
     ) -> (String, bool) {
         let current = session
             .context_state
@@ -4522,10 +4885,10 @@ impl AgentRuntime {
         if current.is_empty() {
             return (Self::summarize_for_context(prefix, 2_500), false);
         }
-        let transcript = Self::transcript_for_compaction(prefix, compaction.max_transcript_chars);
+        let transcript = Self::transcript_for_compaction(prefix, transcript_chars);
         let mut user_text = format!(
-            "Current working notes:\n{}\n\nEarlier conversation transcript:\n{}",
-            current, transcript
+            "Current working notes:\n{}\n\nDeterministically extracted state (authoritative):\n{}\n\nEarlier conversation transcript:\n{}",
+            current, deterministic_facts, transcript
         );
         if let Some(focus) = focus.map(str::trim).filter(|text| !text.is_empty()) {
             user_text.push_str(&format!(
@@ -4537,7 +4900,7 @@ impl AgentRuntime {
             Message::system(NOTES_VERIFY_PROMPT.to_string()),
             Message::user(user_text),
         ];
-        let provider = self.active_provider().await;
+        let provider = self.small_slot_provider().await;
         match provider
             .complete(Some(&session.id), &verify_messages, &[])
             .await
@@ -5906,7 +6269,9 @@ impl AgentRuntime {
 
     pub async fn add_provider(&self, provider_config: crate::config::ProviderConfig) -> Result<()> {
         let catalog = self.catalog.clone();
-        let provider_id = provider_config.provider_type.clone();
+        // Runtime map is keyed by entry id, so two entries can share one
+        // provider_type (two keys, a custom endpoint next to stock).
+        let entry_id = provider_config.effective_id().to_string();
         let oauth_dir = PathBuf::from(
             shellexpand::tilde(&self.config.read().await.storage.database).to_string(),
         )
@@ -5927,21 +6292,20 @@ impl AgentRuntime {
         )));
 
         let default_provider = self.config.read().await.default_provider.clone();
-        let should_activate = default_provider.is_empty() || default_provider == provider_id;
+        let should_activate = default_provider.is_empty() || default_provider == entry_id;
 
         let mut providers = self.providers.write().await;
-        providers.retain(|(id, _)| id != &provider_config.provider_type);
-        providers.push((provider_config.provider_type.clone(), provider));
+        providers.retain(|(id, _)| id != &entry_id);
+        providers.push((entry_id.clone(), provider));
         drop(providers);
 
         let mut cfg = self.config.write().await;
-        cfg.providers
-            .retain(|p| p.provider_type != provider_config.provider_type);
+        cfg.providers.retain(|p| p.effective_id() != entry_id);
         cfg.providers.push(provider_config.clone());
         if cfg.default_provider.is_empty() {
-            cfg.default_provider = provider_config.provider_type.clone();
+            cfg.default_provider = entry_id.clone();
         }
-        if cfg.default_provider == provider_id {
+        if cfg.default_provider == entry_id {
             cfg.default_model = provider_config.model.clone();
         }
         drop(cfg);
@@ -5952,10 +6316,10 @@ impl AgentRuntime {
                 .read()
                 .await
                 .iter()
-                .find(|(id, _)| id == &provider_id)
+                .find(|(id, _)| id == &entry_id)
                 .map(|(_, p)| p.clone())
                 .ok_or_else(|| {
-                    OSAgentError::Config(format!("Provider '{}' not found", provider_id))
+                    OSAgentError::Config(format!("Provider '{}' not found", entry_id))
                 })?;
             let mut active_provider = self.provider.write().await;
             *active_provider = active;
@@ -5978,7 +6342,7 @@ impl AgentRuntime {
         drop(providers);
 
         let mut cfg = self.config.write().await;
-        cfg.providers.retain(|p| p.provider_type != provider_id);
+        cfg.providers.retain(|p| p.effective_id() != provider_id);
         if cfg.default_provider == provider_id {
             if let Some(ref first_id) = first_provider_id {
                 cfg.default_provider = first_id.clone();
@@ -5988,6 +6352,13 @@ impl AgentRuntime {
             }
         }
         drop(cfg);
+
+        // Drop stored keys for the removed entry so secrets do not linger.
+        let auth_dir = self.config.read().await.config_dir();
+        let mut stored = crate::auth_store::load_auth_keys(&auth_dir);
+        if stored.remove(&provider_id).is_some() {
+            let _ = crate::auth_store::save_auth_keys(&auth_dir, &stored);
+        }
 
         if was_active {
             let provider_guard = self.providers.read().await;
@@ -6064,6 +6435,7 @@ impl AgentRuntime {
                 &active_workspace,
                 &runtime_config.compaction,
                 focus,
+                None,
             )
             .await?
             .ok_or_else(|| {
@@ -6242,11 +6614,7 @@ impl AgentRuntime {
     }
 
     /// Reorder pending queued messages to match the given id sequence.
-    pub async fn reorder_queued_messages(
-        &self,
-        session_id: &str,
-        ids: &[String],
-    ) -> Result<()> {
+    pub async fn reorder_queued_messages(&self, session_id: &str, ids: &[String]) -> Result<()> {
         if self.get_session(session_id).await?.is_none() {
             return Err(OSAgentError::Session("Session not found".to_string()));
         }

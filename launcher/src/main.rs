@@ -1961,7 +1961,11 @@ fn save_setup_config_file(
     let voice = ensure_child_table(root, "voice");
     voice.insert(
         "enabled".to_string(),
-        toml::Value::Boolean(stt_local || tts_local),
+        // `enabled` controls whether the Web UI exposes voice controls. The
+        // browser providers need no downloaded runtime, so disabling voice
+        // when both selections are browser-based made the launcher's default
+        // voice choices silently unusable.
+        toml::Value::Boolean(true),
     );
     voice.insert(
         "stt_provider".to_string(),
@@ -2364,7 +2368,11 @@ fn find_file_recursive(dir: &std::path::Path, file_name: &str) -> Option<std::pa
             if let Some(found) = find_file_recursive(&path, file_name) {
                 return Some(found);
             }
-        } else if entry.file_name().to_string_lossy().eq_ignore_ascii_case(file_name) {
+        } else if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(file_name)
+        {
             return Some(path);
         }
     }
@@ -3632,9 +3640,9 @@ async fn install_voice(
                         "Whisper archive did not contain whisper.exe, whisper-cli.exe or main.exe"
                             .to_string()
                     })?;
-                let whisper_inner = binary_src
-                    .parent()
-                    .ok_or_else(|| "Could not determine Whisper extraction directory".to_string())?;
+                let whisper_inner = binary_src.parent().ok_or_else(|| {
+                    "Could not determine Whisper extraction directory".to_string()
+                })?;
                 let binary_dest = dir.join("whisper.exe");
                 std::fs::copy(&binary_src, &binary_dest)
                     .map_err(|e| format!("Failed to install whisper.exe: {}", e))?;
@@ -4564,7 +4572,8 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
-            let open_ui = MenuItem::with_id(app, "open_ui", "Open Web UI in Browser", true, None::<&str>)?;
+            let open_ui =
+                MenuItem::with_id(app, "open_ui", "Open Web UI in Browser", true, None::<&str>)?;
             let start =
                 MenuItem::with_id(app, "start_osagent", "Start OSAgent", true, None::<&str>)?;
             let exit_item = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;

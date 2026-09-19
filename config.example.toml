@@ -17,12 +17,18 @@ cors_allowed_origins = []
 
 # --- Provider Configuration ---
 # OSA supports multiple providers simultaneously.
-# API keys are auto-detected from environment variables:
+# API keys live in auth.toml (0600, next to config.toml) — NOT here.
+# Add keys via Settings > Provider; hand-written api_key entries are moved
+# to auth.toml automatically on load. Env vars still work as fallback:
 #   OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,
 #   GOOGLE_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, XAI_API_KEY
 #
 # Use default_provider and default_model to select the active provider/model.
 # Preset IDs: openrouter, openai, anthropic, google, ollama, groq, deepseek, xai
+#
+# Multiple entries may share one provider_type with different ids
+# (e.g. two OpenRouter keys, or a pinned endpoint next to stock).
+# default_provider addresses the entry id.
 #
 # OAuth providers can use environment variables for credentials:
 #   {PROVIDER}_OAUTH_CLIENT_ID, {PROVIDER}_OAUTH_CLIENT_SECRET
@@ -31,9 +37,19 @@ cors_allowed_origins = []
 # OpenRouter Example (recommended - access to 200+ models)
 [[providers]]
 provider_type = "openrouter"
-api_key = "sk-or-v1-..."  # Or set OPENROUTER_API_KEY env var
 base_url = "https://openrouter.ai/api/v1"
 model = "anthropic/claude-sonnet-4"
+# id = "my-or"            # custom entry id (default: provider_type)
+# api_keys = ["sk-or-second"]  # extra keys: requests rotate across all keys
+
+# Custom OpenAI-compatible endpoint (no code needed — generic adapter)
+# [[providers]]
+# id = "my-local"
+# name = "My Local Server"
+# provider_type = "custom"
+# base_url = "http://192.168.1.10:8000/v1"
+# model = "my-model"
+# models = ["my-model", "my-other-model"]  # declared models for the picker
 
 # OpenAI Example (uncomment to use)
 # [[providers]]
@@ -115,6 +131,16 @@ model = "anthropic/claude-sonnet-4"
 # Active provider and model selection
 # default_provider = "openrouter"
 # default_model = "anthropic/claude-sonnet-4"
+
+# Cheap-model slot for background chores (compaction summaries).
+# Empty inherits the default provider/model.
+# small_provider = "groq"
+# small_model = "llama-3.1-8b-instant"
+
+# Provider allow/deny lists (ids or legacy types). Deny wins; a non-empty
+# allow list disables everything unlisted.
+# enabled_providers = ["openrouter", "groq"]
+# disabled_providers = []
 
 [agent]
 workspace = "~/.osagent/workspace"

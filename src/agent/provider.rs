@@ -162,6 +162,10 @@ pub struct OpenAICompatibleProvider {
     model_override: RwLock<Option<String>>,
     catalog: Option<Arc<ModelCatalog>>,
     retry_listener: std::sync::RwLock<Option<Arc<dyn RetryListener>>>,
+    /// Round-robin cursor across `key_candidates()`. Every resolution
+    /// (each request and each retry) takes the next key, spreading load
+    /// and automatically failing over on 429s/expired keys.
+    key_cursor: std::sync::atomic::AtomicUsize,
 }
 
 impl OpenAICompatibleProvider {
@@ -232,6 +236,7 @@ impl OpenAICompatibleProvider {
             model_override: RwLock::new(None),
             catalog,
             retry_listener: std::sync::RwLock::new(None),
+            key_cursor: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -1308,7 +1313,19 @@ impl OpenAICompatibleProvider {
 
 impl OpenAICompatibleProvider {
     fn resolved_config(&self) -> ProviderConfig {
-        resolve_provider_config(self.config.clone())
+        let mut config = resolve_provider_config(self.config.clone());
+        // Multi-key rotation: every resolution (each request, each retry)
+        // takes the next candidate, so 429s and dead keys fail over to a
+        // fresh key instead of retrying the same one.
+        let candidates = config.key_candidates();
+        if candidates.len() > 1 {
+            let index = self
+                .key_cursor
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                % candidates.len();
+            config.api_key = candidates[index].clone();
+        }
+        config
     }
 
     fn oauth_enabled(&self) -> bool {
@@ -1872,42 +1889,20 @@ impl OpenAICompatibleProvider {
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse> {
         let mut last_error: Option<OSAgentError> = None;
-        let mut current_messages = messages.to_vec();
-        let mut context_compressed = false;
-        let mut compressed_summary: Option<String> = None;
-
         for attempt in 1..=MAX_RETRIES {
-            match self.do_complete(session_id, &current_messages, tools).await {
+            match self.do_complete(session_id, messages, tools).await {
                 Ok(mut response) => {
                     response.retry_count = attempt.saturating_sub(1);
-                    response.context_compressed = context_compressed;
-                    response.compressed_summary = compressed_summary.clone();
                     return Ok(response);
                 }
                 Err(e) => {
-                    if e.is_context_limit() && attempt < MAX_RETRIES {
-                        let (compressed_messages, changed) =
-                            Self::compress_for_context_limit(&current_messages, tools);
-                        if changed {
-                            warn!(
-                                "Provider request exceeded context (attempt {}/{}). Compressing messages and retrying.",
-                                attempt,
-                                MAX_RETRIES
-                            );
-                            compressed_summary = compressed_messages.iter().find_map(|msg| {
-                                if msg.role == "assistant"
-                                    && msg.content.starts_with("Earlier conversation compressed")
-                                {
-                                    Some(msg.content.clone())
-                                } else {
-                                    None
-                                }
-                            });
-                            current_messages = compressed_messages;
-                            context_compressed = true;
-                            last_error = Some(e);
-                            continue;
-                        }
+                    // Context overflow has one owner: AgentRuntime. Returning it
+                    // immediately lets the canonical, archived, tool-pair-safe
+                    // compactor rebuild the request. Provider-local message
+                    // slicing used to race that path and could persist a lossy
+                    // three-head/six-tail preview.
+                    if e.is_context_limit() {
+                        return Err(e);
                     }
 
                     if e.is_retryable() && attempt < MAX_RETRIES {
@@ -1941,28 +1936,12 @@ impl OpenAICompatibleProvider {
         tools: &[ToolDefinition],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent>>> {
         let mut last_error: Option<OSAgentError> = None;
-        let mut current_messages = messages.to_vec();
-
         for attempt in 1..=MAX_RETRIES {
-            match self
-                .do_complete_stream(session_id, &current_messages, tools)
-                .await
-            {
+            match self.do_complete_stream(session_id, messages, tools).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
-                    if e.is_context_limit() && attempt < MAX_RETRIES {
-                        let (compressed_messages, changed) =
-                            Self::compress_for_context_limit(&current_messages, tools);
-                        if changed {
-                            warn!(
-                                "Provider stream exceeded context (attempt {}/{}). Compressing messages and retrying.",
-                                attempt,
-                                MAX_RETRIES
-                            );
-                            current_messages = compressed_messages;
-                            last_error = Some(e);
-                            continue;
-                        }
+                    if e.is_context_limit() {
+                        return Err(e);
                     }
 
                     if e.is_retryable() && attempt < MAX_RETRIES {
@@ -2528,6 +2507,40 @@ fn publishes_none(meta: Option<&crate::agent::model_catalog::ModelReasoningMetad
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_rotation_cycles_across_candidates() {
+        let config = ProviderConfig {
+            provider_type: "openrouter".to_string(),
+            api_key: "key-a".to_string(),
+            api_keys: vec!["key-b".to_string()],
+            auth_file_keys: vec!["key-c".to_string(), "key-a".to_string()],
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model: "x".to_string(),
+            ..ProviderConfig::default()
+        };
+        let provider = OpenAICompatibleProvider::new(config).expect("provider");
+        // Dedup keeps a/b/c; round-robin cycles in order across resolutions.
+        let seen: Vec<String> = (0..4)
+            .map(|_| provider.resolved_config().api_key.clone())
+            .collect();
+        assert_eq!(seen, vec!["key-a", "key-b", "key-c", "key-a"]);
+    }
+
+    #[test]
+    fn single_key_resolution_is_stable() {
+        let config = ProviderConfig {
+            provider_type: "openai".to_string(),
+            api_key: "only".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "x".to_string(),
+            ..ProviderConfig::default()
+        };
+        let provider = OpenAICompatibleProvider::new(config).expect("provider");
+        for _ in 0..3 {
+            assert_eq!(provider.resolved_config().api_key, "only");
+        }
+    }
 
     #[test]
     fn parses_chat_completions_response() {

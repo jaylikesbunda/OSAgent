@@ -1,5 +1,13 @@
 v0.6.0 changes:
 
+* Provider keys moved to auth.toml (0600); config.toml holds no secrets, inline keys migrate on load
+* Multiple keys per provider with round-robin rotation across requests and retries
+* Custom OpenAI-compatible endpoints need no code: provider_type custom + base_url + declared models
+* Provider entries have stable ids (two entries can share one type); searchable list at /api/providers/find
+* enabled/disabled_providers gates, small_provider/small_model slot for compaction summaries
+* Model catalog exposes models.dev per-1M input/output cost
+* Compaction now uses one canonical overflow path, preserves deterministic state, archives pruned tool results, validates final fit, and expands checkpoint evidence
+* Voice input now normalizes Whisper no-speech markers, rejects empty captures clearly, validates Piper output, and keeps browser voice enabled in the native launcher
 * Slimmed default toolset: skill authoring, public web fetch, working notes now load via tool_search; background process promoted to core
 * read_file batch paths[] (10) and edit_file atomic edits[] (20) with better not-found errors
 * grep literal + offset/limit paging, glob offset/limit paging, list_files sizes

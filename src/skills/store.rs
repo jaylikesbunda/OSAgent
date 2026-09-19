@@ -101,7 +101,8 @@ impl SkillStore {
     }
 
     pub fn skill_dir(&self, name: &str) -> PathBuf {
-        self.resolve_dir(name).unwrap_or_else(|| self.primary_root().join(name))
+        self.resolve_dir(name)
+            .unwrap_or_else(|| self.primary_root().join(name))
     }
 
     pub fn skill_skill_md_path(&self, name: &str) -> PathBuf {

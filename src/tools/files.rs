@@ -523,7 +523,8 @@ impl ReadFileTool {
             return self.read_directory(&target_path, offset, limit, &path);
         }
 
-        self.read_file_text(&target_path, offset, limit, &path).await
+        self.read_file_text(&target_path, offset, limit, &path)
+            .await
     }
 
     fn format_directory_entry(&self, absolute: &PathBuf, base: &PathBuf) -> String {
@@ -1091,7 +1092,13 @@ impl Tool for ReadFileTool {
                 }
                 match self.execute_single(Value::Object(single)).await {
                     Ok(res) => {
-                        kinds.push(res.metadata.get("kind").and_then(|k| k.as_str()).unwrap_or("file").to_string());
+                        kinds.push(
+                            res.metadata
+                                .get("kind")
+                                .and_then(|k| k.as_str())
+                                .unwrap_or("file")
+                                .to_string(),
+                        );
                         sections.push(format!("=== {} ===\n{}", path_str, res.output));
                     }
                     Err(e) => {
@@ -1578,18 +1585,24 @@ impl Tool for EditFileTool {
                 }
                 let mut out = Vec::with_capacity(items.len());
                 for (idx, item) in items.iter().enumerate() {
-                    let old = item.get("old_text").and_then(|v| v.as_str()).ok_or_else(|| {
-                        OSAgentError::ToolExecution(format!(
-                            "edits[{}] missing 'old_text'",
-                            idx
-                        ))
-                    })?;
-                    let new = item.get("new_text").and_then(|v| v.as_str()).ok_or_else(|| {
-                        OSAgentError::ToolExecution(format!(
-                            "edits[{}] missing 'new_text'",
-                            idx
-                        ))
-                    })?;
+                    let old = item
+                        .get("old_text")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            OSAgentError::ToolExecution(format!(
+                                "edits[{}] missing 'old_text'",
+                                idx
+                            ))
+                        })?;
+                    let new = item
+                        .get("new_text")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            OSAgentError::ToolExecution(format!(
+                                "edits[{}] missing 'new_text'",
+                                idx
+                            ))
+                        })?;
                     if old.is_empty() {
                         return Err(OSAgentError::ToolExecution(format!(
                             "edits[{}] 'old_text' cannot be empty",
@@ -1605,7 +1618,9 @@ impl Tool for EditFileTool {
                     out.push((
                         old.to_string(),
                         new.to_string(),
-                        item.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+                        item.get("replace_all")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                     ));
                 }
                 Some(out)
@@ -1622,12 +1637,22 @@ impl Tool for EditFileTool {
         let (old_text, new_text, replace_all) = match &batch {
             Some(_) => ("", "", false),
             None => {
-                old_text_owned = args["old_text"].as_str().ok_or_else(|| {
-                    OSAgentError::ToolExecution("Missing 'old_text' parameter (or 'edits' array)".to_string())
-                })?.to_string();
-                new_text_owned = args["new_text"].as_str().ok_or_else(|| {
-                    OSAgentError::ToolExecution("Missing 'new_text' parameter (or 'edits' array)".to_string())
-                })?.to_string();
+                old_text_owned = args["old_text"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        OSAgentError::ToolExecution(
+                            "Missing 'old_text' parameter (or 'edits' array)".to_string(),
+                        )
+                    })?
+                    .to_string();
+                new_text_owned = args["new_text"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        OSAgentError::ToolExecution(
+                            "Missing 'new_text' parameter (or 'edits' array)".to_string(),
+                        )
+                    })?
+                    .to_string();
                 replace_all_owned = args["replace_all"].as_bool().unwrap_or(false);
                 if old_text_owned.is_empty() {
                     return Err(OSAgentError::ToolExecution(
@@ -1639,7 +1664,11 @@ impl Tool for EditFileTool {
                         "No changes to apply: old_text and new_text are identical.".to_string(),
                     ));
                 }
-                (old_text_owned.as_str(), new_text_owned.as_str(), replace_all_owned)
+                (
+                    old_text_owned.as_str(),
+                    new_text_owned.as_str(),
+                    replace_all_owned,
+                )
             }
         };
 
@@ -1728,7 +1757,11 @@ impl Tool for EditFileTool {
                 &working,
                 eol,
                 had_bom,
-                format!("{} replacements (atomic batch of {})", items.len(), hows.join("; ")),
+                format!(
+                    "{} replacements (atomic batch of {})",
+                    items.len(),
+                    hows.join("; ")
+                ),
             )
             .await;
         }
@@ -1887,7 +1920,12 @@ impl Tool for ListFilesTool {
                         Err(_) => String::new(),
                     }
                 };
-                results.push(format!("[{}{}] {}", type_str, size_suffix, relative.display()));
+                results.push(format!(
+                    "[{}{}] {}",
+                    type_str,
+                    size_suffix,
+                    relative.display()
+                ));
 
                 if recursive && path.is_dir() {
                     list_dir(&path, base, results, recursive)?;

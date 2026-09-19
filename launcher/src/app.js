@@ -1251,7 +1251,9 @@
           ? ('Installed' + (status.piper_voice ? ' (' + status.piper_voice + ')' : ''))
           : 'Not installed';
       }
-      const allReady = whisperOk && piperOk;
+      const allReady =
+        (state.wizard.stt_mode !== 'local' || whisperOk) &&
+        (state.wizard.tts_mode !== 'local' || piperOk);
       if (els.voiceStatusChip) {
         els.voiceStatusChip.textContent = allReady ? 'Voice ready' : 'Not installed';
         els.voiceStatusChip.classList.toggle('ready', allReady);

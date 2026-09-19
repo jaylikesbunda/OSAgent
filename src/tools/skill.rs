@@ -765,9 +765,7 @@ fn resolve_action_args(call: &Value, action: &SkillActionSchema) -> Map<String, 
             let required_strings: Vec<&SkillActionParameter> = action
                 .parameters
                 .iter()
-                .filter(|p| {
-                    p.required && p.parameter_type == SkillActionParameterType::String
-                })
+                .filter(|p| p.required && p.parameter_type == SkillActionParameterType::String)
                 .collect();
             if required_strings.len() == 1 && !merged.contains_key(&required_strings[0].name) {
                 merged.insert(
@@ -971,7 +969,8 @@ fn render_skill_summary(skill: &Skill) -> String {
         }
     }
 
-    output.push_str("\n\nSkill configuration is managed separately and is not exposed to the model.");
+    output
+        .push_str("\n\nSkill configuration is managed separately and is not exposed to the model.");
     output
 }
 
@@ -1272,10 +1271,7 @@ mod tests {
                 args: vec![],
             },
         };
-        let mut args = serde_json::json!({"text": 5})
-            .as_object()
-            .cloned()
-            .unwrap();
+        let mut args = serde_json::json!({"text": 5}).as_object().cloned().unwrap();
         validate_action_args(&string_action, &mut args).expect("number coerces to string");
         assert_eq!(args["text"], json!("5"));
 

@@ -558,7 +558,7 @@ OSA.loadSessions = async function() {
             const unread = !isActive && OSA.isSessionUnread(s.id);
             const iconHtml = isRunning
                 ? OSA.sessionRunningOrbitHtml()
-                : (isChild ? 'A' : OSA.escapeHtml(OSA.sessionInitialFor(displayName)));
+                : (isChild ? 'A' : OSA.escapeHtml(OSA.sessionIconLetterFor(workspaceLabel, displayName)));
             const iconStyle = isChild && !isRunning
                 ? 'style="width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);"'
                 : (!isRunning ? `style="--session-hue:${OSA.sessionHueFor(s.id)}"` : '');
@@ -576,7 +576,6 @@ OSA.loadSessions = async function() {
             return `
             <div class="session-item${childClass} ${isActive ? 'active' : ''}${unread ? ' has-unread' : ''}" data-session-id="${OSA.escapeAttr(s.id)}" data-session-source="${OSA.escapeAttr(sourceKey)}" onclick="OSA.selectSession(${OSA.jsArg(s.id)})" style="${indent}">
                 <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}${unread ? '<span class="session-unread-dot" aria-label="Unread response"></span>' : ''}</div>
-                <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}</div>
                 <div class="session-info">
                     <div class="session-name">${OSA.escapeHtml(displayName)}</div>
                     <div class="session-meta">
@@ -1244,10 +1243,12 @@ OSA.setSessionSidebarRunning = function(sessionId, running) {
         icon.setAttribute('style', 'width:22px;height:22px;font-size:10px;border-radius:4px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);');
         icon.textContent = 'A';
     } else {
+        const session = OSA.getSessionObjectFor(sessionId);
         const name = item.querySelector('.session-name')?.textContent || '';
+        const workspaceLabel = session ? OSA.getSessionWorkspaceLabel(session) : '';
         icon.classList.add('session-letter');
         icon.setAttribute('style', `--session-hue:${OSA.sessionHueFor(sessionId)}`);
-        icon.textContent = OSA.sessionInitialFor(name);
+        icon.textContent = OSA.sessionIconLetterFor(workspaceLabel, name);
     }
 };
 

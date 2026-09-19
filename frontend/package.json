@@ -5,6 +5,8 @@
     "build": "node build.js",
     "dev": "node build.js --dev",
     "test": "node --test test/*.test.js",
+    "test:bench": "node --expose-gc --test test/webui-performance.bench.js",
+    "test:memory": "node --expose-gc --test --test-name-pattern=memory test/webui-performance.bench.js",
     "watch": "node build.js --watch"
   },
   "devDependencies": {

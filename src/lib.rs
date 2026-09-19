@@ -13,6 +13,7 @@
 #![allow(clippy::match_like_matches_macro)]
 
 pub mod agent;
+pub mod auth_store;
 pub mod config;
 #[cfg(feature = "discord")]
 pub mod discord;

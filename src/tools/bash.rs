@@ -797,7 +797,11 @@ mod readonly_validation_tests {
 
     #[test]
     fn still_blocks_unquoted_redirection_and_comparison_safe_checks() {
-        for cmd in ["echo hi > out.txt", "echo hi >> out.txt", "cmd /c echo hi > out.txt"] {
+        for cmd in [
+            "echo hi > out.txt",
+            "echo hi >> out.txt",
+            "cmd /c echo hi > out.txt",
+        ] {
             assert!(
                 BashTool::validate_explicit_read_only(cmd).is_err(),
                 "unquoted redirection should be blocked: {cmd}"

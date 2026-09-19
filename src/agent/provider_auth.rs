@@ -447,6 +447,10 @@ pub fn resolve_provider_config(mut config: ProviderConfig) -> ProviderConfig {
     if config.api_key.is_empty() {
         if let Some(key) = auth.api_key_override {
             config.api_key = key;
+        } else if let Some(first) = config.auth_file_keys.iter().find(|k| !k.trim().is_empty()) {
+            // Auth-file keys outrank env fallback: the user stored them
+            // explicitly for this entry.
+            config.api_key = first.clone();
         } else {
             config.api_key =
                 crate::agent::provider_presets::resolve_env_api_key(&config.provider_type)
