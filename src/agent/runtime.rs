@@ -6584,9 +6584,8 @@ impl AgentRuntime {
         if self.get_session(session_id).await?.is_none() {
             return Err(OSAgentError::Session("Session not found".to_string()));
         }
-        Ok(self
-            .storage
-            .delete_session_queued_message(session_id, queue_entry_id)?)
+        self.storage
+            .delete_session_queued_message(session_id, queue_entry_id)
     }
 
     /// Replace the text of a pending queued message, keeping its id, position
@@ -6606,11 +6605,11 @@ impl AgentRuntime {
                 "Queued message content cannot be empty".to_string(),
             ));
         }
-        Ok(self.storage.update_session_queued_message_content(
+        self.storage.update_session_queued_message_content(
             session_id,
             queue_entry_id,
             content,
-        )?)
+        )
     }
 
     /// Reorder pending queued messages to match the given id sequence.
@@ -6618,9 +6617,8 @@ impl AgentRuntime {
         if self.get_session(session_id).await?.is_none() {
             return Err(OSAgentError::Session("Session not found".to_string()));
         }
-        Ok(self
-            .storage
-            .reorder_session_queued_messages(session_id, ids)?)
+        self.storage
+            .reorder_session_queued_messages(session_id, ids)
     }
 
     pub async fn list_session_history(

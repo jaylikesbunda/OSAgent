@@ -913,7 +913,7 @@ fn render_skill_summary(skill: &Skill) -> String {
         .base_dir
         .display()
         .to_string()
-        .replace('/', &std::path::MAIN_SEPARATOR.to_string());
+        .replace('/', std::path::MAIN_SEPARATOR_STR);
     let mut output = format!(
         "Skill: {}\nDescription: {}\nLocation: {}",
         skill.name, skill.description, location

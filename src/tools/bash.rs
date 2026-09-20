@@ -150,13 +150,11 @@ impl BashTool {
                 '"' if !in_single_quote => {
                     in_double_quote = !in_double_quote;
                 }
-                '>' if !in_single_quote && !in_double_quote => {
+                '>' if !in_single_quote && !in_double_quote && chars.get(index + 1) != Some(&'=') => {
                     // `>=` is a comparison operator, not shell output
                     // redirection. `>>`, `>&1`, and ordinary `> file` remain
                     // blocked.
-                    if chars.get(index + 1) != Some(&'=') {
-                        return true;
-                    }
+                    return true;
                 }
                 _ => {}
             }
