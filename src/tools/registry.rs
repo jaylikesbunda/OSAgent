@@ -1152,31 +1152,41 @@ impl ToolRegistry {
                 }
             }
             let mut config = self.base_config.clone();
-            if let Some(workspace) = config.get_workspace_by_path(&path) {
-                config.agent.active_workspace = Some(workspace.id.clone());
-                config.agent.workspace = workspace.resolved_path();
-            } else {
-                let active_id = config
-                    .agent
-                    .active_workspace
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string());
-                if let Some(workspace) = config
-                    .agent
-                    .workspaces
-                    .iter_mut()
-                    .find(|workspace| workspace.id == active_id)
-                {
-                    workspace.paths = vec![WorkspacePath {
-                        path: path.clone(),
-                        permission: WorkspacePermission::ReadWrite,
-                        description: Some("Session workspace".to_string()),
-                    }];
-                    workspace.path = path.clone();
-                }
-                config.agent.active_workspace = Some(active_id);
-                config.agent.workspace = path.clone();
+            // A session may target a directory nested inside a configured
+            // workspace. `get_workspace_by_path` intentionally reports the
+            // containing workspace for permission checks, but tool instances
+            // must be rooted at the exact session path. Otherwise codesearch,
+            // read_file, and grep silently search the parent repository.
+            let containing_workspace = config.get_workspace_by_path(&path);
+            let inherited_path = config
+                .get_workspace_for_path(&path)
+                .map(|(_, workspace_path)| workspace_path);
+            let active_id = containing_workspace
+                .as_ref()
+                .map(|workspace| workspace.id.clone())
+                .or_else(|| config.agent.active_workspace.clone())
+                .unwrap_or_else(|| "default".to_string());
+            if let Some(workspace) = config
+                .agent
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == active_id)
+            {
+                workspace.paths = vec![WorkspacePath {
+                    path: path.clone(),
+                    permission: inherited_path
+                        .as_ref()
+                        .map(|workspace_path| workspace_path.permission.clone())
+                        .unwrap_or(WorkspacePermission::ReadWrite),
+                    description: inherited_path
+                        .as_ref()
+                        .and_then(|workspace_path| workspace_path.description.clone())
+                        .or_else(|| Some("Session workspace".to_string())),
+                }];
+                workspace.path = path.clone();
             }
+            config.agent.active_workspace = Some(active_id);
+            config.agent.workspace = path.clone();
             config.ensure_workspace_defaults();
             if !external_paths.is_empty() {
                 let active_id = config.agent.active_workspace.clone();
@@ -1217,25 +1227,28 @@ impl ToolRegistry {
     }
 
     /// True when routing a call at `path` needs a different config than
-    /// the registry was built with: the path isn't covered by the base
-    /// workspace, or user-approved external paths add scope. The common
-    /// case (session workspace == base workspace, no externals) is false.
+    /// the registry was built with: the requested root differs from the
+    /// base root, or user-approved external paths add scope. Containment is
+    /// deliberately not enough because tools must search the exact session
+    /// directory rather than its containing repository.
     fn workspace_config_differs(&self, path: &str, external_paths: &[String]) -> bool {
         if !external_paths.is_empty() {
             return true;
         }
         let base = &self.base_config;
-        if base.get_workspace_by_path(path).is_some() {
-            return false;
-        }
-        // Ad-hoc session path: covered only if it falls under an existing
-        // workspace root.
-        let expanded = shellexpand::tilde(path).to_string();
-        let candidate = std::path::Path::new(&expanded);
-        !base.get_active_workspace().paths.iter().any(|wp| {
-            let root = std::path::PathBuf::from(shellexpand::tilde(&wp.path).to_string());
-            candidate.starts_with(&root)
-        })
+        let requested = shellexpand::tilde(path).to_string();
+        let requested = std::path::Path::new(&requested)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&requested));
+        let base_root =
+            shellexpand::tilde(&base.get_active_workspace().resolved_path()).to_string();
+        let base_root = std::path::Path::new(&base_root)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&base_root));
+
+        // Containment is not enough: a nested session directory needs a tool
+        // instance whose own workspace root is that directory.
+        requested != base_root
     }
 
     pub fn file_cache(&self) -> &Arc<FileReadCache> {
