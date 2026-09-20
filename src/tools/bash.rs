@@ -150,7 +150,10 @@ impl BashTool {
                 '"' if !in_single_quote => {
                     in_double_quote = !in_double_quote;
                 }
-                '>' if !in_single_quote && !in_double_quote && chars.get(index + 1) != Some(&'=') => {
+                '>' if !in_single_quote
+                    && !in_double_quote
+                    && chars.get(index + 1) != Some(&'=') =>
+                {
                     // `>=` is a comparison operator, not shell output
                     // redirection. `>>`, `>&1`, and ordinary `> file` remain
                     // blocked.
@@ -667,7 +670,7 @@ impl Tool for BashTool {
                         // works). raw_arg bypasses that quoting so cmd sees the
                         // command line exactly as written.
                         Command::new("cmd")
-                            .raw_arg(format!("/C {}", &full_command_for_exec))
+                            .raw_arg(format!("/C {}", full_command_for_exec))
                             .current_dir(&workspace)
                             .output()
                     }

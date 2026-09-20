@@ -6605,11 +6605,8 @@ impl AgentRuntime {
                 "Queued message content cannot be empty".to_string(),
             ));
         }
-        self.storage.update_session_queued_message_content(
-            session_id,
-            queue_entry_id,
-            content,
-        )
+        self.storage
+            .update_session_queued_message_content(session_id, queue_entry_id, content)
     }
 
     /// Reorder pending queued messages to match the given id sequence.
