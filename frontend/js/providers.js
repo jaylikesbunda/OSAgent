@@ -884,65 +884,179 @@ OSA.filterSettingsModels = function(query) {
     OSA.renderSettingsModelList(query || '');
 };
 
-OSA.renderSettingsModelList = function(query) {
-    const catalogList = document.getElementById('all-models-list');
+// ── Settings Models Tab: one search box, one unified provider list ───────
+// The catalog is fetched once and cached (loadProviderCatalog). Expands and
+// searches render from that cache: opening the tab and toggling a provider
+// never re-downloads the catalog.
+
+OSA.modelsShowAll = OSA.modelsShowAll || {};
+OSA.modelsConnectedMap = OSA.modelsConnectedMap || {};
+OSA.MODELS_SEARCH_CAP = 100;
+OSA.MODELS_BROWSE_CAP = 12;
+
+OSA.filterSettingsModels = function(query) {
+    OSA.renderModelsPane(query || '');
+};
+
+OSA.modelsCurrentModelId = function() {
+    return (OSA.currentModelId || document.getElementById('model-input')?.dataset.modelId || '').toLowerCase();
+};
+
+OSA.renderModelsPane = function(query) {
+    const catalogList = document.getElementById('model-catalog-list');
     if (!catalogList) return;
 
-    const q = (query || '').toLowerCase().trim();
-    const { providers } = OSA.providerCatalog;
-    if (!providers || providers.length === 0) {
+    const providers = (OSA.providerCatalog && OSA.providerCatalog.providers) || [];
+    if (providers.length === 0) {
         catalogList.innerHTML = '<div class="model-empty">No providers available</div>';
         return;
     }
 
-    const providerOrder = ['OpenRouter', 'OpenAI', 'Anthropic', 'Google AI', 'Groq', 'DeepSeek', 'xAI', 'Ollama (Local)', 'Unsloth (Local)'];
-    const sortedProviders = [...providers].sort((a, b) => {
-        const ai = providerOrder.indexOf(a.name);
-        const bi = providerOrder.indexOf(b.name);
-        if (ai !== -1 && bi !== -1) return ai - bi;
-        if (ai !== -1) return -1;
-        if (bi !== -1) return 1;
-        return a.name.localeCompare(b.name);
-    });
+    const q = (query || '').toLowerCase().trim();
+    if (q) {
+        catalogList.innerHTML = OSA.modelsSearchHtml(providers, q, (query || '').trim());
+        return;
+    }
 
-    const currentModel = (OSA.currentModelId || document.getElementById('model-input')?.dataset.modelId || '').toLowerCase();
+    const connectedMap = OSA.modelsConnectedMap || {};
+    const currentModel = OSA.modelsCurrentModelId();
+    const connected = [];
+    const rest = [];
+    for (const provider of providers) {
+        (connectedMap[provider.id] ? connected : rest).push(provider);
+    }
+
     let html = '';
-
-    for (const provider of sortedProviders) {
-        let models = provider.models || [];
-        if (q) {
-            models = models.filter(m =>
-                m.name.toLowerCase().includes(q) ||
-                m.id.toLowerCase().includes(q) ||
-                provider.name.toLowerCase().includes(q)
-            );
-        }
-        if (models.length === 0) continue;
-
-        const connectedBadge = provider.connected
-            ? ' <span class="badge badge-apikey" style="font-size:10px;padding:1px 6px;vertical-align:middle">Connected</span>'
-            : ' <button class="btn-ghost" onclick="OSA.openAddProviderModal(\'' + OSA.escapeHtml(provider.id) + '\')" style="padding:1px 8px;font-size:11px;vertical-align:middle;margin-left:2px">Connect</button>';
-
-        html += '<div class="model-group-title">' + OSA.escapeHtml(provider.name) + connectedBadge + '</div>';
-
-        for (const m of models) {
-            html += OSA.buildModelOptionHtml(m, provider.id, currentModel, { inSettings: true });
-        }
+    for (const provider of connected) {
+        html += OSA.modelsCardHtml(provider, connectedMap[provider.id], currentModel);
     }
-
-    if (!html) {
-        html = '<div class="model-empty">' + (q ? 'No models match "' + OSA.escapeHtml(query) + '"' : 'No models available') + '</div>';
+    for (const provider of rest) {
+        html += OSA.modelsCardHtml(provider, null, currentModel);
     }
-
     catalogList.innerHTML = html;
+};
+
+OSA.modelsSearchHtml = function(providers, q, rawQuery) {
+    const currentModel = OSA.modelsCurrentModelId();
+    const rows = [];
+    for (const provider of providers) {
+        const models = provider.models || [];
+        for (const m of models) {
+            if ((m.name || '').toLowerCase().includes(q)
+                || (m.id || '').toLowerCase().includes(q)
+                || (provider.name || '').toLowerCase().includes(q)) {
+                rows.push(OSA.buildModelOptionHtml(m, provider.id, currentModel, { inSettings: true, showProvider: true }));
+                if (rows.length >= OSA.MODELS_SEARCH_CAP) break;
+            }
+        }
+        if (rows.length >= OSA.MODELS_SEARCH_CAP) break;
+    }
+    if (rows.length === 0) {
+        return '<div class="model-empty">No models match "' + OSA.escapeHtml(rawQuery) + '"</div>';
+    }
+    return rows.join('')
+        + (rows.length >= OSA.MODELS_SEARCH_CAP
+            ? '<div class="model-empty">Showing first ' + OSA.MODELS_SEARCH_CAP + ' — refine your search</div>'
+            : '');
+};
+
+OSA.modelsCardHtml = function(provider, connectedEntry, currentModel) {
+    const models = provider.models || [];
+    const connected = !!connectedEntry;
+    const expanded = connected || !!OSA.expandedModels[provider.id];
+    const isDefault = connectedEntry && connectedEntry.is_default;
+
+    let badge;
+    if (connected) {
+        badge = provider.oauth_supported
+            ? '<span class="badge badge-oauth">OAuth</span>'
+            : '<span class="badge badge-apikey">Connected</span>';
+        if (isDefault) badge += ' <span class="badge badge-apikey" style="opacity:0.7">active</span>';
+    } else {
+        badge = '<span class="badge badge-disconnected">Not connected</span>';
+    }
+
+    const btn = connected
+        ? '<button class="btn-ghost" onclick="OSA.openAddProviderModal(' + OSA.jsArg(provider.id) + ', ' + OSA.jsArg(connectedEntry.model || '') + ')" style="padding:4px 12px;font-size:12px">Manage</button>'
+        : '<button class="btn-action" onclick="OSA.openAddProviderModal(' + OSA.jsArg(provider.id) + ')" style="padding:4px 12px;font-size:12px">Connect</button>';
+
+    const meta = connectedEntry
+        ? '<div class="provider-catalog-meta" style="margin-top:2px">Route: <span style="color:var(--text-primary)">' + OSA.escapeHtml(connectedEntry.model || 'provider default') + '</span></div>'
+        : '<div class="provider-catalog-meta">' + OSA.escapeHtml(provider.description || '') + '</div>';
+
+    let modelSection = '';
+    if (models.length > 0) {
+        modelSection = '<div class="provider-models-toggle' + (expanded ? ' expanded' : '') + '" onclick="OSA.toggleProviderModels(' + OSA.jsArg(provider.id) + ')">'
+            + '<span>' + models.length + ' model' + (models.length !== 1 ? 's' : '') + ' ' + (expanded ? '&#9660;' : '&#9654;') + '</span>'
+            + '</div>'
+            + '<div class="provider-catalog-models' + (expanded ? ' expanded' : '') + '" id="models-' + OSA.escapeAttr(provider.id) + '"'
+            + (expanded ? ' data-rendered="1"' : '') + '>'
+            + (expanded ? OSA.modelsRowsHtml(provider, currentModel) : '')
+            + '</div>';
+    }
+
+    return '<div class="provider-catalog-item">'
+        + '<div class="provider-catalog-header">'
+        + '<div class="provider-catalog-title">'
+        + '<span class="provider-catalog-name">' + OSA.escapeHtml(provider.name) + '</span> '
+        + badge
+        + '</div>'
+        + btn
+        + '</div>'
+        + meta
+        + modelSection
+        + '</div>';
+};
+
+OSA.modelsRowsHtml = function(provider, currentModel) {
+    const showAll = !!OSA.modelsShowAll[provider.id];
+    const isFav = function(m) { return OSA.isFavourite(m.id, m.provider_id || provider.id); };
+    const activeId = ((OSA.modelsConnectedMap[provider.id] || {}).model || '').toLowerCase();
+    // Favourites and the active model first, catalog order otherwise.
+    const favs = [];
+    const rest = [];
+    for (const m of (provider.models || [])) {
+        (isFav(m) ? favs : rest).push(m);
+    }
+    if (activeId) {
+        const idx = rest.findIndex(function(m) { return (m.id || '').toLowerCase() === activeId; });
+        if (idx > 0) rest.unshift(rest.splice(idx, 1)[0]);
+    }
+    const ordered = favs.concat(rest);
+
+    const cap = OSA.MODELS_BROWSE_CAP;
+    const shown = showAll ? ordered : ordered.slice(0, cap);
+    let html = '';
+    for (const m of shown) {
+        html += OSA.buildModelOptionHtml(m, provider.id, currentModel, { inSettings: true });
+    }
+    if (!showAll && ordered.length > cap) {
+        html += '<button class="btn-ghost" onclick="OSA.toggleModelsShowAll(' + OSA.jsArg(provider.id) + ')" style="margin:4px 0 2px">Show all ' + ordered.length + ' models</button>';
+    } else if (showAll && ordered.length > cap) {
+        html += '<button class="btn-ghost" onclick="OSA.toggleModelsShowAll(' + OSA.jsArg(provider.id) + ')" style="margin:4px 0 2px">Show less</button>';
+    }
+    return html || '<div class="model-empty">No models</div>';
+};
+
+OSA.toggleModelsShowAll = function(providerId) {
+    OSA.modelsShowAll[providerId] = !OSA.modelsShowAll[providerId];
+    const box = document.getElementById('models-' + providerId);
+    if (!box) return;
+    const provider = (OSA.providerCatalog.providers || []).find(function(p) { return p.id === providerId; });
+    if (!provider) return;
+    box.innerHTML = OSA.modelsRowsHtml(provider, OSA.modelsCurrentModelId());
+};
+
+OSA.renderSettingsModelList = function(query) {
+    // Kept for existing callers (favourites toggle, benchmarks): the single
+    // unified list now owns settings model rendering.
+    OSA.renderModelsPane(query || '');
 };
 
 OSA.renderRoutingOverview = function(catalog, providersData) {
     const summaryEl = document.getElementById('provider-routing-summary');
-    const listEl = document.getElementById('provider-routing-list');
-    if (!summaryEl && !listEl) return;
+    if (!summaryEl) return;
 
-    const connected = providersData.providers || [];
     const activeId = providersData.default_provider || '';
     const activeModel = providersData.default_model || '';
     const providersById = Object.fromEntries((catalog.providers || []).map(function(provider) {
@@ -950,51 +1064,24 @@ OSA.renderRoutingOverview = function(catalog, providersData) {
     }));
     const activeProvider = providersById[activeId] || null;
 
-    if (summaryEl) {
-        if (!activeId || !activeModel) {
-            summaryEl.innerHTML = '<div class="provider-route-card"><div><div class="provider-route-title">No active connected route</div><div class="provider-route-meta">Connect a provider in the Models tab to start routing by provider + model.</div></div><button class="btn-action" onclick="switchSettingsTab(\'models\')">Open Models</button></div>';
-        } else {
-            const providerName = activeProvider ? activeProvider.name : activeId;
-            summaryEl.innerHTML = '<div class="provider-route-card provider-route-card-active">' +
-                '<div>' +
-                    '<div class="provider-route-kicker">Active provider route</div>' +
-                    '<div class="provider-route-title">' + OSA.escapeHtml(providerName) + '</div>' +
-                    '<div class="provider-route-meta">Model: <strong>' + OSA.escapeHtml(activeModel) + '</strong></div>' +
-                '</div>' +
-                '<div class="provider-route-actions">' +
-                    '<button class="btn-ghost" onclick="switchSettingsTab(\'models\')">Browse Models</button>' +
-                    '<button class="btn-action" onclick="OSA.openAddProviderModal(\'' + OSA.escapeHtml(activeId) + '\', \'' + OSA.escapeHtml(activeModel) + '\')">Manage</button>' +
-                '</div>' +
-            '</div>';
-        }
+    if (!activeId || !activeModel) {
+        summaryEl.innerHTML = '<div class="provider-route-card"><div><div class="provider-route-title">No active connected route</div><div class="provider-route-meta">Connect a provider below to start routing by provider + model.</div></div></div>';
+        return;
     }
-
-    if (listEl) {
-        if (!connected.length) {
-            listEl.innerHTML = '<div class="model-empty">No connected providers yet</div>';
-            return;
-        }
-
-        listEl.innerHTML = connected.map(function(entry) {
-            const provider = providersById[entry.id] || null;
-            const name = provider ? provider.name : entry.id;
-            const status = provider && provider.oauth_supported ? 'OAuth' : 'API key';
-            const activeBadge = entry.is_default ? '<span class="badge badge-apikey" style="opacity:0.7">active</span>' : '';
-            return `<div class="provider-route-list-item">
-                <div class="provider-route-list-main">
-                    <div class="provider-route-list-title">${OSA.escapeHtml(name)}${activeBadge}</div>
-                    <div class="provider-route-list-meta">${OSA.escapeHtml(entry.model || 'provider default')} · ${OSA.escapeHtml(status)}</div>
-                </div>
-                <div class="provider-route-actions">
-                    <button class="btn-ghost" onclick="OSA.selectModel(${OSA.jsArg(entry.model || '')}, ${OSA.jsArg(entry.id)})"${entry.model ? '' : ' disabled'}>Use</button>
-                    <button class="btn-ghost" onclick="OSA.openAddProviderModal(${OSA.jsArg(entry.id)}, ${OSA.jsArg(entry.model || '')})">Edit</button>
-                </div>
-            </div>`;
-        }).join('');
-    }
+    const providerName = activeProvider ? activeProvider.name : activeId;
+    summaryEl.innerHTML = '<div class="provider-route-card provider-route-card-active">' +
+        '<div>' +
+            '<div class="provider-route-kicker">Active provider route</div>' +
+            '<div class="provider-route-title">' + OSA.escapeHtml(providerName) + '</div>' +
+            '<div class="provider-route-meta">Model: <strong>' + OSA.escapeHtml(activeModel) + '</strong></div>' +
+        '</div>' +
+        '<div class="provider-route-actions">' +
+            '<button class="btn-action" onclick="OSA.openAddProviderModal(\'' + OSA.escapeHtml(activeId) + '\', \'' + OSA.escapeHtml(activeModel) + '\')">Manage</button>' +
+        '</div>' +
+    '</div>';
 };
 
-// ── Settings Providers with Collapsible Models ──────────────
+// ── Settings Providers (single unified list, cached catalog) ────────────
 
 OSA.renderSettingsProviders = async function() {
     const catalogList = document.getElementById('model-catalog-list');
@@ -1003,75 +1090,22 @@ OSA.renderSettingsProviders = async function() {
     catalogList.innerHTML = '<div class="model-empty">Loading...</div>';
 
     try {
+        // The catalog is cached process-wide after the first fetch; only the
+        // tiny connected-providers payload is re-read here.
         const [catalog, providersData] = await Promise.all([
-            OSA.getJson('/api/providers/catalog'),
+            OSA.loadProviderCatalog(),
             OSA.getJson('/api/providers')
         ]);
-        OSA.providerCatalog = OSA.hydrateProviderModels(catalog);
         OSA.renderRoutingOverview(catalog, providersData);
 
-        // Build a map of connected provider configs (id → config entry)
         const connectedMap = {};
         for (const p of (providersData.providers || [])) {
             connectedMap[p.id] = p;
         }
+        OSA.modelsConnectedMap = connectedMap;
 
-        let catalogHtml = '';
-        for (const provider of catalog.providers) {
-            const modelCount = provider.models.length;
-            const isExpanded = OSA.expandedModels[provider.id];
-            const connectedEntry = connectedMap[provider.id];
-            const isDefault = connectedEntry && connectedEntry.is_default;
-
-            let statusBadge = '';
-            if (provider.connected) {
-                statusBadge = provider.oauth_supported
-                    ? '<span class="badge badge-oauth">OAuth</span>'
-                    : '<span class="badge badge-apikey">Connected</span>';
-                if (isDefault) statusBadge += '<span class="badge badge-apikey" style="opacity:0.7">active</span>';
-            } else {
-                statusBadge = '<span class="badge badge-disconnected">Not connected</span>';
-            }
-
-            const connectBtn = provider.connected
-                ? `<button class="btn-ghost" onclick="OSA.openAddProviderModal(${OSA.jsArg(provider.id)}, ${OSA.jsArg((connectedEntry && connectedEntry.model) || '')})" style="padding:4px 12px;font-size:12px">Manage</button>`
-                : `<button class="btn-action" onclick="OSA.openAddProviderModal(${OSA.jsArg(provider.id)})" style="padding:4px 12px;font-size:12px">Connect</button>`;
-
-            let modelSection = '';
-            if (modelCount > 0) {
-                const toggleIcon = isExpanded ? '&#9660;' : '&#9654;';
-                const toggleClass = isExpanded ? 'expanded' : '';
-                modelSection =
-                    '<div class="provider-models-toggle ' + toggleClass + '" onclick="OSA.toggleProviderModels(' + OSA.jsArg(provider.id) + ')">' +
-                        '<span>' + modelCount + ' model' + (modelCount !== 1 ? 's' : '') + ' ' + toggleIcon + '</span>' +
-                    '</div>' +
-                    '<div class="provider-catalog-models ' + (isExpanded ? 'expanded' : '') + '" id="models-' + OSA.escapeAttr(provider.id) + '">' +
-                        (isExpanded ? OSA.renderCategorizedModels(provider.models, provider.id) : '') +
-                    '</div>';
-            }
-
-            // Show active model if this provider is connected and configured
-            const activeMeta = connectedEntry
-                ? '<div class="provider-catalog-meta" style="margin-top:2px">Route: <span style="color:var(--text-primary)">' + OSA.escapeHtml(connectedEntry.model || 'provider default') + '</span></div>'
-                : '<div class="provider-catalog-meta">' + OSA.escapeHtml(provider.description) + '</div>';
-
-            catalogHtml += '<div class="provider-catalog-item">' +
-                '<div class="provider-catalog-header">' +
-                    '<div class="provider-catalog-title">' +
-                        '<span class="provider-catalog-name">' + OSA.escapeHtml(provider.name) + '</span>' +
-                        statusBadge +
-                    '</div>' +
-                    connectBtn +
-                '</div>' +
-                activeMeta +
-                modelSection +
-            '</div>';
-        }
-        catalogList.innerHTML = catalogHtml || '<div class="model-empty">No providers available</div>';
-
-        // Populate all-models list
         const filterInput = document.getElementById('model-catalog-search');
-        OSA.renderSettingsModelList(filterInput ? filterInput.value : '');
+        OSA.renderModelsPane(filterInput ? filterInput.value : '');
     } catch (e) {
         catalogList.innerHTML = '<div class="model-empty">Failed to load catalog</div>';
     }
@@ -1079,7 +1113,32 @@ OSA.renderSettingsProviders = async function() {
 
 OSA.toggleProviderModels = function(providerId) {
     OSA.expandedModels[providerId] = !OSA.expandedModels[providerId];
-    OSA.renderSettingsProviders();
+    const expanded = !!OSA.expandedModels[providerId];
+    const box = document.getElementById('models-' + providerId);
+    const card = box ? box.closest('.provider-catalog-item') : null;
+    const toggle = card ? card.querySelector('.provider-models-toggle') : null;
+    if (box && toggle) {
+        // In-place expand/collapse from the cached catalog: no refetch, no
+        // full re-render, scroll position untouched.
+        if (expanded && !box.dataset.rendered) {
+            const provider = (OSA.providerCatalog.providers || []).find(function(p) { return p.id === providerId; });
+            if (provider) {
+                box.innerHTML = OSA.modelsRowsHtml(provider, OSA.modelsCurrentModelId());
+                box.dataset.rendered = '1';
+            }
+        }
+        box.classList.toggle('expanded', expanded);
+        toggle.classList.toggle('expanded', expanded);
+        const label = toggle.querySelector('span');
+        if (label) {
+            const provider = (OSA.providerCatalog.providers || []).find(function(p) { return p.id === providerId; });
+            const count = provider ? (provider.models || []).length : 0;
+            label.innerHTML = count + ' model' + (count !== 1 ? 's' : '') + ' ' + (expanded ? '&#9660;' : '&#9654;');
+        }
+        return;
+    }
+    const filterInput = document.getElementById('model-catalog-search');
+    OSA.renderModelsPane(filterInput ? filterInput.value : '');
 };
 
 // ── Local Server Status (Ollama / Unsloth) ──────────────────
@@ -1185,51 +1244,6 @@ OSA.saveLocalServerKey = async function(providerId) {
         OSA.renderSettingsProviders();
     });
     OSA.renderLocalServers();
-};
-
-OSA.renderCategorizedModels = function(models, providerId) {
-    const categories = {};
-    const catOrder = ['recommended', 'popular', 'fast', 'reasoning', 'open', 'code', 'custom'];
-
-    for (const m of models) {
-        const cat = m.category || 'other';
-        if (!categories[cat]) categories[cat] = [];
-        categories[cat].push(m);
-    }
-
-    let html = '';
-    for (const cat of catOrder) {
-        if (!categories[cat] || categories[cat].length === 0) continue;
-        html += '<div class="model-category"><div class="model-category-title">' + cat.charAt(0).toUpperCase() + cat.slice(1) + '</div>';
-        for (const m of categories[cat]) {
-            const ctx = m.context_window >= 1000000 ? (m.context_window / 1000000).toFixed(0) + 'M' : (m.context_window / 1000).toFixed(0) + 'K';
-            let badges = '';
-            if (m.supports_tools) badges += '<span class="model-badge" title="Tool calling">T</span>';
-            if (m.supports_vision) badges += '<span class="model-badge" title="Vision">V</span>';
-            html += '<div class="provider-model-tag" onclick="OSA.selectModel(' + OSA.jsArg(m.id) + ', ' + OSA.jsArg(m.provider_id || providerId) + '); OSA.closeSettings();" title="' + OSA.escapeAttr(m.id) + '">' +
-                OSA.escapeHtml(m.name) +
-                '<span class="model-tag-meta">' + ctx + ' ctx ' + badges + '</span>' +
-            '</div>';
-        }
-        html += '</div>';
-    }
-
-    for (const [cat, catModels] of Object.entries(categories)) {
-        if (catOrder.includes(cat)) continue;
-        html += '<div class="model-category"><div class="model-category-title">' + cat.charAt(0).toUpperCase() + cat.slice(1) + '</div>';
-        for (const m of catModels) {
-            const ctx = m.context_window >= 1000000 ? (m.context_window / 1000000).toFixed(0) + 'M' : (m.context_window / 1000).toFixed(0) + 'K';
-            let badges = '';
-            if (m.supports_tools) badges += '<span class="model-badge" title="Tool calling">T</span>';
-            if (m.supports_vision) badges += '<span class="model-badge" title="Vision">V</span>';
-            html += '<div class="provider-model-tag" onclick="OSA.selectModel(' + OSA.jsArg(m.id) + ', ' + OSA.jsArg(m.provider_id || providerId) + '); OSA.closeSettings();" title="' + OSA.escapeAttr(m.id) + '">' +
-                OSA.escapeHtml(m.name) +
-                '<span class="model-tag-meta">' + ctx + ' ctx ' + badges + '</span>' +
-            '</div>';
-        }
-        html += '</div>';
-    }
-    return html || '<div class="model-empty">No models</div>';
 };
 
 // ── Sleek Add Provider Modal ────────────────────────────────

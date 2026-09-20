@@ -513,11 +513,10 @@
                         <div id="provider-routing-summary" class="provider-routing-summary">Loading...</div>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">Connected Providers</div>
-                        <div id="provider-routing-list" class="provider-routing-list">Loading...</div>
-                    </div>
-                    <div class="settings-group">
-                        <div class="settings-group-title">Connected &amp; Available Routes</div>
+                        <div class="settings-group-title">Providers</div>
+                        <div class="settings-field">
+                            <input type="text" id="model-catalog-search" placeholder="Search all models..." oninput="OSA.debounce('settingsModelSearch', () => OSA.filterSettingsModels(this.value), 200)" />
+                        </div>
                         <div id="model-catalog-list" class="model-catalog-list">Loading...</div>
                     </div>
                     <details class="settings-advanced">
@@ -531,13 +530,6 @@
                             <div id="local-servers-status" class="doctor-status-grid"><div class="model-empty">Checking...</div></div>
                         </div>
                     </details>
-                    <div class="settings-group">
-                        <div class="settings-group-title">Catalog Search</div>
-                        <div class="settings-field">
-                            <input type="text" id="model-catalog-search" placeholder="Filter by name, ID, or provider..." oninput="OSA.debounce('settingsModelSearch', () => OSA.filterSettingsModels(this.value), 200)" />
-                        </div>
-                        <div id="all-models-list" class="model-catalog-list">Loading...</div>
-                    </div>
                 </div>
                 <div class="settings-pane" id="pane-agent">
                     <div class="settings-pane-header">
