@@ -569,9 +569,31 @@ OSA.tmodelEnsureAssistantSegment = function() {
     ));
 };
 
+OSA.tmodelClearAllStreamingFlags = function() {
+    // Every streaming transition keys off the *last* item, so an assistant
+    // segment that stops being last (tool/task/subagent/question item
+    // appended after it) would keep streaming=true forever: stuck typing
+    // cursor, and a phantom streaming item that suppresses the thinking
+    // indicator. Terminal transitions must clear every segment, not just
+    // the tail one.
+    let cleared = false;
+    OSA.TModel.items.forEach(function(item) {
+        if (!item || item.kind !== 'message' || item.role !== 'assistant') return;
+        if (item.streaming || item.thinkingStreaming) {
+            item.streaming = false;
+            item.thinkingStreaming = false;
+            cleared = true;
+        }
+    });
+    return cleared;
+};
+
 OSA.tmodelFinalizeSegmentForToolCall = function() {
     const item = OSA.tmodelStreamingItem();
-    if (!item) return '';
+    if (!item) {
+        OSA.tmodelClearAllStreamingFlags();
+        return '';
+    }
 
     // The visible response text immediately before a tool call is rendered as
     // that card's prelude. Reasoning is a separate part of the transcript and
@@ -585,6 +607,7 @@ OSA.tmodelFinalizeSegmentForToolCall = function() {
     } else {
         OSA.tmodelRemove(item.key);
     }
+    OSA.tmodelClearAllStreamingFlags();
     OSA.tmodelMarkDirty('segment-boundary');
     return display.trim();
 };
@@ -604,12 +627,19 @@ OSA.tmodelReleaseStreamingSegment = function() {
     if (!item) return;
     item.streaming = false;
     item.thinkingStreaming = false;
+    OSA.tmodelClearAllStreamingFlags();
     OSA.tmodelMarkDirty('release-stream');
 };
 
 OSA.tmodelFinalizeStreamingSegment = function(usage) {
     const item = OSA.tmodelStreamingItem();
-    if (!item) return null;
+    if (!item) {
+        // The tail item is not a streaming segment, but an older segment may
+        // still carry the flag (see tmodelClearAllStreamingFlags): clear it
+        // so no typing cursor survives the turn.
+        if (OSA.tmodelClearAllStreamingFlags()) OSA.tmodelMarkDirty('segment-final');
+        return null;
+    }
     item.streaming = false;
     item.thinkingStreaming = false;
 
@@ -645,6 +675,7 @@ OSA.tmodelFinalizeStreamingSegment = function(usage) {
     if (!display.trim() && !(item.thinking || '').trim()) {
         OSA.tmodelRemove(item.key);
     }
+    OSA.tmodelClearAllStreamingFlags();
     OSA.tmodelMarkDirty('segment-final');
     return item;
 };
@@ -1060,6 +1091,10 @@ OSA.ensureMessageLayers = function() {
         messagesDiv.addEventListener('scroll', function() {
             const distance = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight;
             view.userPinnedToBottom = distance < 120;
+            // A real scroll-up by the user cancels any forced stick from an
+            // open/send. Programmatic instant sticks land within 120px, so
+            // they never trip this.
+            if (distance >= 120) view.forceStickBottom = false;
         }, { passive: true });
         view.scrollHandlerAttached = true;
     }
@@ -1180,6 +1215,19 @@ OSA.shiftTranscriptWindow = function(direction) {
     });
 };
 
+OSA.scrollMessagesToBottom = function() {
+    // Programmatic sticks must bypass the container's smooth scrolling:
+    // retargeting an in-flight smooth animation mid-load is what left the
+    // viewport stranded halfway. Instant jump, then restore.
+    const messagesDiv = document.getElementById('messages');
+    if (!messagesDiv) return;
+    const prev = messagesDiv.style.scrollBehavior;
+    messagesDiv.style.scrollBehavior = 'auto';
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    void messagesDiv.offsetHeight;
+    messagesDiv.style.scrollBehavior = prev;
+};
+
 OSA.scheduleTranscriptRender = function() {
     if (OSA.TModel.frame != null) return;
     OSA.TModel.frame = requestAnimationFrame(function() {
@@ -1209,7 +1257,16 @@ OSA.renderTranscript = function(options = {}) {
         view.units = units;
         view.descriptors = units;
         const total = units.length;
-        const shouldStickBottom = !!(options.stickToBottom || view.userPinnedToBottom);
+        // Opening a chat and sending a message always land at the bottom,
+        // even if the user had scrolled up before: the scroll listener
+        // re-arms pinning afterwards, so this never fights manual scrolling.
+        const shouldStickBottom = !!(
+            options.stickToBottom
+            || options.reason === 'session-switch'
+            || options.reason === 'user-message'
+            || view.forceStickBottom
+            || view.userPinnedToBottom
+        );
 
         if (!options.keepWindow || view.windowEnd <= view.windowStart) {
             if (total <= view.maxWindowSize) {
@@ -1280,7 +1337,17 @@ OSA.renderTranscript = function(options = {}) {
         view.bottomSpacer.style.height = Math.max(0, Math.round(heightAfter)) + 'px';
 
         if (shouldStickBottom) {
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            OSA.scrollMessagesToBottom();
+            view.userPinnedToBottom = true;
+            if (options.reason === 'session-switch' || options.reason === 'user-message') {
+                // Content below the fold (images, late markdown layout) can
+                // expand after this frame and push the tail out of view. One
+                // deferred instant re-pin covers it without fighting later
+                // scrolling.
+                requestAnimationFrame(function() {
+                    OSA.scrollMessagesToBottom();
+                });
+            }
         } else if (options.preserveScroll !== false && anchorKey) {
             const nextAnchor = desired.find(function(w) { return w.dataset.unitKey === anchorKey; }) || null;
             if (nextAnchor) {

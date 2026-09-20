@@ -185,6 +185,10 @@ OSA.transcriptView = {
     ioBottom: null,
     scrollHandlerAttached: false,
     userPinnedToBottom: true,
+    // Set on session open/send: every render sticks to the bottom until the
+    // user scrolls up themselves. Survives the async fetch burst on open,
+    // where non-stick renders would otherwise yank the viewport mid-load.
+    forceStickBottom: false,
     isRendering: false,
     avgMessageHeight: 132,
     messageHeights: new Map(),

@@ -353,6 +353,8 @@ OSA.handleAgentEvent = function(event) {
                 chain.pendingToolCallIds.push(event.tool_call_id);
             }
             OSA.completeThinkingDisplay();
+            // The tool card takes over progress display from here.
+            OSA.hideThinkingIndicator();
             const prelude = OSA.tmodelFinalizeSegmentForToolCall();
             OSA.resetSpeechStream?.();
             OSA.tmodelToolStart(prelude ? Object.assign({}, event, { prelude }) : event);
@@ -377,6 +379,21 @@ OSA.handleAgentEvent = function(event) {
                 OSA.scheduleSessionInspectorRefresh();
             }
             OSA.previewReadToolOutput(event);
+            // After a tool the agent goes back to reasoning, often with no
+            // thinking deltas or text chunks for a while. Without this the
+            // transcript sits silent with no indicator until output resumes.
+            // The next thinking_start/response_start/tool_start hides it again.
+            (function() {
+                const cur = OSA.getCurrentSession && OSA.getCurrentSession();
+                if (!cur || cur.task_status !== 'running') return;
+                // Model-side check only: getStreamingAssistantMessage would
+                // force a synchronous render as a side effect.
+                if (OSA.tmodelStreamingItem && OSA.tmodelStreamingItem()) return;
+                if (typeof OSA.shouldShowThinkingIndicatorForRunningSession === 'function'
+                    && OSA.shouldShowThinkingIndicatorForRunningSession(cur)) {
+                    OSA.showThinkingIndicator();
+                }
+            })();
             break;
 
         case 'response_complete':

@@ -1924,6 +1924,7 @@ OSA.resetTranscriptView = function() {
     view.windowStart = 0;
     view.windowEnd = 0;
     view.userPinnedToBottom = true;
+    view.forceStickBottom = true;
     view.initialized = false;
     view.transcriptRoot = null;
     view.topSpacer = null;
@@ -2010,6 +2011,14 @@ OSA.appendUserMessageToChat = function(content, options = {}) {
         mirrorIndex,
         { live: true },
     ));
+    // Sending always returns to the bottom: declare pin intent up front so
+    // the render sticks even if another dirty reason coalesces over
+    // 'user-message' before the frame fires.
+    const pinView = OSA.getTranscriptView && OSA.getTranscriptView();
+    if (pinView) {
+        pinView.userPinnedToBottom = true;
+        pinView.forceStickBottom = true;
+    }
     OSA.tmodelMarkDirty('user-message');
     return item ? OSA.transcriptElementForItemKey(item.key) : null;
 };

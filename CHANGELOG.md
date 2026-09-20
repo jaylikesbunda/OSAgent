@@ -1,36 +1,46 @@
 v0.6.0 changes:
 
+Added:
+* Custom OpenAI-compatible endpoints need no code: provider_type custom + base_url + declared models
+* Searchable provider list at /api/providers/find; enabled/disabled_providers gates, small_provider/small_model slot for compaction summaries
+* Model catalog exposes models.dev per-1M input/output cost
+* Runtime skill authoring: OSA can now create/update/delete skills live
+* Community badges for Discord sessions
+* Voice settings now choose input and output directly: pick browser vs Local Whisper/Piper plus the microphone and speaker devices
+* Follow-up queue now works like opencode: queued messages live in a panel above the composer with edit, reorder, steer/send-now and remove, plus a queue/steer preference (Enter vs Ctrl+Enter)
+* Sidebar shows an unread dot on sessions that finish while unviewed
+
+Changed:
 * Provider keys moved to auth.toml (0600); config.toml holds no secrets, inline keys migrate on load
 * Multiple keys per provider with round-robin rotation across requests and retries
-* Custom OpenAI-compatible endpoints need no code: provider_type custom + base_url + declared models
-* Provider entries have stable ids (two entries can share one type); searchable list at /api/providers/find
-* enabled/disabled_providers gates, small_provider/small_model slot for compaction summaries
-* Model catalog exposes models.dev per-1M input/output cost
+* Provider entries have stable ids (two entries can share one type)
 * Compaction now uses one canonical overflow path, preserves deterministic state, archives pruned tool results, validates final fit, and expands checkpoint evidence
-* Voice input now normalizes Whisper no-speech markers, rejects empty captures clearly, validates Piper output, and keeps browser voice enabled in the native launcher
 * Slimmed default toolset: skill authoring, public web fetch, working notes now load via tool_search; background process promoted to core
 * read_file batch paths[] (10) and edit_file atomic edits[] (20) with better not-found errors
 * grep literal + offset/limit paging, glob offset/limit paging, list_files sizes
 * Raised inline/preview budgets (400 lines/24KB, preview 200/12KB); in-workspace absolute paths stay parallel
 * batch accepts codesearch/lsp/todoread/skill lookups; prompts list core tools + batching
-* Added runtime skill authoring: OSA can now create/update/delete skills live 
-* Fixed Bash read-only false positives in quoted code
 * Improved script-backed skill creation
-* Added Community badges for Discord sessions
-* Fixed thinking loss and transcript flicker during tool calls
-* Preserved live cards across session syncs
-* Fixed buffered lines and unnecessary row redraws
-* Fixed context meter after compaction
-* Voice settings now choose input and output directly: pick browser vs Local Whisper/Piper plus the microphone and speaker devices
-* Fixed stored XSS in the web UI: markdown links, attributes and inline handlers now escape model/tool/session data
-* Fixed session-switch races writing another session's tools, title or inspector state
-* Fixed push-to-talk binding twice per login, failed/queued sends leaving a phantom bubble, and OAuth/voice streams not stopping on close
-* Fixed tool and subagent cards: they now stop spinning on Stop/error, no longer jump on entry, and subagent results show in full with copy
-* Fixed Stop sending a draft instead of stopping, new chats opening blank, failed sends losing the message, phones losing the Workspace menu, and the question card having no way to close
 * Reworked chat session state: each session keeps its own messages, queue, tools and event position, and the live channel stays subscribed in the background, so switching chats no longer loses responses or stalls queued messages
-* Follow-up queue now works like opencode: queued messages live in a panel above the composer with edit, reorder, steer/send-now and remove, plus a queue/steer preference (Enter vs Ctrl+Enter)
-* Sidebar shows an unread dot on sessions that finish while unviewed, and session icons use the name initial with a per-session tint instead of #
-* Subagent results can no longer be lost: wait timeouts detach instead of killing, late completions merge exactly once, restarts mark interrupted (resumable), status/resume take session or task id, 0 waits indefinitely
+* Session icons use the name initial with a per-session tint instead of #
+* Subagent wait timeouts detach instead of killing, status/resume take session or task id, 0 waits indefinitely
+
+Fixed:
+* Subagent results can no longer be lost: late completions merge exactly once, restarts mark interrupted (resumable)
+* Opening a chat or sending a message now jumps to the bottom
+* Typing cursor no longer sticks around after a message finishes
+* Thinking indicator now shows again after each tool call
+* Voice input now normalizes Whisper no-speech markers, rejects empty captures clearly, validates Piper output, and keeps browser voice enabled in the native launcher
+* Bash read-only false positives in quoted code
+* Thinking loss and transcript flicker during tool calls
+* Preserved live cards across session syncs
+* Buffered lines and unnecessary row redraws
+* Context meter after compaction
+* Stored XSS in the web UI: markdown links, attributes and inline handlers now escape model/tool/session data
+* Session-switch races writing another session's tools, title or inspector state
+* Push-to-talk binding twice per login, failed/queued sends leaving a phantom bubble, and OAuth/voice streams not stopping on close
+* Tool and subagent cards: they now stop spinning on Stop/error, no longer jump on entry, and subagent results show in full with copy
+* Stop sending a draft instead of stopping, new chats opening blank, failed sends losing the message, phones losing the Workspace menu, and the question card having no way to close
 
 v0.5.3 changes:
 
