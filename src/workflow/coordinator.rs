@@ -430,7 +430,7 @@ impl SafeWorkflowCoordinator {
 
         let (_, result, _) = self
             .subagent_manager
-            .wait_for_subagent(&subagent_session_id, timeout_secs)
+            .wait_for_subagent(&subagent_session_id, Some(timeout_secs))
             .await
             .unwrap_or(("completed".into(), "No result available".into(), 0));
 

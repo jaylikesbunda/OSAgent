@@ -210,6 +210,15 @@ pub struct AgentConfig {
     /// The retry resumes the same subagent session so completed work is kept.
     #[serde(default = "default_subagent_task_max_retries")]
     pub subagent_task_max_retries: u32,
+    /// How long a foreground `subagent` call waits for the child before
+    /// detaching (seconds). A wait timeout never kills the child: it keeps
+    /// running, and its result is merged into the parent when it finishes.
+    /// Zero waits indefinitely. Indefinite waits are safe: the waiter
+    /// proceeds in heartbeat slices that keep event streams alive, and
+    /// parent cancellation aborts the child, which unblocks the waiter
+    /// through its terminal delivery.
+    #[serde(default = "default_subagent_foreground_timeout_secs")]
+    pub subagent_foreground_timeout_secs: u64,
 }
 
 fn default_prompt_cache_enabled() -> bool {
@@ -230,6 +239,10 @@ fn default_subagent_auto_resume_max_turns() -> usize {
 
 fn default_subagent_task_max_retries() -> u32 {
     2
+}
+
+fn default_subagent_foreground_timeout_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -993,6 +1006,7 @@ impl Default for AgentConfig {
             subagent_auto_resume: default_subagent_auto_resume(),
             subagent_auto_resume_max_turns: default_subagent_auto_resume_max_turns(),
             subagent_task_max_retries: default_subagent_task_max_retries(),
+            subagent_foreground_timeout_secs: default_subagent_foreground_timeout_secs(),
         }
     }
 }

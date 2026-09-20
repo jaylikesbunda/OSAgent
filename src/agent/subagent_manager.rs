@@ -99,6 +99,37 @@ impl SubagentManager {
         let _ = self.wake_callback.set(callback);
     }
 
+    /// Seconds a foreground `subagent` call waits before detaching.
+    /// A wait timeout never kills the child; it keeps running and its
+    /// result is merged into the parent when it finishes. Zero means no
+    /// deadline: wait indefinitely, like OpenCode. Indefinite waits stay
+    /// responsive through heartbeat slices (see `wait_for_subagent`), and
+    /// parent cancellation still aborts the child deterministically.
+    pub async fn foreground_timeout_secs(&self) -> Option<u64> {
+        let secs = self
+            .config
+            .read()
+            .await
+            .agent
+            .subagent_foreground_timeout_secs;
+        if secs == 0 {
+            None
+        } else {
+            Some(secs)
+        }
+    }
+
+    /// Accept either a subagent session id or a task-row id and resolve it
+    /// to the session id, so callers never lose a task to id confusion.
+    /// Tool output always carries the session handle; the row id rides
+    /// along for disambiguation after resumes.
+    fn resolve_session_id(&self, id_or_session: &str) -> String {
+        if let Ok(Some(task)) = self.storage.get_subagent_task(id_or_session) {
+            return task.session_id;
+        }
+        id_or_session.to_string()
+    }
+
     pub fn get_allowed_tools_for_agent_type(agent_type: &str) -> Vec<String> {
         let all_tools = vec![
             "bash",
@@ -326,6 +357,9 @@ impl SubagentManager {
     ) -> Result<String> {
         self.check_depth_limit(&parent_session_id).await?;
 
+        // Accept a task-row id as well as a session id.
+        let session_id = self.resolve_session_id(&session_id);
+
         let subagent_session = self
             .session_manager
             .get_session(&session_id)
@@ -473,10 +507,15 @@ impl SubagentManager {
 
             impl CleanupGuard {
                 /// Hand the outcome to the waiter once the normal path has
-                /// already persisted it.
-                fn deliver(&mut self, outcome: SubagentOutcome) {
+                /// already persisted it. Returns true when a waiter actually
+                /// received it; false means the waiter is gone (detached
+                /// foreground wait or background run) and the completion
+                /// must wake the parent through the merge path instead.
+                fn deliver(&mut self, outcome: SubagentOutcome) -> bool {
                     if let Some(tx) = self.result_tx.take() {
-                        let _ = tx.send(outcome);
+                        tx.send(outcome).is_ok()
+                    } else {
+                        false
                     }
                 }
             }
@@ -632,11 +671,15 @@ impl SubagentManager {
                         timestamp: std::time::SystemTime::now(),
                     });
 
-                    _cleanup.deliver((status, result_text, tool_count));
+                    let waiter_got_it = _cleanup.deliver((status, result_text, tool_count));
 
-                    // Background tasks have no waiter: poke the runtime so the
-                    // parent session can be woken for a continuation turn.
-                    if background_for_notify {
+                    // Wake the parent when nobody is waiting for this
+                    // outcome: background runs never have a waiter, and a
+                    // foreground waiter may have detached on a wait timeout
+                    // (or the retry loop outlived it). A delivered waiter
+                    // needs no wake; every other terminal state merges into
+                    // the parent conversation on the next turn.
+                    if background_for_notify || !waiter_got_it {
                         if let Some(callback) = &wake_callback {
                             callback(parent_session_id_for_async.clone());
                         }
@@ -671,9 +714,12 @@ impl SubagentManager {
                         timestamp: std::time::SystemTime::now(),
                     });
 
-                    _cleanup.deliver(("failed".to_string(), format!("Error: {}", e), 0));
+                    let waiter_got_it =
+                        _cleanup.deliver(("failed".to_string(), format!("Error: {}", e), 0));
 
-                    if background_for_notify {
+                    // Same wake rule as the success path: a gone waiter must
+                    // still learn about the failure through the merge path.
+                    if background_for_notify || !waiter_got_it {
                         if let Some(callback) = &wake_callback {
                             callback(parent_session_id_for_async.clone());
                         }
@@ -1351,7 +1397,8 @@ impl SubagentManager {
     }
 
     pub async fn cancel_subagent(&self, session_id: &str) -> Result<bool> {
-        self.stop_subagent(session_id, "cancelled", "Subagent cancelled".to_string())
+        let session_id = self.resolve_session_id(session_id);
+        self.stop_subagent(&session_id, "cancelled", "Subagent cancelled".to_string())
             .await
     }
 
@@ -1393,55 +1440,101 @@ impl SubagentManager {
 
     /// Return the persisted task record and live-running state for a child
     /// session. This is intentionally read-only so the parent agent can check
-    /// on a background task before deciding whether to resume it.
+    /// on a background task before deciding whether to resume it. Accepts a
+    /// session id or a task-row id.
     pub fn get_subagent_status(&self, session_id: &str) -> Result<Option<(SubagentTask, bool)>> {
-        let task = self.storage.get_subagent_task_by_session(session_id)?;
+        let session_id = self.resolve_session_id(session_id);
+        let task = self.storage.get_subagent_task_by_session(&session_id)?;
         Ok(task.map(|task| {
-            let running = self.active_subagents.contains_key(session_id);
+            let running = self.active_subagents.contains_key(&session_id);
             (task, running)
         }))
     }
 
+    /// How often a blocked waiter proves it is still attached. Each slice
+    /// expiry emits a progress heartbeat, which keeps SSE streams and
+    /// proxies from treating a long single provider call as a dead
+    /// connection.
+    const WAIT_HEARTBEAT_SECS: u64 = 30;
+
     pub async fn wait_for_subagent(
         &self,
         session_id: &str,
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
     ) -> Result<(String, String, i32)> {
+        let session_id = self.resolve_session_id(session_id);
         // Wait on the subagent's own completion signal rather than polling for
         // its disappearance and re-reading storage, which added latency and
         // could observe a not-yet-written result.
-        if let Some((_, receiver)) = self.pending_results.remove(session_id) {
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), receiver).await {
-                Ok(Ok(outcome)) => return Ok(outcome),
-                // Sender dropped without delivering: fall through to storage.
-                Ok(Err(_)) => {}
-                Err(_) => {
-                    // Preserve the work already written to the child session.
-                    // A timeout is an interruption, not a reason to replace
-                    // the useful partial result with a bare error string.
-                    let partial_result = Self::extract_result(&self.storage, session_id)
-                        .await
-                        .unwrap_or_else(|_| "No partial result available".to_string());
-                    let tool_count = self
-                        .storage
-                        .get_subagent_task_by_session(session_id)
-                        .ok()
-                        .flatten()
-                        .map(|task| task.tool_count)
-                        .unwrap_or(0);
-                    let timeout_message = format!(
-                        "Subagent timed out after {}s. The session is resumable with task_id=\"{}\".\n\nPartial result:\n{}",
-                        timeout_secs, session_id, partial_result
-                    );
-                    let _ = self
-                        .stop_subagent(session_id, "timeout", timeout_message.clone())
-                        .await;
-                    return Ok(("timeout".to_string(), timeout_message, tool_count));
+        if let Some((_, mut receiver)) = self.pending_results.remove(&session_id) {
+            // `None` waits indefinitely. Either way the wait proceeds in
+            // heartbeat slices so a very long (or unbounded) wait stays
+            // responsive: idle slices emit progress instead of silence.
+            // Cancellation needs no slice handling — aborting the child runs
+            // its CleanupGuard, which delivers the terminal outcome and
+            // unblocks this waiter immediately.
+            let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+            loop {
+                match tokio::time::timeout(
+                    Duration::from_secs(Self::WAIT_HEARTBEAT_SECS),
+                    &mut receiver,
+                )
+                .await
+                {
+                    Ok(Ok(outcome)) => {
+                        // The waiter got the result directly, so mark this
+                        // generation notified: the merge path must not deliver
+                        // it a second time on the parent's next turn.
+                        if let Ok(Some(task)) =
+                            self.storage.get_subagent_task_by_session(&session_id)
+                        {
+                            if task.completed_at.is_some() {
+                                let _ = self.storage.mark_subagent_notified(&task.id);
+                            }
+                        }
+                        return Ok(outcome);
+                    }
+                    // Sender dropped without delivering: fall through to storage.
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        if let Some(deadline) = deadline {
+                            if Instant::now() >= deadline {
+                                // Detach, don't kill: the child keeps running
+                                // (it may be in a retry backoff longer than
+                                // this wait) and its terminal state wakes the
+                                // parent through the merge path. A timeout is
+                                // an interruption, not a reason to discard the
+                                // child's work or replace its eventual result
+                                // with a bare error string.
+                                let partial_result =
+                                    Self::extract_result(&self.storage, &session_id)
+                                        .await
+                                        .unwrap_or_else(|_| {
+                                            "No partial result available".to_string()
+                                        });
+                                let tool_count = self
+                                    .storage
+                                    .get_subagent_task_by_session(&session_id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|task| task.tool_count)
+                                    .unwrap_or(0);
+                                let timeout_message = format!(
+                                    "Subagent is still running after {}s and has been left running in the background. Check it with action=\"status\" or continue it with action=\"resume\" using task_id=\"{}\".\n\nPartial result:\n{}",
+                                    timeout_secs.unwrap_or(0),
+                                    session_id,
+                                    partial_result
+                                );
+                                return Ok(("timeout".to_string(), timeout_message, tool_count));
+                            }
+                        }
+                        self.emit_wait_heartbeat(&session_id).await;
+                    }
                 }
             }
         }
 
-        if let Ok(Some(task)) = self.storage.get_subagent_task_by_session(session_id) {
+        if let Ok(Some(task)) = self.storage.get_subagent_task_by_session(&session_id) {
             let result = task
                 .result
                 .unwrap_or_else(|| "No result available".to_string());
@@ -1455,20 +1548,30 @@ impl SubagentManager {
         }
     }
 
+    /// Best-effort "still waiting" progress for a blocked waiter. Failures
+    /// are swallowed: a missing heartbeat must never fail the wait itself.
+    async fn emit_wait_heartbeat(&self, session_id: &str) {
+        if let Ok(Some(task)) = self.storage.get_subagent_task_by_session(session_id) {
+            self.event_bus.emit(AgentEvent::SubagentProgress {
+                session_id: task.parent_session_id.clone(),
+                sequence: 0,
+                parent_session_id: task.parent_session_id,
+                subagent_session_id: session_id.to_string(),
+                tool_name: "waiting".to_string(),
+                tool_count: task.tool_count,
+                status: "running".to_string(),
+                timestamp: SystemTime::now(),
+            });
+        }
+    }
+
     async fn stop_subagent(&self, session_id: &str, status: &str, result: String) -> Result<bool> {
         if let Some((_, handle)) = self.active_subagents.remove(session_id) {
-            let SubagentHandle {
-                task_id,
-                handle,
-                cancel_tx,
-                ..
-            } = handle;
-
-            let _ = cancel_tx.send(()).await;
-            handle.abort();
-            let _ = handle.await;
-
-            if let Ok(Some(mut task)) = self.storage.get_subagent_task(&task_id) {
+            // Persist the terminal state before aborting: the task's
+            // CleanupGuard Drop delivers whatever storage knows to a live
+            // waiter, so the waiter must observe this status, not a
+            // "terminated before returning a result" fallback.
+            if let Ok(Some(mut task)) = self.storage.get_subagent_task(&handle.task_id) {
                 task.status = status.to_string();
                 task.result = Some(result.clone());
                 task.completed_at = Some(Utc::now());
@@ -1479,6 +1582,14 @@ impl SubagentManager {
                 session.task_status = status.to_string();
                 let _ = self.storage.update_session(&session);
             }
+
+            let SubagentHandle {
+                handle, cancel_tx, ..
+            } = handle;
+
+            let _ = cancel_tx.send(()).await;
+            handle.abort();
+            let _ = handle.await;
 
             Ok(true)
         } else {

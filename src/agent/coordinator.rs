@@ -457,7 +457,7 @@ impl Coordinator {
                 };
 
                 let (status, result, actual_tool_count) = sm
-                    .wait_for_subagent(&session_id, spec.timeout_secs)
+                    .wait_for_subagent(&session_id, Some(spec.timeout_secs))
                     .await
                     .unwrap_or(("error".to_string(), "Wait failed".to_string(), 0));
 
@@ -522,7 +522,7 @@ impl Coordinator {
 
             let (status, result, actual_tool_count) = self
                 .subagent_manager
-                .wait_for_subagent(&session_id, spec.timeout_secs)
+                .wait_for_subagent(&session_id, Some(spec.timeout_secs))
                 .await
                 .unwrap_or(("error".to_string(), "Wait failed".to_string(), 0));
 

@@ -116,7 +116,7 @@ impl Tool for SubagentTool {
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "Resume a previous task by its session ID (optional); continues the same subagent session with its prior messages"
+                    "description": "Subagent session ID (preferred) or task-row ID from a prior <task> result; status and resume accept either"
                 },
                 "session_id": {
                     "type": "string",
@@ -156,8 +156,8 @@ impl Tool for SubagentTool {
             };
             let result = task.result.unwrap_or_else(|| "No result yet.".to_string());
             return Ok(ToolResult::new(format!(
-                "<task id=\"{}\" state=\"{}\" tools=\"{}\">\n<task_result>\n{}\n</task_result>\n</task>",
-                task_id, state, task.tool_count, result
+                "<task id=\"{}\" task_row=\"{}\" state=\"{}\" tools=\"{}\">\n<task_result>\n{}\n</task_result>\n</task>",
+                task.session_id, task.id, state, task.tool_count, result
             )));
         }
 
@@ -220,8 +220,14 @@ impl Tool for SubagentTool {
             subagent_session_id
         );
 
-        let (status, result, _tool_count) =
-            manager.wait_for_subagent(&subagent_session_id, 300).await?;
+        // The wait budget is configurable; expiring it detaches rather than
+        // kills the child, so the result still arrives via status/resume or
+        // the automatic background merge. It also covers task-level retries,
+        // whose backoff can outlive any single wait. Zero means no deadline.
+        let foreground_timeout = manager.foreground_timeout_secs().await;
+        let (status, result, _tool_count) = manager
+            .wait_for_subagent(&subagent_session_id, foreground_timeout)
+            .await?;
 
         info!(
             "SubagentTool: subagent {} finished with status={}",
@@ -241,8 +247,16 @@ impl Tool for SubagentTool {
                 "<task id=\"{}\" state=\"cancelled\">\n<task_result>\nSubagent was cancelled.\n</task_result>\n</task>",
                 subagent_session_id
             ))),
+            // The child was NOT killed: it keeps running and its result
+            // merges automatically, or poll it with action="status".
             "timeout" => Ok(ToolResult::retryable(format!(
-                "<task id=\"{}\" state=\"timeout\">\n<task_result>\n{}\n\nResume with task_id=\"{}\" when ready.\n</task_result>\n</task>",
+                "<task id=\"{}\" state=\"timeout\">\n<task_result>\n{}\n\nThe subagent is still running. Check action=\"status\" or continue with task_id=\"{}\" when ready.\n</task_result>\n</task>",
+                subagent_session_id, result, subagent_session_id
+            ))),
+            // The host restarted under a running child. Nothing failed;
+            // the child session's history survived, so resume it.
+            "interrupted" => Ok(ToolResult::retryable(format!(
+                "<task id=\"{}\" state=\"interrupted\">\n<task_result>\n{}\n\nResume with task_id=\"{}\" when ready.\n</task_result>\n</task>",
                 subagent_session_id, result, subagent_session_id
             ))),
             _ => Ok(ToolResult::failure(format!(

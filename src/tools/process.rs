@@ -51,12 +51,12 @@ impl ProcessSession {
     }
 }
 
-struct ProcessRegistry {
+pub(crate) struct ProcessRegistry {
     sessions: Arc<RwLock<HashMap<String, ProcessSession>>>,
 }
 
 impl ProcessRegistry {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -136,10 +136,17 @@ pub struct ProcessTool {
 
 impl ProcessTool {
     pub fn new(config: Config) -> Self {
+        Self::with_registry(config, Arc::new(ProcessRegistry::new()))
+    }
+
+    /// Share one registry across every per-workspace tool instance so a
+    /// background process started in one workspace is still pollable after
+    /// the registry rebuilds tools for another workspace.
+    pub(crate) fn with_registry(config: Config, registry: Arc<ProcessRegistry>) -> Self {
         let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
         Self {
             workspace,
-            registry: Arc::new(ProcessRegistry::new()),
+            registry,
         }
     }
 

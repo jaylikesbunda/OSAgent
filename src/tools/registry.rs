@@ -241,6 +241,9 @@ pub struct ToolRegistry {
     storage: Arc<crate::storage::SqliteStorage>,
     skill_loader: Option<Arc<SkillLoader>>,
     file_cache: Arc<FileReadCache>,
+    /// Shared across every per-workspace `process` tool instance so
+    /// background processes survive workspace rebuilds and cache eviction.
+    process_registry: Arc<process::ProcessRegistry>,
     coordinator: Option<Arc<Coordinator>>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
     mcp: McpHandle,
@@ -568,8 +571,13 @@ impl ToolRegistry {
         // Core: background sessions (exec_command + poll/log pattern like
         // Codex). Long-running builds/tests/servers start here, output is
         // polled via poll/log — no tool_search round trip for the most
-        // common async need.
-        let process_tool: Arc<dyn Tool> = Arc::new(process::ProcessTool::new(config.clone()));
+        // common async need. The registry is shared so processes survive
+        // per-workspace tool rebuilds.
+        let process_registry = Arc::new(process::ProcessRegistry::new());
+        let process_tool: Arc<dyn Tool> = Arc::new(process::ProcessTool::with_registry(
+            config.clone(),
+            process_registry.clone(),
+        ));
         tools.insert("process".to_string(), process_tool);
         let calendar_tool: Arc<dyn Tool> = Arc::new(calendar::CalendarTool::new(config.clone()));
         tools.insert("calendar".to_string(), calendar_tool.clone());
@@ -640,6 +648,7 @@ impl ToolRegistry {
             storage,
             skill_loader,
             file_cache,
+            process_registry,
             coordinator: None,
             scheduler: None,
             mcp,
@@ -678,6 +687,7 @@ impl ToolRegistry {
             config.clone(),
             self.storage.clone(),
             &self.file_cache,
+            &self.process_registry,
         )?;
         {
             let mut cached = self
@@ -715,6 +725,7 @@ impl ToolRegistry {
         config: Config,
         storage: Arc<crate::storage::SqliteStorage>,
         file_cache: &Arc<FileReadCache>,
+        process_registry: &Arc<process::ProcessRegistry>,
     ) -> Option<Arc<dyn Tool>> {
         match tool_name {
             "bash" => Some(Arc::new(bash::BashTool::new(config))),
@@ -752,7 +763,10 @@ impl ToolRegistry {
             "web_fetch" => Some(Arc::new(web::WebFetchTool::new(config))),
             "web_search" => Some(Arc::new(web::WebSearchTool::new(config))),
             "public_web_fetch" => Some(Arc::new(web::PublicWebFetchTool::new())),
-            "process" => Some(Arc::new(process::ProcessTool::new(config))),
+            "process" => Some(Arc::new(process::ProcessTool::with_registry(
+                config,
+                process_registry.clone(),
+            ))),
             "calendar" => Some(Arc::new(calendar::CalendarTool::new(config.clone()))),
             "weather" => Some(Arc::new(weather::WeatherTool::new(config.clone()))),
             "news" => Some(Arc::new(news::NewsTool::new(config.clone()))),
