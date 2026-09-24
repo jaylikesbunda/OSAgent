@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>OSA</title>
     <link rel="stylesheet" href="/static/css/variables.css">
     <link rel="stylesheet" href="/static/css/base.css">
@@ -47,12 +47,20 @@
                         <img class="logo-icon" src="images/thinking-indicator.png" alt="OSA">
                         <span class="logo-wordmark">OS<span class="logo-accent">Agent</span></span>
                     </div>
+                    <button class="mobile-sidebar-close" type="button" onclick="closeSidebar()" aria-label="Close chats" title="Close chats">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                    </button>
                     <button class="new-chat-btn" onclick="createSession()">
                         <span>+</span> New chat
                     </button>
                 </div>
                 <div class="sessions-list" id="sessions-list"></div>
                 <div class="sidebar-footer">
+                    <div class="mobile-sidebar-actions">
+                        <button type="button" onclick="closeSidebar(); openSettings()">Settings</button>
+                        <button type="button" onclick="closeSidebar(); OSA.toggleFilePreview()">File preview</button>
+                        <button type="button" onclick="logout()">Sign out</button>
+                    </div>
                     <div class="sidebar-footer-row">
                         <button class="sidebar-jobs-btn" onclick="OSA.Jobs.show()" title="Scheduled Jobs">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -60,6 +68,7 @@
                         </button>
                         <button class="sidebar-footer-icon-btn" onclick="clearSessions()" title="Delete all sessions">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                            <span class="sidebar-clear-label">Delete all chats</span>
                         </button>
                     </div>
                 </div>
@@ -80,6 +89,9 @@
                         </svg>
                     </button>
                     <div class="header-title" id="header-title" onclick="OSA.startRenameCurrentSession(this)">Select a session</div>
+                    <button class="mobile-new-chat-btn" type="button" onclick="createSession()" aria-label="New chat" title="New chat">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    </button>
                     <div class="context-indicator hidden" id="context-indicator" onclick="OSA.toggleContextModal()">
                         <div class="context-ring">
                             <svg viewBox="0 0 36 36">
@@ -125,7 +137,7 @@
                         <div class="empty-state">
                             <div class="empty-state-icon">+</div>
                             <div class="empty-state-title">Start a conversation</div>
-                            <div class="empty-state-text">Click "New chat" to begin</div>
+                            <div class="empty-state-text">Start a new chat to begin</div>
                         </div>
                     </div>
                     <div class="input-area">
@@ -223,11 +235,15 @@
                             </div>
                             <div class="composer-footer">
                                 <div class="input-left-controls">
+                                    <button id="mobile-actions-btn" class="input-icon-btn" type="button" onclick="OSA.toggleMobileComposerMenu(event)" aria-label="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="mobile-composer-menu" title="More actions">
+                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                                    </button>
                                     <input type="file" id="image-upload" class="hidden" accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.js,.jsx,.ts,.tsx,.rs,.py,.html,.css,.toml,.yaml,.yml,.xml,.sql,.sh,.ps1,.bat,.ini,.log" multiple />
                                     <button id="attach-btn" class="input-icon-btn" type="button" onclick="document.getElementById('image-upload').click()" title="Attach file">
                                         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
                                     </button>
                                     <button id="context-trigger" class="input-tab" type="button" onclick="OSA.toggleContextMenu()" title="Workspace &amp; Persona">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
                                         <span class="input-tab-label" id="context-trigger-label">Context</span>
                                     </button>
                                 </div>
@@ -268,6 +284,13 @@
                                          <svg id="stop-icon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                                      </button>
                                 </div>
+                            </div>
+                            <div id="mobile-composer-menu" class="mobile-composer-menu hidden" aria-label="Composer actions">
+                                <button type="button" onclick="OSA.mobileComposerAction('attach', event)">Attach file</button>
+                                <button type="button" onclick="OSA.mobileComposerAction('context', event)">Workspace &amp; persona</button>
+                                <button type="button" onclick="OSA.mobileComposerAction('voice', event)">Voice conversation</button>
+                                <button id="mobile-tts-action" type="button" onclick="OSA.mobileComposerAction('tts', event)" aria-pressed="false">Read replies aloud</button>
+                                <button id="mobile-followup-action" class="hidden" type="button" onclick="OSA.mobileComposerAction('followup', event)">Follow-ups: Queue</button>
                             </div>
                              <div id="mic-meter" class="mic-meter hidden" aria-hidden="true">
                                  <span class="mic-meter-bar"></span>

@@ -47,9 +47,97 @@ OSA.getSessionEntry = function(sessionId) {
             hasReceivedResponse: false,
             streamText: '',
             streamThinking: '',
+            messagesDirty: false,
         };
     }
     return entry;
+};
+
+OSA.mergeSessionSnapshotMessages = function(freshMessages, priorMessages, options = {}) {
+    const fresh = Array.isArray(freshMessages) ? freshMessages : [];
+    const prior = Array.isArray(priorMessages) ? priorMessages : [];
+    const merged = fresh.map(function(message) { return message; });
+    let aligned = true;
+
+    const compatibleAt = function(current, cached) {
+        if (!current || !cached || current.role !== cached.role) return false;
+        const currentClientId = current.metadata && current.metadata.client_message_id;
+        const cachedClientId = cached.metadata && cached.metadata.client_message_id;
+        if (currentClientId || cachedClientId) return !!currentClientId && currentClientId === cachedClientId;
+        if (current.role === 'tool' && (current.tool_call_id || cached.tool_call_id)) {
+            return !!current.tool_call_id && current.tool_call_id === cached.tool_call_id;
+        }
+        return true;
+    };
+
+    const extendedText = function(current, cached) {
+        const freshText = typeof current === 'string' ? current : '';
+        const cachedText = typeof cached === 'string' ? cached : '';
+        return cachedText.startsWith(freshText) ? cachedText : freshText;
+    };
+
+    const overlap = Math.min(fresh.length, prior.length);
+    for (let index = 0; index < overlap; index += 1) {
+        if (!compatibleAt(fresh[index], prior[index])) {
+            aligned = false;
+            break;
+        }
+        if (options.preserveStreamed && fresh[index].role === 'assistant') {
+            merged[index] = Object.assign({}, fresh[index], {
+                content: extendedText(fresh[index].content, prior[index].content),
+                thinking: extendedText(fresh[index].thinking, prior[index].thinking) || null,
+            });
+        }
+    }
+
+    // A background stream can append whole assistant/tool segments after the
+    // GET snapshot was created. Preserve that suffix only when the two message
+    // arrays still describe the same conversation prefix.
+    if (options.preserveStreamed && aligned && prior.length > fresh.length) {
+        prior.slice(fresh.length).forEach(function(message) { merged.push(message); });
+    }
+
+    // Optimistic user messages may not have reached the snapshot yet. Preserve
+    // them by client id even if compaction or another structural change made
+    // the positional merge above unsafe.
+    const clientIds = new Set(merged.map(function(message) {
+        return message && message.metadata && message.metadata.client_message_id;
+    }).filter(Boolean));
+    prior.forEach(function(message) {
+        const clientId = message && message.metadata && message.metadata.client_message_id;
+        if (message && message.role === 'user' && clientId && !clientIds.has(clientId)) {
+            merged.push(message);
+            clientIds.add(clientId);
+        }
+    });
+
+    return merged;
+};
+
+OSA.reconcileSessionSnapshot = function(entry, session, sequenceAtRequest) {
+    if (!entry || !session) return session;
+    const priorSession = entry.session;
+    const priorMessages = priorSession && Array.isArray(priorSession.messages)
+        ? priorSession.messages
+        : [];
+    session.messages = OSA.mergeSessionSnapshotMessages(session.messages, priorMessages, {
+        preserveStreamed: entry.messagesDirty === true,
+    });
+    entry.messagesDirty = false;
+
+    const currentSequence = entry.chain && Number.isFinite(entry.chain.eventSeqNumber)
+        ? entry.chain.eventSeqNumber
+        : 0;
+    const liveAdvanced = currentSequence > (Number.isFinite(sequenceAtRequest) ? sequenceAtRequest : currentSequence);
+    if (liveAdvanced && priorSession && priorSession.task_status) {
+        // Events received after the GET began are newer than its status field.
+        session.task_status = priorSession.task_status;
+    } else if (session.task_status !== 'running') {
+        // With no newer live event, an idle server snapshot is authoritative.
+        entry.processing = false;
+        entry.stopping = false;
+    }
+    return session;
 };
 OSA.getCurrentSessionId = function() {
     return OSA.currentSessionId || (OSA.currentSession && OSA.currentSession.id) || null;
@@ -114,10 +202,30 @@ OSA.saveUnreadMap = function() {
 OSA.isSessionUnread = function(sessionId) {
     return !!sessionId && !!OSA.getUnreadMap()[sessionId];
 };
+OSA.renderSessionUnreadIndicator = function(sessionId) {
+    if (!sessionId || typeof document === 'undefined') return;
+    const esc = (window.CSS && window.CSS.escape) ? window.CSS.escape(sessionId) : String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+    const row = document.querySelector(`.session-item[data-session-id="${esc}"]`);
+    if (!row) return;
+    const unread = OSA.isSessionUnread(sessionId) && !row.classList.contains('active');
+    row.classList.toggle('has-unread', unread);
+    const icon = row.querySelector(':scope > .session-icon');
+    if (!icon) return;
+    const dot = icon.querySelector('.session-unread-dot');
+    if (unread && !dot) {
+        const marker = document.createElement('span');
+        marker.className = 'session-unread-dot';
+        marker.setAttribute('aria-label', 'Unread response');
+        icon.appendChild(marker);
+    } else if (!unread && dot) {
+        dot.remove();
+    }
+};
 OSA.markSessionUnread = function(sessionId) {
     if (!sessionId || sessionId === OSA.getCurrentSessionId()) return;
     OSA.getUnreadMap()[sessionId] = Date.now();
     OSA.saveUnreadMap();
+    OSA.renderSessionUnreadIndicator(sessionId);
 };
 OSA.markSessionSeen = function(sessionId) {
     if (!sessionId) return;
@@ -126,12 +234,7 @@ OSA.markSessionSeen = function(sessionId) {
         delete map[sessionId];
         OSA.saveUnreadMap();
     }
-    const esc = (window.CSS && window.CSS.escape) ? window.CSS.escape(sessionId) : String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
-    const row = document.querySelector(`.session-item[data-session-id="${esc}"]`);
-    if (row) {
-        row.classList.remove('has-unread');
-        row.querySelectorAll('.session-unread-dot').forEach(function(dot) { dot.remove(); });
-    }
+    OSA.renderSessionUnreadIndicator(sessionId);
 };
 OSA.pruneUnreadMap = function(validIds) {
     const map = OSA.getUnreadMap();
@@ -185,6 +288,8 @@ OSA.transcriptView = {
     ioBottom: null,
     scrollHandlerAttached: false,
     userPinnedToBottom: true,
+    autoScrollPaused: false,
+    lastScrollTop: 0,
     // Set on session open/send: every render sticks to the bottom until the
     // user scrolls up themselves. Survives the async fetch burst on open,
     // where non-stick renders would otherwise yank the viewport mid-load.

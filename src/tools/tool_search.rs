@@ -12,8 +12,11 @@
 
 use crate::error::Result;
 use crate::mcp::McpHandle;
+use crate::storage::SqliteStorage;
 use crate::tools::native_catalog::NativeToolCatalog;
-use crate::tools::registry::{tool_prompt_description, Tool, ToolExample, ToolOutcome, ToolResult};
+use crate::tools::registry::{
+    tool_prompt_description, Tool, ToolExample, ToolOutcome, ToolProfile, ToolResult,
+};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -22,23 +25,60 @@ pub struct ToolSearchTool {
     mcp: McpHandle,
     native: Arc<NativeToolCatalog>,
     default_limit: usize,
+    storage: Option<Arc<SqliteStorage>>,
 }
 
 impl ToolSearchTool {
-    pub fn new(mcp: McpHandle, native: Arc<NativeToolCatalog>, default_limit: usize) -> Self {
+    pub fn new(
+        mcp: McpHandle,
+        native: Arc<NativeToolCatalog>,
+        default_limit: usize,
+        storage: Option<Arc<SqliteStorage>>,
+    ) -> Self {
         Self {
             mcp,
             native,
             default_limit: default_limit.max(1),
+            storage,
         }
     }
 
-    fn resolve_select(&self, session: &str, names: &[String]) -> (Vec<Value>, Vec<String>, usize) {
+    /// The calling session's tool profile. Discovery and the tools it
+    /// yields must travel together: handing a restricted chat the schema
+    /// for a tool it can never call sends it down a dead end, and on a
+    /// public channel that loop looks like the bot dying.
+    fn profile_for_session(&self, session_id: &str) -> ToolProfile {
+        let is_community = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.get_session(session_id).ok().flatten())
+            .and_then(|session| session.metadata.get("discord_community")?.as_bool())
+            .unwrap_or(false);
+        if is_community {
+            ToolProfile::Community
+        } else {
+            ToolProfile::Default
+        }
+    }
+
+    fn resolve_select(
+        &self,
+        session: &str,
+        names: &[String],
+        profile: ToolProfile,
+    ) -> (Vec<Value>, Vec<String>, usize, usize) {
         let mut payload = Vec::new();
         let mut native_activate = Vec::new();
         let mut mcp_parts = Vec::new();
+        let mut withheld = 0usize;
 
         for name in names {
+            // Never hand out (or activate) what the caller's profile could
+            // not execute anyway.
+            if !profile.allows(name) {
+                withheld += 1;
+                continue;
+            }
             if self.native.contains(name) {
                 native_activate.push(name.clone());
                 if let Some(result) = self.native.to_search_result(name) {
@@ -54,16 +94,26 @@ impl ToolSearchTool {
         if !mcp_parts.is_empty() {
             if let Some(manager) = self.mcp.get() {
                 let entries = manager.search(&format!("select:{}", mcp_parts.join(",")), 25);
-                let qualified: Vec<String> = entries
+                let allowed: Vec<_> = entries
+                    .into_iter()
+                    .filter(|entry| {
+                        let keep = profile.allows(&entry.qualified_name);
+                        if !keep {
+                            withheld += 1;
+                        }
+                        keep
+                    })
+                    .collect();
+                let qualified: Vec<String> = allowed
                     .iter()
                     .map(|entry| entry.qualified_name.clone())
                     .collect();
                 newly_activated.extend(manager.activate(session, &qualified));
-                payload.extend(entries.iter().map(|entry| entry.to_search_result()));
+                payload.extend(allowed.iter().map(|entry| entry.to_search_result()));
             }
         }
 
-        (payload, newly_activated, names.len())
+        (payload, newly_activated, names.len(), withheld)
     }
 
     fn finish(
@@ -209,16 +259,22 @@ impl Tool for ToolSearchTool {
                     "select: requires at least one tool name, e.g. select:weather,record_memory",
                 ));
             }
-            let (payload, newly_activated, all_requested) = self.resolve_select(&session, &names);
+            let profile = self.profile_for_session(&session);
+            let (payload, newly_activated, all_requested, withheld) =
+                self.resolve_select(&session, &names, profile);
             if payload.is_empty() {
-                return Ok(ToolResult::new(
+                return Ok(ToolResult::new(if withheld > 0 {
+                    "None of the requested tools are available in this chat. \
+                         Use only the tools from your tool list."
+                        .to_string()
+                } else {
                     "No catalog entries matched the requested names. Available deferred \
-                     built-ins are listed in the prompt manifest; MCP servers under \
-                     'Connected MCP Servers'."
-                        .to_string(),
-                ));
+                         built-ins are listed in the prompt manifest; MCP servers under \
+                         'Connected MCP Servers'."
+                        .to_string()
+                }));
             }
-            let activation_note = if newly_activated.is_empty() {
+            let mut activation_note = if newly_activated.is_empty() {
                 "All requested tools were already loaded.".to_string()
             } else {
                 format!(
@@ -227,20 +283,26 @@ impl Tool for ToolSearchTool {
                     newly_activated.join(", ")
                 )
             };
+            if withheld > 0 {
+                activation_note.push_str(&format!(
+                    " {} requested tool(s) are not available in this chat and were skipped.",
+                    withheld
+                ));
+            }
             return self.finish(payload, activation_note, all_requested);
         }
 
         // A server filter is MCP-only, so it hands the whole budget to
         // the MCP catalog.
         let native_limit = if server_filter.is_some() { 0 } else { limit };
-        let native_matches = if native_limit > 0 {
+        let mut native_matches = if native_limit > 0 {
             self.native.search(&query, native_limit)
         } else {
             Vec::new()
         };
 
         let mcp_limit = limit.saturating_sub(native_matches.len()).max(1);
-        let mcp_matches = if let Some(manager) = self.mcp.get() {
+        let mut mcp_matches = if let Some(manager) = self.mcp.get() {
             if let Some(ref server) = server_filter {
                 // Over-fetch before filtering by server, or a server filter can
                 // starve results that ranked just outside the limit.
@@ -255,6 +317,17 @@ impl Tool for ToolSearchTool {
         } else {
             Vec::new()
         };
+
+        // Matches the caller's profile can never execute are withheld
+        // before activation: advertising them is what sent restricted
+        // chats down dead ends.
+        let profile = self.profile_for_session(&session);
+        let withheld_native = native_matches.len();
+        native_matches.retain(|m| profile.allows(&m.name));
+        let withheld_native = withheld_native - native_matches.len();
+        let withheld_mcp = mcp_matches.len();
+        mcp_matches.retain(|entry| profile.allows(&entry.qualified_name));
+        let withheld = withheld_native + (withheld_mcp - mcp_matches.len());
 
         let native_names: Vec<String> = native_matches.iter().map(|m| m.name.clone()).collect();
         let mcp_names: Vec<String> = mcp_matches
@@ -271,11 +344,19 @@ impl Tool for ToolSearchTool {
         };
 
         if native_matches.is_empty() && mcp_matches.is_empty() {
-            return Ok(ToolResult::new(format!(
-                "No tools matched \"{}\". Try different wording, a broader single keyword, or \
-                 select:<name> to load a tool you already know the name of.",
-                query
-            )));
+            return Ok(ToolResult::new(if withheld > 0 {
+                format!(
+                    "No tools matching \"{}\" are available in this chat. \
+                     Use only the tools from your tool list.",
+                    query
+                )
+            } else {
+                format!(
+                    "No tools matched \"{}\". Try different wording, a broader single keyword, or \
+                     select:<name> to load a tool you already know the name of.",
+                    query
+                )
+            }));
         }
 
         let mut payload: Vec<Value> = Vec::with_capacity(native_matches.len() + mcp_matches.len());
@@ -292,7 +373,7 @@ impl Tool for ToolSearchTool {
             payload.push(entry.to_search_result());
         }
 
-        let activation_note = if newly_activated.is_empty() {
+        let mut activation_note = if newly_activated.is_empty() {
             "All matching tools were already loaded.".to_string()
         } else {
             format!(
@@ -300,6 +381,12 @@ impl Tool for ToolSearchTool {
                 newly_activated.len()
             )
         };
+        if withheld > 0 {
+            activation_note.push_str(&format!(
+                " {} matched tool(s) are not available in this chat and were skipped.",
+                withheld
+            ));
+        }
 
         let count = payload.len();
         self.finish(payload, activation_note, count)

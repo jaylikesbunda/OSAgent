@@ -251,14 +251,19 @@ OSA.positionModelDropdown = function() {
     const margin = 8;
     const gap = 6;
     const triggerRect = trigger.getBoundingClientRect();
-    const width = Math.min(380, window.innerWidth - margin * 2);
-    const availableBelow = window.innerHeight - triggerRect.bottom - gap - margin;
-    const availableAbove = triggerRect.top - gap - margin;
+    const viewport = window.matchMedia?.('(max-width: 900px)').matches ? window.visualViewport : null;
+    const viewportLeft = viewport?.offsetLeft || 0;
+    const viewportTop = viewport?.offsetTop || 0;
+    const viewportWidth = viewport?.width || window.innerWidth;
+    const viewportBottom = viewportTop + (viewport?.height || window.innerHeight);
+    const width = Math.min(380, viewportWidth - margin * 2);
+    const availableBelow = viewportBottom - triggerRect.bottom - gap - margin;
+    const availableAbove = triggerRect.top - viewportTop - gap - margin;
     const openBelow = availableBelow >= 240 || availableBelow >= availableAbove;
-    const availableHeight = Math.max(180, openBelow ? availableBelow : availableAbove);
+    const availableHeight = Math.max(80, openBelow ? availableBelow : availableAbove);
     const left = Math.min(
-        Math.max(margin, triggerRect.right - width),
-        Math.max(margin, window.innerWidth - width - margin)
+        Math.max(viewportLeft + margin, triggerRect.right - width),
+        Math.max(viewportLeft + margin, viewportLeft + viewportWidth - width - margin)
     );
 
     dropdown.style.width = width + 'px';
@@ -287,6 +292,7 @@ OSA.openModelDropdown = function(initialQuery) {
     OSA.positionModelDropdown();
     window.addEventListener('resize', OSA.positionModelDropdown);
     window.addEventListener('scroll', OSA.positionModelDropdown, true);
+    window.visualViewport?.addEventListener('resize', OSA.positionModelDropdown);
 
     const searchInput = document.getElementById('model-search');
     if (searchInput) {
@@ -318,6 +324,7 @@ OSA.closeModelDropdown = function(restoreFocus = true) {
     if (trigger) trigger.setAttribute('aria-expanded', 'false');
     window.removeEventListener('resize', OSA.positionModelDropdown);
     window.removeEventListener('scroll', OSA.positionModelDropdown, true);
+    window.visualViewport?.removeEventListener('resize', OSA.positionModelDropdown);
     if (restoreFocus && trigger) trigger.focus();
 };
 

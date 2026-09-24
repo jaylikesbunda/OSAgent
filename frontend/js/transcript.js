@@ -1043,6 +1043,39 @@ OSA.unitHasLiveStream = function(unit) {
     });
 };
 
+OSA.pauseTranscriptAutoScroll = function(view) {
+    if (!view) return;
+    view.autoScrollPaused = true;
+    view.userPinnedToBottom = false;
+    view.forceStickBottom = false;
+};
+
+OSA.updateTranscriptScrollState = function(view, messagesDiv) {
+    if (!view || !messagesDiv) return;
+    const scrollTop = messagesDiv.scrollTop;
+    const previousScrollTop = Number.isFinite(view.lastScrollTop) ? view.lastScrollTop : scrollTop;
+    const distance = Math.max(0, messagesDiv.scrollHeight - scrollTop - messagesDiv.clientHeight);
+    const scrolledUp = scrollTop < previousScrollTop - 1;
+    view.lastScrollTop = scrollTop;
+
+    if (scrolledUp) OSA.pauseTranscriptAutoScroll(view);
+
+    // Once the user scrolls upward, keep streaming renders detached from the
+    // tail until they explicitly return all the way to the bottom.
+    if (view.autoScrollPaused) {
+        if (!scrolledUp && distance <= 2) {
+            view.autoScrollPaused = false;
+            view.userPinnedToBottom = true;
+        } else {
+            view.userPinnedToBottom = false;
+        }
+        return;
+    }
+
+    view.userPinnedToBottom = distance < 120;
+    if (distance >= 120) view.forceStickBottom = false;
+};
+
 OSA.ensureMessageLayers = function() {
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return null;
@@ -1086,15 +1119,14 @@ OSA.ensureMessageLayers = function() {
     view.bottomSentinel = bottomSentinel;
     view.bottomSpacer = bottomSpacer;
     view.floatingRoot = floatingRoot;
+    view.lastScrollTop = messagesDiv.scrollTop;
 
     if (!view.scrollHandlerAttached) {
         messagesDiv.addEventListener('scroll', function() {
-            const distance = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight;
-            view.userPinnedToBottom = distance < 120;
-            // A real scroll-up by the user cancels any forced stick from an
-            // open/send. Programmatic instant sticks land within 120px, so
-            // they never trip this.
-            if (distance >= 120) view.forceStickBottom = false;
+            OSA.updateTranscriptScrollState(view, messagesDiv);
+        }, { passive: true });
+        messagesDiv.addEventListener('wheel', function(event) {
+            if (event.deltaY < 0) OSA.pauseTranscriptAutoScroll(view);
         }, { passive: true });
         view.scrollHandlerAttached = true;
     }
@@ -1115,11 +1147,8 @@ OSA.ensureMessageLayers = function() {
             if (view.isRendering || view.shiftInProgress) return;
             if (!view.units || view.units.length <= view.maxWindowSize) return;
             if ((Date.now() - view.lastShiftAt) < 80) return;
-            entries.forEach(function(entry) {
-                if (entry.target === view.bottomSentinel) {
-                    view.userPinnedToBottom = entry.isIntersecting;
-                }
-            });
+            // Window shifting uses the expanded observer margin. Pinning is
+            // governed by actual scroll position and user intent above.
             if (entries.some(function(entry) { return entry.isIntersecting; })) {
                 OSA.shiftTranscriptWindow(1);
             }
@@ -1224,6 +1253,8 @@ OSA.scrollMessagesToBottom = function() {
     const prev = messagesDiv.style.scrollBehavior;
     messagesDiv.style.scrollBehavior = 'auto';
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    const view = OSA.getTranscriptView && OSA.getTranscriptView();
+    if (view) view.lastScrollTop = messagesDiv.scrollTop;
     void messagesDiv.offsetHeight;
     messagesDiv.style.scrollBehavior = prev;
 };
@@ -1353,6 +1384,7 @@ OSA.renderTranscript = function(options = {}) {
             if (nextAnchor) {
                 const nextTop = nextAnchor.getBoundingClientRect().top;
                 messagesDiv.scrollTop += (nextTop - anchorTop);
+                view.lastScrollTop = messagesDiv.scrollTop;
             }
         }
 

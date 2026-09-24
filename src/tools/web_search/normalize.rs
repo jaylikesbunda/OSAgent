@@ -37,7 +37,15 @@ pub fn decode_duckduckgo_redirect(raw: &str) -> String {
         return String::new();
     }
 
-    if let Ok(url) = Url::parse(trimmed) {
+    let absolute = if trimmed.starts_with("//") {
+        format!("https:{trimmed}")
+    } else if trimmed.starts_with("/l/") {
+        format!("https://duckduckgo.com{trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+
+    if let Ok(url) = Url::parse(&absolute) {
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         if host.contains("duckduckgo.com") || host.contains("duck.co") {
             for (key, value) in url.query_pairs() {
@@ -48,7 +56,7 @@ pub fn decode_duckduckgo_redirect(raw: &str) -> String {
         }
     }
 
-    trimmed.to_string()
+    absolute
 }
 
 fn should_keep_query_param(key: &str) -> bool {
@@ -117,6 +125,16 @@ mod tests {
             "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs%3Futm_source%3Dddg",
         );
         assert_eq!(decoded, "https://example.com/docs?utm_source=ddg");
+        assert_eq!(
+            decode_duckduckgo_redirect(
+                "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide"
+            ),
+            "https://example.com/guide"
+        );
+        assert_eq!(
+            decode_duckduckgo_redirect("/l/?uddg=https%3A%2F%2Fexample.com%2Fguide"),
+            "https://example.com/guide"
+        );
     }
 
     #[test]

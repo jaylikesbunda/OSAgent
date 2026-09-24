@@ -169,6 +169,27 @@ pub struct OpenAICompatibleProvider {
 }
 
 impl OpenAICompatibleProvider {
+    fn apply_conversation_headers(
+        mut request: reqwest::RequestBuilder,
+        config: &ProviderConfig,
+        session_id: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let is_opencode_go = config.provider_type.eq_ignore_ascii_case("opencode-go")
+            || config.base_url.contains("opencode.ai/zen/go");
+        if !is_opencode_go {
+            return request;
+        }
+
+        request = request.header(
+            reqwest::header::USER_AGENT,
+            concat!("osagent/", env!("CARGO_PKG_VERSION")),
+        );
+        if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
+            request = request.header("x-opencode-session", session_id);
+        }
+        request
+    }
+
     pub fn new(config: ProviderConfig) -> Result<Self> {
         Self::with_catalog(config, None)
     }
@@ -1094,6 +1115,7 @@ impl OpenAICompatibleProvider {
         request_auth: &ResolvedRequestAuth,
         request_body: &serde_json::Value,
         config: &ProviderConfig,
+        session_id: Option<&str>,
     ) -> Result<ProviderResponse> {
         let mut req = self
             .client
@@ -1120,6 +1142,7 @@ impl OpenAICompatibleProvider {
         for (key, value) in &request_auth.extra_headers {
             req = req.header(key, value);
         }
+        req = Self::apply_conversation_headers(req, config, session_id);
 
         let response = req
             .send()
@@ -2068,6 +2091,7 @@ impl OpenAICompatibleProvider {
         for (key, value) in &request_auth.extra_headers {
             req = req.header(key, value);
         }
+        req = Self::apply_conversation_headers(req, &config, session_id);
 
         let event_source = req
             .eventsource()
@@ -2277,7 +2301,7 @@ impl OpenAICompatibleProvider {
             request_body["stream"] = serde_json::json!(true);
             request_body["stream_options"] = serde_json::json!({ "include_usage": true });
             let parsed = self
-                .send_responses_request(&request_auth, &request_body, &config)
+                .send_responses_request(&request_auth, &request_body, &config, session_id)
                 .await?;
 
             info!(
@@ -2335,6 +2359,7 @@ impl OpenAICompatibleProvider {
             for (key, value) in &request_auth.extra_headers {
                 req = req.header(key, value);
             }
+            req = Self::apply_conversation_headers(req, &config, session_id);
 
             req.json(&request_body).send().await.map_err(|e| {
                 error!("HTTP request failed: {}", e);
@@ -2540,6 +2565,37 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(provider.resolved_config().api_key, "only");
         }
+    }
+
+    #[test]
+    fn opencode_go_requests_include_stable_session_and_client_headers() {
+        let config = ProviderConfig {
+            provider_type: "opencode-go".to_string(),
+            base_url: "https://opencode.ai/zen/go/v1".to_string(),
+            ..ProviderConfig::default()
+        };
+        let request = OpenAICompatibleProvider::apply_conversation_headers(
+            reqwest::Client::new().post("https://opencode.ai/zen/go/v1/chat/completions"),
+            &config,
+            Some("session-123"),
+        )
+        .build()
+        .expect("request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("x-opencode-session")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-123")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some(concat!("osagent/", env!("CARGO_PKG_VERSION")))
+        );
     }
 
     #[test]

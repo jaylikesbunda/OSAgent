@@ -51,6 +51,54 @@ test.beforeEach(() => {
     OSA.getTranscriptView = () => OSA.transcriptView;
 });
 
+test('scrolling upward pauses transcript auto-scroll even near the bottom', () => {
+    const view = {
+        lastScrollTop: 1000,
+        userPinnedToBottom: true,
+        autoScrollPaused: false,
+        forceStickBottom: true,
+    };
+    const messages = { scrollTop: 990, scrollHeight: 1100, clientHeight: 100 };
+
+    OSA.updateTranscriptScrollState(view, messages);
+
+    assert.equal(view.autoScrollPaused, true);
+    assert.equal(view.userPinnedToBottom, false);
+    assert.equal(view.forceStickBottom, false);
+});
+
+test('stream growth does not resume auto-scroll after the user scrolls up', () => {
+    const view = {
+        lastScrollTop: 1000,
+        userPinnedToBottom: true,
+        autoScrollPaused: false,
+        forceStickBottom: true,
+    };
+    const messages = { scrollTop: 990, scrollHeight: 1100, clientHeight: 100 };
+
+    OSA.updateTranscriptScrollState(view, messages);
+    messages.scrollHeight = 1200;
+    OSA.updateTranscriptScrollState(view, messages);
+
+    assert.equal(view.autoScrollPaused, true);
+    assert.equal(view.userPinnedToBottom, false);
+});
+
+test('auto-scroll resumes after the user returns to the bottom', () => {
+    const view = {
+        lastScrollTop: 990,
+        userPinnedToBottom: false,
+        autoScrollPaused: true,
+        forceStickBottom: false,
+    };
+    const messages = { scrollTop: 1100, scrollHeight: 1200, clientHeight: 100 };
+
+    OSA.updateTranscriptScrollState(view, messages);
+
+    assert.equal(view.autoScrollPaused, false);
+    assert.equal(view.userPinnedToBottom, true);
+});
+
 test('incremental markdown intentionally withholds incomplete lines until newline or flush', () => {
     const el = document.createElement('div');
     document.body.appendChild(el);

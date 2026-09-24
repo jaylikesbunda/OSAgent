@@ -1,5 +1,79 @@
 window.OSA = window.OSA || {};
 
+// Mobile browser chrome and the on-screen keyboard change the visible height
+// without always changing CSS viewport units (notably in Safari).
+OSA.syncMobileViewportHeight = function() {
+    if (!window.matchMedia('(max-width: 900px)').matches) {
+        document.documentElement.style.removeProperty('--app-viewport-height');
+        return;
+    }
+    const viewport = window.visualViewport;
+    const height = viewport ? viewport.height : window.innerHeight;
+    if (height > 0) {
+        document.documentElement.style.setProperty('--app-viewport-height', `${height}px`);
+    }
+};
+OSA.syncMobileViewportHeight();
+window.addEventListener('resize', OSA.syncMobileViewportHeight);
+window.visualViewport?.addEventListener('resize', OSA.syncMobileViewportHeight);
+
+OSA.closeMobileComposerMenu = function() {
+    document.getElementById('mobile-composer-menu')?.classList.add('hidden');
+    document.getElementById('mobile-actions-btn')?.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', OSA._mobileComposerOutsideClick);
+    document.removeEventListener('keydown', OSA._mobileComposerEscape, true);
+};
+
+OSA._mobileComposerOutsideClick = function(event) {
+    if (!event.target.closest?.('#mobile-composer-menu, #mobile-actions-btn')) {
+        OSA.closeMobileComposerMenu();
+    }
+};
+
+OSA._mobileComposerEscape = function(event) {
+    if (event.key !== 'Escape') return;
+    event.stopPropagation();
+    OSA.closeMobileComposerMenu();
+    document.getElementById('mobile-actions-btn')?.focus();
+};
+
+OSA.toggleMobileComposerMenu = function(event) {
+    event?.stopPropagation();
+    const menu = document.getElementById('mobile-composer-menu');
+    const button = document.getElementById('mobile-actions-btn');
+    if (!menu || !button) return;
+    if (!menu.classList.contains('hidden')) {
+        OSA.closeMobileComposerMenu();
+        return;
+    }
+    const ttsAction = document.getElementById('mobile-tts-action');
+    const speaking = !!OSA.getTtsEnabled?.();
+    if (ttsAction) {
+        ttsAction.textContent = speaking ? 'Stop reading replies' : 'Read replies aloud';
+        ttsAction.setAttribute('aria-pressed', String(speaking));
+    }
+    const followupAction = document.getElementById('mobile-followup-action');
+    const followupToggle = document.getElementById('followup-toggle');
+    if (followupAction && followupToggle) {
+        followupAction.classList.toggle('hidden', followupToggle.classList.contains('hidden'));
+        followupAction.textContent = `Follow-ups: ${OSA.getFollowUpBehavior?.() === 'steer' ? 'Steer' : 'Queue'}`;
+    }
+    menu.classList.remove('hidden');
+    button.setAttribute('aria-expanded', 'true');
+    document.addEventListener('click', OSA._mobileComposerOutsideClick);
+    document.addEventListener('keydown', OSA._mobileComposerEscape, true);
+};
+
+OSA.mobileComposerAction = function(action, event) {
+    event?.stopPropagation();
+    OSA.closeMobileComposerMenu();
+    if (action === 'attach') document.getElementById('image-upload')?.click();
+    else if (action === 'context') OSA.toggleContextMenu();
+    else if (action === 'voice') OSA.openVoiceMode();
+    else if (action === 'tts') OSA.toggleTTS();
+    else if (action === 'followup') OSA.toggleFollowUpBehavior();
+};
+
 OSA._debounceTimers = {};
 OSA.debounce = function(key, fn, delay) {
     if (OSA._debounceTimers[key]) clearTimeout(OSA._debounceTimers[key]);
@@ -786,6 +860,8 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
     try {
         const currentSession = OSA.getCurrentSession();
         if (!currentSession || currentSession.id !== sessionId) return;
+        const entry = OSA.getSessionEntry(sessionId);
+        const sequenceAtRequest = entry.chain.eventSeqNumber;
 
         const res = await fetch(`/api/sessions/${sessionId}`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` }
@@ -795,6 +871,7 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
         const session = await res.json();
         if (OSA._runningSnapshotRequestId !== requestId) return;
         if (!OSA.getCurrentSession() || OSA.getCurrentSession().id !== sessionId) return;
+        OSA.reconcileSessionSnapshot(entry, session, sequenceAtRequest);
 
         const hasLiveAgentActivity = OSA.tmodelHasLiveAgentActivity();
         if (session.task_status !== 'running') {
@@ -865,6 +942,11 @@ OSA.selectSession = async function(sessionId) {
     OSA.setSessionSelectionAbortController?.(selectionController);
     const { signal } = selectionController;
     OSA.markSessionListSelection(sessionId);
+    const selectionEntry = OSA.getSessionEntry(sessionId);
+    const sequenceAtSnapshotRequest = selectionEntry && selectionEntry.chain
+        && Number.isFinite(selectionEntry.chain.eventSeqNumber)
+        ? selectionEntry.chain.eventSeqNumber
+        : 0;
 
     try {
         await new Promise((resolve, reject) => {
@@ -880,7 +962,7 @@ OSA.selectSession = async function(sessionId) {
             signal,
         });
         if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return;
-        const session = await res.json();
+        let session = await res.json();
         if (requestId && !OSA.isSessionSelectionCurrent(requestId)) return;
         OSA.perfLog?.('selectSession:session', {
             sessionId,
@@ -917,33 +999,14 @@ OSA.selectSession = async function(sessionId) {
             signal,
         });
 
+        const entry = OSA.getSessionEntry(sessionId);
+        // Reconcile before setCurrentSession replaces entry.session. Otherwise
+        // a slightly stale GET discards text streamed while this task was in
+        // the background and can leave a partial bubble marked as typing.
+        OSA.reconcileSessionSnapshot(entry, session, sequenceAtSnapshotRequest);
         OSA.setCurrentSession(session);
         OSA.markSessionSeen(session.id);
         OSA.markSessionSeen(sessionId);
-        const entry = OSA.getSessionEntry(sessionId);
-        // Merge the fresh snapshot over live entry state instead of wiping it:
-        // background events may have arrived after the GET was issued. Server
-        // wins for persisted messages, except local-only optimistic user
-        // messages (client_message_id) not yet echoed back.
-        (function mergeSessionSnapshot() {
-            const freshMessages = Array.isArray(session.messages) ? session.messages : [];
-            const freshIds = new Set();
-            freshMessages.forEach(function(m) {
-                const cid = m && m.metadata && m.metadata.client_message_id;
-                if (cid) freshIds.add(cid);
-            });
-            const priorMessages = entry.session && Array.isArray(entry.session.messages)
-                ? entry.session.messages : [];
-            const localOnly = priorMessages.filter(function(m) {
-                const cid = m && m.metadata && m.metadata.client_message_id;
-                return m && m.role === 'user' && cid && !freshIds.has(cid);
-            });
-            if (localOnly.length) session.messages = freshMessages.concat(localOnly);
-            entry.session = session;
-            // A live turn that started after this snapshot was taken must not
-            // be downgraded to idle.
-            if (entry.processing) session.task_status = 'running';
-        })();
         OSA.restoreContextState(session.id, session.context_state || null);
 
         OSA.getActiveTools().clear();
@@ -1017,10 +1080,44 @@ OSA.selectSession = async function(sessionId) {
         if (!isCurrentSelection()) return;
         const subagentsData = (subagentsRes && subagentsRes.ok) ? await subagentsRes.json() : { subagents: [], has_running: false };
         if (!isCurrentSelection()) return;
-        const historyData = (historyRes && historyRes.ok) ? await historyRes.json() : [];
+        let historyData = (historyRes && historyRes.ok) ? await historyRes.json() : [];
         if (!isCurrentSelection()) return;
         const queueItems = (queueRes && queueRes.ok) ? await queueRes.json() : [];
         if (!isCurrentSelection()) return;
+
+        // The history read can finish after the first session GET. Refresh a
+        // running snapshot before using history's sequence as the replay
+        // cursor, or a completed reply in that gap will be skipped forever.
+        if (session.task_status === 'running' || entry.processing) {
+            const sequenceBeforeRefresh = entry.chain.eventSeqNumber;
+            const refreshedRes = await fetch(`/api/sessions/${sessionId}`, {
+                headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+                signal,
+            }).catch(() => null);
+            if (!isCurrentSelection()) return;
+            if (refreshedRes && refreshedRes.ok) {
+                const refreshedSession = await refreshedRes.json();
+                if (!isCurrentSelection()) return;
+                if (refreshedSession.task_status !== 'running') {
+                    // A final snapshot can contain chunks newer than the
+                    // first history read. Advance the cursor with a history
+                    // read taken after that snapshot to avoid replaying them.
+                    const refreshedHistoryRes = await fetch(`/api/sessions/${sessionId}/history`, {
+                        headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+                        signal,
+                    }).catch(() => null);
+                    if (!isCurrentSelection()) return;
+                    if (refreshedHistoryRes && refreshedHistoryRes.ok) {
+                        historyData = await refreshedHistoryRes.json();
+                        if (!isCurrentSelection()) return;
+                        OSA.reconcileSessionSnapshot(entry, refreshedSession, sequenceBeforeRefresh);
+                        session = refreshedSession;
+                        OSA.setCurrentSession(session);
+                        OSA.restoreContextState(session.id, session.context_state || null);
+                    }
+                }
+            }
+        }
 
         const latestEventSequence = Array.isArray(historyData) && historyData.length > 0
             ? Number(historyData[historyData.length - 1]?.sequence || 0)
@@ -1109,7 +1206,15 @@ OSA.selectSession = async function(sessionId) {
         OSA.setSessionQueue(mergedQueue);
         OSA.setSessionToolEvents(mergedTools);
         OSA.setSessionSubagentTasks(mergedSubs);
-        OSA.rebuildTranscriptFromSession(session, mergedTools, mergedSubs, { reason: 'session-artifacts' });
+        if (session.task_status !== 'running' && !entry.processing) {
+            OSA.hideThinkingIndicator();
+            OSA.stopToolSync();
+            OSA.setProcessing(false);
+        }
+        OSA.rebuildTranscriptFromSession(session, mergedTools, mergedSubs, {
+            reason: 'session-artifacts',
+            adoptStreaming: session.task_status === 'running' || entry.processing,
+        });
         OSA.perfLog?.('selectSession:artifacts', {
             sessionId,
             requestId,
@@ -1126,7 +1231,7 @@ OSA.selectSession = async function(sessionId) {
         // the snapshot was loading. Entry flags are authoritative over the
         // possibly-stale fetch-time task_status.
         const liveRunning = entry.processing === true || session.task_status === 'running';
-        const isDirectlyRunning = (sessionIsRunning || liveRunning) && !subagentsRunning;
+        const isDirectlyRunning = liveRunning && !subagentsRunning;
 
         OSA.connectEventSource(sessionId);
 
@@ -1236,6 +1341,7 @@ OSA.setSessionSidebarRunning = function(sessionId, running) {
         icon.classList.remove('session-letter');
         icon.removeAttribute('style');
         icon.innerHTML = OSA.sessionRunningOrbitHtml();
+        OSA.renderSessionUnreadIndicator(sessionId);
         return;
     }
     icon.classList.remove('session-icon-running');
@@ -1250,6 +1356,7 @@ OSA.setSessionSidebarRunning = function(sessionId, running) {
         icon.setAttribute('style', `--session-hue:${OSA.sessionHueFor(sessionId)}`);
         icon.textContent = OSA.sessionIconLetterFor(workspaceLabel, name);
     }
+    OSA.renderSessionUnreadIndicator(sessionId);
 };
 
 OSA.clearSessions = async function() {
@@ -1278,7 +1385,7 @@ OSA.clearSessions = async function() {
             ws.close();
             OSA.setWebSocket(null);
         }
-        OSA.renderEmptyTranscript('Click "New chat" to begin');
+        OSA.renderEmptyTranscript('Start a new chat to begin');
         OSA.setHeaderBaseTitle('Select a session');
         document.getElementById('header-title').textContent = 'Select a session';
         OSA.setHeaderTitleRenameable(false);
@@ -2252,7 +2359,7 @@ OSA.deleteSession = async function(sessionId) {
                 ws.close();
                 OSA.setWebSocket(null);
             }
-            OSA.renderEmptyTranscript('Click "New chat" to begin');
+            OSA.renderEmptyTranscript('Start a new chat to begin');
         }
         OSA.loadSessions();
     } catch (error) {

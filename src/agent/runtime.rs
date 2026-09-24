@@ -1377,7 +1377,6 @@ impl AgentRuntime {
         drop(agent_settings);
         let mut response_truncated = false;
         let mut max_iterations_reached = false;
-        let mut response_complete_emitted = false;
         let mut tool_success_count = 0usize;
         let mut tool_failure_count = 0usize;
         let mut last_iteration_only_meta_tools = false;
@@ -2763,11 +2762,41 @@ impl AgentRuntime {
 
                         // Tool schemas are not a sufficient security boundary:
                         // providers can emit calls for tools they were not shown.
+                        // Deny them with a recoverable tool error instead of
+                        // killing the whole turn: a dead turn on a public
+                        // channel looks like the bot dying, and the model
+                        // just retries the same call next turn.
                         if !tool_profile.allows(&tool_call.name) {
-                            return Err(OSAgentError::ToolExecution(format!(
-                                "Tool '{}' is not allowed by the {:?} profile",
-                                tool_call.name, tool_profile
-                            )));
+                            let denial = format!(
+                                "Tool '{}' is not available in this chat. Use only the tools from your tool list.",
+                                tool_call.name
+                            );
+                            warn!(
+                                "Profile {:?} denied tool '{}' for session {}",
+                                tool_profile, tool_call.name, session_id
+                            );
+                            self.event_bus.emit(AgentEvent::ToolComplete {
+                                session_id: session_id.to_string(),
+                                sequence: 0,
+                                tool_call_id: tool_call.id.clone(),
+                                tool_name: tool_call.name.clone(),
+                                success: false,
+                                output: denial.clone(),
+                                title: None,
+                                metadata: None,
+                                duration_ms: 0,
+                                timestamp: SystemTime::now(),
+                            });
+                            session.messages.push(Message::tool_result_with_metadata(
+                                tool_call.id.clone(),
+                                format!("Tool: {}\nError: {}", tool_call.name, denial),
+                                serde_json::json!({
+                                    "tool_name": tool_call.name,
+                                    "success": false,
+                                    "error_message": denial,
+                                }),
+                            ));
+                            continue;
                         }
 
                         let snapshot_id =
@@ -3163,26 +3192,6 @@ impl AgentRuntime {
                     finish_reason,
                     timestamp: SystemTime::now(),
                 });
-                self.event_bus.emit(AgentEvent::ResponseComplete {
-                    session_id: session_id.to_string(),
-                    sequence: 0,
-                    timestamp: SystemTime::now(),
-                    usage: last_request_usage.clone(),
-                    turn_usage: if total_tokens > 0 {
-                        Some(EventTokenUsage {
-                            input: total_input_tokens,
-                            output: total_output_tokens,
-                            total: total_tokens,
-                            cached_read: cache_read_reported.then_some(total_cached_read_tokens),
-                            cached_write: cache_write_reported.then_some(total_cached_write_tokens),
-                            reasoning: None,
-                            cache_reason: Self::aggregate_cache_reason(&cache_reasons),
-                        })
-                    } else {
-                        None
-                    },
-                });
-                response_complete_emitted = true;
                 break;
             }
         }
@@ -3204,17 +3213,47 @@ impl AgentRuntime {
                 });
         }
 
+        // A reopened client may read the session immediately after receiving
+        // ResponseComplete. Persist the full reply and idle status first so
+        // that snapshot can never pair a complete event with a running turn.
+        session.task_status = "active".to_string();
         info!("process_message: Loop complete, finalizing session");
         self.session_manager.update_session(&session).await?;
+        self.event_bus.emit(AgentEvent::ResponseComplete {
+            session_id: session_id.to_string(),
+            sequence: 0,
+            timestamp: SystemTime::now(),
+            usage: last_request_usage,
+            turn_usage: if total_tokens > 0 {
+                Some(EventTokenUsage {
+                    input: total_input_tokens,
+                    output: total_output_tokens,
+                    total: total_tokens,
+                    cached_read: cache_read_reported.then_some(total_cached_read_tokens),
+                    cached_write: cache_write_reported.then_some(total_cached_write_tokens),
+                    reasoning: None,
+                    cache_reason: Self::aggregate_cache_reason(&cache_reasons),
+                })
+            } else {
+                None
+            },
+        });
 
         if runtime_config.agent.checkpoint_enabled {
+            // Community Discord turns have a read-only tool profile. Running
+            // `git add -A` over their workspace after every reply can hold the
+            // Discord response behind a large repository scan even though no
+            // files could have changed. Keep the session snapshot checkpoint,
+            // but skip the workspace Git snapshot for these turns.
+            let checkpoint_workspace = (session.metadata["source"] != "discord-community")
+                .then(|| active_workspace.resolved_path());
             if let Err(error) = self
                 .checkpoint_manager
                 .create_checkpoint(
                     &session,
                     Some("assistant_turn_complete".to_string()),
                     None,
-                    Some(active_workspace.resolved_path()),
+                    checkpoint_workspace,
                 )
                 .await
             {
@@ -3330,28 +3369,6 @@ impl AgentRuntime {
                 result.len(),
                 session_id
             );
-        }
-
-        if !response_complete_emitted {
-            self.event_bus.emit(AgentEvent::ResponseComplete {
-                session_id: session_id.to_string(),
-                sequence: 0,
-                timestamp: SystemTime::now(),
-                usage: last_request_usage,
-                turn_usage: if total_tokens > 0 {
-                    Some(EventTokenUsage {
-                        input: total_input_tokens,
-                        output: total_output_tokens,
-                        total: total_tokens,
-                        cached_read: cache_read_reported.then_some(total_cached_read_tokens),
-                        cached_write: cache_write_reported.then_some(total_cached_write_tokens),
-                        reasoning: None,
-                        cache_reason: Self::aggregate_cache_reason(&cache_reasons),
-                    })
-                } else {
-                    None
-                },
-            });
         }
 
         if let Ok(elapsed) = active_run.started_at.elapsed() {

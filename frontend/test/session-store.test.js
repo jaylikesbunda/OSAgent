@@ -102,6 +102,90 @@ test('background turn completion clears processing without touching the viewed s
     assert.equal(OSA.getCurrentSession().id, 'session-a');
 });
 
+test('session snapshot reconciliation preserves a newer streamed assistant tail', () => {
+    setup();
+    const entry = OSA.getSessionEntry('session-b');
+    entry.session = {
+        id: 'session-b',
+        task_status: 'active',
+        messages: [
+            { role: 'user', content: 'Explain it', metadata: { client_message_id: 'user-1' } },
+            { role: 'assistant', content: 'The complete answer.', thinking: null, metadata: {} },
+        ],
+    };
+    entry.processing = false;
+    entry.messagesDirty = true;
+
+    const snapshot = {
+        id: 'session-b',
+        task_status: 'active',
+        messages: [
+            { role: 'user', content: 'Explain it', metadata: { client_message_id: 'user-1' } },
+            { role: 'assistant', content: 'The complete', thinking: null, metadata: {} },
+        ],
+    };
+
+    OSA.reconcileSessionSnapshot(entry, snapshot, entry.chain.eventSeqNumber);
+
+    assert.equal(snapshot.messages[1].content, 'The complete answer.');
+    assert.equal(snapshot.task_status, 'active');
+});
+
+test('authoritative snapshot does not resurrect an old truncated tail', () => {
+    setup();
+    const entry = OSA.getSessionEntry('session-b');
+    entry.session = {
+        id: 'session-b',
+        task_status: 'active',
+        messages: [
+            { role: 'user', content: 'Keep this', metadata: {} },
+            { role: 'assistant', content: 'Removed by restore', metadata: {} },
+        ],
+    };
+    entry.messagesDirty = false;
+
+    const snapshot = {
+        id: 'session-b',
+        task_status: 'active',
+        messages: [{ role: 'user', content: 'Keep this', metadata: {} }],
+    };
+
+    OSA.reconcileSessionSnapshot(entry, snapshot, entry.chain.eventSeqNumber);
+
+    assert.equal(snapshot.messages.length, 1);
+});
+
+test('idle session snapshot clears stale processing when no newer event arrived', () => {
+    setup();
+    const entry = OSA.getSessionEntry('session-b');
+    entry.session = makeSession('session-b');
+    entry.processing = true;
+    entry.stopping = true;
+    entry.chain.eventSeqNumber = 8;
+
+    const snapshot = makeSession('session-b');
+    OSA.reconcileSessionSnapshot(entry, snapshot, 8);
+
+    assert.equal(entry.processing, false);
+    assert.equal(entry.stopping, false);
+    assert.equal(snapshot.task_status, 'active');
+});
+
+test('events received during a session fetch keep their newer running status', () => {
+    setup();
+    const entry = OSA.getSessionEntry('session-b');
+    entry.session = makeSession('session-b');
+    entry.session.task_status = 'running';
+    entry.processing = true;
+    entry.chain.eventSeqNumber = 9;
+
+    const staleSnapshot = makeSession('session-b');
+    OSA.reconcileSessionSnapshot(entry, staleSnapshot, 8);
+
+    assert.equal(staleSnapshot.task_status, 'running');
+    assert.equal(entry.processing, true);
+});
+
 test('event sequence dedup is per-session', () => {
     setup();
     emit({ session_id: 'session-a', sequence: 1, type: 'thinking' });
@@ -125,6 +209,40 @@ test('background completion flags the session unread; viewing clears it', () => 
     OSA.markSessionSeen('session-b');
     delete global.document;
     assert.equal(OSA.isSessionUnread('session-b'), false);
+});
+
+test('background completion paints the unread dot before refreshing the sidebar', async () => {
+    setup();
+    OSA.unreadSessions = {};
+    const { Window } = await import('happy-dom');
+    const dom = new Window();
+    global.document = dom.document;
+    dom.document.body.innerHTML = '<div class="session-item" data-session-id="session-b"><div class="session-icon session-icon-running"></div></div>';
+    let unreadAtRefresh = false;
+    OSA.setSessionSidebarRunning = (sessionId, running) => {
+        const icon = dom.document.querySelector('.session-icon');
+        icon.textContent = running ? 'running' : 'B';
+        OSA.renderSessionUnreadIndicator(sessionId);
+    };
+    OSA.loadSessions = () => {
+        unreadAtRefresh = !!dom.document.querySelector('.session-unread-dot');
+    };
+
+    try {
+        emit({ session_id: 'session-b', sequence: 1, type: 'response_complete', usage: null });
+        assert.equal(unreadAtRefresh, true);
+        assert.equal(dom.document.querySelectorAll('.session-unread-dot').length, 1);
+        assert.equal(dom.document.querySelector('.session-item').classList.contains('has-unread'), true);
+
+        OSA.setSessionSidebarRunning('session-b', false);
+        assert.equal(dom.document.querySelectorAll('.session-unread-dot').length, 1);
+
+        OSA.markSessionSeen('session-b');
+        assert.equal(dom.document.querySelector('.session-unread-dot'), null);
+    } finally {
+        delete global.document;
+        dom.close();
+    }
 });
 
 test('session letter avatar falls back to # only for blank names', () => {

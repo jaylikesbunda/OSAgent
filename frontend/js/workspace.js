@@ -84,11 +84,17 @@ OSA.positionMenuForTrigger = function(menuEl, triggerEl) {
     menuEl.style.bottom = bottom + 'px';
 };
 
+OSA.getContextMenuAnchor = function() {
+    return (window.matchMedia?.('(max-width: 640px)').matches
+        ? document.getElementById('mobile-actions-btn')
+        : document.getElementById('context-trigger')) || document.getElementById('context-trigger');
+};
+
 OSA._repositionOpenMenus = function() {
     const menu = document.getElementById('context-menu');
     const trigger = document.getElementById('context-trigger');
     if (menu && trigger && !menu.classList.contains('hidden')) {
-        OSA.positionMenuForTrigger(menu, trigger);
+        OSA.positionMenuForTrigger(menu, OSA.getContextMenuAnchor());
     }
 };
 
@@ -99,7 +105,7 @@ OSA.toggleContextMenu = function() {
     menu.classList.toggle('hidden');
     trigger.classList.toggle('open');
     if (!menu.classList.contains('hidden')) {
-        OSA.positionMenuForTrigger(menu, trigger);
+        OSA.positionMenuForTrigger(menu, OSA.getContextMenuAnchor());
         document.addEventListener('click', OSA._contextMenuOutsideClick);
     } else {
         document.removeEventListener('click', OSA._contextMenuOutsideClick);
@@ -124,7 +130,8 @@ OSA.closeContextMenu = function() {
 OSA._contextMenuOutsideClick = function(e) {
     const menu = document.getElementById('context-menu');
     const trigger = document.getElementById('context-trigger');
-    if (menu && !menu.contains(e.target) && trigger && !trigger.contains(e.target)) {
+    const anchor = OSA.getContextMenuAnchor();
+    if (menu && !menu.contains(e.target) && trigger && !trigger.contains(e.target) && !anchor?.contains(e.target)) {
         OSA.closeContextMenu();
     }
 };

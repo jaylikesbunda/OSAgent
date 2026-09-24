@@ -145,16 +145,14 @@ OSA.applyBackgroundSessionEvent = function(entry, sessionId, event, chain) {
             chain.lastAssistantDomId = null;
             entry.hasReceivedResponse = true;
             if (session) session.task_status = 'active';
-            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
-            touchSidebar(false);
             if ((entry.queue || []).length === 0) {
                 entry.processing = false;
                 entry.stopping = false;
             }
-            if (typeof OSA.maybeAutoNameSession === 'function') OSA.maybeAutoNameSession(sessionId);
-            // Finished while the user looks elsewhere: flag the row so the
-            // sidebar shows an unread dot until the session is opened.
+            touchSidebar(false);
             OSA.markSessionUnread(sessionId);
+            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
+            if (typeof OSA.maybeAutoNameSession === 'function') OSA.maybeAutoNameSession(sessionId);
             // Reconcile against the server queue: the local copy may still
             // list an item the server already dispatched.
             if (typeof OSA.refreshSessionQueue === 'function') {
@@ -196,10 +194,10 @@ OSA.applyBackgroundSessionEvent = function(entry, sessionId, event, chain) {
             chain.pendingToolCallIds = [];
             entry.stopping = false;
             if (session) session.task_status = 'active';
-            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
-            touchSidebar(false);
             if ((entry.queue || []).length === 0) entry.processing = false;
+            touchSidebar(false);
             OSA.markSessionUnread(sessionId);
+            if (typeof OSA.loadSessions === 'function') OSA.loadSessions();
             if (typeof OSA.refreshSessionQueue === 'function') {
                 OSA.refreshSessionQueue(sessionId).then(function(queue) {
                     const fresh = Array.isArray(queue) ? queue : [];

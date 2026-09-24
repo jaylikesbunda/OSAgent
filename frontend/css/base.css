@@ -7,6 +7,7 @@ body {
     background: var(--bg-primary);
     color: var(--text-primary);
     height: 100vh;
+    height: var(--app-viewport-height, 100dvh);
     display: flex;
     font-size: 14px;
     line-height: 1.5;

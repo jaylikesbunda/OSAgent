@@ -18,7 +18,7 @@ impl SearchBackend for DuckDuckGoHtmlBackend {
     }
 
     fn priority(&self) -> u8 {
-        50
+        10
     }
 
     fn min_interval(&self) -> std::time::Duration {
@@ -67,8 +67,10 @@ pub(crate) fn parse_html_results(
         .map_err(|e| BackendError::parse(format!("invalid result selector: {e:?}")))?;
     let link_selector = Selector::parse(".result__a, a.result__a")
         .map_err(|e| BackendError::parse(format!("invalid link selector: {e:?}")))?;
-    let snippet_selector = Selector::parse(".result__snippet, .result__body")
+    let snippet_selector = Selector::parse(".result__snippet")
         .map_err(|e| BackendError::parse(format!("invalid snippet selector: {e:?}")))?;
+    let body_selector = Selector::parse(".result__body")
+        .map_err(|e| BackendError::parse(format!("invalid body selector: {e:?}")))?;
 
     let mut results = Vec::new();
     for element in document.select(&result_selector) {
@@ -86,7 +88,9 @@ pub(crate) fn parse_html_results(
         let snippet = element
             .select(&snippet_selector)
             .next()
-            .map(|snippet| snippet.text().collect::<String>().trim().to_string())
+            .or_else(|| element.select(&body_selector).next())
+            .map(|snippet| snippet.text().collect::<Vec<_>>().join(" "))
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
 
         if title.is_empty() || url.is_empty() {
@@ -122,8 +126,10 @@ mod tests {
     fn parses_html_results() {
         let html = r#"
         <div class="result">
-          <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">Example Docs</a>
-          <a class="result__snippet">Read the docs</a>
+          <div class="result__body">
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">Example Docs</a>
+            <a class="result__snippet">Read the docs</a>
+          </div>
         </div>
         <div class="result">
           <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2Flearn">Rust Learn</a>

@@ -1,3 +1,17 @@
+v0.6.1 changes:
+
+Fixed:
+* Streaming replies no longer pull the transcript back to the bottom after the user intentionally scrolls up; auto-follow resumes when they return to the bottom or send another message
+* Reopening a session now preserves newer background-streamed response text and clears stale typing state instead of showing a truncated reply until the next message is sent
+* Final replies are saved with an idle session status before completion is broadcast, and reopening refreshes the snapshot before advancing the event cursor so a completed reply cannot remain stuck as typing
+* Background session completions now show an unread dot in the sidebar immediately and keep it through icon refreshes until the chat is opened
+* Discord turns using OpenCode Go now send the required stable `x-opencode-session` header and an OSAgent user agent, preventing the provider's 400 response from appearing as a generic Request Failed error
+* Code search now streams bounded ripgrep results and skips generated/dependency trees; grep and glob no longer repeat a full fallback scan after ripgrep times out
+* Web search now decodes DuckDuckGo's protocol-relative result links and extracts clean snippets, avoiding a silent fallback to weaker engines; it also drops unrelated results, ranks a small candidate pool, honors GitHub query intent and `site:` restrictions, and no longer substitutes unrelated site-specific API results when general engines fail
+* Community Discord replies no longer wait for an unnecessary workspace Git snapshot, and the status changes from Thinking to Wrapping up as soon as the model finishes
+* Mobile chat now fits the visible screen as browser chrome or the keyboard changes, with a scrolling transcript, safe-area spacing, a focused composer action menu, and a simplified chat header and drawer
+* Mobile user messages now render as a single bubble without the split-layout outer frame or extra right padding
+
 v0.6.0 changes:
 
 Added:

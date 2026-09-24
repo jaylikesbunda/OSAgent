@@ -164,6 +164,19 @@ async fn status_loop(
                         state.lock().await.compactions += 1;
                         dirty = true;
                     }
+                    Ok(AgentEvent::StepFinish { session_id: sid, finish_reason, .. }) => {
+                        if sid != session_id || finish_reason == "tool_calls_processed" { continue; }
+                        if let Some(status_id) = status_id {
+                            let embed = {
+                                let state = state.lock().await;
+                                status_embed(&state, started.elapsed(), true, community)
+                            };
+                            let _ = channel_id
+                                .edit_message(&http, status_id, EditMessage::new().embed(embed))
+                                .await;
+                        }
+                        dirty = false;
+                    }
                     Ok(AgentEvent::ResponseComplete { session_id: sid, .. })
                     | Ok(AgentEvent::Error { session_id: sid, .. }) => {
                         if sid == session_id { break; }

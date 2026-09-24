@@ -379,6 +379,9 @@ OSA.ensureCurrentSessionAssistantMessage = function(forceNew = false, sessionId)
         tokens: null,
     };
     session.messages.push(next);
+    const targetId = sessionId || session.id;
+    const entry = targetId && OSA.getSessionEntry ? OSA.getSessionEntry(targetId) : null;
+    if (entry) entry.messagesDirty = true;
     return next;
 };
 
@@ -389,6 +392,9 @@ OSA.appendCurrentSessionAssistantThinking = function(content, sessionId) {
     const current = message.thinking || '';
     if (content.length >= 4 && current.endsWith(content)) return;
     message.thinking = current + content;
+    const targetId = sessionId || OSA.getCurrentSessionId?.();
+    const entry = targetId && OSA.getSessionEntry ? OSA.getSessionEntry(targetId) : null;
+    if (entry) entry.messagesDirty = true;
 };
 
 OSA.appendCurrentSessionAssistantContent = function(content, sessionId) {
@@ -398,6 +404,9 @@ OSA.appendCurrentSessionAssistantContent = function(content, sessionId) {
     const current = message.content || '';
     if (content.length >= 4 && current.endsWith(content)) return;
     message.content = current + content;
+    const targetId = sessionId || OSA.getCurrentSessionId?.();
+    const entry = targetId && OSA.getSessionEntry ? OSA.getSessionEntry(targetId) : null;
+    if (entry) entry.messagesDirty = true;
 };
 
 OSA.resetCurrentSessionAssistantContent = function() {
@@ -439,6 +448,9 @@ OSA.insertCurrentSessionToolBoundary = function(event) {
     };
 
     session.messages.push(toolMessage);
+    const targetId = sessionId || session.id;
+    const entry = targetId && OSA.getSessionEntry ? OSA.getSessionEntry(targetId) : null;
+    if (entry) entry.messagesDirty = true;
     return toolMessage;
 };
 
@@ -1924,6 +1936,8 @@ OSA.resetTranscriptView = function() {
     view.windowStart = 0;
     view.windowEnd = 0;
     view.userPinnedToBottom = true;
+    view.autoScrollPaused = false;
+    view.lastScrollTop = 0;
     view.forceStickBottom = true;
     view.initialized = false;
     view.transcriptRoot = null;
@@ -1943,7 +1957,7 @@ OSA.resetTranscriptView = function() {
     OSA.resetStreamingMessage();
 };
 
-OSA.renderEmptyTranscript = function(text = 'Click "New chat" to begin') {
+OSA.renderEmptyTranscript = function(text = 'Start a new chat to begin') {
     OSA.resetTranscriptView();
     const messagesDiv = document.getElementById('messages');
     if (!messagesDiv) return;
@@ -2017,6 +2031,7 @@ OSA.appendUserMessageToChat = function(content, options = {}) {
     const pinView = OSA.getTranscriptView && OSA.getTranscriptView();
     if (pinView) {
         pinView.userPinnedToBottom = true;
+        pinView.autoScrollPaused = false;
         pinView.forceStickBottom = true;
     }
     OSA.tmodelMarkDirty('user-message');

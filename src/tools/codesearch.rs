@@ -11,7 +11,9 @@ use crate::tools::codesearch_tokenizer::{camel_case_join, extract_query_terms, s
 use crate::tools::guard::path_touches_backups;
 use crate::tools::output::path_touches_tool_outputs;
 use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
-use crate::tools::search::{discouraged_path_penalty, ensure_rg_checked, rg_binary_name};
+use crate::tools::search::{
+    discouraged_path_penalty, ensure_rg_checked, rg_binary_name, search_excludes_for,
+};
 use async_trait::async_trait;
 use rayon::prelude::*;
 use regex::Regex;
@@ -24,6 +26,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
 use tracing::debug;
 
@@ -336,6 +339,7 @@ fn render_results(query: &str, scored: &[ScoredFile], limit: usize) -> String {
 pub struct CodeSearchTool {
     workspaces: Vec<PathBuf>,
     timeout_seconds: u64,
+    exclude_dirs: Vec<String>,
 }
 
 impl CodeSearchTool {
@@ -361,10 +365,12 @@ impl CodeSearchTool {
             })
             .collect();
         let timeout_seconds = config.tools.grep.timeout_seconds;
+        let exclude_dirs = config.tools.grep.exclude_dirs.clone();
 
         Self {
             workspaces,
             timeout_seconds,
+            exclude_dirs,
         }
     }
 
@@ -374,7 +380,6 @@ impl CodeSearchTool {
         language_globs: Option<&[&str]>,
         search_path: &Path,
     ) -> Result<Vec<Hit>> {
-        let workspace = self.default_workspace()?;
         let mut cmd = tokio::process::Command::new(rg_binary_name());
         cmd.args([
             "--no-heading",
@@ -385,6 +390,7 @@ impl CodeSearchTool {
             "--hidden",
             "-i",
             "--max-count=250",
+            "--max-filesize=1000000",
         ])
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null());
@@ -395,25 +401,26 @@ impl CodeSearchTool {
             }
         }
 
-        cmd.args([
-            "--glob",
-            "!.osagent_backups",
-            "--glob",
-            "!.osa_tool_outputs",
-        ]);
+        for glob in search_excludes_for(&self.exclude_dirs) {
+            cmd.args(["--glob", &glob]);
+        }
 
         for pattern in patterns {
             cmd.args(["-e", &pattern.source]);
         }
 
-        cmd.arg("--").arg(search_path);
+        cmd.arg("--")
+            .arg(search_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
 
-        let output = timeout(Duration::from_secs(self.timeout_seconds), cmd.output())
-            .await
-            .map_err(|_| OSAgentError::Timeout)?
+        let mut child = cmd
+            .spawn()
             .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = child.stdout.take().ok_or_else(|| {
+            OSAgentError::ToolExecution("ripgrep stdout was not piped".to_string())
+        })?;
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
         let prefix = search_path.to_string_lossy().to_string();
         // Compile once up front; classifying thousands of lines must not
         // re-parse pattern sources.
@@ -426,40 +433,74 @@ impl CodeSearchTool {
             .collect::<crate::error::Result<Vec<_>>>()?;
         let mut hits = Vec::new();
 
-        for line in stdout.lines() {
-            if hits.len() >= MAX_COLLECTED_HITS {
-                break;
+        let scan = timeout(Duration::from_secs(self.timeout_seconds), async {
+            while let Some(line) = lines
+                .next_line()
+                .await
+                .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?
+            {
+                // Lines look like `<abs path>:<line>:<content>`; strip the known
+                // search-path prefix so the drive-letter colon can't confuse the
+                // split, then take relpath : lineno : text.
+                let Some(rest) = line.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let rest = rest.trim_start_matches(['/', '\\']);
+                let mut parts = rest.splitn(3, ':');
+                let (Some(rel), Some(line_no), Some(text)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                let Ok(line_no) = line_no.parse::<usize>() else {
+                    continue;
+                };
+                let rel_path = PathBuf::from(rel);
+                if path_touches_backups(&rel_path) || path_touches_tool_outputs(&rel_path) {
+                    continue;
+                }
+                // Which pattern matched this line: retest with precompiled regexes.
+                let pattern_idx = compiled
+                    .iter()
+                    .position(|re| re.is_match(text))
+                    .unwrap_or(0);
+                hits.push(Hit {
+                    rel_path,
+                    line_no,
+                    text: text.to_string(),
+                    pattern_idx,
+                });
+                if hits.len() >= MAX_COLLECTED_HITS {
+                    return Ok(true);
+                }
             }
-            // Lines look like `<abs path>:<line>:<content>`; strip the known
-            // search-path prefix so the drive-letter colon can't confuse the
-            // split, then take relpath : lineno : text.
-            let Some(rest) = line.strip_prefix(&prefix) else {
-                continue;
-            };
-            let rest = rest.trim_start_matches(['/', '\\']);
-            let mut parts = rest.splitn(3, ':');
-            let (Some(rel), Some(line_no), Some(text)) = (parts.next(), parts.next(), parts.next())
-            else {
-                continue;
-            };
-            let Ok(line_no) = line_no.parse::<usize>() else {
-                continue;
-            };
-            let rel_path = PathBuf::from(rel);
-            if path_touches_backups(&rel_path) || path_touches_tool_outputs(&rel_path) {
-                continue;
+            Ok(false)
+        })
+        .await;
+
+        let hit_cap_reached = match scan {
+            Ok(Ok(hit_cap_reached)) => hit_cap_reached,
+            Ok(Err(error)) => {
+                let _ = child.kill().await;
+                return Err(error);
             }
-            // Which pattern matched this line: retest with precompiled regexes.
-            let pattern_idx = compiled
-                .iter()
-                .position(|re| re.is_match(text))
-                .unwrap_or(0);
-            hits.push(Hit {
-                rel_path,
-                line_no,
-                text: text.to_string(),
-                pattern_idx,
-            });
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(OSAgentError::Timeout);
+            }
+        };
+        if hit_cap_reached {
+            let _ = child.kill().await;
+        } else {
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
+            if !status.success() && status.code() != Some(1) {
+                return Err(OSAgentError::ToolExecution(format!(
+                    "ripgrep exited with status {status}"
+                )));
+            }
         }
 
         Ok(hits)
@@ -492,7 +533,7 @@ impl CodeSearchTool {
         let walker = crate::tools::search::FastWalk::new(
             workspace,
             search_path.to_path_buf(),
-            &[],
+            &self.exclude_dirs,
             None,
             MAX_SCANNED_FILES,
         )?;
@@ -672,6 +713,7 @@ impl Tool for CodeSearchTool {
                 .await
             {
                 Ok(hits) => hits,
+                Err(e @ OSAgentError::Timeout) => return Err(e),
                 Err(e) => {
                     debug!("codesearch ripgrep failed ({}), falling back to walkdir", e);
                     self.execute_walkdir_batch(&patterns, lang_extensions.as_deref(), &search_path)
@@ -849,5 +891,25 @@ mod tests {
 
         assert!(result.output.contains("y.py"));
         assert!(!result.output.contains("x.rs"));
+    }
+
+    #[tokio::test]
+    async fn excludes_generated_trees_from_code_search() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("target")).expect("target dir");
+        std::fs::write(dir.path().join("source.rs"), "fn stable_marker() {}\n").expect("source");
+        std::fs::write(
+            dir.path().join("target").join("noise.rs"),
+            "fn stable_marker() {}\n",
+        )
+        .expect("generated");
+
+        let tool = CodeSearchTool::new(config_for_workspace(&dir.path().to_string_lossy()));
+        let result = Tool::execute_result(&tool, json!({ "query": "stable_marker" }))
+            .await
+            .expect("result");
+
+        assert!(result.output.contains("source.rs"));
+        assert!(!result.output.contains("noise.rs"));
     }
 }

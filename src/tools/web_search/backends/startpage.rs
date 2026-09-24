@@ -17,7 +17,7 @@ impl SearchBackend for StartpageBackend {
     }
 
     fn priority(&self) -> u8 {
-        20
+        50
     }
 
     fn min_interval(&self) -> std::time::Duration {

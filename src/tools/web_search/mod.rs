@@ -33,6 +33,7 @@ pub use types::TimeRange;
 
 const DEFAULT_SEARCH_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_RESULTS: usize = 10;
+const BACKEND_CANDIDATES: usize = 20;
 const ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
 const PRIMARY_WAVE_SIZE: usize = 2;
 const RATE_LIMIT_GRACE: Duration = Duration::from_millis(250);
@@ -145,7 +146,7 @@ impl SearchService {
             ));
         }
 
-        let mut request = SearchRequest {
+        let request = SearchRequest {
             query: query.clone(),
             num_results: num_results.clamp(1, self.config.max_results.clamp(1, MAX_RESULTS)),
             time_range,
@@ -165,19 +166,29 @@ impl SearchService {
         // is answered by that API. It is both more reliable and more accurate
         // than asking a general engine to filter by domain.
         if let Some((route, cleaned)) = structured::route_for_query(&request.query) {
-            request.query = cleaned;
-            match structured::search_route(route, &self.client, &request).await {
+            let structured_request = SearchRequest {
+                query: cleaned,
+                ..request.clone()
+            };
+            match structured::search_route(route, &self.client, &structured_request).await {
                 Ok(results) if !results.is_empty() => {
-                    let response = SearchResponse {
-                        query: request.query.clone(),
-                        backend: route.id().to_string(),
-                        fallback_used: false,
-                        cached: false,
-                        tried_backends: vec![route.id().to_string()],
-                        results: rank_results(normalize_results(results), request.num_results),
-                    };
-                    self.cache.insert(cache_key, response.clone());
-                    return Ok(response);
+                    let ranked = rank_results(
+                        normalize_results(results),
+                        request.num_results,
+                        &structured_request.query,
+                    );
+                    if !ranked.is_empty() {
+                        let response = SearchResponse {
+                            query: request.query.clone(),
+                            backend: route.id().to_string(),
+                            fallback_used: false,
+                            cached: false,
+                            tried_backends: vec![route.id().to_string()],
+                            results: ranked,
+                        };
+                        self.cache.insert(cache_key, response.clone());
+                        return Ok(response);
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -200,6 +211,10 @@ impl SearchService {
 
         let global_deadline =
             TokioInstant::now() + Duration::from_millis(self.config.global_timeout_ms.max(500));
+        let candidate_request = SearchRequest {
+            num_results: BACKEND_CANDIDATES,
+            ..request.clone()
+        };
         let mut pending = FuturesUnordered::new();
         let mut launched = 0usize;
         let max_launches = self
@@ -217,7 +232,7 @@ impl SearchService {
             .launch_backends(
                 &mut scheduled,
                 &mut pending,
-                &request,
+                &candidate_request,
                 &mut tried_backends,
                 primary_wave,
                 global_deadline,
@@ -233,6 +248,7 @@ impl SearchService {
         self.collect_pending_results(
             &mut pending,
             global_deadline,
+            &request.query,
             &mut merged_results,
             &mut successful_backends,
             &mut errors,
@@ -241,14 +257,14 @@ impl SearchService {
 
         while launched < max_launches
             && !scheduled.is_empty()
-            && !self.has_enough_results(&merged_results, request.num_results)
+            && !self.has_enough_results(&merged_results, request.num_results, &request.query)
             && global_deadline > TokioInstant::now()
         {
             let launched_now = self
                 .launch_backends(
                     &mut scheduled,
                     &mut pending,
-                    &request,
+                    &candidate_request,
                     &mut tried_backends,
                     1,
                     global_deadline,
@@ -262,32 +278,12 @@ impl SearchService {
             self.collect_pending_results(
                 &mut pending,
                 global_deadline,
+                &request.query,
                 &mut merged_results,
                 &mut successful_backends,
                 &mut errors,
             )
             .await;
-        }
-
-        // Every general backend failed — they are the ones that get challenged
-        // and rate limited. Before giving up, ask the key-less structured APIs,
-        // which answer when the scrapers cannot.
-        if merged_results.is_empty() {
-            for route in structured::FALLBACK_ROUTES {
-                if TokioInstant::now() >= global_deadline {
-                    break;
-                }
-                tried_backends.push(route.id().to_string());
-                match structured::search_route(route, &self.client, &request).await {
-                    Ok(results) if !results.is_empty() => {
-                        merged_results.extend(normalize_results(results));
-                        successful_backends.push(route.id().to_string());
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error) => errors.push(format!("{}: {}", route.id(), error.message)),
-                }
-            }
         }
 
         if merged_results.is_empty() {
@@ -297,12 +293,18 @@ impl SearchService {
                 errors.join(" | ")
             };
             return Err(OSAgentError::ToolExecution(format!(
-                "No search results found. Tried backends: {}. Consider narrowing the query, adding a `site:` filter for a site with a public API (github.com, stackoverflow.com, wikipedia.org, news.ycombinator.com, reddit.com, crates.io, npmjs.com, arxiv.org), or using web_fetch with a direct URL.",
+                "No search results found. Tried backends: {}. Try a more specific query, an explicit `site:` filter for a supported public API, or web_fetch with a direct URL.",
                 backend_info
             )));
         }
 
-        let results = rank_results(merged_results, request.num_results);
+        let results = rank_results(merged_results, request.num_results, &request.query);
+        if results.is_empty() {
+            return Err(OSAgentError::ToolExecution(format!(
+                "Search backends returned no results relevant to: {}",
+                request.query
+            )));
+        }
         let backend = if successful_backends.len() == 1 {
             successful_backends[0].clone()
         } else {
@@ -421,6 +423,7 @@ impl SearchService {
         &self,
         pending: &mut FuturesUnordered<BackendTask>,
         global_deadline: TokioInstant,
+        query: &str,
         merged_results: &mut Vec<SearchResult>,
         successful_backends: &mut Vec<String>,
         errors: &mut Vec<String>,
@@ -433,9 +436,17 @@ impl SearchService {
 
             match timeout(remaining, pending.next()).await {
                 Ok(Some((backend_id, Ok(Ok(results))))) => {
-                    self.record_success(&backend_id, Instant::now());
-                    successful_backends.push(backend_id);
-                    merged_results.extend(normalize_results(results));
+                    let normalized = normalize_results(results);
+                    let relevant = rank_results(normalized, usize::MAX, query);
+                    if relevant.is_empty() {
+                        let error = BackendError::empty("returned only unrelated results");
+                        self.record_failure(&backend_id, &error, Instant::now());
+                        errors.push(format!("{}: {}", backend_id, error.message));
+                    } else {
+                        self.record_success(&backend_id, Instant::now());
+                        successful_backends.push(backend_id);
+                        merged_results.extend(relevant);
+                    }
                 }
                 Ok(Some((backend_id, Ok(Err(error))))) => {
                     self.record_failure(&backend_id, &error, Instant::now());
@@ -454,10 +465,14 @@ impl SearchService {
         }
     }
 
-    fn has_enough_results(&self, merged_results: &[SearchResult], requested: usize) -> bool {
-        let unique_results = normalize_results(merged_results.to_vec());
-        let threshold = requested.clamp(3, 4);
-        unique_results.len() >= threshold
+    fn has_enough_results(
+        &self,
+        merged_results: &[SearchResult],
+        requested: usize,
+        query: &str,
+    ) -> bool {
+        let relevant_results = rank_results(merged_results.to_vec(), requested, query);
+        relevant_results.len() >= requested
     }
 
     fn backend_timeout(&self) -> Duration {
@@ -757,7 +772,7 @@ mod tests {
 
     fn sample_result(url: &str, source: &str) -> SearchResult {
         SearchResult {
-            title: "Example Result".to_string(),
+            title: "Example Rust Async Query Result".to_string(),
             url: url.to_string(),
             snippet: "Useful snippet".to_string(),
             source: source.to_string(),
@@ -882,5 +897,87 @@ mod tests {
         assert_eq!(second.backend, "startpage");
         assert_eq!(*brave_calls.lock().expect("lock poisoned"), 1);
         assert_eq!(*fallback_calls.lock().expect("lock poisoned"), 2);
+    }
+
+    #[tokio::test]
+    async fn unrelated_results_are_not_reported_as_success() {
+        let service = SearchService::with_backends(
+            Client::new(),
+            vec![Arc::new(FakeBackend {
+                id: "brave",
+                calls: Arc::new(Mutex::new(0)),
+                result: Ok(vec![SearchResult {
+                    title: "Cat breeds".to_string(),
+                    url: "https://example.com/cats".to_string(),
+                    snippet: "A guide to domestic pets".to_string(),
+                    source: "brave".to_string(),
+                    position: 1,
+                }]),
+                priority: 10,
+                min_interval: Duration::ZERO,
+            })],
+            Duration::ZERO,
+            config(),
+        );
+
+        let error = service.search("rust tokio timeout", 5).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("returned only unrelated results"));
+    }
+
+    #[tokio::test]
+    async fn failed_general_search_does_not_substitute_unrelated_indexes() {
+        let service = SearchService::with_backends(
+            Client::new(),
+            vec![Arc::new(FakeBackend {
+                id: "brave",
+                calls: Arc::new(Mutex::new(0)),
+                result: Err(BackendError::blocked("challenge")),
+                priority: 10,
+                min_interval: Duration::ZERO,
+            })],
+            Duration::ZERO,
+            config(),
+        );
+
+        let error = service.search("rust tokio timeout", 5).await.unwrap_err();
+        assert!(error.to_string().contains("No search results found"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live public search engines"]
+    async fn live_search_smoke() {
+        let client = Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .build()
+            .expect("HTTP client");
+        let search_config = SearchConfig {
+            global_timeout_ms: 15_000,
+            per_backend_timeout_ms: 8_000,
+            max_parallel_backends: 5,
+            ..config()
+        };
+        let service = SearchService::new(client.clone(), search_config.clone());
+        let response = service
+            .search("rust tokio timeout documentation", 5)
+            .await
+            .expect("live search should return results");
+        println!("{response:#?}");
+        assert!(response
+            .results
+            .iter()
+            .any(|result| { result.url.contains("docs.rs") || result.url.contains("tokio.rs") }));
+
+        let service = SearchService::new(client, search_config);
+        let response = service
+            .search("GhostESP docs wifi deauth", 5)
+            .await
+            .expect("live documentation search should return results");
+        println!("{response:#?}");
+        assert!(response
+            .results
+            .iter()
+            .any(|result| result.url.contains("docs.ghostesp.net")));
     }
 }

@@ -3,6 +3,71 @@ use reqwest::Url;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
+fn query_terms(query: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about",
+        "and",
+        "are",
+        "documentation",
+        "for",
+        "from",
+        "github",
+        "how",
+        "into",
+        "the",
+        "this",
+        "today",
+        "tomorrow",
+        "weather",
+        "what",
+        "when",
+        "where",
+        "which",
+        "with",
+    ];
+    let words = query
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|word| word.len() >= 3)
+        .collect::<Vec<_>>();
+    let meaningful = words
+        .iter()
+        .filter(|word| !STOP_WORDS.contains(&word.as_str()))
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if meaningful.is_empty() {
+        words
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        meaningful
+    }
+}
+
+fn relevance_score(result: &SearchResult, terms: &[String]) -> Option<i32> {
+    if terms.is_empty() {
+        return Some(0);
+    }
+    let title = result.title.to_ascii_lowercase();
+    let url = result.url.to_ascii_lowercase();
+    let snippet = result.snippet.to_ascii_lowercase();
+    let score = terms.iter().fold(0, |score, term| {
+        score
+            + if title.contains(term) || url.contains(term) {
+                35
+            } else if snippet.contains(term) {
+                10
+            } else {
+                0
+            }
+    });
+    (score > 0).then_some(score)
+}
+
 fn domain_for(url: &str) -> Option<String> {
     Url::parse(url)
         .ok()
@@ -24,7 +89,15 @@ struct AggregateResult {
     best_position: usize,
 }
 
-pub fn rank_results(mut results: Vec<SearchResult>, max_results: usize) -> Vec<SearchResult> {
+pub fn rank_results(
+    mut results: Vec<SearchResult>,
+    max_results: usize,
+    query: &str,
+) -> Vec<SearchResult> {
+    let terms = query_terms(query);
+    let prefers_github = query
+        .split(|ch: char| !ch.is_alphanumeric())
+        .any(|word| word.eq_ignore_ascii_case("github"));
     let mut grouped: HashMap<String, AggregateResult> = HashMap::new();
 
     for result in results.drain(..) {
@@ -60,9 +133,17 @@ pub fn rank_results(mut results: Vec<SearchResult>, max_results: usize) -> Vec<S
 
     let mut preliminary = grouped
         .into_values()
-        .map(|aggregate| {
+        .filter_map(|aggregate| {
+            let relevance = relevance_score(&aggregate.result, &terms)?;
             let mut score = 1_000 - (aggregate.best_position as i32 * 10);
+            score += relevance;
             score += aggregate.sources.len() as i32 * 35;
+            if prefers_github
+                && domain_for(&aggregate.result.url)
+                    .is_some_and(|domain| domain == "github.com" || domain.ends_with(".github.com"))
+            {
+                score += 100;
+            }
             if aggregate.result.url.starts_with("https://") {
                 score += 5;
             }
@@ -73,7 +154,7 @@ pub fn rank_results(mut results: Vec<SearchResult>, max_results: usize) -> Vec<S
                 score -= 12;
             }
 
-            (score, aggregate.result)
+            Some((score, aggregate.result))
         })
         .collect::<Vec<_>>();
 
@@ -134,7 +215,7 @@ mod tests {
             },
         ];
 
-        let ranked = rank_results(results, 3);
+        let ranked = rank_results(results, 3, "example rust");
         assert_eq!(ranked[0].url, "https://example.com/docs");
         assert_eq!(ranked[1].url, "https://rust-lang.org/learn/async");
     }
@@ -165,8 +246,54 @@ mod tests {
             },
         ];
 
-        let ranked = rank_results(results, 3);
+        let ranked = rank_results(results, 3, "example other");
         assert_eq!(ranked[0].url, "https://example.com/docs");
         assert_eq!(ranked[0].source, "ddg_lite,startpage");
+    }
+
+    #[test]
+    fn rejects_unrelated_fallback_results() {
+        let results = vec![SearchResult {
+            title: "Wikipedia: Cat".to_string(),
+            url: "https://en.wikipedia.org/wiki/Cat".to_string(),
+            snippet: "A small domestic animal".to_string(),
+            source: "wikipedia-api".to_string(),
+            position: 1,
+        }];
+        assert!(rank_results(results, 5, "rust tokio timeout").is_empty());
+    }
+
+    #[test]
+    fn generic_weather_hit_does_not_satisfy_city_query() {
+        let results = vec![SearchResult {
+            title: "Canberra Area Weather".to_string(),
+            url: "https://example.com/canberra-weather".to_string(),
+            snippet: "Tomorrow's forecast".to_string(),
+            source: "bing".to_string(),
+            position: 1,
+        }];
+        assert!(rank_results(results, 5, "weather Perth tomorrow").is_empty());
+    }
+
+    #[test]
+    fn named_site_intent_boosts_matching_domain() {
+        let results = vec![
+            SearchResult {
+                title: "OSAgent documentation".to_string(),
+                url: "https://example.com/osagent".to_string(),
+                snippet: String::new(),
+                source: "bing".to_string(),
+                position: 2,
+            },
+            SearchResult {
+                title: "OSAgent repository".to_string(),
+                url: "https://github.com/team/OSAgent".to_string(),
+                snippet: String::new(),
+                source: "bing".to_string(),
+                position: 9,
+            },
+        ];
+        let ranked = rank_results(results, 2, "OSAgent github");
+        assert_eq!(ranked[0].url, "https://github.com/team/OSAgent");
     }
 }

@@ -17,7 +17,7 @@ impl SearchBackend for BraveBackend {
     }
 
     fn priority(&self) -> u8 {
-        10
+        15
     }
 
     fn min_interval(&self) -> std::time::Duration {

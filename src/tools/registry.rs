@@ -401,6 +401,7 @@ impl ToolRegistry {
                 mcp.clone(),
                 native_catalog.clone(),
                 config.mcp.search_result_limit,
+                Some(storage.clone()),
             )),
         );
         tools.insert(

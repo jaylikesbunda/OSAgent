@@ -18,7 +18,7 @@ impl SearchBackend for BingBackend {
     }
 
     fn priority(&self) -> u8 {
-        15
+        35
     }
 
     fn min_interval(&self) -> std::time::Duration {

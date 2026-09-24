@@ -4,12 +4,9 @@
 //! bot management challenges the client. These endpoints are public, documented,
 //! need no API key, and return JSON, so they neither rot nor get blocked.
 //!
-//! They are used in two situations:
-//!   * the query carries a `site:` operator pointing at a site we have an API
-//!     for — then it is the primary path, exactly like typing `site:` into a
-//!     browser; and
-//!   * every general backend failed — then they run as a last resort instead of
-//!     returning "no results".
+//! A query with a supported `site:` operator uses the matching API directly.
+//! We do not substitute these narrow indexes for general search results: that
+//! produced unrelated answers whenever public search engines blocked scraping.
 
 use super::types::{BackendError, BackendResult, SearchRequest, SearchResult, TimeRange};
 use reqwest::Client;
@@ -68,14 +65,6 @@ impl SiteRoute {
         }
     }
 }
-
-/// Routes tried when every general backend has failed. Ordered by how broadly
-/// useful they are for an arbitrary query.
-pub const FALLBACK_ROUTES: [SiteRoute; 3] = [
-    SiteRoute::Wikipedia,
-    SiteRoute::HackerNews,
-    SiteRoute::GitHub,
-];
 
 /// Detect a `site:` operator and split it from the rest of the query.
 ///

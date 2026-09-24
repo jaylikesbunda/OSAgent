@@ -933,6 +933,7 @@ impl Tool for GrepTool {
                         attachments: Vec::new(),
                     })
                 }
+                Err(e @ OSAgentError::Timeout) => return Err(e),
                 Err(e) => {
                     debug!("ripgrep grep failed ({}), falling back to walkdir", e);
                 }
@@ -1338,6 +1339,7 @@ impl Tool for GlobTool {
                         attachments: Vec::new(),
                     })
                 }
+                Err(e @ OSAgentError::Timeout) => return Err(e),
                 Err(e) => {
                     debug!("ripgrep glob failed ({}), falling back to walkdir", e);
                 }

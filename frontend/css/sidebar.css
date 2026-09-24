@@ -733,6 +733,10 @@
     pointer-events: none;
 }
 
+.session-item.has-unread .session-icon-running {
+    overflow: visible;
+}
+
 .session-item.active .session-icon {
     border-color: var(--border-hover);
     background: var(--accent-dim);
