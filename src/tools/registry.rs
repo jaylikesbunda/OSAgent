@@ -600,6 +600,7 @@ impl ToolRegistry {
         if let Some(ref ms) = memory_store {
             let memory_tools: Vec<Arc<dyn Tool>> = vec![
                 Arc::new(memory::RecordMemoryTool::new(ms.clone())),
+                Arc::new(memory::RecallMemoriesTool::new(ms.clone())),
                 Arc::new(memory::ListMemorySuggestionsTool::new(ms.clone())),
                 Arc::new(memory::ApproveMemorySuggestionTool::new(ms.clone())),
                 Arc::new(memory::RejectMemorySuggestionTool::new(ms.clone())),

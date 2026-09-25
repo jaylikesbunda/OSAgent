@@ -915,6 +915,359 @@
     align-items: center;
 }
 
+/* ---- Memory settings ---- */
+
+.memory-pane-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.memory-header-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 26px;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    background: var(--bg-primary);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.memory-header-status.active {
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+    background: color-mix(in srgb, var(--success) 10%, var(--bg-primary));
+}
+
+.memory-header-status.partial {
+    color: var(--warning-color, #d97706);
+    border-color: color-mix(in srgb, var(--warning-color, #d97706) 35%, var(--border));
+}
+
+.memory-overview-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.memory-control-card,
+.memory-section {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--bg-primary) 78%, transparent);
+}
+
+.memory-control-card {
+    padding: 16px;
+    transition: opacity var(--transition-fast), border-color var(--transition-fast);
+}
+
+.memory-control-card.is-disabled {
+    opacity: 0.58;
+}
+
+.memory-card-heading {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+}
+
+.memory-card-icon {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.memory-card-icon-decision {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.memory-card-copy {
+    min-width: 0;
+}
+
+.memory-card-eyebrow,
+.memory-section-eyebrow {
+    display: block;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1.2;
+    text-transform: uppercase;
+}
+
+.memory-card-copy h3,
+.memory-section-header h3 {
+    margin: 3px 0 4px;
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+}
+
+.memory-card-copy p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.memory-card-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.memory-card-control label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.memory-card-control select {
+    width: auto;
+    min-width: 142px;
+    padding: 7px 28px 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.memory-scope-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin: 0 0 18px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg-primary));
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.memory-scope-note strong {
+    color: var(--text-primary);
+}
+
+.memory-scope-note-icon {
+    flex: 0 0 auto;
+    color: var(--accent);
+    font-size: 16px;
+    line-height: 1.1;
+}
+
+.memory-advanced {
+    margin-top: 0;
+    margin-bottom: 18px;
+}
+
+.memory-storage-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 14px;
+}
+
+.memory-content-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+    align-items: start;
+    gap: 14px;
+}
+
+.memory-section {
+    padding: 14px;
+}
+
+.memory-section + .memory-section {
+    margin-top: 12px;
+}
+
+.memory-side-stack .memory-section + .memory-section {
+    margin-top: 12px;
+}
+
+.memory-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 36px;
+    margin-bottom: 10px;
+}
+
+.memory-section-header h3 {
+    margin-bottom: 0;
+}
+
+.memory-section-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.memory-section-actions .settings-filter-select {
+    min-width: 92px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    font-size: 11px;
+}
+
+.icon-button {
+    display: inline-grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 15px;
+    cursor: pointer;
+}
+
+.icon-button:hover {
+    border-color: var(--border-hover);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.memory-list {
+    max-height: 360px;
+    padding: 4px;
+    background: color-mix(in srgb, var(--bg-secondary) 60%, transparent);
+}
+
+.memory-review-list {
+    max-height: 250px;
+}
+
+.memory-list .decision-item {
+    align-items: center;
+    padding: 10px 9px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+.memory-list .decision-item:last-child {
+    border-bottom: 0;
+}
+
+.memory-list .decision-key {
+    font-family: var(--sans);
+    font-size: 12px;
+}
+
+.memory-list .decision-value {
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.memory-form-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 2px;
+}
+
+.memory-form-heading strong {
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.memory-form-heading span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.memory-add-form {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+}
+
+.memory-form-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+}
+
+.memory-form-row select,
+.memory-form-row input {
+    min-width: 0;
+}
+
+.memory-add-form .settings-form-actions {
+    justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+    .memory-pane-header {
+        align-items: flex-start;
+    }
+
+    .memory-overview-grid,
+    .memory-content-grid,
+    .memory-storage-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .memory-content-grid {
+        gap: 12px;
+    }
+
+    .memory-side-stack {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+    }
+
+    .memory-side-stack .memory-section + .memory-section {
+        margin-top: 0;
+    }
+}
+
+@media (max-width: 560px) {
+    .memory-card-control,
+    .memory-form-row {
+        grid-template-columns: 1fr;
+    }
+
+    .memory-card-control {
+        display: grid;
+        align-items: stretch;
+    }
+
+    .memory-card-control select {
+        width: 100%;
+    }
+}
+
 /* ---- Voice status ---- */
 
 .voice-status-grid {

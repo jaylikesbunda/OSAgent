@@ -172,6 +172,7 @@ pub struct ScriptContext {
     pub registry: Arc<ToolRegistry>,
     pub config: Config,
     pub workspace_path: String,
+    pub workspace_id: String,
     pub event_bus: Option<EventBus>,
     pub session_id: String,
 }
@@ -238,6 +239,7 @@ pub async fn run_script(context: ScriptContext, args: &Value) -> Result<ToolResu
     let bridge = BridgeState {
         registry: context.registry.clone(),
         workspace_path: context.workspace_path.clone(),
+        workspace_id: context.workspace_id.clone(),
         allowlist: allowlist.clone(),
         token: token.clone(),
         call_count: call_count.clone(),
@@ -373,6 +375,7 @@ fn build_allowlist(context: &ScriptContext, declared: &[String]) -> Result<HashS
 struct BridgeState {
     registry: Arc<ToolRegistry>,
     workspace_path: String,
+    workspace_id: String,
     allowlist: HashSet<String>,
     token: String,
     call_count: Arc<AtomicUsize>,
@@ -460,13 +463,14 @@ async fn dispatch(state: &BridgeState, request: BridgeRequest) -> Value {
     }
 
     let started = Instant::now();
+    let mut arguments = request.arguments.clone();
+    if let Some(object) = arguments.as_object_mut() {
+        object.insert("session_id".to_string(), json!(state.session_id));
+        object.insert("workspace_id".to_string(), json!(state.workspace_id));
+    }
     let result = state
         .registry
-        .execute_in_workspace_result(
-            &request.tool,
-            request.arguments.clone(),
-            Some(state.workspace_path.clone()),
-        )
+        .execute_in_workspace_result(&request.tool, arguments, Some(state.workspace_path.clone()))
         .await;
     let duration_ms = started.elapsed().as_millis() as u64;
 

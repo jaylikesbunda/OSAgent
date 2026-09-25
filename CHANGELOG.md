@@ -3,6 +3,8 @@ v0.6.2 changes:
 Changed:
 * Smoother update checks, downloads, and install progress
 * More reliable update restarts and failure recovery
+* Memory now supports global/workspace scopes, safer capture modes, relevance recall, and resilient storage
+* Added approved decision management and safer memory review controls
 
 v0.6.1 changes:
 

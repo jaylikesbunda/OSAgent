@@ -1335,7 +1335,7 @@ OSA.speakToolStart = function(event) {
     const voiceConfig = OSA.getVoiceConfig();
     if (!ttsEnabled || !voiceConfig?.enabled) return;
     if (!voiceConfig?.speak_tool_progress) return;
-    const toolName = (event.tool_name || 'tool').replace(/[_-]/g, ' ');
+    const toolName = OSA.toolLabel ? OSA.toolLabel(event.tool_name || 'tool') : (event.tool_name || 'tool').replace(/[_-]/g, ' ');
     const args = OSA.summarizeToolArguments(event.arguments);
     const text = args ? `Running ${toolName}. ${args}.` : `Running ${toolName}.`;
     OSA.speakText(text, { interrupt: false });
@@ -1346,7 +1346,7 @@ OSA.speakToolComplete = function(event) {
     const voiceConfig = OSA.getVoiceConfig();
     if (!ttsEnabled || !voiceConfig?.enabled) return;
     if (!voiceConfig?.speak_tool_progress) return;
-    const toolName = (event.tool_name || 'tool').replace(/[_-]/g, ' ');
+    const toolName = OSA.toolLabel ? OSA.toolLabel(event.tool_name || 'tool') : (event.tool_name || 'tool').replace(/[_-]/g, ' ');
     const text = event.success ? `Finished ${toolName}.` : `${toolName} failed.`;
     OSA.speakText(text, { interrupt: false });
 };

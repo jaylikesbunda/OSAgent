@@ -45,7 +45,7 @@ OSA.showNextPermissionPrompt = function() {
     OSA.activePermissionPrompt = prompt;
     var toolName = String(prompt.source || 'tool').split(':')[0];
     var sessionRead = prompt.path_type === 'session_read';
-    document.getElementById('permission-tool').textContent = toolName;
+    document.getElementById('permission-tool').textContent = OSA.toolLabel ? OSA.toolLabel(toolName) : toolName;
     document.getElementById('permission-operation').textContent =
         sessionRead ? 'read another conversation' : (prompt.path_type || 'access');
     document.getElementById('permission-path').textContent =

@@ -228,14 +228,15 @@ OSA.loadSettings = async function() {
         const memEnabled = config.agent?.memory_enabled === true;
         document.getElementById('setting-memory-enabled').checked = memEnabled;
         document.getElementById('setting-memory-file').value = config.agent?.memory_file || '~/.osagent/memories.json';
-        document.getElementById('setting-learning-mode').value = config.agent?.learning_mode || 'manual';
         document.getElementById('setting-memory-capture-mode').value = config.agent?.memory_capture_mode || 'review';
         document.getElementById('memory-file-field').classList.toggle('hidden', !memEnabled);
         document.getElementById('memory-add-form').classList.toggle('hidden', !memEnabled);
         document.getElementById('memory-suggestions-group').classList.toggle('hidden', !memEnabled);
-        document.getElementById('decision-suggestions-group').classList.toggle('hidden', !memEnabled);
+        document.getElementById('decision-list-group').classList.toggle('hidden', config.agent?.decision_memory_enabled === false);
+        document.getElementById('decision-suggestions-group').classList.toggle('hidden', config.agent?.decision_memory_enabled === false);
         const decisionMemEnabled = config.agent?.decision_memory_enabled !== false;
         document.getElementById('setting-decision-memory-enabled').checked = decisionMemEnabled;
+        OSA.updateMemoryHeaderStatus();
         document.getElementById('setting-decision-memory-file').value = config.agent?.decision_memory_file || '~/.osagent/decision_memories.json';
         document.getElementById('setting-decision-capture-mode').value = config.agent?.decision_capture_mode || 'review';
         document.getElementById('decision-memory-file-field').classList.toggle('hidden', !decisionMemEnabled);
@@ -283,6 +284,7 @@ OSA.loadSettings = async function() {
         
         await OSA.loadMemories();
         await OSA.loadMemorySuggestions();
+        await OSA.loadDecisions();
         await OSA.loadDecisionSuggestions();
         await OSA.loadVoiceInstallStatus();
         await OSA.loadDiscordBotStatus();
@@ -432,7 +434,6 @@ OSA.saveSettings = async function() {
         thinking_level: document.getElementById('setting-thinking-level').value || 'auto',
         memory_enabled: document.getElementById('setting-memory-enabled').checked,
         memory_file: document.getElementById('setting-memory-file').value || '~/.osagent/memories.json',
-        learning_mode: document.getElementById('setting-learning-mode').value || 'manual',
         memory_capture_mode: document.getElementById('setting-memory-capture-mode').value || 'review',
         decision_memory_enabled: document.getElementById('setting-decision-memory-enabled').checked,
         decision_memory_file: document.getElementById('setting-decision-memory-file').value || '~/.osagent/decision_memories.json',
@@ -1326,12 +1327,31 @@ OSA.initTheme = function() {
     if (chatAlignmentSelect) chatAlignmentSelect.value = chatAlignment;
 };
 
+OSA.updateMemoryHeaderStatus = function() {
+    const status = document.getElementById('memory-header-status');
+    if (!status) return;
+    const memoryEnabled = document.getElementById('setting-memory-enabled')?.checked === true;
+    const decisionEnabled = document.getElementById('setting-decision-memory-enabled')?.checked === true;
+    document.getElementById('memory-control-card')?.classList.toggle('is-disabled', !memoryEnabled);
+    document.getElementById('decision-control-card')?.classList.toggle('is-disabled', !decisionEnabled);
+    if (memoryEnabled && decisionEnabled) {
+        status.textContent = 'Memory active';
+        status.className = 'memory-header-status active';
+    } else if (memoryEnabled || decisionEnabled) {
+        status.textContent = decisionEnabled ? 'Decisions active' : 'Memory active';
+        status.className = 'memory-header-status partial';
+    } else {
+        status.textContent = 'Memory off';
+        status.className = 'memory-header-status';
+    }
+};
+
 OSA.onMemoryToggleChange = function() {
     const enabled = document.getElementById('setting-memory-enabled').checked;
     document.getElementById('memory-file-field').classList.toggle('hidden', !enabled);
     document.getElementById('memory-add-form').classList.toggle('hidden', !enabled);
     document.getElementById('memory-suggestions-group').classList.toggle('hidden', !enabled);
-    document.getElementById('decision-suggestions-group').classList.toggle('hidden', !enabled);
+    OSA.updateMemoryHeaderStatus();
     if (enabled) {
         OSA.loadMemories();
         OSA.loadMemorySuggestions();
@@ -1342,6 +1362,13 @@ OSA.onMemoryToggleChange = function() {
 OSA.onDecisionMemoryToggleChange = function() {
     const enabled = document.getElementById('setting-decision-memory-enabled').checked;
     document.getElementById('decision-memory-file-field').classList.toggle('hidden', !enabled);
+    document.getElementById('decision-list-group').classList.toggle('hidden', !enabled);
+    document.getElementById('decision-suggestions-group').classList.toggle('hidden', !enabled);
+    OSA.updateMemoryHeaderStatus();
+    if (enabled) {
+        OSA.loadDecisions();
+        OSA.loadDecisionSuggestions();
+    }
 };
 
 OSA.loadMemories = async function() {
@@ -1361,7 +1388,9 @@ OSA.loadMemories = async function() {
         }
         list.innerHTML = data.memories.map(m => {
             const tagStr = m.tags && m.tags.length ? `<span class="decision-meta" style="margin-left:4px">[${OSA.escapeHtml(m.tags.join(', '))}]</span>` : '';
+            const scope = m.scope === 'global' ? 'global' : `workspace:${m.workspace_id || 'current'}`;
             const category = m.category ? `<span class="decision-meta" style="margin-left:4px">${OSA.escapeHtml(m.category)}</span>` : '';
+            const scopeLabel = `<span class="decision-meta" style="margin-left:4px">${OSA.escapeHtml(scope)}</span>`;
             const confirmation = m.confirmed === false
                 ? '<span class="decision-meta" style="margin-left:4px;color:var(--warning-color,#d97706)">unconfirmed</span>'
                 : '';
@@ -1369,15 +1398,16 @@ OSA.loadMemories = async function() {
             const encodedTitle = encodeURIComponent(m.title || '').replace(/'/g, '%27');
             const encodedContent = encodeURIComponent(m.content || '').replace(/'/g, '%27');
             const encodedTags = encodeURIComponent((m.tags || []).join(', ')).replace(/'/g, '%27');
+            const encodedScope = m.scope === 'global' ? 'global' : 'workspace';
             return `
             <div class="decision-item">
                 <div class="decision-body">
-                    <div class="decision-key">${OSA.escapeHtml(m.title)}${tagStr}${category}${confirmation}</div>
+                    <div class="decision-key">${OSA.escapeHtml(m.title)}${tagStr}${category}${scopeLabel}${confirmation}</div>
                     <div class="decision-value" style="white-space:pre-wrap">${OSA.escapeHtml(m.content)}</div>
                     <div class="decision-meta">${sourceLabel}</div>
                 </div>
                 <div style="display:flex;gap:6px;flex-shrink:0">
-                    <button type="button" class="btn-ghost" style="font-size:12px" onclick="OSA.openMemoryEdit('${m.id}', '${encodedTitle}', '${encodedContent}', '${encodedTags}')">Edit</button>
+                    <button type="button" class="btn-ghost" style="font-size:12px" onclick="OSA.openMemoryEdit('${m.id}', '${encodedTitle}', '${encodedContent}', '${encodedTags}', '${encodedScope}')">Edit</button>
                     <button type="button" class="btn-danger" onclick="OSA.deleteMemory('${m.id}')">Delete</button>
                 </div>
             </div>`;
@@ -1392,11 +1422,12 @@ OSA.addMemory = async function() {
     const content = document.getElementById('memory-content').value.trim();
     const tagsRaw = document.getElementById('memory-tags').value.trim();
     const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const scope = document.getElementById('memory-scope').value;
     if (!title || !content) { alert('Title and content are required.'); return; }
     try {
         const res = await OSA.fetchWithAuth('/api/memories', {
             method: 'POST',
-            body: JSON.stringify({ title, content, tags })
+            body: JSON.stringify({ title, content, tags, scope })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -1425,7 +1456,7 @@ OSA.deleteMemory = async function(id) {
     }
 };
 
-OSA.openMemoryEdit = function(id, title, content, tags) {
+OSA.openMemoryEdit = function(id, title, content, tags, scope) {
     const decode = value => {
         try {
             return decodeURIComponent(value || '');
@@ -1436,6 +1467,7 @@ OSA.openMemoryEdit = function(id, title, content, tags) {
     document.getElementById('edit-memory-id').value = id;
     document.getElementById('edit-memory-title').value = decode(title);
     document.getElementById('edit-memory-content').value = decode(content);
+    document.getElementById('edit-memory-scope').value = scope === 'global' ? 'global' : 'workspace';
     document.getElementById('edit-memory-tags').value = decode(tags);
     document.getElementById('memory-edit-modal').classList.remove('hidden');
 };
@@ -1450,10 +1482,11 @@ OSA.saveMemoryEdit = async function() {
     const content = document.getElementById('edit-memory-content').value.trim();
     const tagsRaw = document.getElementById('edit-memory-tags').value.trim();
     const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const scope = document.getElementById('edit-memory-scope').value;
     try {
         const res = await OSA.fetchWithAuth(`/api/memories/${id}`, {
             method: 'PUT',
-            body: JSON.stringify({ title, content, tags })
+            body: JSON.stringify({ title, content, tags, scope })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -1542,6 +1575,46 @@ OSA.rejectMemorySuggestion = async function(id) {
     }
 };
 
+OSA.loadDecisions = async function() {
+    const list = document.getElementById('decision-list');
+    if (!list) return;
+    try {
+        const res = await OSA.fetchWithAuth('/api/decisions');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (!data.enabled) {
+            list.innerHTML = '<div class="decision-meta">Enable decision memory to view approved decisions.</div>';
+            return;
+        }
+        if (!data.decisions || data.decisions.length === 0) {
+            list.innerHTML = '<div class="decision-meta">No approved decisions.</div>';
+            return;
+        }
+        list.innerHTML = data.decisions.map(decision => `
+            <div class="decision-item">
+                <div class="decision-body">
+                    <div class="decision-key">${OSA.escapeHtml(decision.key)}</div>
+                    <div class="decision-value">${OSA.escapeHtml(decision.value)}</div>
+                </div>
+                <button type="button" class="btn-danger" onclick="OSA.deleteDecision('${decision.id}')">Delete</button>
+            </div>`).join('');
+    } catch (error) {
+        list.innerHTML = `<div class="decision-meta">Failed to load decisions: ${OSA.escapeHtml(error.message)}</div>`;
+    }
+};
+
+OSA.deleteDecision = async function(id) {
+    if (!confirm('Delete this approved decision?')) return;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/decisions/${id}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadDecisions();
+    } catch (error) {
+        alert(`Failed to delete decision: ${error.message}`);
+    }
+};
+
 OSA.loadDecisionSuggestions = async function() {
     const list = document.getElementById('decision-suggestions-list');
     if (!list) return;
@@ -1595,6 +1668,7 @@ OSA.approveDecisionSuggestion = async function(id) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadDecisions();
         await OSA.loadDecisionSuggestions();
     } catch (error) {
         alert(`Failed to approve decision suggestion: ${error.message}`);
@@ -1610,6 +1684,7 @@ OSA.rejectDecisionSuggestion = async function(id) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.loadDecisions();
         await OSA.loadDecisionSuggestions();
     } catch (error) {
         alert(`Failed to reject decision suggestion: ${error.message}`);

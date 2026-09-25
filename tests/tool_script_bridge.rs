@@ -62,6 +62,7 @@ fn context(harness: &Harness) -> ScriptContext {
         registry: harness.context_registry.clone(),
         config: harness.config.clone(),
         workspace_path: harness.workspace_path.clone(),
+        workspace_id: "default".to_string(),
         event_bus: None,
         session_id: "test-session".to_string(),
     }

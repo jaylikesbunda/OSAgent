@@ -1978,7 +1978,7 @@ fn tool_line_detailed(name: &str) -> Option<(String, String)> {
         )),
         "record_memory" => Some((
             "- record_memory: save persistent user or project facts, not temporary reasoning".to_string(),
-            "record_memory(key=\"prefers_dark_mode\", value=\"true\")".to_string(),
+            "record_memory(title=\"Preferred code style\", content=\"Use tabs\", scope=\"workspace\")".to_string(),
         )),
         "question" => Some((
             "- question: ask the user for clarification or approval".to_string(),
@@ -2100,7 +2100,7 @@ fn tool_line_with_example(name: &str) -> Option<(String, String)> {
         )),
         "record_memory" => Some((
             "- record_memory: save persistent user or project facts, not temporary reasoning".to_string(),
-            "record_memory(key=\"build_cmd\", value=\"cargo build\")".to_string(),
+            "record_memory(title=\"Build command\", content=\"Use cargo build\", scope=\"workspace\")".to_string(),
         )),
         "question" => Some((
             "- question: ask the user for clarification or approval".to_string(),

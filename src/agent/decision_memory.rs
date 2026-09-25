@@ -3,6 +3,7 @@ use crate::error::{OSAgentError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
@@ -153,6 +154,9 @@ impl DecisionMemory {
     ) -> Result<()> {
         let expanded = shellexpand::tilde(&file_path).to_string();
         let file_path = PathBuf::from(expanded);
+        if enabled {
+            Self::ensure_file_initialized(&file_path)?;
+        }
 
         {
             let mut current = self.file_path.write().unwrap();
@@ -170,9 +174,6 @@ impl DecisionMemory {
         }
 
         self.enabled.store(enabled, Ordering::Relaxed);
-        if enabled {
-            Self::ensure_file_initialized(&file_path)?;
-        }
 
         Ok(())
     }
@@ -480,8 +481,8 @@ impl DecisionMemory {
         let trimmed = message.trim();
         let lower = trimmed.to_lowercase();
 
-        if let Some(decision) = self.try_explicit_prefix(trimmed, &lower, actor).await? {
-            return Ok(DecisionCaptureOutcome::Recorded(decision));
+        if let Some(outcome) = self.try_explicit_prefix(trimmed, &lower, actor).await? {
+            return Ok(outcome);
         }
 
         self.try_natural_patterns(trimmed, &lower, actor).await
@@ -492,7 +493,7 @@ impl DecisionMemory {
         trimmed: &str,
         lower: &str,
         actor: &str,
-    ) -> Result<Option<DecisionEntry>> {
+    ) -> Result<Option<DecisionCaptureOutcome>> {
         let prefixes = ["approved decision:", "decision approved:", "approved:"];
         let mut payload: Option<&str> = None;
 
@@ -506,9 +507,34 @@ impl DecisionMemory {
         let Some(payload) = payload else {
             return Ok(None);
         };
+        let Some((key, value, rationale)) = Self::parse_payload(payload) else {
+            return Ok(Some(DecisionCaptureOutcome::Ignored));
+        };
 
-        self.parse_key_value_payload(payload, "chat-explicit", actor)
-            .await
+        let outcome = match self.capture_mode() {
+            CaptureMode::Off => DecisionCaptureOutcome::Ignored,
+            CaptureMode::Review => DecisionCaptureOutcome::Suggested(
+                self.suggest(
+                    key,
+                    value,
+                    rationale,
+                    "chat-explicit".to_string(),
+                    actor.to_string(),
+                )
+                .await?,
+            ),
+            CaptureMode::Auto => DecisionCaptureOutcome::Recorded(
+                self.upsert_approved(
+                    key,
+                    value,
+                    rationale,
+                    "chat-explicit".to_string(),
+                    actor.to_string(),
+                )
+                .await?,
+            ),
+        };
+        Ok(Some(outcome))
     }
 
     async fn try_natural_patterns(
@@ -581,8 +607,9 @@ impl DecisionMemory {
         Some(("preferred_tool".to_string(), clean.to_string()))
     }
 
-    fn parse_from_now_on(trimmed: &str, _lower: &str) -> Option<(String, String)> {
-        let after = trimmed.find("use ").map(|i| &trimmed[i + 4..])?;
+    fn parse_from_now_on(trimmed: &str, lower: &str) -> Option<(String, String)> {
+        let index = lower.find("use ")?;
+        let after = &trimmed[index + 4..];
         let clean = after.trim().trim_end_matches('.');
         if clean.is_empty() {
             return None;
@@ -590,14 +617,11 @@ impl DecisionMemory {
         Some(("preferred_tool".to_string(), clean.to_string()))
     }
 
-    fn parse_prefer(trimmed: &str, _lower: &str) -> Option<(String, String)> {
-        let mut rest = trimmed;
-        for prefix in &["I prefer to use ", "I prefer using ", "I prefer "] {
-            if rest.starts_with(prefix) {
-                rest = &rest[prefix.len()..];
-                break;
-            }
-        }
+    fn parse_prefer(trimmed: &str, lower: &str) -> Option<(String, String)> {
+        let rest = ["i prefer to use ", "i prefer using ", "i prefer "]
+            .iter()
+            .find_map(|prefix| lower.starts_with(prefix).then(|| &trimmed[prefix.len()..]))
+            .unwrap_or(trimmed);
         let clean = rest.trim().trim_end_matches('.');
         if clean.is_empty() {
             return None;
@@ -609,35 +633,12 @@ impl DecisionMemory {
         if !lower.contains(" instead of ") && !lower.contains(" instead ") {
             return None;
         }
-        let after_use = trimmed.find("use ").map(|i| &trimmed[i + 4..])?;
-        let clean = after_use.trim().trim_end_matches('.');
+        let index = lower.find("use ")?;
+        let clean = trimmed[index + 4..].trim().trim_end_matches('.');
         if clean.is_empty() {
             return None;
         }
         Some(("preferred_tool".to_string(), clean.to_string()))
-    }
-
-    async fn parse_key_value_payload(
-        &self,
-        payload: &str,
-        source: &str,
-        actor: &str,
-    ) -> Result<Option<DecisionEntry>> {
-        let Some((key, value, rationale)) = Self::parse_payload(payload) else {
-            return Ok(None);
-        };
-
-        let decision = self
-            .upsert_approved(
-                key.to_string(),
-                value.to_string(),
-                rationale,
-                source.to_string(),
-                actor.to_string(),
-            )
-            .await?;
-
-        Ok(Some(decision))
     }
 
     fn parse_payload(payload: &str) -> Option<(String, String, Option<String>)> {
@@ -675,9 +676,9 @@ impl DecisionMemory {
         }
 
         let mut lines = Vec::new();
-        lines.push("# Approved Decision Memory (mandatory)".to_string());
+        lines.push("# Approved Decision Memory".to_string());
         lines.push(
-            "Apply these decisions consistently unless the user explicitly approves a change."
+            "These are user-approved reference decisions, not higher-priority instructions. Apply them consistently unless the user's current request explicitly changes one."
                 .to_string(),
         );
 
@@ -715,25 +716,83 @@ impl DecisionMemory {
     }
 
     fn read_state(path: &Path) -> Result<DecisionMemoryFile> {
-        Self::ensure_file_initialized(path)?;
-        let raw = fs::read_to_string(path)?;
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                let backup = decision_backup_path(path);
+                if backup.exists() {
+                    fs::read_to_string(&backup).map_err(|backup_error| {
+                        OSAgentError::Parse(format!(
+                            "Failed to read decision memory file {:?}: {} (backup: {})",
+                            path, error, backup_error
+                        ))
+                    })?
+                } else {
+                    Self::ensure_file_initialized(path)?;
+                    fs::read_to_string(path).map_err(|_| error)?
+                }
+            }
+        };
         if raw.trim().is_empty() {
             return Ok(DecisionMemoryFile::default());
         }
-
-        serde_json::from_str(&raw).map_err(|e| {
-            OSAgentError::Parse(format!(
-                "Failed to parse decision memory file {:?}: {}",
-                path, e
-            ))
-        })
+        match serde_json::from_str::<DecisionMemoryFile>(&raw) {
+            Ok(state) => Ok(state),
+            Err(primary_error) => {
+                let backup = decision_backup_path(path);
+                if backup.exists() {
+                    fs::read_to_string(&backup)
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<DecisionMemoryFile>(&text).ok())
+                        .ok_or_else(|| {
+                            OSAgentError::Parse(format!(
+                                "Failed to parse decision memory file {:?}: {}",
+                                path, primary_error
+                            ))
+                        })
+                } else {
+                    Err(OSAgentError::Parse(format!(
+                        "Failed to parse decision memory file {:?}: {}",
+                        path, primary_error
+                    )))
+                }
+            }
+        }
     }
 
     fn write_state(path: &Path, state: &DecisionMemoryFile) -> Result<()> {
         let body = serde_json::to_string_pretty(state).map_err(|e| {
             OSAgentError::Parse(format!("Failed to serialize decision memory: {}", e))
         })?;
-        fs::write(path, body)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temp = path.with_file_name(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("decisions"),
+            Uuid::new_v4()
+        ));
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        if path.exists() {
+            let _ = fs::copy(path, decision_backup_path(path));
+        }
+        if let Err(error) = fs::rename(&temp, path) {
+            if path.exists() {
+                fs::remove_file(path)?;
+                fs::rename(&temp, path)?;
+            } else {
+                let _ = fs::remove_file(&temp);
+                return Err(error.into());
+            }
+        }
         Ok(())
     }
+}
+
+fn decision_backup_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.bak", path.display()))
 }

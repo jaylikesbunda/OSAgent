@@ -64,6 +64,36 @@ OSA.TOOL_LABELS = {
     web_search: 'Search',
     skill: 'Skill',
     subagent: 'Subagent',
+    process: 'Background process',
+    codesearch: 'Code search',
+    lsp: 'Language server',
+    public_web_fetch: 'Web page',
+    tool_search: 'Find tools',
+    tool_script: 'Tool script',
+    skill_list: 'List skills',
+    skill_action: 'Run skill',
+    skill_create: 'Create skill',
+    skill_update: 'Update skill',
+    skill_delete: 'Delete skill',
+    record_memory: 'Save memory',
+    recall_memories: 'Recall memories',
+    list_memory_suggestions: 'Memory suggestions',
+    approve_memory_suggestion: 'Approve memory',
+    reject_memory_suggestion: 'Reject memory',
+    record_decision: 'Save decision',
+    list_decision_suggestions: 'Decision suggestions',
+    approve_decision_suggestion: 'Approve decision',
+    reject_decision_suggestion: 'Reject decision',
+    calendar: 'Calendar',
+    weather: 'Weather',
+    news: 'News',
+    system_status: 'System status',
+    sessions: 'Past sessions',
+    update_notes: 'Update notes',
+    create_goal: 'Create goal',
+    update_goal: 'Update goal',
+    schedule: 'Schedule',
+    coordinator: 'Coordinate',
 };
 
 OSA.TOOL_ICONS = {
@@ -82,6 +112,21 @@ OSA.TOOL_ICONS = {
     web_fetch: 'H',
     web_search: 'Q',
     subagent: 'A',
+    process: 'B',
+    codesearch: 'C',
+    lsp: 'L',
+    tool_search: '?',
+    tool_script: '</>',
+    record_memory: 'M',
+    recall_memories: 'R',
+    record_decision: 'D',
+    list_memory_suggestions: 'M',
+    list_decision_suggestions: 'D',
+    calendar: 'C',
+    weather: 'W',
+    news: 'N',
+    system_status: 'S',
+    sessions: 'H',
 };
 
 OSA.ROW_TOOLS = new Set(['read_file', 'list_files', 'task', 'skill', 'web_fetch', 'subagent']);
@@ -297,6 +342,7 @@ OSA.handleAgentEvent = function(event) {
             OSA.setProcessing(true);
             OSA.setStopping(false);
             OSA.showThinkingIndicator();
+            OSA.setThinkingStatus('Working', 'Preparing request');
             OSA.setSendButtonStopMode(true);
             OSA.startToolSync();
             // A new turn starts: clear the terminal-banner coalescing window so
@@ -319,6 +365,7 @@ OSA.handleAgentEvent = function(event) {
                 break;
             }
             OSA.beginThinkingDisplay();
+            OSA.setThinkingStatus('Thinking', 'Reasoning through the request');
             break;
 
         case 'thinking_delta':
@@ -334,6 +381,7 @@ OSA.handleAgentEvent = function(event) {
             OSA.clearRetryNotice();
             chain.lastAssistantDomId = OSA.getStreamingAssistantDomId() || chain.lastAssistantDomId;
             OSA.beginAssistantResponse();
+            OSA.setThinkingStatus('Writing', 'Composing the response');
             OSA.renderQueuedMessages(OSA.getSessionQueue());
             if (OSA.refreshCurrentSessionQueue) OSA.refreshCurrentSessionQueue();
             break;
@@ -390,6 +438,7 @@ OSA.handleAgentEvent = function(event) {
                 if (typeof OSA.shouldShowThinkingIndicatorForRunningSession === 'function'
                     && OSA.shouldShowThinkingIndicatorForRunningSession(cur)) {
                     OSA.showThinkingIndicator();
+                    OSA.setThinkingStatus('Thinking', 'Reviewing tool results');
                 }
             })();
             break;
@@ -460,6 +509,10 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'retry':
+            if (!event.subagent_session_id) {
+                OSA.showThinkingIndicator();
+                OSA.setThinkingStatus('Retrying', event.reason || 'Recovering the request');
+            }
             if (event.subagent_session_id) {
                 OSA.handleSubagentRetry(event);
             } else {
@@ -469,6 +522,10 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'compaction': {
+            if (!event.subagent_session_id) {
+                OSA.showThinkingIndicator();
+                OSA.setThinkingStatus('Organizing', 'Compacting conversation context');
+            }
             const current = OSA.getCurrentSession && OSA.getCurrentSession();
             if (current && current.id === event.session_id && !OSA.isAgentProcessing()) {
                 if (typeof OSA.selectSession === 'function') OSA.selectSession(event.session_id);
@@ -480,7 +537,14 @@ OSA.handleAgentEvent = function(event) {
         }
 
         case 'step_finish':
+            OSA.scheduleSessionInspectorRefresh();
+            break;
+
         case 'reasoning':
+            if (document.getElementById('thinking-indicator')) {
+                const summary = String(event.summary || 'Reasoning through the request').slice(0, 90);
+                OSA.setThinkingStatus('Thinking', summary);
+            }
             OSA.scheduleSessionInspectorRefresh();
             break;
 
@@ -771,7 +835,13 @@ OSA._updateContextModalContent = function() {
 };
 
 OSA.toolLabel = function(name) {
-    return OSA.TOOL_LABELS[name] || name;
+    if (!name) return 'Tool';
+    if (OSA.TOOL_LABELS[name]) return OSA.TOOL_LABELS[name];
+    return String(name)
+        .replace(/^mcp__/, '')
+        .replace(/__/g, ' · ')
+        .replace(/[_-]+/g, ' ')
+        .replace(/\b\w/g, function(char) { return char.toUpperCase(); });
 };
 
 OSA.toolIcon = function(name) {

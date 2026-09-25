@@ -1,5 +1,5 @@
-use crate::agent::memory::{MemoryCategory, MemoryStore, MemorySuggestionStatus};
-use crate::config::LearningMode;
+use crate::agent::memory::{MemoryCategory, MemoryScope, MemoryStore, MemorySuggestionStatus};
+use crate::config::CaptureMode;
 use crate::error::Result;
 use crate::tools::registry::Tool;
 use async_trait::async_trait;
@@ -14,6 +14,13 @@ fn parse_category(value: Option<&str>) -> Option<MemoryCategory> {
         Some(v) if v == "fact" => Some(MemoryCategory::Fact),
         Some(v) if v == "general" => Some(MemoryCategory::General),
         _ => None,
+    }
+}
+
+fn parse_scope(value: Option<&str>) -> MemoryScope {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("global") => MemoryScope::Global,
+        _ => MemoryScope::Workspace,
     }
 }
 
@@ -59,6 +66,11 @@ impl Tool for RecordMemoryTool {
                     "enum": ["user_preference", "project_context", "workflow", "fact", "general"],
                     "description": "Optional memory category"
                 },
+                "scope": {
+                    "type": "string",
+                    "enum": ["workspace", "global"],
+                    "description": "Workspace (default) limits this memory to the current workspace; global applies everywhere"
+                },
                 "rationale": {
                     "type": "string",
                     "description": "Optional reason for saving this memory"
@@ -87,25 +99,38 @@ impl Tool for RecordMemoryTool {
             })
             .unwrap_or_default();
         let category = parse_category(args["category"].as_str());
+        let scope = parse_scope(args["scope"].as_str());
+        let workspace_id = args["workspace_id"].as_str().map(str::to_string);
         let rationale = args["rationale"].as_str().map(|s| s.to_string());
 
-        if self.store.learning_mode() == LearningMode::Review {
-            let suggestion = self
-                .store
-                .suggest(
-                    title.clone(),
-                    content,
-                    tags,
-                    category,
-                    "tool".to_string(),
-                    "agent".to_string(),
-                    rationale,
+        match self.store.capture_mode() {
+            CaptureMode::Off => {
+                return Ok(
+                    "Memory capture is off. Ask the user to add it manually in Settings > Memory."
+                        .to_string(),
                 )
-                .await?;
-            return Ok(format!(
-                "Memory suggestion queued for review: '{}' (id: {})",
-                suggestion.title, suggestion.id
-            ));
+            }
+            CaptureMode::Review => {
+                let suggestion = self
+                    .store
+                    .suggest(
+                        title.clone(),
+                        content,
+                        tags,
+                        category,
+                        scope,
+                        workspace_id,
+                        "tool".to_string(),
+                        "agent".to_string(),
+                        rationale,
+                    )
+                    .await?;
+                return Ok(format!(
+                    "Memory suggestion queued for review: '{}' (id: {})",
+                    suggestion.title, suggestion.id
+                ));
+            }
+            CaptureMode::Auto => {}
         }
 
         let entry = self
@@ -115,6 +140,8 @@ impl Tool for RecordMemoryTool {
                 content,
                 tags,
                 category,
+                scope,
+                workspace_id,
                 true,
                 "agent".to_string(),
             )
@@ -123,6 +150,76 @@ impl Tool for RecordMemoryTool {
             "Memory recorded: '{}' (id: {})",
             entry.title, entry.id
         ))
+    }
+}
+
+pub struct RecallMemoriesTool {
+    store: Arc<MemoryStore>,
+}
+
+impl RecallMemoriesTool {
+    pub fn new(store: Arc<MemoryStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for RecallMemoriesTool {
+    fn name(&self) -> &str {
+        "recall_memories"
+    }
+
+    fn description(&self) -> &str {
+        "Search confirmed global and current-workspace memories by relevance. Use when the user asks what OSA remembers or when a specific stored preference, project fact, or workflow may help."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to search for in memory titles, content, and tags"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 25,
+                    "description": "Maximum memories to return (default 10)"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<String> {
+        if !self.store.is_enabled() {
+            return Ok("Memory system is disabled. Enable it in Settings > Memory.".to_string());
+        }
+        let query = args["query"].as_str().unwrap_or("").trim();
+        if query.is_empty() {
+            return Ok("Recall requires a non-empty query.".to_string());
+        }
+        let limit = args["limit"].as_u64().unwrap_or(10).clamp(1, 25) as usize;
+        let workspace_id = args["workspace_id"].as_str();
+        let memories = self.store.search(query, workspace_id, limit).await?;
+        if memories.is_empty() {
+            return Ok("No matching memories found.".to_string());
+        }
+        Ok(memories
+            .into_iter()
+            .map(|memory| {
+                let scope = match memory.scope {
+                    MemoryScope::Global => "global".to_string(),
+                    MemoryScope::Workspace => "workspace".to_string(),
+                };
+                format!(
+                    "[{} / {:?}] {}: {} (id: {})",
+                    scope, memory.category, memory.title, memory.content, memory.id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }
 

@@ -126,8 +126,10 @@ OSA.generateClientMessageId = function() {
 OSA.summarizeHistoryEvent = function(event) {
     const data = event?.data || {};
     switch (event.event_type) {
-        case 'tool':
-            return `${data.tool_name || 'tool'} ${data.success ? 'completed' : 'failed'} in ${data.duration_ms ?? '?'}ms`;
+        case 'tool': {
+            const name = window.OSA?.toolLabel ? OSA.toolLabel(data.tool_name) : (data.tool_name || 'tool');
+            return `${name} ${data.success ? 'completed' : 'failed'} in ${data.duration_ms ?? '?'}ms`;
+        }
         case 'retry':
             return `${data.scope || 'operation'} retried ${data.attempt_count || 0} time(s)${data.context_compressed ? ' after context compression' : ''}`;
         case 'compaction':

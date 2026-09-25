@@ -46,6 +46,14 @@ OSA.isHiddenSyntheticMessage = function(message) {
     return true;
 };
 
+OSA.setThinkingStatus = function(label, detail) {
+    if (typeof document === 'undefined') return;
+    const labelEl = document.querySelector('#thinking-indicator .thinking-label');
+    const detailEl = document.getElementById('thinking-sublabel');
+    if (labelEl && label) labelEl.textContent = label;
+    if (detailEl && detail) detailEl.textContent = detail;
+};
+
 OSA.showThinkingIndicator = function() {
     const existing = document.getElementById('thinking-indicator');
     if (existing) return existing;
@@ -59,7 +67,7 @@ OSA.showThinkingIndicator = function() {
         <canvas class="thinking-canvas" id="thinking-canvas"></canvas>
         <div class="thinking-info">
             <span class="thinking-label">Thinking</span>
-            <span class="thinking-sublabel" id="thinking-sublabel">Sending request</span>
+            <span class="thinking-sublabel" id="thinking-sublabel">Preparing request</span>
         </div>
     `;
 
@@ -71,18 +79,7 @@ OSA.showThinkingIndicator = function() {
         OSA._thinkingCanvasAnim = OSA._initThinkingCanvas(canvas);
     }
 
-    const sublabels = [
-        'Sending request',
-        'Waiting for response',
-        'Processing response',
-    ];
-    let labelIdx = 0;
-    OSA._thinkingSublabelTimer = setInterval(() => {
-        const el = document.getElementById('thinking-sublabel');
-        if (!el) { clearInterval(OSA._thinkingSublabelTimer); return; }
-        labelIdx = (labelIdx + 1) % sublabels.length;
-        el.textContent = sublabels[labelIdx];
-    }, 3000);
+    OSA.setThinkingStatus('Working', 'Preparing request');
     return indicator;
 };
 
@@ -2054,6 +2051,8 @@ OSA.handleQueuedMessageDispatched = function(event) {
     OSA.setProcessing(true);
     OSA.setStopping(false);
     OSA.setSendButtonStopMode(true);
+    OSA.showThinkingIndicator();
+    OSA.setThinkingStatus('Working', 'Processing queued message');
     const dispatchedId = event.queue_entry_id || '';
     const dispatchedClientId = event.client_message_id || '';
     const queue = (OSA.getSessionQueue() || []).filter(item => {

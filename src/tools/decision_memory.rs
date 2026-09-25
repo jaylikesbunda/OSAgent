@@ -1,5 +1,5 @@
 use crate::agent::decision_memory::{DecisionMemory, DecisionSuggestionStatus};
-use crate::config::LearningMode;
+use crate::config::CaptureMode;
 use crate::error::Result;
 use crate::tools::registry::Tool;
 use async_trait::async_trait;
@@ -60,21 +60,30 @@ impl Tool for RecordDecisionTool {
             return Ok("Both 'key' and 'value' are required.".to_string());
         }
 
-        if self.store.learning_mode() == LearningMode::Review {
-            let suggestion = self
-                .store
-                .suggest(
-                    key.clone(),
-                    value,
-                    rationale,
-                    "tool".to_string(),
-                    "agent".to_string(),
+        match self.store.capture_mode() {
+            CaptureMode::Off => {
+                return Ok(
+                    "Decision capture is off. Ask the user to approve it in Settings > Memory."
+                        .to_string(),
                 )
-                .await?;
-            return Ok(format!(
-                "Decision suggestion queued for review: '{}' = '{}' (id: {})",
-                suggestion.key, suggestion.value, suggestion.id
-            ));
+            }
+            CaptureMode::Review => {
+                let suggestion = self
+                    .store
+                    .suggest(
+                        key.clone(),
+                        value,
+                        rationale,
+                        "tool".to_string(),
+                        "agent".to_string(),
+                    )
+                    .await?;
+                return Ok(format!(
+                    "Decision suggestion queued for review: '{}' = '{}' (id: {})",
+                    suggestion.key, suggestion.value, suggestion.id
+                ));
+            }
+            CaptureMode::Auto => {}
         }
 
         let entry = self

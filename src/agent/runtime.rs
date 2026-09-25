@@ -7,7 +7,7 @@ use crate::agent::instruction::{
     workspace_instruction_blocks,
 };
 use crate::agent::memory::{
-    MemoryCategory, MemoryEntry, MemoryStatus, MemoryStore, MemorySuggestion,
+    MemoryCategory, MemoryEntry, MemoryScope, MemoryStatus, MemoryStore, MemorySuggestion,
 };
 use crate::agent::model_catalog::ModelCatalog;
 use crate::agent::persona::{self, ActivePersona};
@@ -443,6 +443,7 @@ impl AgentRuntime {
             config.agent.memory_enabled,
             config.agent.memory_file.clone(),
             config.agent.learning_mode,
+            config.agent.memory_capture_mode,
         )?);
         let decision_memory = Arc::new(DecisionMemory::new(
             config.agent.decision_memory_enabled,
@@ -1278,26 +1279,33 @@ impl AgentRuntime {
             }
             session.messages.push(message);
 
-            match self
-                .decision_memory
-                .maybe_capture_from_user_message(&user_message, &user)
-                .await
-            {
-                Ok(DecisionCaptureOutcome::Ignored) => {}
-                Ok(DecisionCaptureOutcome::Recorded(entry)) => {
-                    info!(
-                        "Captured approved decision from user message: {}",
-                        entry.key
-                    );
-                }
-                Ok(DecisionCaptureOutcome::Suggested(suggestion)) => {
-                    info!(
-                        "Captured decision suggestion from user message: {} (id: {})",
-                        suggestion.key, suggestion.id
-                    );
-                }
-                Err(error) => {
-                    warn!("Failed to capture approved decision memory: {}", error);
+            let is_community = session
+                .metadata
+                .get("discord_community")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if !is_community {
+                match self
+                    .decision_memory
+                    .maybe_capture_from_user_message(&user_message, &user)
+                    .await
+                {
+                    Ok(DecisionCaptureOutcome::Ignored) => {}
+                    Ok(DecisionCaptureOutcome::Recorded(entry)) => {
+                        info!(
+                            "Captured approved decision from user message: {}",
+                            entry.key
+                        );
+                    }
+                    Ok(DecisionCaptureOutcome::Suggested(suggestion)) => {
+                        info!(
+                            "Captured decision suggestion from user message: {} (id: {})",
+                            suggestion.key, suggestion.id
+                        );
+                    }
+                    Err(error) => {
+                        warn!("Failed to capture approved decision memory: {}", error);
+                    }
                 }
             }
         }
@@ -1535,11 +1543,19 @@ impl AgentRuntime {
             }
 
             if !is_roleplay && !is_community {
-                if let Some(decision_block) = self.decision_memory.prompt_block().await? {
-                    api_messages.push(Message::system(decision_block));
+                match self.decision_memory.prompt_block().await {
+                    Ok(Some(decision_block)) => api_messages.push(Message::system(decision_block)),
+                    Ok(None) => {}
+                    Err(error) => warn!("Decision memory unavailable for this turn: {}", error),
                 }
-                if let Some(memory_block) = self.memory_store.prompt_block().await? {
-                    api_messages.push(Message::system(memory_block));
+                match self
+                    .memory_store
+                    .prompt_block(Some(&active_workspace.id), Some(&user_message))
+                    .await
+                {
+                    Ok(Some(memory_block)) => api_messages.push(Message::system(memory_block)),
+                    Ok(None) => {}
+                    Err(error) => warn!("Memory unavailable for this turn: {}", error),
                 }
             }
 
@@ -2837,6 +2853,7 @@ impl AgentRuntime {
                             // activation, MCP auto-activation, todos,
                             // goals, questions) can find its session.
                             tool_args["session_id"] = serde_json::json!(session_id);
+                            tool_args["workspace_id"] = serde_json::json!(active_workspace.id);
                             // Reading other conversations through the
                             // `sessions` tool is gated by the
                             // `session_access` policy (popup, rules) before
@@ -5174,6 +5191,7 @@ impl AgentRuntime {
             registry: self.tool_registry.clone(),
             config,
             workspace_path: active_workspace.resolved_path(),
+            workspace_id: active_workspace.id.clone(),
             event_bus: Some(self.event_bus.clone()),
             session_id: session_id.to_string(),
         };
@@ -6912,6 +6930,7 @@ impl AgentRuntime {
             cfg.agent.memory_enabled,
             cfg.agent.memory_file.clone(),
             cfg.agent.learning_mode,
+            cfg.agent.memory_capture_mode,
         ) {
             warn!("Failed to update memory state: {}", e);
         }
@@ -7128,6 +7147,10 @@ impl AgentRuntime {
         cfg.save(config_path)
     }
 
+    pub fn decision_memory_status(&self) -> crate::agent::decision_memory::DecisionMemoryStatus {
+        self.decision_memory.status()
+    }
+
     pub fn memory_status(&self) -> MemoryStatus {
         self.memory_store.status()
     }
@@ -7142,11 +7165,22 @@ impl AgentRuntime {
         content: String,
         tags: Vec<String>,
         category: Option<MemoryCategory>,
+        scope: MemoryScope,
+        workspace_id: Option<String>,
         confirmed: bool,
         source: String,
     ) -> Result<MemoryEntry> {
         self.memory_store
-            .add(title, content, tags, category, confirmed, source)
+            .add(
+                title,
+                content,
+                tags,
+                category,
+                scope,
+                workspace_id,
+                confirmed,
+                source,
+            )
             .await
     }
 
@@ -7157,10 +7191,21 @@ impl AgentRuntime {
         content: Option<String>,
         tags: Option<Vec<String>>,
         category: Option<MemoryCategory>,
+        scope: Option<MemoryScope>,
+        workspace_id: Option<String>,
         confirmed: Option<bool>,
     ) -> Result<MemoryEntry> {
         self.memory_store
-            .update(id, title, content, tags, category, confirmed)
+            .update(
+                id,
+                title,
+                content,
+                tags,
+                category,
+                scope,
+                workspace_id,
+                confirmed,
+            )
             .await
     }
 
@@ -7183,6 +7228,16 @@ impl AgentRuntime {
         note: Option<String>,
     ) -> Result<bool> {
         self.memory_store.reject_suggestion(id, actor, note).await
+    }
+
+    pub async fn list_decisions(
+        &self,
+    ) -> Result<Vec<crate::agent::decision_memory::DecisionEntry>> {
+        self.decision_memory.list().await
+    }
+
+    pub async fn delete_decision(&self, id: &str) -> Result<bool> {
+        self.decision_memory.delete(id, "user".to_string()).await
     }
 
     pub async fn list_decision_suggestions(&self) -> Result<Vec<DecisionSuggestion>> {

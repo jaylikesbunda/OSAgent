@@ -1,6 +1,6 @@
 use super::{scheduler, ws};
-use crate::agent::decision_memory::DecisionSuggestion;
-use crate::agent::memory::{MemoryCategory, MemoryEntry, MemorySuggestion};
+use crate::agent::decision_memory::{DecisionEntry, DecisionSuggestion};
+use crate::agent::memory::{MemoryCategory, MemoryEntry, MemoryScope, MemorySuggestion};
 use crate::agent::persona::{ActivePersona, PersonaOption};
 use crate::agent::runtime::AgentRuntime;
 use crate::config::{Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission};
@@ -413,6 +413,13 @@ pub struct MemorySuggestionListResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DecisionListResponse {
+    pub enabled: bool,
+    pub file_path: String,
+    pub decisions: Vec<DecisionEntry>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DecisionSuggestionListResponse {
     pub suggestions: Vec<DecisionSuggestion>,
 }
@@ -424,6 +431,8 @@ pub struct AddMemoryRequest {
     #[serde(default)]
     pub tags: Vec<String>,
     pub category: Option<MemoryCategory>,
+    pub scope: Option<MemoryScope>,
+    pub workspace_id: Option<String>,
     pub confirmed: Option<bool>,
 }
 
@@ -433,6 +442,8 @@ pub struct UpdateMemoryRequest {
     pub content: Option<String>,
     pub tags: Option<Vec<String>>,
     pub category: Option<MemoryCategory>,
+    pub scope: Option<MemoryScope>,
+    pub workspace_id: Option<String>,
     pub confirmed: Option<bool>,
 }
 
@@ -575,6 +586,8 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/memories/suggestions/:id/reject",
             post(reject_memory_suggestion),
         )
+        .route("/api/decisions", get(list_decisions))
+        .route("/api/decisions/:id", delete(delete_decision))
         .route("/api/decisions/suggestions", get(list_decision_suggestions))
         .route(
             "/api/decisions/suggestions/:id/approve",
@@ -1690,12 +1703,24 @@ async fn add_memory(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Json(payload): Json<AddMemoryRequest>,
 ) -> Result<Json<MemoryEntry>, (StatusCode, Json<ErrorResponse>)> {
+    let scope = payload.scope.unwrap_or(MemoryScope::Workspace);
+    let workspace_id = if scope == MemoryScope::Workspace {
+        let workspace_id = match payload.workspace_id {
+            Some(id) => id,
+            None => agent.get_active_workspace().await.id,
+        };
+        Some(workspace_id)
+    } else {
+        None
+    };
     let entry = agent
         .add_memory(
             payload.title,
             payload.content,
             payload.tags,
             payload.category,
+            scope,
+            workspace_id,
             payload.confirmed.unwrap_or(true),
             "user".to_string(),
         )
@@ -1716,6 +1741,16 @@ async fn update_memory(
     Path(id): Path<String>,
     Json(payload): Json<UpdateMemoryRequest>,
 ) -> Result<Json<MemoryEntry>, (StatusCode, Json<ErrorResponse>)> {
+    let workspace_id = match payload.scope {
+        Some(MemoryScope::Workspace) => {
+            let id = match payload.workspace_id {
+                Some(id) => id,
+                None => agent.get_active_workspace().await.id,
+            };
+            Some(id)
+        }
+        _ => payload.workspace_id,
+    };
     let entry = agent
         .update_memory(
             &id,
@@ -1723,6 +1758,8 @@ async fn update_memory(
             payload.content,
             payload.tags,
             payload.category,
+            payload.scope,
+            workspace_id,
             payload.confirmed,
         )
         .await
@@ -1818,6 +1855,49 @@ async fn reject_memory_suggestion(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "Memory suggestion not found".to_string(),
+            }),
+        ))
+    }
+}
+
+async fn list_decisions(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<DecisionListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let status = agent.decision_memory_status();
+    let decisions = agent.list_decisions().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(DecisionListResponse {
+        enabled: status.enabled,
+        file_path: status.file_path,
+        decisions,
+    }))
+}
+
+async fn delete_decision(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let deleted = agent.delete_decision(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    if deleted {
+        Ok(StatusCode::OK)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Decision not found".to_string(),
             }),
         ))
     }
