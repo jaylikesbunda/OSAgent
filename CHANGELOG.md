@@ -5,6 +5,7 @@ Changed:
 * More reliable update restarts and failure recovery
 * Memory now supports global/workspace scopes, safer capture modes, relevance recall, and resilient storage
 * Added approved decision management and safer memory review controls
+* Refactored scheduled jobs with reliable local-time/cron parsing, explicit one-shot/recurring behavior, retries, concurrency limits, recovery, and durable web notifications
 
 v0.6.1 changes:
 

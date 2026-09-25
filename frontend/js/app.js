@@ -256,7 +256,7 @@ OSA.getSessionSourceKey = function(session) {
     const source = (session && session.metadata && typeof session.metadata.source === 'string')
         ? session.metadata.source.trim().toLowerCase()
         : '';
-    if (source === 'discord' || source === 'discord-community' || source === 'web') return source;
+    if (source === 'discord' || source === 'discord-community' || source === 'web' || source === 'scheduler') return source;
     if (source === 'discord-shared' || source === 'shared') return 'discord-shared';
 
     const owner = (session && session.metadata && typeof session.metadata.owner === 'string')
@@ -272,6 +272,7 @@ OSA.getSessionSourceLabel = function(sourceKey) {
     if (sourceKey === 'discord') return 'Discord';
     if (sourceKey === 'discord-community') return 'Community';
     if (sourceKey === 'discord-shared') return 'Shared';
+    if (sourceKey === 'scheduler') return 'Scheduled';
     return 'Web';
 };
 

@@ -15,6 +15,13 @@ jwt_secret = "replace-with-a-long-random-secret"
 # Changes require a server restart.
 cors_allowed_origins = []
 
+[scheduler]
+# Scheduled jobs run inside the OSA process. One-time and recurring jobs are
+# persisted in SQLite; retries use exponential backoff.
+enabled = true
+max_concurrent = 3
+max_retries = 3
+
 # --- Provider Configuration ---
 # OSA supports multiple providers simultaneously.
 # API keys live in auth.toml (0600, next to config.toml) — NOT here.

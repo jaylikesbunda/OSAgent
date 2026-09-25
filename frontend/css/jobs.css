@@ -194,6 +194,10 @@
     box-shadow: 0 0 6px var(--error-dim);
 }
 
+.job-status-completed {
+    background: var(--text-muted);
+}
+
 /* ---- Message ---- */
 
 .job-message {
@@ -235,6 +239,15 @@
 .job-schedule-tag svg {
     flex-shrink: 0;
     opacity: 0.7;
+}
+
+.job-repetition-tag {
+    display: inline-block;
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 10px;
 }
 
 .job-channel-tag {
@@ -281,6 +294,14 @@
 .job-time-failures {
     color: var(--error);
     font-weight: 500;
+}
+
+.job-time-error {
+    max-width: 100%;
+    overflow: hidden;
+    color: var(--error);
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* ---- Card Actions ---- */

@@ -467,6 +467,14 @@ pub struct ScheduledJob {
     pub next_run_at: DateTime<Utc>,
     pub failure_count: u32,
     pub notify_channels: Vec<String>,
+    /// Whether this job runs once or repeatedly. This is stored explicitly
+    /// instead of inferred from the expression (`at 3pm` is one-shot, while
+    /// `@daily` is recurring).
+    pub schedule_type: String,
+    /// scheduled -> running -> scheduled/completed/failed.
+    pub run_state: String,
+    pub last_error: Option<String>,
+    pub attempt_count: u32,
 }
 
 impl ScheduledJob {
@@ -476,6 +484,7 @@ impl ScheduledJob {
         job_type: String,
         session_id: Option<String>,
     ) -> Self {
+        let schedule_type = Self::infer_schedule_type(&cron_expr).to_string();
         let now = Utc::now();
         Self {
             id: Uuid::new_v4().to_string(),
@@ -490,7 +499,31 @@ impl ScheduledJob {
             next_run_at: now,
             failure_count: 0,
             notify_channels: vec!["web".to_string()],
+            schedule_type,
+            run_state: "scheduled".to_string(),
+            last_error: None,
+            attempt_count: 0,
         }
+    }
+
+    pub fn infer_schedule_type(expr: &str) -> &'static str {
+        let expr = expr.trim().to_ascii_lowercase();
+        if expr.starts_with("in ") || expr.starts_with("at ") {
+            "one_shot"
+        } else {
+            "recurring"
+        }
+    }
+
+    pub fn with_schedule_type(mut self, schedule_type: String) -> Self {
+        if matches!(schedule_type.as_str(), "one_shot" | "recurring") {
+            self.schedule_type = schedule_type;
+        }
+        self
+    }
+
+    pub fn is_one_shot(&self) -> bool {
+        self.schedule_type == "one_shot"
     }
 
     pub fn with_channels(mut self, channels: Vec<String>) -> Self {
@@ -515,6 +548,16 @@ impl ScheduledJob {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobNotification {
+    pub id: i64,
+    pub job_id: String,
+    pub job_type: String,
+    pub message: String,
+    pub session_id: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// A message that matched a search, with enough context to render a result row.

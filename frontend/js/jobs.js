@@ -4,11 +4,11 @@ OSA.Jobs = {
     panel: null,
     refreshTimer: null,
     pendingDeleteId: null,
+    notificationTimer: null,
+    notificationCursor: null,
 
     init() {
-        if (Notification.permission === 'default') {
-            Notification.requestPermission();
-        }
+        this.startNotificationPolling();
         const discordCb = document.getElementById('notify-discord');
         if (discordCb) {
             discordCb.addEventListener('change', () => this.toggleDiscordField());
@@ -20,8 +20,12 @@ OSA.Jobs = {
     onTypeChange() {
         const type = document.getElementById('job-type').value;
         const msg = document.getElementById('job-message');
-        if (type === 'daily_briefing' && !msg.value.trim()) {
-            msg.value = this.DEFAULT_BRIEFING_PROMPT;
+        if (type === 'daily_briefing') {
+            if (!msg.value.trim()) {
+                msg.value = this.DEFAULT_BRIEFING_PROMPT;
+            }
+            const repetition = document.getElementById('job-schedule-type');
+            if (repetition) repetition.value = 'recurring';
         }
     },
 
@@ -57,6 +61,58 @@ OSA.Jobs = {
             clearInterval(this.refreshTimer);
             this.refreshTimer = null;
         }
+    },
+
+    startNotificationPolling() {
+        if (this.notificationTimer) clearInterval(this.notificationTimer);
+        this.pollNotifications();
+        this.notificationTimer = setInterval(() => this.pollNotifications(), 15000);
+    },
+
+    async pollNotifications() {
+        if (!OSA.getScheduledNotifications) return;
+        try {
+            const stored = localStorage.getItem('osa-scheduled-notification-cursor');
+            const cursor = stored === null ? null : Number(stored);
+            const data = await OSA.getScheduledNotifications(cursor || 0);
+            const latest = Number(data.latest_id || 0);
+
+            // On the first visit, recover existing scheduled sessions as unread
+            // without showing transient toasts. Once stored, every new job
+            // result remains recoverable after a reconnect or browser sleep.
+            const notifications = data.notifications || [];
+            for (const notification of notifications) {
+                this.handleSessionResult(notification, false);
+            }
+            if (notifications.length > 0) this.refreshSessions();
+
+            if (cursor === null || !Number.isFinite(cursor)) {
+                this.notificationCursor = latest;
+                localStorage.setItem('osa-scheduled-notification-cursor', String(latest));
+                return;
+            }
+
+            this.notificationCursor = latest;
+            localStorage.setItem('osa-scheduled-notification-cursor', String(latest));
+        } catch (e) {
+            console.debug('Scheduled notification poll failed:', e);
+        }
+    },
+
+    handleSessionResult(result, refreshSessions = true) {
+        const sessionId = result && result.session_id;
+        if (!sessionId) return;
+        if (typeof OSA.markSessionUnread === 'function') {
+            OSA.markSessionUnread(sessionId);
+        }
+        if (refreshSessions) this.refreshSessions();
+    },
+
+    refreshSessions() {
+        if (typeof OSA.loadSessions !== 'function') return;
+        OSA.loadSessions().catch(error => {
+            console.debug('Failed to refresh sessions after scheduled job:', error);
+        });
     },
 
     async load() {
@@ -101,9 +157,11 @@ OSA.Jobs = {
 
     renderJobCard(job) {
         const enabled = job.enabled;
-        const hasFailed = job.failure_count > 0;
-        const statusClass = !enabled ? 'paused' : hasFailed ? 'error' : 'active';
-        const statusLabel = !enabled ? 'Paused' : hasFailed ? `${job.failure_count} failure${job.failure_count > 1 ? 's' : ''}` : 'Active';
+        const runState = job.run_state || 'scheduled';
+        const hasFailed = runState === 'failed' || job.failure_count > 0 || !!job.last_error;
+        const isCompleted = runState === 'completed';
+        const statusClass = isCompleted ? 'completed' : !enabled ? 'paused' : hasFailed ? 'error' : 'active';
+        const statusLabel = isCompleted ? 'Completed' : !enabled ? 'Paused' : hasFailed ? `${job.failure_count || 1} failure${(job.failure_count || 1) > 1 ? 's' : ''}` : 'Active';
         const typeLabel = job.job_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         const channels = (job.notify_channels || ['web']).map(c =>
             `<span class="job-channel-tag job-channel-${c}">${c}</span>`
@@ -125,12 +183,14 @@ OSA.Jobs = {
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                         ${this.escapeHtml(job.cron_expr)}
                     </span>
+                    <span class="job-repetition-tag">${job.schedule_type === 'one_shot' ? 'One time' : 'Recurring'}</span>
                     ${channels}
                 </div>
                 <div class="job-card-times">
-                    ${this.renderNextRun(job.next_run_at)}
+                    ${isCompleted ? '<span class="job-time-next">Completed</span>' : this.renderNextRun(job.next_run_at)}
                     ${job.last_run_at ? this.renderLastRun(job.last_run_at) : ''}
-                    ${hasFailed ? `<span class="job-time-failures">${job.failure_count} failure${job.failure_count > 1 ? 's' : ''}</span>` : ''}
+                    ${hasFailed ? `<span class="job-time-failures">${job.failure_count || 1} failure${(job.failure_count || 1) > 1 ? 's' : ''}</span>` : ''}
+                    ${job.last_error ? `<span class="job-time-error" title="${this.escapeHtml(job.last_error)}">${this.escapeHtml(job.last_error)}</span>` : ''}
                 </div>
             </div>
             <div class="job-card-actions">
@@ -182,6 +242,7 @@ OSA.Jobs = {
         const when = document.getElementById('job-when').value.trim();
         const message = document.getElementById('job-message').value.trim();
         const type = document.getElementById('job-type').value;
+        const scheduleType = document.getElementById('job-schedule-type')?.value || 'one_shot';
 
         if (!when || !message) return;
 
@@ -190,7 +251,7 @@ OSA.Jobs = {
         if (document.getElementById('notify-discord').checked) notify_via.push('discord');
         if (notify_via.length === 0) notify_via.push('web');
 
-        const payload = { when, message, job_type: type, notify_via };
+        const payload = { when, message, job_type: type, schedule_type: scheduleType, notify_via };
 
         const discordChannel = document.getElementById('discord-channel-id');
         if (discordChannel && discordChannel.value.trim()) {
@@ -239,6 +300,17 @@ OSA.Jobs = {
         }
     },
 
+    async runNow(id) {
+        try {
+            await OSA.runScheduledJobNow(id);
+            this.showToast('Job queued to run now', 'info');
+            await this.load();
+        } catch (e) {
+            console.error('Failed to run job:', e);
+            this.showToast('Failed to run job: ' + (e.message || 'Unknown error'), 'error');
+        }
+    },
+
     async toggle(id) {
         try {
             await OSA.toggleScheduledJob(id);
@@ -247,13 +319,6 @@ OSA.Jobs = {
             console.error('Failed to toggle job:', e);
             this.showToast('Failed to update job', 'error');
         }
-    },
-
-    showNotification(message, type, job_id) {
-        if (document.hidden && Notification.permission === 'granted') {
-            new Notification('OSAgent', { body: message });
-        }
-        this.showToast(message, type || 'info');
     },
 
     showToast(message, type) {

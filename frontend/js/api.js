@@ -97,9 +97,21 @@ OSA.deleteScheduledJob = async function(id) {
     return res.ok;
 };
 
+OSA.runScheduledJobNow = async function(id) {
+    const res = await OSA.fetchWithAuth(`/api/scheduler/jobs/${id}/run-now`, {
+        method: 'POST'
+    });
+    return res.json();
+};
+
 OSA.toggleScheduledJob = async function(id) {
     const res = await OSA.fetchWithAuth(`/api/scheduler/jobs/${id}/toggle`, {
         method: 'PATCH'
     });
+    return res.json();
+};
+
+OSA.getScheduledNotifications = async function(after = 0) {
+    const res = await OSA.fetchWithAuth(`/api/scheduler/notifications?after=${encodeURIComponent(after)}&limit=100`);
     return res.json();
 };

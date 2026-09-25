@@ -1,6 +1,6 @@
 use crate::error::{OSAgentError, Result};
 use crate::storage::models::*;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::params;
 use rusqlite::OptionalExtension;
 use std::path::PathBuf;
@@ -560,11 +560,26 @@ impl SqliteStorage {
                     last_run_at INTEGER,
                     next_run_at INTEGER NOT NULL,
                     failure_count INTEGER NOT NULL DEFAULT 0,
-                    notify_channels BLOB NOT NULL
+                    notify_channels BLOB NOT NULL,
+                     schedule_type TEXT NOT NULL DEFAULT 'recurring',
+                     run_state TEXT NOT NULL DEFAULT 'scheduled',
+                     last_error TEXT,
+                     attempt_count INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_enabled ON scheduled_jobs(enabled, next_run_at);
                 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_session ON scheduled_jobs(session_id);
+
+                 CREATE TABLE IF NOT EXISTS scheduled_job_notifications (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     job_id TEXT NOT NULL,
+                     job_type TEXT NOT NULL,
+                     message TEXT NOT NULL,
+                     session_id TEXT,
+                     created_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_scheduled_job_notifications_id
+                     ON scheduled_job_notifications(id);
 
                 -- Per-message thumbs-up/down feedback. A sidecar to the
                 -- immutable transcript: the model never sees these rows.
@@ -603,6 +618,40 @@ impl SqliteStorage {
                 "#,
             )
             .map_err(OSAgentError::Storage)?;
+
+            let has_schedule_type: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('scheduled_jobs') WHERE name='schedule_type'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !has_schedule_type {
+                conn.execute(
+                    "ALTER TABLE scheduled_jobs ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'recurring'",
+                    [],
+                )?;
+                conn.execute(
+                    "ALTER TABLE scheduled_jobs ADD COLUMN run_state TEXT NOT NULL DEFAULT 'scheduled'",
+                    [],
+                )?;
+                conn.execute(
+                    "ALTER TABLE scheduled_jobs ADD COLUMN last_error TEXT",
+                    [],
+                )?;
+                conn.execute(
+                    "ALTER TABLE scheduled_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+                // Preserve the old semantics for existing relative jobs. New
+                // jobs get an explicit type from the API/tool.
+                conn.execute(
+                    "UPDATE scheduled_jobs SET schedule_type = 'one_shot'
+                     WHERE lower(trim(cron_expr)) LIKE 'in %'
+                        OR lower(trim(cron_expr)) LIKE 'at %'",
+                    [],
+                )?;
+            }
 
             let has_event_sequence: bool = conn
                 .query_row(
@@ -2977,14 +3026,18 @@ impl SqliteStorage {
                 .unwrap_or_else(Utc::now),
             failure_count: row.get::<_, i64>(10)?.try_into().unwrap_or(0),
             notify_channels,
+            schedule_type: row.get(12)?,
+            run_state: row.get(13)?,
+            last_error: row.get(14)?,
+            attempt_count: row.get::<_, i64>(15)?.try_into().unwrap_or(0),
         })
     }
 
     pub fn create_scheduled_job(&self, job: &ScheduledJob) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO scheduled_jobs (id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO scheduled_jobs (id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     job.id,
                     job.cron_expr,
@@ -2998,6 +3051,10 @@ impl SqliteStorage {
                     job.next_run_at.timestamp(),
                     job.failure_count as i64,
                     serde_json::to_vec(&job.notify_channels).unwrap_or_default(),
+                    job.schedule_type,
+                    job.run_state,
+                    job.last_error,
+                    job.attempt_count as i64,
                 ],
             )
             .map_err(OSAgentError::Storage)?;
@@ -3008,7 +3065,7 @@ impl SqliteStorage {
     pub fn get_scheduled_job(&self, id: &str) -> Result<Option<ScheduledJob>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels FROM scheduled_jobs WHERE id = ?1")
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count FROM scheduled_jobs WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![id], Self::scheduled_job_from_row);
@@ -3023,7 +3080,7 @@ impl SqliteStorage {
     pub fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels FROM scheduled_jobs ORDER BY next_run_at ASC")
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count FROM scheduled_jobs ORDER BY next_run_at ASC")
                 .map_err(OSAgentError::Storage)?;
 
             let jobs = stmt
@@ -3038,7 +3095,7 @@ impl SqliteStorage {
     pub fn list_enabled_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels FROM scheduled_jobs WHERE enabled = 1 ORDER BY next_run_at ASC")
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count FROM scheduled_jobs WHERE enabled = 1 AND run_state = 'scheduled' ORDER BY next_run_at ASC")
                 .map_err(OSAgentError::Storage)?;
 
             let jobs = stmt
@@ -3053,7 +3110,7 @@ impl SqliteStorage {
     pub fn update_scheduled_job(&self, job: &ScheduledJob) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "UPDATE scheduled_jobs SET cron_expr = ?1, message = ?2, job_type = ?3, session_id = ?4, enabled = ?5, metadata = ?6, last_run_at = ?7, next_run_at = ?8, failure_count = ?9, notify_channels = ?10 WHERE id = ?11",
+                "UPDATE scheduled_jobs SET cron_expr = ?1, message = ?2, job_type = ?3, session_id = ?4, enabled = ?5, metadata = ?6, last_run_at = ?7, next_run_at = ?8, failure_count = ?9, notify_channels = ?10, schedule_type = ?11, run_state = ?12, last_error = ?13, attempt_count = ?14 WHERE id = ?15",
                 params![
                     job.cron_expr,
                     job.message,
@@ -3065,6 +3122,10 @@ impl SqliteStorage {
                     job.next_run_at.timestamp(),
                     job.failure_count as i64,
                     serde_json::to_vec(&job.notify_channels).unwrap_or_default(),
+                    job.schedule_type,
+                    job.run_state,
+                    job.last_error,
+                    job.attempt_count as i64,
                     job.id,
                 ],
             )
@@ -3092,27 +3153,146 @@ impl SqliteStorage {
         })
     }
 
-    pub fn record_scheduled_job_result(
+    pub fn recover_running_scheduled_jobs(&self) -> Result<usize> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE scheduled_jobs
+                 SET run_state = 'scheduled', next_run_at = ?1, last_error = 'Interrupted by restart; retrying.'
+                 WHERE enabled = 1 AND run_state = 'running'",
+                params![Utc::now().timestamp()],
+            )
+            .map_err(OSAgentError::Storage)
+        })
+    }
+
+    /// Atomically claim a due job. The state transition prevents a second
+    /// scheduler tick (or a second OSA process) from running it again.
+    pub fn claim_scheduled_job(
+        &self,
+        id: &str,
+        now: DateTime<Utc>,
+        next_run: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.with_conn(|conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE scheduled_jobs
+                 SET run_state = 'running', attempt_count = attempt_count + 1, next_run_at = ?1
+                 WHERE id = ?2 AND enabled = 1 AND run_state = 'scheduled' AND next_run_at <= ?3",
+                    params![next_run.timestamp(), id, now.timestamp()],
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok(changed == 1)
+        })
+    }
+
+    pub fn finish_scheduled_job(
         &self,
         id: &str,
         success: bool,
-        next_run: i64,
+        next_run: DateTime<Utc>,
+        disable: bool,
+        retry: bool,
+        error: Option<String>,
     ) -> Result<()> {
         self.with_conn(|conn| {
             if success {
                 conn.execute(
-                    "UPDATE scheduled_jobs SET last_run_at = ?1, next_run_at = ?2, failure_count = 0 WHERE id = ?3",
-                    params![Utc::now().timestamp(), next_run, id],
+                    "UPDATE scheduled_jobs
+                     SET last_run_at = ?1, next_run_at = ?2, failure_count = 0,
+                         attempt_count = 0, run_state = ?3,
+                         enabled = CASE WHEN ?4 = 1 THEN 0 ELSE enabled END,
+                         last_error = NULL
+                     WHERE id = ?5",
+                    params![
+                        Utc::now().timestamp(),
+                        next_run.timestamp(),
+                        if disable { "completed" } else { "scheduled" },
+                        if disable { 0 } else { 1 },
+                        id,
+                    ],
                 )
                 .map_err(OSAgentError::Storage)?;
             } else {
                 conn.execute(
-                    "UPDATE scheduled_jobs SET failure_count = failure_count + 1 WHERE id = ?1",
-                    params![id],
+                    "UPDATE scheduled_jobs
+                     SET next_run_at = ?1, failure_count = failure_count + 1,
+                         run_state = ?2, last_error = ?3
+                     WHERE id = ?4",
+                    params![
+                        next_run.timestamp(),
+                        if retry { "scheduled" } else { "failed" },
+                        error,
+                        id,
+                    ],
                 )
                 .map_err(OSAgentError::Storage)?;
             }
             Ok(())
+        })
+    }
+
+    pub fn insert_scheduled_job_notification(
+        &self,
+        job_id: &str,
+        job_type: &str,
+        message: &str,
+        session_id: Option<&str>,
+    ) -> Result<i64> {
+        self.with_conn(|conn| {
+            // Keep the inbox bounded; the browser cursor only needs a short
+            // recovery window, not an unlimited event log.
+            conn.execute(
+                "DELETE FROM scheduled_job_notifications WHERE created_at < ?1",
+                params![Utc::now().timestamp() - 30 * 86_400],
+            )
+            .map_err(OSAgentError::Storage)?;
+            conn.execute(
+                "INSERT INTO scheduled_job_notifications (job_id, job_type, message, session_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![job_id, job_type, message, session_id, Utc::now().timestamp()],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    pub fn list_scheduled_job_notifications(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<(Vec<JobNotification>, i64)> {
+        self.with_conn(|conn| {
+            let latest_id = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(id), 0) FROM scheduled_job_notifications",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(OSAgentError::Storage)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, job_id, job_type, message, session_id, created_at
+                     FROM scheduled_job_notifications
+                     WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+                )
+                .map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map(params![after_id, limit as i64], |row| {
+                    Ok(JobNotification {
+                        id: row.get(0)?,
+                        job_id: row.get(1)?,
+                        job_type: row.get(2)?,
+                        message: row.get(3)?,
+                        session_id: row.get(4)?,
+                        created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(5)?, 0)
+                            .unwrap_or_else(Utc::now),
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok((rows, latest_id))
         })
     }
 }
@@ -3182,6 +3362,47 @@ mod pool_tests {
 
     /// Every query in the process used to serialise through one global mutex.
     /// This drives real cross-thread contention through the pool.
+    #[test]
+    fn scheduled_job_claim_finish_and_notification_round_trip() {
+        let (storage, path) = temp_storage();
+        let mut job = ScheduledJob::new(
+            "in 1m".to_string(),
+            "Check the oven".to_string(),
+            "reminder".to_string(),
+            None,
+        );
+        job.next_run_at = Utc::now() - chrono::Duration::seconds(1);
+        storage.create_scheduled_job(&job).expect("create job");
+
+        assert!(storage
+            .claim_scheduled_job(&job.id, Utc::now(), Utc::now())
+            .expect("claim"));
+        assert!(!storage
+            .claim_scheduled_job(&job.id, Utc::now(), Utc::now())
+            .expect("duplicate claim"));
+
+        storage
+            .finish_scheduled_job(&job.id, true, Utc::now(), true, false, None)
+            .expect("finish");
+        let finished = storage
+            .get_scheduled_job(&job.id)
+            .expect("get")
+            .expect("job");
+        assert_eq!(finished.run_state, "completed");
+        assert!(!finished.enabled);
+
+        storage
+            .insert_scheduled_job_notification(&job.id, "reminder", "Check the oven", None)
+            .expect("notification");
+        let (notifications, latest_id) = storage
+            .list_scheduled_job_notifications(0, 10)
+            .expect("list notifications");
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].message, "Check the oven");
+        assert_eq!(latest_id, notifications[0].id);
+        cleanup(&path);
+    }
+
     #[test]
     fn concurrent_readers_and_writers() {
         let (storage, path) = temp_storage();

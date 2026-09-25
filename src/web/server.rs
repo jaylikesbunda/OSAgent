@@ -274,6 +274,7 @@ pub async fn run_with_agent(
             .map_err(|e| crate::error::OSAgentError::Unknown(e.to_string()))?;
     }
 
+    agent.stop_scheduler().await;
     info!("Server shutdown complete");
     Ok(())
 }

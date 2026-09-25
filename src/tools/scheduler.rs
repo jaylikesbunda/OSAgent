@@ -40,13 +40,18 @@ impl Tool for ScheduleTool {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Session ID to deliver the message to. If not provided, a new session will be created for run_prompt jobs."
+                            "description": "Optional existing session ID. Leave this unset unless the user explicitly asks to run the job in an existing conversation; otherwise OSA creates a dedicated session for the job."
                         },
                         "job_type": {
                             "type": "string",
                             "enum": ["reminder", "run_prompt", "daily_briefing"],
-                            "description": "Type of job. 'reminder' sends a notification, 'run_prompt' executes the message as an agent prompt, 'daily_briefing' generates a summary of recent activity."
+                            "description": "Type of job. 'reminder' sends a direct notification, 'run_prompt' executes the message as an agent prompt, 'daily_briefing' generates a summary of recent activity."
         },
+                        "schedule_type": {
+                            "type": "string",
+                            "enum": ["one_shot", "recurring"],
+                            "description": "Whether this runs once or repeats. Defaults based on the expression: 'in ...' and 'at ...' are one-shot; other forms are recurring."
+                        },
                         "notify_via": {
                             "type": "array",
                             "items": { "type": "string", "enum": ["web", "discord"] },
@@ -65,9 +70,26 @@ impl Tool for ScheduleTool {
         let message = args["message"].as_str().ok_or_else(|| {
             crate::error::OSAgentError::ToolExecution("Missing 'message' parameter".into())
         })?;
+        let when = when.trim();
+        let message = message.trim();
+        if when.is_empty() || message.is_empty() {
+            return Err(crate::error::OSAgentError::ToolExecution(
+                "Both 'when' and 'message' must not be empty".into(),
+            ));
+        }
 
         let session_id = args["session_id"].as_str().map(String::from);
         let job_type = args["job_type"].as_str().unwrap_or("reminder").to_string();
+        let schedule_type = args["schedule_type"]
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| ScheduledJob::infer_schedule_type(when).to_string());
+
+        if !matches!(schedule_type.as_str(), "one_shot" | "recurring") {
+            return Err(crate::error::OSAgentError::ToolExecution(
+                "Invalid schedule_type. Must be 'one_shot' or 'recurring'".into(),
+            ));
+        }
 
         if !matches!(
             job_type.as_str(),
@@ -89,6 +111,7 @@ impl Tool for ScheduleTool {
             .unwrap_or_else(|| vec!["web".to_string()]);
 
         let job = ScheduledJob::new(when.to_string(), message.to_string(), job_type, session_id)
+            .with_schedule_type(schedule_type)
             .with_channels(notify_via);
 
         match self.scheduler.add_job(job) {
@@ -99,9 +122,10 @@ impl Tool for ScheduleTool {
                      ID: {}\n\
                      When: {}\n\
                      Type: {}\n\
+                     Repeat: {}\n\
                      Notify: {}\n\
                      Message: {}",
-                    job.id, when, job.job_type, channels, job.message
+                    job.id, when, job.job_type, job.schedule_type, channels, job.message
                 ))
             }
             Err(e) => Err(crate::error::OSAgentError::ToolExecution(format!(

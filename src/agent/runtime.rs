@@ -22,6 +22,7 @@ use crate::config::{AgentConfig, Config, WorkspaceConfig, WorkspacePath};
 use crate::error::{OSAgentError, Result};
 use crate::external::{ExternalDirectoryManager, PermissionAction, PermissionPrompt};
 use crate::plugin::PluginManager;
+use crate::scheduler::executor::RunPromptResponse;
 use crate::scheduler::Scheduler;
 use crate::skills::{get_skills_base_dir, SkillLoader};
 use crate::storage::{
@@ -525,7 +526,8 @@ impl AgentRuntime {
         let goal_store = Arc::new(crate::agent::goal::GoalStore::new(storage.clone()));
         tool_registry_instance.register_goals(goal_store.clone());
 
-        let mut scheduler = Scheduler::new(storage.clone(), event_bus.clone());
+        let mut scheduler =
+            Scheduler::new(storage.clone(), event_bus.clone(), config.scheduler.clone());
 
         let (run_prompt_tx, mut run_prompt_rx) = tokio::sync::mpsc::unbounded_channel();
         scheduler.set_prompt_sender(run_prompt_tx);
@@ -7961,57 +7963,113 @@ impl AgentRuntime {
             let this = Arc::clone(self);
             tokio::spawn(async move {
                 while let Some(req) = rx.recv().await {
-                    let session_id = match req.session_id {
+                    let requested_session_id = req.session_id.clone();
+                    let created_session = requested_session_id.is_none();
+                    let session_id = match requested_session_id {
                         Some(sid) => sid,
                         None => {
-                            let mut session = match this.create_session().await {
+                            let session = match this.create_session().await {
                                 Ok(s) => s,
                                 Err(e) => {
                                     warn!("Scheduler run_prompt: failed to create session: {}", e);
                                     if let Some(tx) = req.response_tx {
-                                        let _ = tx.send(format!("Failed to create session: {}", e));
+                                        let _ = tx
+                                            .send(Err(format!("Failed to create session: {}", e)));
                                     }
                                     continue;
                                 }
                             };
-                            if let Some(source) = &req.source {
-                                if !session.metadata.is_object() {
-                                    session.metadata = serde_json::json!({});
-                                }
-                                if let Some(meta) = session.metadata.as_object_mut() {
-                                    meta.insert(
-                                        "source".to_string(),
-                                        serde_json::Value::String(source.clone()),
-                                    );
-                                }
-                                if let Err(e) = this.session_manager.update_session(&session).await
-                                {
-                                    warn!("Failed to set session source: {}", e);
-                                }
-                            }
                             info!("Scheduler run_prompt: created session {}", session.id);
                             session.id
                         }
                     };
 
-                    info!("Scheduler run_prompt: executing in session {}", session_id);
-                    let result = this
-                        .process_message(&session_id, req.prompt, "scheduler".to_string())
-                        .await;
-
-                    if let Some(tx) = req.response_tx {
-                        let response = match &result {
-                            Ok(r) => r.clone(),
-                            Err(e) => format!("Error: {}", e),
-                        };
-                        let _ = tx.send(response);
+                    if created_session {
+                        if let Ok(Some(mut session)) = this.get_session(&session_id).await {
+                            if !session.metadata.is_object() {
+                                session.metadata = serde_json::json!({});
+                            }
+                            if let Some(meta) = session.metadata.as_object_mut() {
+                                let label = match req.job_type.as_str() {
+                                    "reminder" => "Scheduled reminder",
+                                    "daily_briefing" => "Daily briefing",
+                                    _ => "Scheduled task",
+                                };
+                                let preview = req.prompt.chars().take(60).collect::<String>();
+                                meta.insert(
+                                    "name".to_string(),
+                                    serde_json::Value::String(format!("{}: {}", label, preview)),
+                                );
+                                meta.insert(
+                                    "source".to_string(),
+                                    serde_json::Value::String("scheduler".to_string()),
+                                );
+                                if let Some(source) = &req.source {
+                                    meta.insert(
+                                        "delivery_source".to_string(),
+                                        serde_json::Value::String(source.clone()),
+                                    );
+                                }
+                                meta.insert(
+                                    "scheduled_job_id".to_string(),
+                                    serde_json::Value::String(req.job_id.clone()),
+                                );
+                                meta.insert(
+                                    "scheduled_job_type".to_string(),
+                                    serde_json::Value::String(req.job_type.clone()),
+                                );
+                            }
+                            if let Err(e) = this.session_manager.update_session(&session).await {
+                                warn!("Failed to label scheduled session: {}", e);
+                            }
+                        }
                     }
 
-                    if let Err(e) = result {
-                        error!(
-                            "Scheduler run_prompt failed for session {}: {}",
-                            session_id, e
-                        );
+                    info!("Scheduler job executing in session {}", session_id);
+                    let result: std::result::Result<String, String> = if req.run_agent {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(290),
+                            this.process_message(&session_id, req.prompt, "scheduler".to_string()),
+                        )
+                        .await
+                        {
+                            Ok(Ok(response)) => Ok(response),
+                            Ok(Err(e)) => Err(e.to_string()),
+                            Err(_) => Err("Agent execution timed out".to_string()),
+                        }
+                    } else {
+                        match this.get_session(&session_id).await {
+                            Ok(Some(mut session)) => {
+                                session.messages.push(crate::storage::Message::assistant(
+                                    req.prompt.clone(),
+                                    None,
+                                ));
+                                session.updated_at = Utc::now();
+                                match this.session_manager.update_session(&session).await {
+                                    Ok(()) => Ok(req.prompt.clone()),
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            }
+                            Ok(None) => Err("Scheduled session was not found".to_string()),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    };
+
+                    if let Some(tx) = req.response_tx {
+                        match result {
+                            Ok(response) => {
+                                let _ = tx.send(Ok(RunPromptResponse {
+                                    session_id: session_id.clone(),
+                                    response,
+                                }));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(e.clone()));
+                                error!("Scheduler job failed for session {}: {}", session_id, e);
+                            }
+                        }
+                    } else if let Err(e) = result {
+                        error!("Scheduler job failed for session {}: {}", session_id, e);
                     }
                 }
             });

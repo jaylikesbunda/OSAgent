@@ -610,8 +610,8 @@ OSA.handleAgentEvent = function(event) {
             break;
 
         case 'scheduled_job_fired':
-            if (OSA.Jobs) {
-                OSA.Jobs.showNotification(event.message, event.job_type || 'info');
+            if (OSA.Jobs && typeof OSA.Jobs.handleSessionResult === 'function') {
+                OSA.Jobs.handleSessionResult(event);
             }
             break;
 

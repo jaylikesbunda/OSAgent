@@ -501,10 +501,18 @@
                     <div class="settings-group">
                         <div class="settings-group-title">Color Palette</div>
                         <div class="palette-presets" id="palette-presets">
-                            <button type="button" class="palette-swatch" data-palette="charcoal-red" title="Charcoal Red" onclick="OSA.setPalette('charcoal-red')"><span></span><span></span><span></span><span></span></button>
-                            <button type="button" class="palette-swatch" data-palette="midnight-purple" title="Midnight Purple" onclick="OSA.setPalette('midnight-purple')"><span></span><span></span><span></span><span></span></button>
-                            <button type="button" class="palette-swatch" data-palette="ocean-blue" title="Ocean Blue" onclick="OSA.setPalette('ocean-blue')"><span></span><span></span><span></span><span></span></button>
-                            <button type="button" class="palette-swatch" data-palette="daylight" title="Daylight" onclick="OSA.setPalette('daylight')"><span></span><span></span><span></span><span></span></button>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="charcoal-red" title="Charcoal Red" onclick="OSA.setPalette('charcoal-red')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Charcoal Red</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="midnight-purple" title="Midnight Purple" onclick="OSA.setPalette('midnight-purple')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Midnight Purple</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="ocean-blue" title="Ocean Blue" onclick="OSA.setPalette('ocean-blue')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Ocean Blue</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="daylight" title="Daylight" onclick="OSA.setPalette('daylight')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Daylight</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="coral-dusk" title="Coral Dusk" onclick="OSA.setPalette('coral-dusk')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Coral Dusk</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="coral-cream" title="Coral Cream" onclick="OSA.setPalette('coral-cream')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Coral Cream</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="sea-glass" title="Sea Glass" onclick="OSA.setPalette('sea-glass')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Sea Glass</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="sea-mist" title="Sea Mist" onclick="OSA.setPalette('sea-mist')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Sea Mist</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="violet-night" title="Violet Night" onclick="OSA.setPalette('violet-night')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Violet Night</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="violet-lavender" title="Violet Lavender" onclick="OSA.setPalette('violet-lavender')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Violet Lavender</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="peach-sorbet" title="Peach Sorbet" onclick="OSA.setPalette('peach-sorbet')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Peach Sorbet</span></div>
+                            <div class="palette-option"><button type="button" class="palette-swatch" data-palette="peach-cream" title="Peach Cream" onclick="OSA.setPalette('peach-cream')"><span></span><span></span><span></span><span></span></button><span class="palette-name">Peach Cream</span></div>
                         </div>
                         <span class="settings-field-hint">Palettes control background, surfaces, and accent color together.</span>
                     </div>
@@ -1502,6 +1510,14 @@
                         <option value="run_prompt" selected>Run Prompt</option>
                         <option value="daily_briefing">Daily Briefing</option>
                     </select>
+                </div>
+                <div class="settings-field">
+                    <label for="job-schedule-type">Repetition</label>
+                    <select id="job-schedule-type">
+                        <option value="one_shot" selected>One time</option>
+                        <option value="recurring">Recurring</option>
+                    </select>
+                    <span class="settings-field-hint">One time is best for reminders; recurring repeats on the chosen schedule.</span>
                 </div>
                 <div class="settings-field">
                     <label for="job-when">When</label>

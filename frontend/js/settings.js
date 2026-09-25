@@ -1241,7 +1241,20 @@ OSA.applyChatAlignment = function(alignment) {
     document.documentElement.setAttribute('data-chat-alignment', alignment === 'left' ? 'left' : 'split');
 };
 
-OSA.PALETTE_CHOICES = ['charcoal-red', 'midnight-purple', 'ocean-blue', 'daylight'];
+OSA.PALETTE_CHOICES = [
+    'charcoal-red',
+    'midnight-purple',
+    'ocean-blue',
+    'daylight',
+    'coral-dusk',
+    'sea-glass',
+    'violet-night',
+    'peach-sorbet',
+    'coral-cream',
+    'sea-mist',
+    'violet-lavender',
+    'peach-cream',
+];
 
 OSA.FONT_PRESETS = {
     'inter-playfair': {

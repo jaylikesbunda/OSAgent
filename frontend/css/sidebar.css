@@ -312,6 +312,11 @@
     color: #88d8f0;
 }
 
+.session-source-badge.source-scheduler {
+    border-color: rgba(251, 191, 36, 0.45);
+    color: #f6c85f;
+}
+
 .sidebar-backdrop {
     display: none;
     position: fixed;
