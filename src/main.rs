@@ -95,15 +95,41 @@ enum Commands {
         #[command(subcommand)]
         command: ServiceCommands,
     },
-    /// Check for updates
+    /// Check, download, install, or inspect application updates
     Update {
-        /// Only check, don't show full details
-        #[arg(short, long)]
-        check: bool,
+        #[command(subcommand)]
+        command: UpdateCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateCommands {
+    /// Check the release manifest without downloading
+    Check {
         /// Update channel (stable/beta/dev)
         #[arg(short = 'c', long)]
         channel: Option<String>,
+        /// Require this exact release tag
+        #[arg(long)]
+        tag: Option<String>,
     },
+    /// Download and prepare an update, showing live byte progress
+    Download {
+        /// Update channel (stable/beta/dev)
+        #[arg(short = 'c', long)]
+        channel: Option<String>,
+        /// Require this exact release tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Arm a prepared update for launcher-managed installation
+    Install {
+        /// Require this exact prepared release tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Show persisted update coordinator status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -386,50 +412,160 @@ async fn main() -> anyhow::Result<()> {
                 },
             }
         }
-        Commands::Update { check, channel } => {
-            let cfg = config::Config::load("~/.osagent/config.toml")?;
-            let channel_str = channel.unwrap_or_else(|| cfg.update.channel.clone());
-            let channel = channel_str
-                .parse::<update::UpdateChannel>()
-                .unwrap_or(update::UpdateChannel::Stable);
-
-            let checker = update::UpdateChecker::new(update::build_version());
-
-            info!("Checking for updates (channel: {})...", channel);
-            let result = checker.check(channel).await;
-
-            if check {
-                if result.update_available {
-                    println!(
-                        "Update available: {} -> {}",
-                        result.current_version,
-                        result.latest_version.as_deref().unwrap_or("?")
-                    );
-                } else {
-                    println!("OSA is up to date (v{})", result.current_version);
-                }
-            } else {
-                println!("Current version: {}", result.current_version);
-                if let Some(latest) = &result.latest_version {
-                    println!("Latest version: {}", latest);
-                }
-                println!("Channel: {}", result.channel);
-                if result.update_available {
-                    println!("\nUpdate available!");
-                    if let Some(url) = &result.release_url {
-                        println!("Release URL: {}", url);
-                    }
-                } else {
-                    println!("\nNo update available.");
-                }
-                if let Some(err) = &result.error {
-                    println!("Error: {}", err);
-                }
-            }
+        Commands::Update { command } => {
+            run_update_command(command).await?;
         }
     }
 
     Ok(())
+}
+
+async fn run_update_command(command: UpdateCommands) -> anyhow::Result<()> {
+    let config_path = shellexpand::tilde("~/.osagent/config.toml").to_string();
+    let cfg = config::Config::load(&config_path)?;
+    if !cfg.update.enabled && !matches!(command, UpdateCommands::Status) {
+        anyhow::bail!("Updates are disabled in {}", config_path);
+    }
+
+    let manager = update::UpdateManager::new(
+        update::UpdateInstaller::new(),
+        update::InstallMode::from_environment(),
+    );
+
+    match command {
+        UpdateCommands::Check { channel, tag } => {
+            let channel = resolve_update_channel(channel, &cfg.update.channel)?;
+            let result = manager.check(channel, tag.as_deref()).await?;
+            println!("Current version: {}", result.current_version);
+            println!("Requested channel: {}", result.channel);
+            if let Some(latest_channel) = result.latest_channel {
+                println!("Manifest channel: {}", latest_channel);
+            }
+            if let Some(latest_tag) = &result.latest_tag {
+                println!("Latest tag: {}", latest_tag);
+            }
+            if let Some(latest_version) = &result.latest_version {
+                println!("Latest version: {}", latest_version);
+            }
+            if result.update_available {
+                println!("Update available.");
+                if let Some(url) = result.release_url {
+                    println!("Release URL: {}", url);
+                }
+            } else {
+                println!("No matching update is available.");
+            }
+            if let Some(error) = result.error {
+                anyhow::bail!("Update check failed: {}", error);
+            }
+        }
+        UpdateCommands::Download { channel, tag } => {
+            let channel = resolve_update_channel(channel, &cfg.update.channel)?;
+            let mut state = manager.start_download(channel, tag.as_deref()).await?;
+            println!(
+                "Update download started (channel: {}, tag: {})",
+                channel,
+                tag.as_deref().unwrap_or("latest")
+            );
+            print_update_poll_state(&state);
+            loop {
+                match state.phase {
+                    update::UpdatePhase::Ready => {
+                        println!(
+                            "Update ready: {}",
+                            state.tag.as_deref().unwrap_or("unknown")
+                        );
+                        return Ok(());
+                    }
+                    update::UpdatePhase::Error => {
+                        anyhow::bail!(
+                            "Update download failed: {}",
+                            state
+                                .error
+                                .as_deref()
+                                .or(state.message.as_deref())
+                                .unwrap_or("unknown error")
+                        );
+                    }
+                    update::UpdatePhase::Cancelled => {
+                        anyhow::bail!("Update download was cancelled");
+                    }
+                    update::UpdatePhase::Idle => {
+                        anyhow::bail!(
+                            "{}",
+                            state
+                                .message
+                                .as_deref()
+                                .unwrap_or("No matching release is available")
+                        );
+                    }
+                    _ => {}
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let next = manager.status();
+                if next.bytes_downloaded != state.bytes_downloaded
+                    || next.phase != state.phase
+                    || next.total_bytes != state.total_bytes
+                {
+                    print_update_poll_state(&next);
+                }
+                state = next;
+            }
+        }
+        UpdateCommands::Install { tag } => {
+            let state = manager.install(tag.as_deref()).await?;
+            println!(
+                "Update {} armed (transaction {}). The launcher can now install it.",
+                state.tag.as_deref().unwrap_or("unknown"),
+                state.transaction_id.as_deref().unwrap_or("unknown")
+            );
+        }
+        UpdateCommands::Status => {
+            print_update_poll_state(&manager.status());
+            println!(
+                "Install mode: {}",
+                match manager.install_mode() {
+                    update::InstallMode::LauncherManaged => "launcher-managed",
+                    update::InstallMode::Standalone => "standalone",
+                }
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_update_channel(
+    override_channel: Option<String>,
+    configured_channel: &str,
+) -> anyhow::Result<update::UpdateChannel> {
+    override_channel
+        .unwrap_or_else(|| configured_channel.to_string())
+        .parse::<update::UpdateChannel>()
+        .map_err(anyhow::Error::msg)
+}
+
+fn print_update_poll_state(state: &update::UpdateManagerState) {
+    let progress = match (state.progress, state.bytes_downloaded, state.total_bytes) {
+        (Some(percent), Some(downloaded), Some(total)) if total > 0 => {
+            format!(" {percent:.1}% ({downloaded}/{total} bytes)")
+        }
+        (_, Some(downloaded), None) => format!(" ({downloaded} bytes)"),
+        _ => String::new(),
+    };
+    println!(
+        "Update phase: {}{} [tag: {}]",
+        state.phase,
+        progress,
+        state.tag.as_deref().unwrap_or("-")
+    );
+    if let Some(message) = &state.message {
+        println!("{}", message);
+    }
+    if let Some(error) = &state.error {
+        eprintln!("Error: {}", error);
+    }
 }
 
 /// Registers OSA with the Windows Service Control Manager.

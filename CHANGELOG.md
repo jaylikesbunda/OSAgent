@@ -1,3 +1,9 @@
+v0.6.2 changes:
+
+Changed:
+* Smoother update checks, downloads, and install progress
+* More reliable update restarts and failure recovery
+
 v0.6.1 changes:
 
 Fixed:

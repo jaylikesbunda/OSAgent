@@ -1252,28 +1252,22 @@
                             <span class="update-label">Current version:</span>
                             <span class="update-value" id="update-current-version">-</span>
                         </div>
-                        <div class="update-status-display" id="update-status-display">
-                            <span class="update-status-text">Click "Check for Updates" to see if a new version is available.</span>
+                        <div class="update-status-display" id="update-status-display" aria-live="polite">
+                            <span class="update-status-text">Checking update status…</span>
                         </div>
                         <div class="update-version-row hidden" id="update-version-row">
                             <span class="update-label">Latest:</span>
                             <span class="update-value" id="update-latest-version">-</span>
                         </div>
                         <div class="update-actions">
-                            <button class="btn-action" id="btn-check-update" onclick="OSA.checkForUpdates()">
+                            <button class="btn-primary" id="btn-check-update" onclick="OSA.handleUpdateAction()">
                                 Check for Updates
-                            </button>
-                            <button class="btn-primary hidden" id="btn-download-update" onclick="OSA.downloadUpdate()">
-                                Download Update
-                            </button>
-                            <button class="btn-primary hidden" id="btn-install-update" onclick="OSA.installUpdate()">
-                                Install & Restart
                             </button>
                             <a class="btn-ghost hidden" id="btn-view-release" target="_blank" rel="noopener noreferrer">
                                 View Release
                             </a>
                         </div>
-                        <div class="update-progress hidden" id="update-progress-container">
+                        <div class="update-progress hidden" id="update-progress-container" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-busy="false">
                             <div class="progress-bar">
                                 <div class="progress-fill" id="update-progress-fill"></div>
                             </div>
@@ -1285,7 +1279,7 @@
                         <div class="settings-advanced-body">
                             <div class="update-info-row">
                                 <span class="update-label">Channel:</span>
-                                <select id="update-channel-select" class="update-channel-select">
+                                <select id="update-channel-select" class="update-channel-select" onchange="OSA.onUpdateChannelChange()">
                                     <option value="stable">Stable</option>
                                     <option value="beta">Beta (includes prereleases)</option>
                                 </select>

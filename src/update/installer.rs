@@ -1,4 +1,4 @@
-use crate::update::channel::UpdateChannel;
+use crate::update::channel::{resolve_manifest_channel, UpdateChannel};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,14 @@ pub struct PendingUpdate {
     #[serde(default = "default_pending_update_armed")]
     pub armed: bool,
     pub created_at: DateTime<Utc>,
+    /// Optional coordinator fields. Older launchers ignore them, preserving
+    /// the original marker contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 fn default_pending_update_kind() -> PendingUpdateKind {
@@ -127,6 +135,8 @@ impl PayloadFormat {
 struct CdnManifest {
     tag: String,
     version: String,
+    #[serde(default)]
+    channel: Option<String>,
     #[serde(default)]
     assets: std::collections::HashMap<String, CdnAssetEntry>,
     #[serde(default)]
@@ -206,6 +216,45 @@ fn is_safe_relative_path(path: &Path) -> bool {
         Component::CurDir => true,
         _ => false,
     })
+}
+
+/// Validate a release tag before it is used as a directory component or placed
+/// in a launcher marker.
+pub(crate) fn validate_update_tag(tag: &str) -> Result<(), String> {
+    if tag.is_empty() || tag == "." || tag == ".." {
+        return Err("Update tag cannot be empty or a relative path".to_string());
+    }
+    if tag.len() > 128 {
+        return Err("Update tag is too long (maximum 128 characters)".to_string());
+    }
+    if !tag.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '+')
+    }) {
+        return Err(format!(
+            "Update tag '{}' contains unsafe path characters; use only letters, numbers, '.', '-', '_' and '+'",
+            tag
+        ));
+    }
+    if tag.ends_with('.') {
+        return Err("Update tag cannot end with '.'".to_string());
+    }
+
+    // Windows treats these names (with any extension) as device paths rather
+    // than ordinary directories.
+    let device_stem = tag
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let is_reserved_device = matches!(device_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device_stem
+            .strip_prefix("COM")
+            .or_else(|| device_stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'));
+    if is_reserved_device {
+        return Err(format!("Update tag '{}' is a reserved device name", tag));
+    }
+    Ok(())
 }
 
 /// Identify a payload by its magic bytes. Extensions lie — a `.deb` served
@@ -414,8 +463,13 @@ impl UpdateInstaller {
 
     pub async fn find_release_for_platform(
         &self,
-        _channel: UpdateChannel,
+        channel: UpdateChannel,
+        expected_tag: Option<&str>,
     ) -> Result<Option<ReleaseAsset>, String> {
+        if let Some(tag) = expected_tag {
+            validate_update_tag(tag)?;
+        }
+
         let url = format!("{CDN_BASE_URL}/releases/latest.json");
         let response = self
             .client
@@ -432,6 +486,22 @@ impl UpdateInstaller {
             .json()
             .await
             .map_err(|e| format!("Failed to parse manifest: {}", e))?;
+        validate_update_tag(&manifest.tag)?;
+
+        if let Some(expected) = expected_tag {
+            if expected != manifest.tag {
+                return Err(format!(
+                    "Requested update tag '{}' does not match latest release '{}'",
+                    expected, manifest.tag
+                ));
+            }
+        }
+
+        let manifest_channel =
+            resolve_manifest_channel(manifest.channel.as_deref(), &manifest.tag)?;
+        if manifest_channel != channel {
+            return Ok(None);
+        }
 
         Ok(Some(select_asset(
             &manifest,
@@ -441,6 +511,54 @@ impl UpdateInstaller {
             cfg!(target_os = "windows"),
             &self.platform_archive_name(),
         )))
+    }
+
+    /// Validate a staged path against the release directory. Besides catching
+    /// stale markers, this prevents a malformed marker from making the
+    /// launcher execute a file outside the update staging area.
+    pub fn validate_staged_path(&self, tag: &str, staged_path: &Path) -> Result<(), String> {
+        let update_dir = self.update_dir()?;
+        self.validate_staged_path_under(&update_dir, tag, staged_path)
+    }
+
+    pub fn validate_staged_path_under(
+        &self,
+        update_dir: &Path,
+        tag: &str,
+        staged_path: &Path,
+    ) -> Result<(), String> {
+        validate_update_tag(tag)?;
+        if !staged_path.is_file() {
+            return Err(format!(
+                "Staged update is missing at {}; re-download the update",
+                staged_path.display()
+            ));
+        }
+
+        let release_dir = update_dir.join(tag);
+        let canonical_release_dir = std::fs::canonicalize(&release_dir).map_err(|error| {
+            format!(
+                "Staged update directory is unavailable at {}: {}",
+                release_dir.display(),
+                error
+            )
+        })?;
+        let canonical_staged_path = std::fs::canonicalize(staged_path).map_err(|error| {
+            format!(
+                "Staged update is unreadable at {}: {}",
+                staged_path.display(),
+                error
+            )
+        })?;
+
+        if !canonical_staged_path.starts_with(&canonical_release_dir) {
+            return Err(format!(
+                "Staged update path {} is outside {}",
+                staged_path.display(),
+                release_dir.display()
+            ));
+        }
+        Ok(())
     }
 
     fn pending_update_kind_for_path(&self, path: &Path) -> PendingUpdateKind {
@@ -488,6 +606,7 @@ impl UpdateInstaller {
     where
         F: Fn(u64, u64) + Send + 'static,
     {
+        validate_update_tag(&asset.tag)?;
         let update_dir = self.update_dir()?;
         let dest_dir = update_dir.join(&asset.tag);
         fs::create_dir_all(&dest_dir)
@@ -673,9 +792,10 @@ impl UpdateInstaller {
                         .map_err(|e| format!("Write error: {}", e))?;
                     let current =
                         written.fetch_add(data.len() as u64, Ordering::Relaxed) + data.len() as u64;
-                    if expected_total > 0 {
-                        progress_callback(current, expected_total);
-                    }
+                    // Report every received byte. A missing Content-Length is
+                    // represented as total=0, but the downloaded count must
+                    // still advance in real time.
+                    progress_callback(current, expected_total);
                 }
                 None => break,
             }
@@ -707,6 +827,7 @@ impl UpdateInstaller {
     }
 
     pub async fn extract_update(&self, archive_path: &Path, tag: &str) -> Result<PathBuf, String> {
+        validate_update_tag(tag)?;
         let update_dir = self.update_dir()?;
         // Extract into a dedicated subdirectory so leftovers from a previous
         // attempt can be wiped without touching the downloaded payload.
@@ -870,6 +991,7 @@ impl UpdateInstaller {
     /// Turn a verified payload into something the launcher can apply on the
     /// next start: either a staged launcher binary or a staged installer.
     pub async fn prepare_update(&self, archive_path: &Path, tag: &str) -> Result<PathBuf, String> {
+        validate_update_tag(tag)?;
         let format = sniff_payload_format(archive_path)?;
 
         if format == PayloadFormat::TextBody || format == PayloadFormat::Unknown {
@@ -973,49 +1095,44 @@ impl UpdateInstaller {
         Ok(staged_installer)
     }
 
+    /// Arm a launcher update and return the exact marker that was persisted.
+    /// A transaction ID is generated at the arming boundary so every attempt
+    /// is distinguishable even when two downloads stage the same release tag.
     pub fn mark_update_pending(
         &self,
         tag: &str,
         staged_path: &Path,
         armed: bool,
-    ) -> Result<(), String> {
-        // Never arm an update whose staged payload has gone missing — the
-        // launcher would clear the marker and silently do nothing.
-        if !staged_path.exists() {
-            return Err(format!(
-                "Staged update is missing at {}; re-download the update",
-                staged_path.display()
-            ));
-        }
+        phase: Option<&str>,
+    ) -> Result<PendingUpdate, String> {
+        validate_update_tag(tag)?;
+        // Never arm an update whose staged payload has gone missing or escaped
+        // its release directory — the launcher must execute only coordinator
+        // staged files.
+        self.validate_staged_path(tag, staged_path)?;
 
         let pending_file = self.pending_update_file()?;
-
-        if let Some(parent) = pending_file.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create pending update directory: {}", e))?;
-        }
-
         let pending = PendingUpdate {
             tag: tag.to_string(),
             staged_path: staged_path.to_path_buf(),
             kind: self.pending_update_kind_for_path(staged_path),
             armed,
             created_at: Utc::now(),
+            transaction_id: armed.then(|| uuid::Uuid::new_v4().to_string()),
+            phase: phase.map(str::to_string),
+            error: None,
         };
 
         let json = serde_json::to_string_pretty(&pending)
             .map_err(|e| format!("Failed to serialize pending update: {}", e))?;
-
-        write_atomic(&pending_file, &json)
+        write_atomic(&pending_file, &json)?;
+        Ok(pending)
     }
 
     pub fn mark_prepared_update(&self, tag: &str, staged_path: &Path) -> Result<(), String> {
+        validate_update_tag(tag)?;
+        self.validate_staged_path(tag, staged_path)?;
         let prepared_file = self.prepared_update_file()?;
-
-        if let Some(parent) = prepared_file.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create prepared update directory: {}", e))?;
-        }
 
         let prepared = PendingUpdate {
             tag: tag.to_string(),
@@ -1023,6 +1140,9 @@ impl UpdateInstaller {
             kind: self.pending_update_kind_for_path(staged_path),
             armed: false,
             created_at: Utc::now(),
+            transaction_id: None,
+            phase: Some("ready".to_string()),
+            error: None,
         };
 
         let json = serde_json::to_string_pretty(&prepared)
@@ -1050,6 +1170,7 @@ impl UpdateInstaller {
     }
 
     pub fn cleanup_update_files(&self, tag: &str) -> Result<(), String> {
+        validate_update_tag(tag)?;
         let update_dir = self.update_dir()?;
         let tag_dir = update_dir.join(tag);
         if tag_dir.exists() {
@@ -1062,6 +1183,9 @@ impl UpdateInstaller {
     /// Drop staged files for every tag except the one still in use, so a failed
     /// update does not leave the disk filling up with dead payloads.
     pub fn cleanup_stale_updates(&self, keep_tag: Option<&str>) -> Result<(), String> {
+        if let Some(tag) = keep_tag {
+            validate_update_tag(tag)?;
+        }
         let update_dir = self.update_dir()?;
         if !update_dir.exists() {
             return Ok(());
@@ -1086,15 +1210,106 @@ impl UpdateInstaller {
     }
 }
 
-/// Write via a temp file + rename so a crash mid-write cannot leave the
-/// launcher parsing a truncated marker file.
-fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
-    let temp_path = path.with_extension("tmp");
-    std::fs::write(&temp_path, contents)
-        .map_err(|e| format!("Failed to write {}: {}", temp_path.display(), e))?;
-    std::fs::rename(&temp_path, path)
-        .map_err(|e| format!("Failed to finalize {}: {}", path.display(), e))?;
+#[cfg(windows)]
+fn replace_file_atomic(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x00000008;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let source = wide(source);
+    let destination = wide(destination);
+    let result = unsafe {
+        extern "system" {
+            fn MoveFileExW(
+                existing_file_name: *const u16,
+                new_file_name: *const u16,
+                flags: u32,
+            ) -> i32;
+        }
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomic(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::rename(source, destination).map_err(|error| error.to_string())
+}
+
+/// Write via a unique, same-directory temp file and flush it before rename so
+/// concurrent writers cannot corrupt each other and a crash cannot leave the
+/// launcher parsing a truncated marker/state file.
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Atomic write path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Failed to create {}: {}", parent.display(), error))?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("update");
+    let temp_path = parent.join(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
+
+    let write_result = (|| -> Result<(), String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&temp_path)
+            .map_err(|error| format!("Failed to create {}: {}", temp_path.display(), error))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| format!("Failed to write {}: {}", temp_path.display(), error))?;
+        file.sync_all()
+            .map_err(|error| format!("Failed to sync {}: {}", temp_path.display(), error))?;
+        drop(file);
+
+        replace_file_atomic(&temp_path, path).map_err(|error| {
+            format!(
+                "Failed to finalize {} from {}: {}",
+                path.display(),
+                temp_path.display(),
+                error
+            )
+        })?;
+
+        // Persist the directory entry as well on Unix. Opening directories is
+        // not portable to Windows, where rename already provides the durable
+        // replacement guarantee we need here.
+        #[cfg(unix)]
+        {
+            if let Ok(directory) = std::fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
 }
 
 impl Default for UpdateInstaller {
@@ -1133,6 +1348,18 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_state() {
+        let root = std::env::temp_dir().join(format!("osagent-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("state.json");
+        write_atomic(&path, "{\"value\":1}").unwrap();
+        write_atomic(&path, "{\"value\":2}").unwrap();
+        let value = std::fs::read_to_string(&path).unwrap();
+        assert!(value.contains("\"value\": 2") || value.contains("\"value\":2"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1196,6 +1423,36 @@ mod tests {
         assert!(is_safe_relative_path(Path::new("bin/osagent-launcher")));
         assert!(!is_safe_relative_path(Path::new("../escape")));
         assert!(!is_safe_relative_path(Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn legacy_marker_json_remains_compatible() {
+        let marker: PendingUpdate = serde_json::from_str(
+            r#"{
+                "tag":"v1.2.3",
+                "staged_path":"C:\\updates\\v1.2.3\\osagent-launcher.exe",
+                "kind":"binary_swap",
+                "armed":false,
+                "created_at":"2026-01-01T00:00:00Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(marker.tag, "v1.2.3");
+        assert!(!marker.armed);
+        assert!(marker.transaction_id.is_none());
+        assert!(marker.phase.is_none());
+    }
+
+    #[test]
+    fn rejects_unsafe_release_tags() {
+        assert!(validate_update_tag("v1.2.3-beta.1+build.7").is_ok());
+        assert!(validate_update_tag("../escape").is_err());
+        assert!(validate_update_tag("v1/beta").is_err());
+        assert!(validate_update_tag("v1\\beta").is_err());
+        assert!(validate_update_tag("v1:beta").is_err());
+        assert!(validate_update_tag("v1.").is_err());
+        assert!(validate_update_tag("CON").is_err());
+        assert!(validate_update_tag("").is_err());
     }
 
     #[test]

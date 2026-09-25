@@ -1,12 +1,15 @@
 [package]
 name = "osagent-updater"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "OSAgent self-update helper"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 dirs-next = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

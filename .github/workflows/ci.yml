@@ -10,7 +10,7 @@ on:
       release-tag:
         description: Release version tag (e.g. v0.4.5)
         required: true
-        default: v0.4.5
+        default: v0.6.2
         type: string
       prerelease:
         description: Mark the GitHub release as a prerelease

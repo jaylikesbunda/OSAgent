@@ -961,7 +961,7 @@ impl Handler {
             let meta = QueuedMeta {
                 title: query
                     .split('/')
-                    .last()
+                    .next_back()
                     .unwrap_or("Direct audio")
                     .to_string(),
                 url: query.clone(),
@@ -980,7 +980,7 @@ impl Handler {
         let discord_cfg = cfg.discord.clone().unwrap_or_default();
         let prog_str = resolve_yt_dlp_program(&discord_cfg);
         // ensure auto binary exists if we are using it or PATH has no yt-dlp
-        let prog_is_auto = prog_str == auto_yt_dlp_path().to_string_lossy().to_string();
+        let prog_is_auto = std::path::Path::new(&prog_str) == auto_yt_dlp_path();
         let needs_auto = prog_is_auto
             || (which::which("yt-dlp").is_err()
                 && which::which("yt-dlp.exe").is_err()
@@ -1080,9 +1080,7 @@ impl Handler {
         } else {
             self.piped_search(query, &instances).await
         };
-        let Some(vid) = vid else {
-            return None;
-        };
+        let vid = vid?;
         for inst in &instances {
             if let Some((audio_url, title, thumb, dur)) = self.piped_streams(inst, &vid).await {
                 let client = self.music_http_client().await;
@@ -1254,7 +1252,7 @@ impl Handler {
     }
 
     async fn spawn_auto_leave(&self, ctx: Context, guild_id: GuildId, channel_id: ChannelId) {
-        let Some(manager) = songbird::get(&ctx).await.map(|m| m.clone()) else {
+        let Some(manager) = songbird::get(&ctx).await else {
             return;
         };
         let cfg = self.agent.get_config().await;

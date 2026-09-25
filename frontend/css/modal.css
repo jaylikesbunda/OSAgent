@@ -2239,6 +2239,11 @@
     margin-bottom: 10px;
 }
 
+.update-status-text {
+    display: block;
+    line-height: 1.45;
+}
+
 .update-status-display.up-to-date {
     background: rgba(0, 200, 100, 0.1);
     color: #00c864;

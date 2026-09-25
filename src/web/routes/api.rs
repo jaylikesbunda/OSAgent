@@ -32,7 +32,8 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
+use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -515,6 +516,12 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
     )));
     let skills_router = crate::skills::create_skills_router(skill_service);
 
+    let update_manager = crate::update::UpdateManager::new(
+        crate::update::UpdateInstaller::new(),
+        crate::update::InstallMode::from_environment(),
+    );
+    spawn_scheduled_update_checks(update_manager.clone(), &config.update);
+
     let public_routes = Router::new()
         .route("/api/auth/login", post(login))
         .route("/api/auth/status", get(auth_status));
@@ -729,6 +736,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/update/check", get(check_update))
         .route("/api/update/download", post(download_update))
         .route("/api/update/install", post(install_update))
+        .route("/api/update/cancel", post(cancel_update))
         .route("/api/update/status", get(update_status))
         .merge(scheduler::create_scheduler_router());
 
@@ -737,6 +745,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .layer(Extension(agent))
         .layer(Extension(Arc::new(secret)))
         .layer(Extension(config_path))
+        .layer(Extension(update_manager))
 }
 
 #[derive(Debug, Serialize)]
@@ -7073,217 +7082,257 @@ async fn voice_delete_model(
 #[derive(Debug, Deserialize)]
 struct CheckUpdateQuery {
     channel: Option<String>,
+    tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateRequest {
+    channel: Option<String>,
+    tag: Option<String>,
+}
+
+fn parse_update_channel(
+    value: Option<&str>,
+    default: crate::update::UpdateChannel,
+) -> Result<crate::update::UpdateChannel, (StatusCode, Json<ErrorResponse>)> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value
+            .parse::<crate::update::UpdateChannel>()
+            .map_err(bad_request),
+        None => Ok(default),
+    }
+}
+
+fn update_manager_error(
+    error: crate::update::UpdateManagerError,
+) -> (StatusCode, Json<ErrorResponse>) {
+    let status = match error {
+        crate::update::UpdateManagerError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+        crate::update::UpdateManagerError::Busy(_)
+        | crate::update::UpdateManagerError::NoRelease(_) => StatusCode::CONFLICT,
+        crate::update::UpdateManagerError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
+        crate::update::UpdateManagerError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
+async fn updates_enabled(agent: &AgentRuntime) -> bool {
+    agent.get_config().await.update.enabled
+}
+
+fn spawn_scheduled_update_checks(
+    manager: Arc<crate::update::UpdateManager>,
+    update_config: &crate::config::UpdateConfig,
+) {
+    if !update_config.enabled {
+        return;
+    }
+
+    let channel = update_config
+        .channel
+        .parse::<crate::update::UpdateChannel>()
+        .unwrap_or(crate::update::UpdateChannel::Stable);
+    let check_on_startup = update_config.check_on_startup;
+    // Zero would otherwise create a tight scheduled loop. One hour is the
+    // smallest safe interval while still honoring the configured setting.
+    let interval = Duration::from_secs(
+        update_config
+            .check_interval_hours
+            .saturating_mul(60 * 60)
+            .max(60 * 60),
+    );
+
+    tokio::spawn(async move {
+        // Always defer even the startup check. Router construction and server
+        // startup must never wait on the update CDN.
+        tokio::task::yield_now().await;
+        loop {
+            if check_on_startup {
+                if let Err(error) = manager.check(channel, None).await {
+                    tracing::debug!("Scheduled update check failed: {}", error);
+                }
+                // `check_on_startup` means once, then use the interval.
+                sleep(interval).await;
+            } else {
+                sleep(interval).await;
+                if let Err(error) = manager.check(channel, None).await {
+                    tracing::debug!("Scheduled update check failed: {}", error);
+                }
+            }
+        }
+    });
 }
 
 async fn check_update(
     Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(manager): Extension<Arc<crate::update::UpdateManager>>,
     Query(params): Query<CheckUpdateQuery>,
 ) -> Result<Json<crate::update::UpdateCheckResult>, (StatusCode, Json<ErrorResponse>)> {
+    if !updates_enabled(&agent).await {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Updates are disabled in configuration".to_string(),
+            }),
+        ));
+    }
     let config = agent.get_config().await;
-
-    let channel = params
-        .channel
+    let channel = parse_update_channel(
+        params.channel.as_deref(),
+        config
+            .update
+            .channel
+            .parse::<crate::update::UpdateChannel>()
+            .unwrap_or(crate::update::UpdateChannel::Stable),
+    )?;
+    let tag = params
+        .tag
         .as_deref()
-        .or(Some(config.update.channel.as_str()))
-        .and_then(|c| c.parse::<crate::update::UpdateChannel>().ok())
-        .unwrap_or(crate::update::UpdateChannel::Stable);
-
-    let checker = crate::update::UpdateChecker::new(crate::update::build_version());
-
-    let result = checker.check(channel).await;
-
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty());
+    let result = manager
+        .check(channel, tag)
+        .await
+        .map_err(update_manager_error)?;
     Ok(Json(result))
-}
-
-#[derive(Debug, Deserialize)]
-struct DownloadUpdateRequest {
-    channel: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct UpdateStatusResponse {
     status: String,
+    current_version: String,
+    update_available: bool,
+    release_url: Option<String>,
     progress: Option<f32>,
     bytes_downloaded: Option<u64>,
     total_bytes: Option<u64>,
     tag: Option<String>,
     version: Option<String>,
     message: Option<String>,
+    error: Option<String>,
+    phase: crate::update::UpdatePhase,
+    channel: Option<crate::update::UpdateChannel>,
+    transaction_id: Option<String>,
+    launcher_managed: bool,
+}
+
+fn update_status_response(manager: &crate::update::UpdateManager) -> UpdateStatusResponse {
+    let state = manager.status();
+    let update_available = matches!(
+        state.phase,
+        crate::update::UpdatePhase::Available
+            | crate::update::UpdatePhase::Ready
+            | crate::update::UpdatePhase::Installing
+    );
+    let release_url = state
+        .tag
+        .as_ref()
+        .filter(|_| update_available)
+        .map(|tag| format!("https://osa.fuckyourcdn.com/releases/{}/", tag));
+    UpdateStatusResponse {
+        status: state.phase.to_string(),
+        current_version: crate::update::get_current_version(),
+        update_available,
+        release_url,
+        progress: state.progress,
+        bytes_downloaded: state.bytes_downloaded,
+        total_bytes: state.total_bytes,
+        tag: state.tag,
+        version: state.version,
+        message: state.message,
+        error: state.error,
+        phase: state.phase,
+        channel: state.channel,
+        transaction_id: state.transaction_id,
+        launcher_managed: manager.install_mode() == crate::update::InstallMode::LauncherManaged,
+    }
 }
 
 async fn download_update(
-    Json(payload): Json<DownloadUpdateRequest>,
-) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let channel = payload
-        .channel
-        .as_ref()
-        .and_then(|c| c.parse::<crate::update::UpdateChannel>().ok())
-        .unwrap_or(crate::update::UpdateChannel::Stable);
-
-    let installer = crate::update::UpdateInstaller::new();
-
-    let asset = installer
-        .find_release_for_platform(channel)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "No release found for this platform and channel".to_string(),
-                }),
-            )
-        })?;
-
-    // Free space taken by earlier attempts before pulling a fresh payload.
-    let _ = installer.cleanup_stale_updates(Some(&asset.tag));
-
-    let archive_path = installer
-        .download_release(&asset, |downloaded, total| {
-            tracing::debug!(
-                "Download progress: {}/{} bytes ({:.1}%)",
-                downloaded,
-                total,
-                if total > 0 {
-                    (downloaded as f64 / total as f64 * 100.0) as f32
-                } else {
-                    0.0
-                }
-            );
-        })
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Download failed: {}", e),
-                }),
-            )
-        })?;
-
-    let staged_update = installer
-        .prepare_update(&archive_path, &asset.tag)
-        .await
-        .map_err(|e| {
-            // Leave the verified payload on disk: for platforms that ship a
-            // package the user can still install it by hand, and the next
-            // attempt reuses it instead of re-downloading.
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to prepare update: {}", e),
-                }),
-            )
-        })?;
-
-    if archive_path != staged_update {
-        let _ = std::fs::remove_file(&archive_path).ok();
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(manager): Extension<Arc<crate::update::UpdateManager>>,
+    Json(payload): Json<UpdateRequest>,
+) -> Result<(StatusCode, Json<UpdateStatusResponse>), (StatusCode, Json<ErrorResponse>)> {
+    if !updates_enabled(&agent).await {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Updates are disabled in configuration".to_string(),
+            }),
+        ));
     }
-
-    installer
-        .mark_prepared_update(&asset.tag, &staged_update)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to mark update as prepared: {}", e),
-                }),
-            )
-        })?;
-
-    Ok(Json(UpdateStatusResponse {
-        status: "ready".to_string(),
-        progress: Some(100.0),
-        bytes_downloaded: None,
-        total_bytes: None,
-        tag: Some(asset.tag),
-        version: Some(asset.version),
-        message: Some("Update ready to install".to_string()),
-    }))
+    let config = agent.get_config().await;
+    let channel = parse_update_channel(
+        payload.channel.as_deref(),
+        config
+            .update
+            .channel
+            .parse::<crate::update::UpdateChannel>()
+            .unwrap_or(crate::update::UpdateChannel::Stable),
+    )?;
+    let tag = payload
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty());
+    manager
+        .start_download(channel, tag)
+        .await
+        .map_err(update_manager_error)?;
+    Ok((StatusCode::ACCEPTED, Json(update_status_response(&manager))))
 }
 
 async fn install_update(
     Extension(agent): Extension<Arc<AgentRuntime>>,
-    Json(payload): Json<DownloadUpdateRequest>,
+    Extension(manager): Extension<Arc<crate::update::UpdateManager>>,
+    Json(payload): Json<UpdateRequest>,
 ) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let installer = crate::update::UpdateInstaller::new();
-
-    let pending = crate::update::get_prepared_update().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
+    if !updates_enabled(&agent).await {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
             Json(ErrorResponse {
-                error: "No pending update found. Download an update first.".to_string(),
+                error: "Updates are disabled in configuration".to_string(),
             }),
-        )
-    })?;
+        ));
+    }
+    let tag = payload
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty());
+    manager.install(tag).await.map_err(update_manager_error)?;
 
-    installer
-        .mark_update_pending(&pending.tag, &pending.staged_path, true)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-
-    let _ = installer.clear_prepared_update();
-
+    // This is deliberately after the manager's successful launcher-mode arm.
+    // Standalone install errors above and never reaches this signal.
     agent.signal_shutdown();
-
-    Ok(Json(UpdateStatusResponse {
-        status: "restarting".to_string(),
-        progress: None,
-        bytes_downloaded: None,
-        total_bytes: None,
-        tag: Some(pending.tag),
-        version: None,
-        message: Some("Shutting down for update...".to_string()),
-    }))
+    Ok(Json(update_status_response(&manager)))
 }
 
-async fn update_status() -> Json<UpdateStatusResponse> {
-    let pending = crate::update::get_pending_update();
-
-    if let Some(pending) = pending {
-        return Json(UpdateStatusResponse {
-            status: "ready".to_string(),
-            progress: Some(100.0),
-            bytes_downloaded: None,
-            total_bytes: None,
-            tag: Some(pending.tag.clone()),
-            version: Some(pending.tag.trim_start_matches('v').to_string()),
-            message: Some("Update ready to install".to_string()),
-        });
+async fn cancel_update(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(manager): Extension<Arc<crate::update::UpdateManager>>,
+) -> Result<Json<UpdateStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !updates_enabled(&agent).await {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Updates are disabled in configuration".to_string(),
+            }),
+        ));
     }
+    manager.cancel().await.map_err(update_manager_error)?;
+    Ok(Json(update_status_response(&manager)))
+}
 
-    let prepared = crate::update::get_prepared_update();
-
-    if let Some(prepared) = prepared {
-        return Json(UpdateStatusResponse {
-            status: "ready".to_string(),
-            progress: Some(100.0),
-            bytes_downloaded: None,
-            total_bytes: None,
-            tag: Some(prepared.tag.clone()),
-            version: Some(prepared.tag.trim_start_matches('v').to_string()),
-            message: Some("Update ready to install".to_string()),
-        });
-    }
-
-    Json(UpdateStatusResponse {
-        status: "idle".to_string(),
-        progress: None,
-        bytes_downloaded: None,
-        total_bytes: None,
-        tag: None,
-        version: None,
-        message: None,
-    })
+async fn update_status(
+    Extension(manager): Extension<Arc<crate::update::UpdateManager>>,
+) -> Json<UpdateStatusResponse> {
+    Json(update_status_response(&manager))
 }
 
 #[cfg(test)]

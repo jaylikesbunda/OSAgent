@@ -163,6 +163,9 @@ OSA.openSettings = async function() {
 OSA.closeSettings = function() {
     document.getElementById('settings-modal').classList.add('hidden');
     document.getElementById('settings-error').classList.add('hidden');
+    // Update status is scoped to the open Updates pane. In particular, do not
+    // leave a download poll running after the user closes Settings.
+    OSA.stopUpdatePolling?.();
     // The voice-model progress stream is only useful while Settings is open;
     // otherwise it holds an SSE connection for the whole page lifetime.
     if (typeof OSA.stopProgressListener === 'function') {
@@ -601,6 +604,11 @@ OSA.switchSettingsTab = async function(tabId) {
         await OSA.loadSkillsUI();
     } else if (tabId === 'mcp') {
         await OSA.loadMcpUI();
+    } else if (tabId === 'updates') {
+        // The update API is independent of the settings/config load. Make
+        // sure the pane initializes every time it is selected, including a
+        // pane selected before the first config request has completed.
+        await OSA.initUpdatesPane();
     }
 };
 
@@ -1611,212 +1619,529 @@ OSA.rejectDecisionSuggestion = async function(id) {
 OSA.pendingUpdateTag = null;
 OSA.pendingUpdateVersion = null;
 OSA.currentVersion = null;
+OSA._updatePollGeneration = 0;
+OSA._updatePollTimer = null;
+OSA._updatePaneInitialized = false;
+OSA._updateStartupChecked = false;
+OSA._updateStartupToastPending = false;
+OSA._updateState = {
+    status: 'idle',
+    phase: 'idle',
+    retryAction: null,
+    releaseUrl: '',
+    releaseNotes: ''
+};
 
-OSA.checkForUpdates = async function() {
-    const btn = document.getElementById('btn-check-update');
-    const statusDisplay = document.getElementById('update-status-display');
-    const versionRow = document.getElementById('update-version-row');
-    const latestVersion = document.getElementById('update-latest-version');
-    const channel = document.getElementById('update-channel-select')?.value || 'stable';
-    
-    btn.disabled = true;
-    btn.textContent = 'Checking...';
-    statusDisplay.className = 'update-status-display checking';
-    statusDisplay.querySelector('.update-status-text').textContent = 'Checking for updates...';
-    versionRow.classList.add('hidden');
-    document.getElementById('btn-download-update')?.classList.add('hidden');
-    document.getElementById('btn-install-update')?.classList.add('hidden');
-    document.getElementById('btn-view-release')?.classList.add('hidden');
-    document.getElementById('update-release-notes')?.classList.add('hidden');
-    
-    try {
-        const result = await OSA.getJson('/api/update/check?channel=' + encodeURIComponent(channel));
-        
-        btn.disabled = false;
-        btn.textContent = 'Check for Updates';
-        
-        if (!OSA.currentVersion) {
-            OSA.currentVersion = result.current_version;
-            document.getElementById('update-current-version').textContent = result.current_version;
+OSA.UPDATE_POLL_INTERVAL = 1000;
+OSA.getUpdateState = function() {
+    return OSA._updateState;
+};
+
+OSA.getUpdateActionButton = function() {
+    return document.getElementById('btn-check-update');
+};
+
+OSA.getUpdateChannel = function() {
+    return document.getElementById('update-channel-select')?.value || 'stable';
+};
+
+// Unlike getJson(), update endpoints need to reject an error JSON body even
+// when the HTTP status is 200. The server has historically returned both
+// shapes, and treating `{ error: ... }` as a successful download/install is
+// particularly dangerous because it can make the UI offer a restart that was
+// never staged.
+OSA.fetchUpdateJson = async function(url, options, fallbackMessage) {
+    const response = await OSA.fetchWithAuth(url, options);
+    const data = await response.json().catch(() => ({}));
+    const ok = response.ok === undefined ? true : response.ok;
+    if (!ok || data?.error || data?.status === 'error' || data?.status === 'failed') {
+        const error = new Error(data?.error || data?.message || fallbackMessage || `HTTP ${response.status || 'error'}`);
+        error.updateData = data;
+        throw error;
+    }
+    return data || {};
+};
+
+OSA.labelForUpdateProgress = function(percent, bytesDownloaded, totalBytes) {
+    let label = Math.round(percent) + '%';
+    const downloaded = Number(bytesDownloaded);
+    const total = Number(totalBytes);
+    if (Number.isFinite(downloaded) && downloaded >= 0 && Number.isFinite(total) && total > 0) {
+        label += ' (' + Math.max(0, Math.round(downloaded)) + ' / ' + Math.round(total) + ' bytes)';
+    }
+    return label;
+};
+
+OSA.setUpdateProgress = function(progress, bytesDownloaded, totalBytes, message) {
+    const container = document.getElementById('update-progress-container');
+    const fill = document.getElementById('update-progress-fill');
+    const text = document.getElementById('update-progress-text');
+    if (!container || !fill || !text) return;
+
+    let percent = null;
+    if (Number.isFinite(Number(progress))) {
+        const value = Number(progress);
+        // Accept both the API's 0..100 form and the common 0..1 form.
+        percent = value > 0 && value <= 1 ? value * 100 : value;
+        percent = Math.max(0, Math.min(100, percent));
+    }
+
+    const downloaded = Number(bytesDownloaded);
+    const total = Number(totalBytes);
+    const hasBytes = Number.isFinite(downloaded) && downloaded >= 0
+        && Number.isFinite(total) && total > 0;
+    if (percent === null && hasBytes) {
+        percent = Math.max(0, Math.min(100, (downloaded / total) * 100));
+    }
+    if (percent === null) percent = 0;
+
+    fill.style.width = percent + '%';
+    container.setAttribute('aria-valuenow', String(Math.round(percent)));
+    container.setAttribute('aria-valuetext', message || OSA.labelForUpdateProgress(percent, bytesDownloaded, totalBytes));
+    let label = OSA.labelForUpdateProgress(percent, bytesDownloaded, totalBytes);
+    if (message) label += ' — ' + message;
+    text.textContent = label;
+    container.classList.remove('hidden');
+    container.setAttribute('aria-busy', 'true');
+};
+
+OSA.hideUpdateProgress = function() {
+    const container = document.getElementById('update-progress-container');
+    if (container) {
+        container.classList.add('hidden');
+        container.setAttribute('aria-busy', 'false');
+        container.setAttribute('aria-valuenow', '0');
+    }
+};
+
+OSA.setUpdateStatusText = function(message, stateName) {
+    const display = document.getElementById('update-status-display');
+    if (!display) return;
+    display.className = 'update-status-display' + (stateName ? ' ' + stateName : '');
+    const text = display.querySelector('.update-status-text');
+    if (text) text.textContent = message;
+};
+
+OSA.renderUpdateAction = function() {
+    const button = OSA.getUpdateActionButton();
+    if (!button) return;
+    const state = OSA._updateState;
+    const busy = state.phase === 'checking' || state.phase === 'downloading' || state.phase === 'installing' || state.phase === 'restarting';
+    let label = 'Check for Updates';
+    if (state.phase === 'available') label = 'Download Update';
+    else if (state.phase === 'ready') label = 'Install & Restart';
+    else if (state.phase === 'downloading') label = 'Downloading…';
+    else if (state.phase === 'installing') label = 'Installing…';
+    else if (state.phase === 'restarting') label = 'Restarting…';
+    else if (state.phase === 'error') {
+        label = state.retryAction === 'download' ? 'Retry Download'
+            : state.retryAction === 'install' ? 'Retry Install'
+            : 'Check for Updates';
+    }
+    button.textContent = label;
+    button.disabled = busy || (state.phase === 'ready' && !OSA.pendingUpdateTag);
+    button.setAttribute('aria-busy', String(busy));
+    button.dataset.updateAction = state.phase === 'error'
+        ? (state.retryAction || 'check')
+        : state.phase;
+};
+
+OSA.getUpdateTag = function(data, version) {
+    if (data?.latest_tag || data?.tag) return data.latest_tag || data.tag;
+    if (!data?.update_available) return '';
+    const safeReleaseUrl = OSA.safeUrl(data.release_url) || OSA._updateState.releaseUrl;
+    if (safeReleaseUrl) {
+        const match = safeReleaseUrl.match(/\/tag\/([^/?#]+)/);
+        if (match) {
+            try {
+                return decodeURIComponent(match[1]);
+            } catch (error) {
+                return match[1];
+            }
         }
-        
-        if (result.update_available) {
-            const latest = result.latest_version || 'unknown';
-            latestVersion.textContent = latest;
-            versionRow.classList.remove('hidden');
-            statusDisplay.className = 'update-status-display update-available';
-            statusDisplay.querySelector('.update-status-text').textContent = 'Update available: v' + latest;
-            
-            OSA.pendingUpdateTag = result.release_url?.split('/tag/')[1] || latest;
-            OSA.pendingUpdateVersion = latest;
-            
-            const downloadBtn = document.getElementById('btn-download-update');
-            if (downloadBtn) {
-                downloadBtn.classList.remove('hidden');
-                downloadBtn.disabled = false;
-                downloadBtn.textContent = 'Download Update';
-            }
-            
-            const viewRelease = document.getElementById('btn-view-release');
-            if (viewRelease && result.release_url) {
-                const releaseUrl = OSA.safeUrl(result.release_url);
-                if (releaseUrl) {
-                    viewRelease.href = releaseUrl;
-                    viewRelease.classList.remove('hidden');
-                }
-            }
-            
-            if (result.release_notes) {
-                const notesDiv = document.getElementById('update-release-notes');
-                const notesContent = document.getElementById('release-notes-content');
-                if (notesDiv && notesContent) {
-                    notesContent.textContent = result.release_notes;
-                    notesDiv.classList.remove('hidden');
-                }
-            }
+    }
+    return version || '';
+};
+
+OSA.renderUpdateRelease = function(data) {
+    const state = OSA._updateState;
+    if (Object.prototype.hasOwnProperty.call(data || {}, 'release_url')) {
+        const safeReleaseUrl = OSA.safeUrl(data.release_url);
+        state.releaseUrl = safeReleaseUrl;
+    }
+    const release = document.getElementById('btn-view-release');
+    if (release) {
+        if (state.releaseUrl) {
+            release.href = state.releaseUrl;
+            release.classList.remove('hidden');
         } else {
-            statusDisplay.className = 'update-status-display up-to-date';
-            statusDisplay.querySelector('.update-status-text').textContent = 'You are up to date!';
+            release.classList.add('hidden');
+            release.removeAttribute('href');
         }
+    }
+
+    // Release notes are rendered as text, never as HTML. This preserves
+    // markdown/code formatting in the browser without allowing server output
+    // to inject markup into Settings.
+    if (Object.prototype.hasOwnProperty.call(data || {}, 'release_notes')) {
+        state.releaseNotes = typeof data.release_notes === 'string' ? data.release_notes : '';
+    }
+    const notes = document.getElementById('update-release-notes');
+    const notesContent = document.getElementById('release-notes-content');
+    if (notes && notesContent) {
+        notesContent.textContent = state.releaseNotes;
+        notes.classList.toggle('hidden', !state.releaseNotes);
+    }
+};
+
+OSA.renderUpdateStatus = function(data, fallbackPhase) {
+    data = data || {};
+    const state = OSA._updateState;
+    const status = String(data.status || '').toLowerCase();
+    const currentVersion = data.current_version || data.currentVersion;
+    if (currentVersion) {
+        OSA.currentVersion = currentVersion;
+        const current = document.getElementById('update-current-version');
+        if (current) current.textContent = currentVersion;
+    }
+
+    const version = data.latest_version || data.version || (data.tag ? String(data.tag).replace(/^v/, '') : '');
+    if (version) {
+        OSA.pendingUpdateVersion = version;
+        const latest = document.getElementById('update-latest-version');
+        const row = document.getElementById('update-version-row');
+        if (latest) latest.textContent = version;
+        if (row) row.classList.toggle('hidden', !(data.update_available || status === 'ready' || status === 'available' || fallbackPhase === 'ready'));
+    }
+
+    OSA.renderUpdateRelease(data);
+    if (data.update_available) {
+        // Replace, rather than retain, a tag from an older check. Otherwise a
+        // second check without a tag could install the previous release.
+        OSA.pendingUpdateTag = OSA.getUpdateTag(data, version);
+    } else if (status === 'ready') {
+        // A ready response is installable only when the server identifies the
+        // exact staged tag. Do not guess from a version string.
+        OSA.pendingUpdateTag = data.tag || '';
+    } else if (data.tag) {
+        OSA.pendingUpdateTag = data.tag;
+    }
+
+    if (status === 'ready') {
+        state.status = 'ready';
+        state.phase = 'ready';
+        state.retryAction = null;
+        OSA.setUpdateStatusText('Update ready: v' + (OSA.pendingUpdateVersion || version || 'unknown'), 'update-available');
+        OSA.setUpdateProgress(data.progress === undefined ? 100 : data.progress, data.bytes_downloaded, data.total_bytes, data.message);
+    } else if (status === 'checking' || status === 'in_progress') {
+        state.status = status;
+        state.phase = 'checking';
+        state.retryAction = null;
+        OSA.setUpdateStatusText(data.message || 'Checking for updates…', 'checking');
+        OSA.hideUpdateProgress();
+    } else if (status === 'downloading' || status === 'preparing') {
+        state.status = status;
+        state.phase = 'downloading';
+        state.retryAction = null;
+        OSA.setUpdateStatusText(data.message || 'Downloading update…', 'checking');
+        OSA.setUpdateProgress(data.progress, data.bytes_downloaded, data.total_bytes, data.message);
+    } else if (status === 'restarting' || status === 'installing') {
+        state.status = status;
+        state.phase = 'installing';
+        state.retryAction = null;
+        OSA.setUpdateStatusText(data.message || 'Restarting… Please wait.', 'checking');
+        OSA.hideUpdateProgress();
+    } else if (status === 'error' || status === 'failed' || data.error) {
+        state.status = 'error';
+        state.phase = 'error';
+        state.retryAction = OSA.updateRetryAction(data, state.retryAction);
+        OSA.setUpdateStatusText(data.error || data.message || 'Update failed.', 'error');
+        OSA.hideUpdateProgress();
+    } else if (data.update_available === true || status === 'available') {
+        state.status = 'available';
+        state.phase = 'available';
+        state.retryAction = null;
+        OSA.setUpdateStatusText('Update available: v' + (version || 'unknown'), 'update-available');
+        OSA.hideUpdateProgress();
+    } else {
+        state.status = status || 'idle';
+        state.phase = 'idle';
+        state.retryAction = null;
+        OSA.setUpdateStatusText('You are up to date!', 'up-to-date');
+        OSA.hideUpdateProgress();
+    }
+    OSA.renderUpdateAction();
+    return state;
+};
+
+OSA.updateRetryAction = function(data, fallback) {
+    const text = String(data?.message || data?.error || '').toLowerCase();
+    if (text.includes('install') || text.includes('launcher') || text.includes('handoff')) return 'install';
+    if (text.includes('download') || text.includes('prepar') || text.includes('stage')) return 'download';
+    if (data?.tag && data?.launcher_managed === true) return 'install';
+    return fallback || 'check';
+};
+
+OSA.renderUpdateError = function(error, retryAction) {
+    const state = OSA._updateState;
+    state.status = 'error';
+    state.phase = 'error';
+    state.retryAction = OSA.updateRetryAction(error?.updateData, retryAction || state.retryAction || 'check');
+    OSA.setUpdateStatusText((retryAction === 'download' ? 'Download failed: ' : retryAction === 'install' ? 'Install failed: ' : 'Error checking for updates: ')
+        + (error?.message || 'Unknown error'), 'error');
+    OSA.hideUpdateProgress();
+    OSA.renderUpdateAction();
+    return state;
+};
+
+OSA.maybeShowStartupUpdateToast = function(data) {
+    const state = OSA._updateState;
+    const version = data?.latest_version || data?.version || (data?.tag ? String(data.tag).replace(/^v/, '') : '') || OSA.pendingUpdateVersion;
+    if (!version || (state.phase !== 'available' && state.phase !== 'ready')) return false;
+    const key = 'osa-update-toast:' + version;
+    try {
+        if (window.sessionStorage?.getItem(key)) return false;
+        window.sessionStorage?.setItem(key, '1');
     } catch (error) {
-        btn.disabled = false;
-        btn.textContent = 'Check for Updates';
-        statusDisplay.className = 'update-status-display error';
-        statusDisplay.querySelector('.update-status-text').textContent = 'Error checking for updates: ' + (error.message || 'Unknown error');
+        // Storage is optional; a toast is still useful when it is unavailable.
+    }
+    if (typeof OSA.showToast === 'function') {
+        OSA.showToast('OSAgent ' + version + ' is ' + (state.phase === 'ready' ? 'ready to install' : 'available') + '.', 'info');
+    }
+    return true;
+};
+
+OSA.stopUpdatePolling = function() {
+    OSA._updatePollGeneration = (OSA._updatePollGeneration || 0) + 1;
+    if (OSA._updatePollTimer) {
+        clearTimeout(OSA._updatePollTimer);
+        OSA._updatePollTimer = null;
+    }
+    if (OSA._updateRestartTimer) {
+        clearTimeout(OSA._updateRestartTimer);
+        OSA._updateRestartTimer = null;
+    }
+};
+
+OSA.startUpdatePolling = function() {
+    OSA.stopUpdatePolling();
+    const generation = OSA._updatePollGeneration;
+    const poll = async function() {
+        if (generation !== OSA._updatePollGeneration) return;
+        try {
+            const result = await OSA.fetchUpdateJson('/api/update/status', undefined, 'Failed to read update status');
+            if (generation !== OSA._updatePollGeneration) return;
+            OSA.renderUpdateStatus(result);
+            const status = String(result.status || '').toLowerCase();
+            if (OSA._updateStartupToastPending && (status === 'available' || status === 'ready')) {
+                OSA.maybeShowStartupUpdateToast(result);
+                OSA._updateStartupToastPending = false;
+            }
+            if (status === 'checking' || status === 'downloading' || status === 'in_progress' || status === 'preparing') {
+                OSA._updatePollTimer = setTimeout(poll, OSA.UPDATE_POLL_INTERVAL);
+            } else {
+                OSA._updatePollTimer = null;
+            }
+        } catch (error) {
+            if (generation !== OSA._updatePollGeneration) return;
+            OSA._updatePollTimer = null;
+            if (error?.updateData) {
+                OSA.renderUpdateStatus(error.updateData);
+            } else {
+                OSA.renderUpdateError(error, OSA._updateState.phase === 'downloading' ? 'download' : 'check');
+            }
+        }
+    };
+    OSA._updatePollTimer = setTimeout(poll, 0);
+};
+
+OSA.loadUpdateStatus = async function(options) {
+    options = options || {};
+    try {
+        const result = await OSA.fetchUpdateJson('/api/update/status', undefined, 'Failed to read update status');
+        OSA.renderUpdateStatus(result);
+        if (!options.skipPoll) {
+            const status = String(result.status || '').toLowerCase();
+            if (status === 'checking' || status === 'downloading' || status === 'in_progress' || status === 'preparing') {
+                OSA.startUpdatePolling();
+            }
+        }
+        if (options.notify) OSA.maybeShowStartupUpdateToast(result);
+        return result;
+    } catch (error) {
+        if (error?.updateData) {
+            OSA.renderUpdateStatus(error.updateData);
+            return error.updateData;
+        }
+        console.error('Failed to load update status:', error);
+        OSA.renderUpdateError(error, 'check');
+        return null;
+    }
+};
+
+OSA.checkForUpdates = async function(options) {
+    options = options || {};
+    const channel = options.channel || OSA.getUpdateChannel();
+    OSA._updateState.phase = 'checking';
+    OSA._updateState.status = 'checking';
+    OSA.setUpdateStatusText('Checking for updates…', 'checking');
+    OSA.renderUpdateAction();
+
+    try {
+        const result = await OSA.fetchUpdateJson('/api/update/check?channel=' + encodeURIComponent(channel), undefined, 'Update check failed');
+        OSA.renderUpdateStatus(result);
+        if (result.update_available) {
+            const safeReleaseUrl = OSA.safeUrl(result.release_url);
+            OSA._updateState.releaseUrl = safeReleaseUrl;
+            const release = document.getElementById('btn-view-release');
+            if (release && safeReleaseUrl) {
+                release.href = safeReleaseUrl;
+                release.classList.remove('hidden');
+            }
+            if (options.notify) OSA.maybeShowStartupUpdateToast(result);
+        }
+        return result;
+    } catch (error) {
+        OSA.renderUpdateError(error, 'check');
+        return null;
     }
 };
 
 OSA.downloadUpdate = async function() {
     if (!OSA.pendingUpdateTag) {
-        alert('No update to download. Please check for updates first.');
+        OSA.renderUpdateError(new Error('No update is available to download. Check for updates first.'), 'check');
+        return false;
+    }
+    const tag = OSA.pendingUpdateTag;
+    OSA._updateState.phase = 'downloading';
+    OSA._updateState.status = 'downloading';
+    OSA.renderUpdateAction();
+    OSA.setUpdateProgress(0, null, null, 'Starting download…');
+    try {
+        const result = await OSA.fetchUpdateJson('/api/update/download', {
+            method: 'POST',
+            body: JSON.stringify({ tag, channel: OSA.getUpdateChannel() })
+        }, 'Download failed');
+        OSA.renderUpdateStatus(result, 'downloading');
+        const status = String(result.status || '').toLowerCase();
+        if (status === 'downloading' || status === 'in_progress' || status === 'preparing') {
+            OSA.startUpdatePolling();
+        }
+        return result;
+    } catch (error) {
+        OSA.renderUpdateError(error, 'download');
+        return false;
+    }
+};
+
+OSA.waitForUpdateRestart = async function(attempt) {
+    attempt = Number(attempt) || 0;
+    if (attempt >= 90) {
+        window.location.reload();
         return;
     }
-    
-    const btn = document.getElementById('btn-download-update');
-    const progressContainer = document.getElementById('update-progress-container');
-    const progressFill = document.getElementById('update-progress-fill');
-    const progressText = document.getElementById('update-progress-text');
-    const channel = document.getElementById('update-channel-select')?.value || 'stable';
-    
-    btn.disabled = true;
-    btn.textContent = 'Downloading...';
-    progressContainer.classList.remove('hidden');
-    progressFill.style.width = '0%';
-    progressText.textContent = '0%';
-    
     try {
-        const response = await OSA.fetchWithAuth('/api/update/download', {
-            method: 'POST',
-            body: JSON.stringify({ tag: OSA.pendingUpdateTag, channel: channel })
-        });
-        
-        const result = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(result.error || 'Download failed');
+        const result = await OSA.fetchUpdateJson('/api/update/status', undefined, 'Update status unavailable during restart');
+        const status = String(result.status || '').toLowerCase();
+        OSA.renderUpdateStatus(result, status === 'installing' ? 'installing' : undefined);
+        if (status === 'installing' || status === 'restarting' || status === 'downloading' || status === 'preparing') {
+            OSA._updateRestartTimer = setTimeout(function() {
+                OSA._updateRestartTimer = null;
+                OSA.waitForUpdateRestart(attempt + 1);
+            }, OSA.UPDATE_POLL_INTERVAL || 1000);
+            return;
         }
-        
-        progressFill.style.width = '100%';
-        progressText.textContent = '100%';
-        
-        const installBtn = document.getElementById('btn-install-update');
-        if (installBtn) {
-            installBtn.classList.remove('hidden');
-            installBtn.disabled = false;
-            installBtn.textContent = 'Install & Restart';
-        }
-        
-        btn.classList.add('hidden');
+        // The replacement process is answering again. Reloading now restores
+        // the UI from its durable post-restart state instead of guessing a
+        // fixed three-second delay.
+        window.location.reload();
     } catch (error) {
-        btn.disabled = false;
-        btn.textContent = 'Download Update';
-        const statusDisplay = document.getElementById('update-status-display');
-        statusDisplay.className = 'update-status-display error';
-        statusDisplay.querySelector('.update-status-text').textContent = 'Download failed: ' + (error.message || 'Unknown error');
+        OSA._updateRestartTimer = setTimeout(function() {
+            OSA._updateRestartTimer = null;
+            OSA.waitForUpdateRestart(attempt + 1);
+        }, OSA.UPDATE_POLL_INTERVAL || 1000);
     }
 };
 
 OSA.installUpdate = async function() {
     if (!OSA.pendingUpdateTag) {
-        alert('No update to install. Please download an update first.');
-        return;
+        OSA.renderUpdateError(new Error('No prepared update is ready to install.'), 'check');
+        return false;
     }
-    
-    const btn = document.getElementById('btn-install-update');
-    btn.disabled = true;
-    btn.textContent = 'Restarting...';
-    
+    const tag = OSA.pendingUpdateTag;
+    OSA._updateState.phase = 'installing';
+    OSA._updateState.status = 'installing';
+    OSA.setUpdateStatusText('Installing update…', 'checking');
+    OSA.renderUpdateAction();
     try {
-        const response = await OSA.fetchWithAuth('/api/update/install', {
+        const result = await OSA.fetchUpdateJson('/api/update/install', {
             method: 'POST',
-            body: JSON.stringify({ tag: OSA.pendingUpdateTag })
-        });
-        
-        const result = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(result.error || 'Install failed');
-        }
-        
-        const statusDisplay = document.getElementById('update-status-display');
-        statusDisplay.className = 'update-status-display checking';
-        statusDisplay.querySelector('.update-status-text').textContent = 'Restarting... Please wait.';
-        
+            body: JSON.stringify({ tag })
+        }, 'Install failed');
+        OSA.renderUpdateStatus(result, 'installing');
+        OSA.waitForUpdateRestart(0);
+        return result;
+    } catch (error) {
+        OSA.renderUpdateError(error, 'install');
+        return false;
+    }
+};
+
+OSA.handleUpdateAction = async function() {
+    const state = OSA._updateState;
+    let action = state.phase;
+    if (state.phase === 'error') action = state.retryAction || 'check';
+    if (action === 'ready' && !OSA.pendingUpdateTag) action = 'check';
+    if (action === 'ready' || action === 'installing' || action === 'restarting') {
+        if (action === 'restarting') return;
+        return OSA.installUpdate();
+    }
+    if (action === 'downloading') return;
+    if (action === 'available' || action === 'download') return OSA.downloadUpdate();
+    return OSA.checkForUpdates();
+};
+
+OSA.onUpdateChannelChange = function() {
+    if (document.getElementById('pane-updates')?.classList.contains('active')) {
+        OSA.checkForUpdates();
+    }
+};
+
+OSA.initUpdatesPane = async function() {
+    OSA._updatePaneInitialized = true;
+    const result = await OSA.loadUpdateStatus();
+    const status = String(result?.status || 'idle').toLowerCase();
+    if (status === 'idle' || status === 'cancelled') {
+        await OSA.checkForUpdates();
+    }
+};
+
+OSA.checkForUpdatesOnStartup = async function() {
+    if (OSA._updateStartupChecked) return;
+    OSA._updateStartupChecked = true;
+    // The backend owns the configured startup/interval policy. Poll an
+    // in-flight check instead of racing it with a second client-owned request.
+    const result = await OSA.loadUpdateStatus({ notify: true });
+    const status = String(result?.status || '').toLowerCase();
+    if (status === 'checking' || status === 'downloading' || status === 'preparing') {
+        OSA._updateStartupToastPending = true;
+    } else if (!status || status === 'idle') {
+        // The scheduled task is deliberately detached from router startup.
+        // Re-read once after it has had a chance to enter its checking phase.
         setTimeout(function() {
-            window.location.reload();
-        }, 3000);
-    } catch (error) {
-        btn.disabled = false;
-        btn.textContent = 'Install & Restart';
-        const statusDisplay = document.getElementById('update-status-display');
-        statusDisplay.className = 'update-status-display error';
-        statusDisplay.querySelector('.update-status-text').textContent = 'Install failed: ' + (error.message || 'Unknown error');
-    }
-};
-
-OSA.loadUpdateStatus = async function() {
-    try {
-        const result = await OSA.getJson('/api/update/status');
-        
-        if (result.tag && result.status === 'ready') {
-            OSA.pendingUpdateTag = result.tag;
-            OSA.pendingUpdateVersion = result.version;
-            
-            const installBtn = document.getElementById('btn-install-update');
-            if (installBtn) {
-                installBtn.classList.remove('hidden');
-                installBtn.disabled = false;
-                installBtn.textContent = 'Install & Restart';
-            }
-            
-            const statusDisplay = document.getElementById('update-status-display');
-            statusDisplay.className = 'update-status-display update-available';
-            statusDisplay.querySelector('.update-status-text').textContent = 'Update ready: v' + result.version;
-            
-            const versionRow = document.getElementById('update-version-row');
-            const latestVersion = document.getElementById('update-latest-version');
-            latestVersion.textContent = result.version;
-            versionRow.classList.remove('hidden');
-        }
-    } catch (error) {
-        console.error('Failed to load update status:', error);
-    }
-};
-
-OSA.initUpdatesPane = function() {
-    const versionDisplay = document.getElementById('update-current-version');
-    if (versionDisplay && !OSA.currentVersion) {
-        OSA.getJson('/api/update/check?channel=stable').then(function(result) {
-            OSA.currentVersion = result.current_version;
-            versionDisplay.textContent = result.current_version;
-        }).catch(function() {
-            versionDisplay.textContent = 'Unknown';
-        });
+            OSA.loadUpdateStatus({ notify: true }).then(function(delayed) {
+                const delayedStatus = String(delayed?.status || '').toLowerCase();
+                if (delayedStatus === 'checking' || delayedStatus === 'downloading' || delayedStatus === 'preparing') {
+                    OSA._updateStartupToastPending = true;
+                }
+            });
+        }, 1500);
     }
 };
 
 window.openSettings = OSA.openSettings;
 window.closeSettings = OSA.closeSettings;
+
 window.saveSettings = OSA.saveSettings;
 window.installVoiceModels = OSA.installVoiceModels;
 window.switchSettingsTab = OSA.switchSettingsTab;

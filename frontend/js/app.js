@@ -110,6 +110,11 @@ OSA.queueDeferredStartupTasks = function() {
         OSA.initPushToTalk?.();
         OSA.loadProviderCatalog();
         OSA.refreshWorkflowAvailability?.();
+        if (typeof OSA.checkForUpdatesOnStartup === 'function') {
+            OSA.checkForUpdatesOnStartup().catch(function(error) {
+                console.debug('Startup update check failed:', error);
+            });
+        }
     });
 };
 

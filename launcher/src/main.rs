@@ -17,6 +17,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -1565,7 +1566,7 @@ async fn discover_ollama_models(
         })
         .collect();
 
-    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    models.sort_by_key(|model| model.name.to_lowercase());
     Ok(models)
 }
 
@@ -2059,9 +2060,7 @@ async fn validate_provider_connection(
     let response = request
         .send()
         .await
-        .map_err(|e| match provider_type.as_str() {
-            _ => format!("Could not reach {}: {}", preset.name, e),
-        })?;
+        .map_err(|error| format!("Could not reach {}: {}", preset.name, error))?;
 
     let status = response.status();
     if status.is_success() {
@@ -2327,6 +2326,7 @@ fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> 
     Ok(())
 }
 
+#[allow(dead_code)]
 fn extract_tar_gz(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new("tar")
         .args([
@@ -2965,6 +2965,7 @@ fn start_osagent(
     cmd.arg("start")
         .arg("--config")
         .arg(&state.config_path)
+        .env("OSAGENT_LAUNCHER_MANAGED", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -4046,15 +4047,57 @@ fn read_output_to_file<R: std::io::Read>(reader: R, app_handle: AppHandle, log_p
 
 // --- Pending Update Application ---
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum LauncherPendingUpdateKind {
+    #[default]
     BinarySwap,
     Installer,
 }
 
 fn default_launcher_pending_update_kind() -> LauncherPendingUpdateKind {
     LauncherPendingUpdateKind::BinarySwap
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LauncherPendingUpdatePhase {
+    #[default]
+    Pending,
+    Applying,
+    Committed,
+    Failed,
+}
+
+impl LauncherPendingUpdatePhase {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            // The backend calls its armed intent "installing"; older markers
+            // may call the same durable state "pending".
+            "pending" | "installing" => Some(Self::Pending),
+            "applying" => Some(Self::Applying),
+            "committed" => Some(Self::Committed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+// The backend producer may omit phase or serialize its Option as null.
+fn deserialize_launcher_pending_update_phase<'de, D>(
+    deserializer: D,
+) -> Result<LauncherPendingUpdatePhase, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|phase| {
+            LauncherPendingUpdatePhase::parse(&phase)
+                .ok_or_else(|| serde::de::Error::custom(format!("unknown update phase: {phase}")))
+        })
+        .transpose()
+        .map(|phase| phase.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -4066,162 +4109,157 @@ struct LauncherPendingUpdate {
     kind: LauncherPendingUpdateKind,
     #[serde(default = "default_launcher_pending_update_armed")]
     armed: bool,
-    created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(rename = "created_at")]
+    _created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    transaction_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_launcher_pending_update_phase"
+    )]
+    phase: LauncherPendingUpdatePhase,
 }
 
 fn default_launcher_pending_update_armed() -> bool {
     true
 }
 
+static UPDATE_HANDOFF_FAILED: AtomicBool = AtomicBool::new(false);
+
 fn get_pending_update_path() -> Option<std::path::PathBuf> {
     dirs_next::home_dir().map(|h| h.join(".osagent").join("pending_update.json"))
 }
 
+fn transaction_id_for_update(pending: &LauncherPendingUpdate) -> String {
+    if let Some(transaction_id) =
+        pending
+            .transaction_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|transaction_id| {
+                !transaction_id.is_empty()
+                    && transaction_id.len() <= 128
+                    && transaction_id.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                    })
+            })
+    {
+        return transaction_id.to_string();
+    }
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("launcher-{}-{timestamp}", std::process::id())
+}
+
+fn launcher_transaction_path_token(transaction_id: &str) -> String {
+    let token: String = transaction_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect();
+    if token.is_empty() || token == "." || token == ".." {
+        "transaction".to_string()
+    } else {
+        token
+    }
+}
+
+fn launcher_transaction_ack_path(marker_path: &Path, transaction_id: &str) -> Option<PathBuf> {
+    let parent = marker_path.parent()?;
+    let marker_name = marker_path.file_name()?.to_string_lossy();
+    Some(parent.join(format!(
+        "{marker_name}.{}.ack",
+        launcher_transaction_path_token(transaction_id)
+    )))
+}
+
+fn acknowledge_update_transaction() -> Result<(), String> {
+    let transaction_id = std::env::var("OSAGENT_UPDATE_TRANSACTION")
+        .map_err(|_| "OSAGENT_UPDATE_TRANSACTION is not set".to_string())?;
+    if transaction_id.trim().is_empty() {
+        return Err("OSAGENT_UPDATE_TRANSACTION is empty".to_string());
+    }
+
+    let marker_path =
+        get_pending_update_path().ok_or_else(|| "could not locate update marker".to_string())?;
+    let json = fs::read_to_string(&marker_path)
+        .map_err(|error| format!("failed to read update marker: {error}"))?;
+    let marker: LauncherPendingUpdate = serde_json::from_str(&json)
+        .map_err(|error| format!("failed to parse update marker: {error}"))?;
+    if marker.phase != LauncherPendingUpdatePhase::Applying
+        || marker.transaction_id.as_deref() != Some(transaction_id.as_str())
+    {
+        return Err("update marker does not match this launch transaction".to_string());
+    }
+
+    let ack_path = launcher_transaction_ack_path(&marker_path, &transaction_id)
+        .ok_or_else(|| "could not locate acknowledgement path".to_string())?;
+    if let Ok(existing) = fs::read_to_string(&ack_path) {
+        if existing.trim() == transaction_id {
+            return Ok(());
+        }
+        return Err("transaction acknowledgement path contains another id".to_string());
+    }
+
+    if let Some(parent) = ack_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create acknowledgement directory: {error}"))?;
+    }
+    let temp_path = ack_path.with_extension(format!("tmp.{}", std::process::id()));
+    let write_result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+
+        let mut file = fs::File::create(&temp_path)?;
+        file.write_all(transaction_id.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp_path, &ack_path)
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("failed to write update acknowledgement: {error}"));
+    }
+
+    info!(
+        "Acknowledged update transaction {} after Tauri setup",
+        transaction_id
+    );
+    Ok(())
+}
+
 fn spawn_updater_and_exit(
-    launcher_path: &std::path::Path,
-    new_launcher_path: &std::path::Path,
+    launcher_path: &Path,
+    new_launcher_path: &Path,
+    marker_path: &Path,
+    transaction_id: &str,
 ) -> bool {
     let current_exe = launcher_path.to_string_lossy().to_string();
     let new_exe = new_launcher_path.to_string_lossy().to_string();
+    let marker = marker_path.to_string_lossy().to_string();
     let cleanup_dir = new_launcher_path
         .parent()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    if let Some(updater_path) = get_embedded_updater_path() {
-        info!("Using embedded updater: {}", updater_path.display());
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            use std::process::Command;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-
-            let result = Command::new(&updater_path)
-                .args([
-                    "--pid",
-                    &std::process::id().to_string(),
-                    "--old",
-                    &current_exe,
-                    "--new",
-                    &new_exe,
-                    "--launch",
-                    &current_exe,
-                    "--cleanup",
-                    &cleanup_dir,
-                ])
-                .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-                .spawn();
-
-            match result {
-                Ok(_) => {
-                    info!("Updater spawned successfully, exiting launcher for update");
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    info!("Updater spawn failed: {}, falling back to bat script", e);
-                }
-            }
-        }
-
-        #[cfg(not(windows))]
-        {
-            use std::process::Command;
-
-            let result = Command::new(&updater_path)
-                .args([
-                    "--pid",
-                    &std::process::id().to_string(),
-                    "--old",
-                    &current_exe,
-                    "--new",
-                    &new_exe,
-                    "--launch",
-                    &current_exe,
-                    "--cleanup",
-                    &cleanup_dir,
-                ])
-                .spawn();
-
-            match result {
-                Ok(_) => {
-                    info!("Updater spawned successfully, exiting launcher for update");
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    info!("Updater spawn failed: {}, falling back to script", e);
-                }
-            }
-        }
-    } else {
-        info!("Embedded updater not available, falling back to legacy script");
-    }
+    let Some(updater_path) = get_embedded_updater_path() else {
+        info!("Embedded updater not available; update intent was not applied");
+        return false;
+    };
+    info!("Using embedded updater: {}", updater_path.display());
 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-
-        let bat_path = std::env::temp_dir().join("osagent-update.bat");
-        let bat = format!(
-            "@echo off\r\ntimeout /t 3 /nobreak >nul\r\ncopy /Y \"{new_exe}\" \"{current_exe}\"\r\ndel \"{new_exe}\"\r\nstart \"\" \"{current_exe}\"\r\ndel \"%~f0\"\r\n"
-        );
-
-        if let Err(e) = std::fs::write(&bat_path, bat) {
-            info!("Failed to write updater bat: {}", e);
-            return false;
-        }
-
-        info!("Spawning updater bat: {}", bat_path.display());
-
-        let spawned = Command::new("cmd")
-            .args([
-                "/c",
-                "start",
-                "/min",
-                "",
-                bat_path.to_string_lossy().as_ref(),
-            ])
-            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-            .spawn();
-
-        match spawned {
-            Ok(_) => {
-                info!("Updater bat spawned, exiting launcher for update");
-                std::process::exit(0);
-            }
-            Err(e) => {
-                info!("Failed to spawn updater bat: {}", e);
-                false
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        info!("Auto-update not supported on this platform without embedded updater");
-        false
-    }
-}
-
-#[cfg(windows)]
-fn spawn_installer_and_exit(
-    launcher_path: &std::path::Path,
-    installer_path: &std::path::Path,
-) -> bool {
-    let current_exe = launcher_path.to_string_lossy().to_string();
-    let installer_exe = installer_path.to_string_lossy().to_string();
-    let cleanup_dir = installer_path
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    if let Some(updater_path) = get_embedded_updater_path() {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         const DETACHED_PROCESS: u32 = 0x00000008;
 
@@ -4229,93 +4267,198 @@ fn spawn_installer_and_exit(
             .args([
                 "--pid",
                 &std::process::id().to_string(),
-                "--installer",
-                &installer_exe,
+                "--old",
+                &current_exe,
+                "--new",
+                &new_exe,
                 "--launch",
                 &current_exe,
                 "--cleanup",
                 &cleanup_dir,
+                "--marker",
+                &marker,
+                "--transaction",
+                transaction_id,
             ])
+            .env("OSAGENT_UPDATE_TRANSACTION", transaction_id)
             .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn();
 
         match result {
             Ok(_) => {
-                info!("Installer updater spawned successfully, exiting launcher for update");
+                info!("Updater spawned successfully, exiting launcher for update");
                 std::process::exit(0);
             }
-            Err(e) => {
-                info!("Installer updater spawn failed: {}", e);
+            Err(error) => {
+                info!("Updater spawn failed; BAT fallback is disabled: {error}");
                 false
             }
         }
-    } else {
-        info!("Embedded updater not available for installer update");
-        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        let result = Command::new(&updater_path)
+            .args([
+                "--pid",
+                &std::process::id().to_string(),
+                "--old",
+                &current_exe,
+                "--new",
+                &new_exe,
+                "--launch",
+                &current_exe,
+                "--cleanup",
+                &cleanup_dir,
+                "--marker",
+                &marker,
+                "--transaction",
+                transaction_id,
+            ])
+            .spawn();
+
+        match result {
+            Ok(_) => {
+                info!("Updater spawned successfully, exiting launcher for update");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                info!("Updater spawn failed; update intent was preserved: {error}");
+                false
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_installer_and_exit(
+    launcher_path: &Path,
+    installer_path: &Path,
+    marker_path: &Path,
+    transaction_id: &str,
+) -> bool {
+    let current_exe = launcher_path.to_string_lossy().to_string();
+    let installer_exe = installer_path.to_string_lossy().to_string();
+    let marker = marker_path.to_string_lossy().to_string();
+    let cleanup_dir = installer_path
+        .parent()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let Some(updater_path) = get_embedded_updater_path() else {
+        info!("Embedded updater not available; installer update intent was not applied");
+        return false;
+    };
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+
+    let result = Command::new(&updater_path)
+        .args([
+            "--pid",
+            &std::process::id().to_string(),
+            "--installer",
+            &installer_exe,
+            "--launch",
+            &current_exe,
+            "--cleanup",
+            &cleanup_dir,
+            "--marker",
+            &marker,
+            "--transaction",
+            transaction_id,
+        ])
+        .env("OSAGENT_UPDATE_TRANSACTION", transaction_id)
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn();
+
+    match result {
+        Ok(_) => {
+            info!("Installer updater spawned successfully, exiting launcher for update");
+            std::process::exit(0);
+        }
+        Err(error) => {
+            info!("Installer updater spawn failed; update intent was preserved: {error}");
+            false
+        }
     }
 }
 
 fn apply_pending_update_if_any() -> bool {
+    if UPDATE_HANDOFF_FAILED.load(Ordering::Relaxed) {
+        return false;
+    }
     let pending_path = match get_pending_update_path() {
-        Some(p) => p,
+        Some(path) => path,
         None => return false,
     };
-
     if !pending_path.exists() {
         return false;
     }
 
-    let json = match std::fs::read_to_string(&pending_path) {
-        Ok(j) => j,
-        Err(e) => {
-            info!("Failed to read pending update file: {}", e);
+    let json = match fs::read_to_string(&pending_path) {
+        Ok(json) => json,
+        Err(error) => {
+            info!("Failed to read pending update file: {error}");
+            UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
             return false;
         }
     };
-
     let pending: LauncherPendingUpdate = match serde_json::from_str(&json) {
-        Ok(p) => p,
-        Err(e) => {
-            info!("Failed to parse pending update file: {}", e);
-            let _ = std::fs::remove_file(&pending_path);
+        Ok(pending) => pending,
+        Err(error) => {
+            info!("Failed to parse pending update file; intent was preserved: {error}");
+            UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
             return false;
         }
     };
 
-    if !pending.armed {
+    if pending.phase != LauncherPendingUpdatePhase::Pending || !pending.armed {
         return false;
     }
-
     if !pending.staged_path.exists() {
         info!(
-            "Staged update does not exist: {}",
+            "Staged update does not exist; intent was preserved: {}",
             pending.staged_path.display()
         );
-        let _ = std::fs::remove_file(&pending_path);
+        UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
         return false;
     }
-
     let launcher_path = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            info!("Failed to get current exe path: {}", e);
+        Ok(path) => path,
+        Err(error) => {
+            info!("Failed to get current exe path; intent was preserved: {error}");
+            UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
             return false;
         }
     };
 
     info!("Startup: pending update {} found, applying", pending.tag);
-    let _ = std::fs::remove_file(&pending_path);
-    match pending.kind {
-        LauncherPendingUpdateKind::BinarySwap => {
-            spawn_updater_and_exit(&launcher_path, &pending.staged_path)
-        }
+    let transaction_id = transaction_id_for_update(&pending);
+    let spawned = match pending.kind {
+        LauncherPendingUpdateKind::BinarySwap => spawn_updater_and_exit(
+            &launcher_path,
+            &pending.staged_path,
+            &pending_path,
+            &transaction_id,
+        ),
         #[cfg(windows)]
-        LauncherPendingUpdateKind::Installer => {
-            spawn_installer_and_exit(&launcher_path, &pending.staged_path)
-        }
+        LauncherPendingUpdateKind::Installer => spawn_installer_and_exit(
+            &launcher_path,
+            &pending.staged_path,
+            &pending_path,
+            &transaction_id,
+        ),
         #[cfg(not(windows))]
-        LauncherPendingUpdateKind::Installer => false,
+        LauncherPendingUpdateKind::Installer => {
+            info!("Installer updates are not supported on this platform");
+            false
+        }
+    };
+    if !spawned {
+        UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
     }
+    spawned
 }
 
 // --- Process Monitor ---
@@ -4383,98 +4526,115 @@ fn start_process_monitor(app_handle: AppHandle) {
 }
 
 fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
+    if UPDATE_HANDOFF_FAILED.load(Ordering::Relaxed) {
+        return false;
+    }
     let pending_path = match get_pending_update_path() {
-        Some(p) => p,
+        Some(path) => path,
         None => return false,
     };
-
     if !pending_path.exists() {
         return false;
     }
 
     let state = app_handle.state::<AppState>();
-    add_log(
-        &state,
-        "info",
-        format!("Pending update file found: {}", pending_path.display()),
-    );
-
-    let json = match std::fs::read_to_string(&pending_path) {
-        Ok(j) => j,
-        Err(e) => {
+    let json = match fs::read_to_string(&pending_path) {
+        Ok(json) => json,
+        Err(error) => {
             add_log(
                 &state,
                 "error",
-                format!("Failed to read pending update file: {}", e),
+                format!("Failed to read pending update file; intent was preserved: {error}"),
             );
+            UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
             return false;
         }
     };
-
     let pending: LauncherPendingUpdate = match serde_json::from_str(&json) {
-        Ok(p) => p,
-        Err(e) => {
+        Ok(pending) => pending,
+        Err(error) => {
             add_log(
                 &state,
                 "error",
-                format!("Failed to parse pending update file: {}", e),
+                format!("Failed to parse pending update file; intent was preserved: {error}"),
             );
-            let _ = std::fs::remove_file(&pending_path);
+            UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
             return false;
         }
     };
 
-    if !pending.armed {
+    if pending.phase != LauncherPendingUpdatePhase::Pending || !pending.armed {
         return false;
     }
+    if !pending.staged_path.exists() {
+        add_log(
+            &state,
+            "error",
+            format!(
+                "Staged update missing; intent was preserved: {}",
+                pending.staged_path.display()
+            ),
+        );
+        UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
+        return false;
+    }
+    let launcher_path = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            add_log(
+                &state,
+                "error",
+                format!("Failed to get current exe; intent was preserved: {error}"),
+            );
+            UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
+            return false;
+        }
+    };
 
     add_log(
         &state,
         "info",
         format!(
-            "Pending update: tag={}, path={}",
+            "Applying update {} transaction {}...",
             pending.tag,
-            pending.staged_path.display()
+            transaction_id_for_update(&pending)
         ),
     );
-
-    if !pending.staged_path.exists() {
+    terminate_osagent_processes(&state);
+    let transaction_id = transaction_id_for_update(&pending);
+    let spawned = match pending.kind {
+        LauncherPendingUpdateKind::BinarySwap => spawn_updater_and_exit(
+            &launcher_path,
+            &pending.staged_path,
+            &pending_path,
+            &transaction_id,
+        ),
+        #[cfg(windows)]
+        LauncherPendingUpdateKind::Installer => spawn_installer_and_exit(
+            &launcher_path,
+            &pending.staged_path,
+            &pending_path,
+            &transaction_id,
+        ),
+        #[cfg(not(windows))]
+        LauncherPendingUpdateKind::Installer => {
+            add_log(
+                &state,
+                "error",
+                "Installer updates are not supported on this platform; intent was preserved",
+            );
+            false
+        }
+    };
+    if !spawned {
         add_log(
             &state,
             "error",
-            format!("Staged update missing: {}", pending.staged_path.display()),
+            "Update helper handoff failed; marker and staging were preserved".to_string(),
         );
-        let _ = std::fs::remove_file(&pending_path);
-        return false;
+        UPDATE_HANDOFF_FAILED.store(true, Ordering::Relaxed);
     }
-
-    let launcher_path = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            add_log(&state, "error", format!("Failed to get current exe: {}", e));
-            return false;
-        }
-    };
-
-    add_log(
-        &state,
-        "info",
-        format!("Applying update {}...", pending.tag),
-    );
-    let _ = std::fs::remove_file(&pending_path);
-
-    terminate_osagent_processes(&state);
-    match pending.kind {
-        LauncherPendingUpdateKind::BinarySwap => {
-            spawn_updater_and_exit(&launcher_path, &pending.staged_path)
-        }
-        #[cfg(windows)]
-        LauncherPendingUpdateKind::Installer => {
-            spawn_installer_and_exit(&launcher_path, &pending.staged_path)
-        }
-        #[cfg(not(windows))]
-        LauncherPendingUpdateKind::Installer => false,
-    }
+    spawned
 }
 
 // --- Main Entry ---
@@ -4493,10 +4653,10 @@ fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    if apply_pending_update_if_any() {
-        info!("Update pending, launcher will restart shortly...");
-        std::process::exit(0);
-    }
+    // A successful handoff exits from the spawn function so the helper can
+    // replace this process. A failed handoff leaves the marker intact and the
+    // launcher continues without retrying in a tight loop.
+    apply_pending_update_if_any();
 
     let osagent_path = get_osagent_path();
     let config_path = get_config_path();
@@ -4698,8 +4858,61 @@ fn main() {
                 });
             }
 
+            if std::env::var_os("OSAGENT_UPDATE_TRANSACTION").is_some() {
+                if let Err(error) = acknowledge_update_transaction() {
+                    info!("Failed to acknowledge update transaction: {error}");
+                }
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod update_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn parses_pending_marker_with_missing_or_null_phase() {
+        for phase in ["", ",\"phase\":null"] {
+            let json = format!(
+                r#"{{"tag":"v1","staged_path":"/tmp/new","armed":true,"created_at":"2026-01-01T00:00:00Z"{phase}}}"#
+            );
+            let marker: LauncherPendingUpdate = serde_json::from_str(&json).unwrap();
+            assert_eq!(marker.phase, LauncherPendingUpdatePhase::Pending);
+            assert_eq!(marker.kind, LauncherPendingUpdateKind::BinarySwap);
+        }
+    }
+
+    #[test]
+    fn parses_known_phases_and_rejects_unknown() {
+        for (value, expected) in [
+            ("pending", LauncherPendingUpdatePhase::Pending),
+            ("installing", LauncherPendingUpdatePhase::Pending),
+            ("applying", LauncherPendingUpdatePhase::Applying),
+            ("committed", LauncherPendingUpdatePhase::Committed),
+            ("failed", LauncherPendingUpdatePhase::Failed),
+        ] {
+            let json = format!(
+                r#"{{"tag":"v1","staged_path":"/tmp/new","created_at":"2026-01-01T00:00:00Z","phase":"{value}"}}"#
+            );
+            let marker: LauncherPendingUpdate = serde_json::from_str(&json).unwrap();
+            assert_eq!(marker.phase, expected);
+        }
+
+        let json = r#"{"tag":"v1","staged_path":"/tmp/new","created_at":"2026-01-01T00:00:00Z","phase":"mystery"}"#;
+        assert!(serde_json::from_str::<LauncherPendingUpdate>(json).is_err());
+    }
+
+    #[test]
+    fn derives_ack_path_from_marker_and_transaction() {
+        let path = launcher_transaction_ack_path(
+            Path::new("/home/user/.osagent/pending_update.json"),
+            "launcher-42-123",
+        )
+        .unwrap();
+        assert!(path.ends_with("pending_update.json.launcher-42-123.ack"));
+    }
 }
