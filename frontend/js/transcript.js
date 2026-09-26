@@ -1020,7 +1020,20 @@ OSA.unitSignature = function(unit) {
             ].join('\u0002');
         }
         if (item.kind === 'tool') {
-            return [item.toolName, item.status, item.completed ? '1' : '0', item.output || '', item.title || '', item.prelude || ''].join('\u0002');
+            // Tool metadata is load-bearing: the diagram viewer, the diff
+            // renderer, and the read_file preview payload all read from it,
+            // and it only arrives with the completion event. Folding it into
+            // the signature is what makes the card re-patch when a completion
+            // lands after the start event.
+            return [
+                item.toolName,
+                item.status,
+                item.completed ? '1' : '0',
+                item.output || '',
+                item.title || '',
+                item.prelude || '',
+                item.metadata ? JSON.stringify(item.metadata) : '',
+            ].join('\u0002');
         }
         if (item.kind === 'subagent') {
             return [
@@ -1735,6 +1748,7 @@ OSA.buildToolCardElement = function(item) {
     const label = OSA.toolLabel(item.toolName);
     const icon = OSA.toolIcon(item.toolName);
     const subtitle = OSA.summarizeToolArgs(item.toolName, item.args);
+    const isDiagram = item.toolName === 'draw_diagram';
     const isCompleted = item.completed === true;
     const isSuccess = item.success === true;
     const statusText = isCompleted
@@ -1749,8 +1763,20 @@ OSA.buildToolCardElement = function(item) {
     container.className = 'tool-container';
     container.dataset.callId = item.callId;
     container._toolArgs = item.args;
+
+    // A diagram is the answer, not a footnote: it renders as its own card in
+    // the message column instead of behind a tool row that has to be opened.
+    if (isDiagram) {
+        container.classList.add('diagram-container');
+        container.innerHTML = `
+            <div class="tool-card tool-diagram" id="card-${domId}" data-tool="${OSA.escapeHtml(item.toolName)}">
+                <div class="diagram-host" id="diagram-${domId}"></div>
+            </div>`;
+        return container;
+    }
+
     container.innerHTML = `
-        <div class="tool-card tool-inline" id="card-${domId}" data-tool="${OSA.escapeHtml(item.toolName)}">
+        <div class="tool-card tool-inline${isDiagram ? ' tool-diagram' : ''}" id="card-${domId}" data-tool="${OSA.escapeHtml(item.toolName)}">
             <div class="tool-trigger tool-trigger-inline" onclick="OSA.handleToolCardClick(${OSA.jsArg(domId)})">
                 <span class="tool-icon">${icon}</span>
                 <span class="tool-title ${titleClass}" id="title-${domId}">${OSA.escapeHtml(label)}</span>
@@ -1772,7 +1798,7 @@ OSA.buildToolCardElement = function(item) {
             <div class="tool-body" id="body-${domId}">
                 <div class="tool-body-inner">
                     ${item.prelude ? `<div class="tool-prelude" id="prelude-${domId}">${OSA.escapeHtml(item.prelude)}</div>` : ''}
-                    <div class="tool-args" id="args-${domId}">${OSA.escapeHtml(JSON.stringify(item.args, null, 2))}</div>
+                    <div class="tool-args" id="args-${domId}"${isDiagram ? ' style="display:none"' : ''}>${OSA.escapeHtml(JSON.stringify(item.args, null, 2))}</div>
                     <div class="tool-output" id="output-${domId}" style="display:none"></div>
                 </div>
             </div>
@@ -1827,6 +1853,11 @@ OSA.patchToolCardElement = function(container, item) {
         }
         const chevron = container.querySelector('#chevron-' + OSA.cssEscape(domId));
         if (chevron) chevron.style.opacity = '';
+    }
+
+    if (item.toolName === 'draw_diagram') {
+        OSA.patchDiagramCardElement(container, domId, item);
+        return;
     }
 
     const outputChanged = container._toolOutput !== item.output;
@@ -1885,6 +1916,58 @@ OSA.cssEscape = function(value) {
     return (window.CSS && window.CSS.escape)
         ? window.CSS.escape(value)
         : String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+};
+
+// `draw_diagram` owns its whole card: the transcript renders the diagram as a
+// first-class element in the message column, with no tool row, no collapse
+// chevron, and no args/output pane. The diagram metadata rides along with the
+// tool event, so a reloaded session rebuilds the same card through this path.
+OSA.patchDiagramCardElement = function(container, domId, item) {
+    const card = container.querySelector(':scope > .tool-card');
+    if (!card) return;
+    card.classList.add('tool-diagram');
+    container.classList.add('diagram-container');
+
+    const host = card.querySelector('.diagram-host');
+    if (!host) return;
+
+    const showPending = function(message) {
+        // Never on top of a mounted diagram: a stale running event must not
+        // resurrect a placeholder under/over the real card.
+        if (host.querySelector('.diagram-card') || host.querySelector('.diagram-pending')) return;
+        const pending = document.createElement('div');
+        pending.className = 'diagram-pending';
+        const spinner = document.createElement('span');
+        spinner.className = 'diagram-pending-spinner';
+        const label = document.createElement('span');
+        label.className = 'diagram-pending-label';
+        label.textContent = message;
+        pending.appendChild(spinner);
+        pending.appendChild(label);
+        host.appendChild(pending);
+    };
+
+    if (!item.completed) {
+        showPending('Drawing diagram\u2026');
+        return;
+    }
+
+    const metadata = item.metadata && item.metadata.kind === 'diagram' ? item.metadata : null;
+    if (!metadata) {
+        showPending('Diagram unavailable');
+        return;
+    }
+    const sig = JSON.stringify([
+        metadata.title || '',
+        metadata.source || '',
+        metadata.theme || '',
+        metadata.spec || null,
+        metadata.svg || '',
+    ]);
+    if (host.dataset.diagramSig === sig) return;
+    if (typeof OSA.Diagram === 'undefined' || typeof OSA.Diagram.mount !== 'function') return;
+    OSA.Diagram.mount(host, metadata);
+    host.dataset.diagramSig = sig;
 };
 
 OSA.ensureToolContainerNode = function(item) {

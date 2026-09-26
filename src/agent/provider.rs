@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::{Event, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -151,6 +151,17 @@ struct ResolvedRequestAuth {
     request_mode: RequestMode,
 }
 
+/// One function call as assembled from the Responses SSE stream. Argument
+/// deltas arrive keyed by item id while item events carry both ids, so the
+/// map is keyed by item id and the `call_id` (what replies and history must
+/// reference) rides along separately.
+#[derive(Debug, Default)]
+struct StreamedCall {
+    name: String,
+    arguments: String,
+    call_id: Option<String>,
+}
+
 pub struct OpenAICompatibleProvider {
     client: reqwest::Client,
     config: ProviderConfig,
@@ -282,7 +293,110 @@ impl OpenAICompatibleProvider {
         }
     }
 
+    /// Pair every recorded tool call with a tool result before the history
+    /// goes out on the wire.
+    ///
+    /// The assistant message holding `tool_calls` is persisted the moment the
+    /// provider answers, and the results are appended as the tools run. A turn
+    /// that is cancelled (or fails) in between leaves a `function_call` with no
+    /// `function_call_output`, and both request shapes reject that outright —
+    /// the Responses API answers `No tool output found for function call
+    /// call_...`, which kills the session until it is cleared by hand. The
+    /// reverse (a result whose call was never recorded, e.g. a nameless call
+    /// filtered out of the request) is just as invalid.
+    ///
+    /// Repairing here rather than on write means an already-broken session
+    /// heals on the next request, and the fix cannot be bypassed by a new exit
+    /// path in the tool loop.
+    fn reconcile_tool_call_results(messages: &[Message]) -> Vec<Message> {
+        let recorded_calls: HashSet<&str> = messages
+            .iter()
+            .filter(|msg| msg.role == "assistant")
+            .filter_map(|msg| msg.tool_calls.as_ref())
+            .flatten()
+            .map(|call| call.id.as_str())
+            .filter(|id| !id.is_empty())
+            .collect();
+
+        if recorded_calls.is_empty() && !messages.iter().any(|msg| msg.role == "tool") {
+            return messages.to_vec();
+        }
+
+        let answered: HashSet<&str> = messages
+            .iter()
+            .filter(|msg| msg.role == "tool")
+            .filter_map(|msg| msg.tool_call_id.as_deref())
+            .collect();
+
+        let mut repaired: Vec<Message> = Vec::with_capacity(messages.len());
+        let mut repaired_count = 0usize;
+        let mut dropped_count = 0usize;
+        // Unanswered calls, held until the run of real results that belongs to
+        // them has been emitted. Appending a placeholder in the middle of that
+        // run would reorder the batch; putting it last keeps the history in
+        // the order the model actually produced it.
+        let mut pending: Vec<String> = Vec::new();
+
+        for msg in messages {
+            // A result with no call behind it is invalid input in both shapes.
+            if msg.role == "tool" {
+                match msg.tool_call_id.as_deref() {
+                    Some(call_id) if !call_id.is_empty() && recorded_calls.contains(call_id) => {
+                        repaired.push(msg.clone());
+                    }
+                    _ => dropped_count += 1,
+                }
+                continue;
+            }
+
+            for call_id in pending.drain(..) {
+                repaired_count += 1;
+                repaired.push(Message::tool_result(
+                    call_id,
+                    "No result recorded: this tool call was interrupted before it returned. \
+                     Treat it as not run and continue without it."
+                        .to_string(),
+                ));
+            }
+            repaired.push(msg.clone());
+
+            if msg.role != "assistant" {
+                continue;
+            }
+            let Some(tool_calls) = msg.tool_calls.as_ref() else {
+                continue;
+            };
+            for call in tool_calls {
+                if call.id.is_empty() || call.name.is_empty() || answered.contains(call.id.as_str())
+                {
+                    continue;
+                }
+                pending.push(call.id.clone());
+            }
+        }
+
+        for call_id in pending.drain(..) {
+            repaired_count += 1;
+            repaired.push(Message::tool_result(
+                call_id,
+                "No result recorded: this tool call was interrupted before it returned. \
+                 Treat it as not run and continue without it."
+                    .to_string(),
+            ));
+        }
+
+        if repaired_count > 0 || dropped_count > 0 {
+            warn!(
+                "Repaired tool-call history for request: {} unanswered call(s) given a \
+                 placeholder result, {} orphaned result(s) dropped",
+                repaired_count, dropped_count
+            );
+        }
+        repaired
+    }
+
     fn build_messages(&self, messages: &[Message], provider_type: &str) -> Vec<serde_json::Value> {
+        let messages = &Self::reconcile_tool_call_results(messages);
         let image_url_as_string = provider_type == "ollama";
         let total_images = messages.iter().map(|msg| msg.images.len()).sum::<usize>();
         if total_images > 0 {
@@ -389,6 +503,7 @@ impl OpenAICompatibleProvider {
     }
 
     fn build_responses_input(&self, messages: &[Message]) -> Vec<serde_json::Value> {
+        let messages = &Self::reconcile_tool_call_results(messages);
         let mut input = Vec::new();
 
         for msg in messages {
@@ -404,6 +519,12 @@ impl OpenAICompatibleProvider {
                     if msg.role == "assistant" {
                         if let Some(tool_calls) = &msg.tool_calls {
                             for tool_call in tool_calls {
+                                // Nameless calls are never valid input (the API
+                                // rejects `name: ""`). Skipping them also heals
+                                // sessions poisoned before the stream filter.
+                                if tool_call.name.is_empty() {
+                                    continue;
+                                }
                                 input.push(serde_json::json!({
                                     "type": "function_call",
                                     "call_id": tool_call.id,
@@ -444,6 +565,9 @@ impl OpenAICompatibleProvider {
 
                     if let Some(tool_calls) = &msg.tool_calls {
                         for tool_call in tool_calls {
+                            if tool_call.name.is_empty() {
+                                continue;
+                            }
                             input.push(serde_json::json!({
                                 "type": "function_call",
                                 "call_id": tool_call.id,
@@ -608,7 +732,11 @@ impl OpenAICompatibleProvider {
 
         match provider_type {
             "openai" if mode == RequestMode::Responses => {
-                request_body["reasoning"] = serde_json::json!({ "effort": thinking_level });
+                // Reasoning summaries are opt-in: without `summary`, the
+                // response carries no summary text at all. `auto` selects the
+                // most detailed summarizer the model offers.
+                request_body["reasoning"] =
+                    serde_json::json!({ "effort": thinking_level, "summary": "auto" });
             }
             "anthropic" => {
                 // Adaptive-thinking models publish effort levels instead of a
@@ -698,7 +826,14 @@ impl OpenAICompatibleProvider {
                 if item.get("type").and_then(|v| v.as_str()) == Some("message") {
                     if let Some(content_items) = item.get("content").and_then(|v| v.as_array()) {
                         for content in content_items {
-                            if let Some(text) = content.get("text").and_then(|v| v.as_str()) {
+                            // Refusals carry `refusal`, not `text` — surface
+                            // them instead of replying with nothing.
+                            let text = content.get("text").and_then(|v| v.as_str()).or_else(|| {
+                                (content.get("type").and_then(|v| v.as_str()) == Some("refusal"))
+                                    .then(|| content.get("refusal").and_then(|v| v.as_str()))
+                                    .flatten()
+                            });
+                            if let Some(text) = text {
                                 if !text.is_empty() {
                                     chunks.push(text.to_string());
                                 }
@@ -907,6 +1042,40 @@ impl OpenAICompatibleProvider {
         ))
     }
 
+    /// Tool calls accumulated from the stream, converted to the same shape as
+    /// the completed-object parse. Entries without a usable name are dropped:
+    /// executing a nameless call fails as `Tool not found`, and replaying it
+    /// poisons every later request with `Invalid 'input[N].name': empty
+    /// string`.
+    fn tool_calls_from_stream(calls: HashMap<String, StreamedCall>) -> Option<Vec<ToolCall>> {
+        let mut dropped = 0usize;
+        let calls: Vec<ToolCall> = calls
+            .into_iter()
+            .filter_map(|(key, entry)| {
+                if entry.name.is_empty() {
+                    dropped += 1;
+                    return None;
+                }
+                Some(ToolCall {
+                    id: entry.call_id.unwrap_or(key),
+                    name: entry.name,
+                    arguments: serde_json::from_str(&entry.arguments)
+                        .unwrap_or(serde_json::json!({})),
+                })
+            })
+            .collect();
+        if dropped > 0 {
+            warn!(
+                "Dropped {} streamed tool call(s) with no name; arguments could not be attributed",
+                dropped
+            );
+        }
+        if calls.is_empty() {
+            return None;
+        }
+        Some(calls)
+    }
+
     fn parse_response_tool_calls(response_json: &serde_json::Value) -> Option<Vec<ToolCall>> {
         let mut calls = Vec::new();
         if let Some(output_items) = response_json.get("output").and_then(|v| v.as_array()) {
@@ -1093,6 +1262,35 @@ impl OpenAICompatibleProvider {
         }
     }
 
+    /// The completed object is authoritative, but some backends shape it
+    /// differently than the public API. Never throw away text that actually
+    /// streamed: fall back to the accumulated deltas when the parse came up
+    /// empty.
+    fn merge_streamed_fallback(
+        parsed: &mut ProviderResponse,
+        streamed_content: &str,
+        streamed_thinking: &str,
+    ) {
+        if parsed
+            .content
+            .as_ref()
+            .map(|c| c.is_empty())
+            .unwrap_or(true)
+            && !streamed_content.is_empty()
+        {
+            parsed.content = Some(streamed_content.to_string());
+        }
+        if parsed
+            .thinking
+            .as_ref()
+            .map(|t| t.is_empty())
+            .unwrap_or(true)
+            && !streamed_thinking.is_empty()
+        {
+            parsed.thinking = Some(streamed_thinking.to_string());
+        }
+    }
+
     fn parse_responses_response(response_json: &serde_json::Value) -> ProviderResponse {
         ProviderResponse {
             content: Self::parse_response_content(response_json),
@@ -1164,10 +1362,14 @@ impl OpenAICompatibleProvider {
 
         let mut content = String::new();
         let mut thinking = String::new();
-        let mut calls: HashMap<String, (String, String)> = HashMap::new();
+        let mut reasoning_delta_seen = false;
+        let mut calls: HashMap<String, StreamedCall> = HashMap::new();
         let mut final_response: Option<serde_json::Value> = None;
         let mut final_status: Option<String> = None;
         let mut usage: Option<TokenUsage> = None;
+        // Census of SSE event types, for diagnosing backends whose shapes
+        // differ from the public Responses API (e.g. Codex).
+        let mut event_census: HashMap<String, usize> = HashMap::new();
 
         for chunk in body.split("\n\n") {
             let trimmed = chunk.trim();
@@ -1205,6 +1407,7 @@ impl OpenAICompatibleProvider {
                     .unwrap_or("")
                     .to_string();
             }
+            *event_census.entry(event_name.clone()).or_insert(0) += 1;
 
             match event_name.as_str() {
                 "error" => {
@@ -1233,6 +1436,50 @@ impl OpenAICompatibleProvider {
                         content.push_str(delta);
                     }
                 }
+                // Some backends emit the full text once instead of (or after)
+                // deltas. Only take it when no deltas arrived, so text is
+                // never duplicated. Refusals stream the same way.
+                "response.output_text.done" => {
+                    if content.is_empty() {
+                        if let Some(text) = parsed.get("text").and_then(|v| v.as_str()) {
+                            content.push_str(text);
+                        }
+                    }
+                }
+                "response.refusal.delta" => {
+                    if let Some(delta) = parsed.get("delta").and_then(|v| v.as_str()) {
+                        content.push_str(delta);
+                    }
+                }
+                "response.refusal.done" => {
+                    if content.is_empty() {
+                        if let Some(text) = parsed
+                            .get("refusal")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| parsed.get("text").and_then(|v| v.as_str()))
+                        {
+                            content.push_str(text);
+                        }
+                    }
+                }
+                // A failed response carries the reason instead of output.
+                // Surfacing it beats ending the turn in silence.
+                "response.failed" => {
+                    let message = parsed
+                        .get("response")
+                        .and_then(|v| v.get("error"))
+                        .and_then(|v| v.get("message"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            parsed
+                                .get("error")
+                                .and_then(|v| v.get("message"))
+                                .and_then(|v| v.as_str())
+                        })
+                        .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
+                        .unwrap_or("Unknown responses failure");
+                    return Err(OSAgentError::Provider(message.to_string()));
+                }
                 "response.reasoning_summary_text.delta"
                 | "response.reasoning_text.delta"
                 | "response.reasoning.delta" => {
@@ -1241,39 +1488,100 @@ impl OpenAICompatibleProvider {
                         .and_then(|v| v.as_str())
                         .or_else(|| parsed.get("text").and_then(|v| v.as_str()))
                     {
+                        if !delta.is_empty() {
+                            reasoning_delta_seen = true;
+                        }
                         thinking.push_str(delta);
+                    }
+                }
+                // Summarised thinking can arrive as whole parts rather than
+                // deltas (`reasoning_summary_part.done` carries `part.text`,
+                // `reasoning_summary_text.done` carries `text`). Take them
+                // only when no deltas arrived, so text is never duplicated.
+                "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
+                    if !reasoning_delta_seen {
+                        if let Some(text) = parsed.get("text").and_then(|v| v.as_str()) {
+                            thinking.push_str(text);
+                        }
+                    }
+                }
+                "response.reasoning_summary_part.done" => {
+                    if !reasoning_delta_seen {
+                        if let Some(text) = parsed
+                            .get("part")
+                            .and_then(|v| v.get("text"))
+                            .and_then(|v| v.as_str())
+                        {
+                            thinking.push_str(text);
+                        }
                     }
                 }
                 "response.function_call_arguments.delta" => {
                     if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str()) {
-                        let entry = calls
-                            .entry(item_id.to_string())
-                            .or_insert_with(|| (String::new(), String::new()));
+                        // An empty id correlates with nothing — dropping it
+                        // here keeps one malformed event from poisoning the
+                        // turn with an unexecutable call.
+                        if item_id.is_empty() {
+                            continue;
+                        }
+                        let entry = calls.entry(item_id.to_string()).or_default();
                         if let Some(delta) = parsed.get("delta").and_then(|v| v.as_str()) {
-                            entry.1.push_str(delta);
+                            entry.arguments.push_str(delta);
+                        }
+                    }
+                }
+                // The authoritative arguments for a call. Deltas and item
+                // events key the same call differently across backends
+                // (`item_id` vs `call_id`), so when this carries the full
+                // argument string it wins over whatever the deltas assembled.
+                "response.function_call_arguments.done" => {
+                    if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str()) {
+                        if item_id.is_empty() {
+                            continue;
+                        }
+                        if let Some(arguments) = parsed.get("arguments").and_then(|v| v.as_str()) {
+                            let entry = calls.entry(item_id.to_string()).or_default();
+                            entry.arguments = arguments.to_string();
                         }
                     }
                 }
                 "response.output_item.added" | "response.output_item.done" => {
                     if let Some(item) = parsed.get("item") {
                         if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
-                            let id = item
-                                .get("call_id")
-                                .or_else(|| item.get("id"))
+                            // Key by the item id so argument deltas (keyed by
+                            // `item_id`) merge into the same entry. The
+                            // `call_id` is stored separately: it is what the
+                            // reply and the history must reference.
+                            let key = item
+                                .get("id")
                                 .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if !id.is_empty() {
-                                let entry = calls
-                                    .entry(id)
-                                    .or_insert_with(|| (String::new(), String::new()));
+                                .filter(|id| !id.is_empty())
+                                .or_else(|| {
+                                    item.get("call_id")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|call_id| !call_id.is_empty())
+                                });
+                            if let Some(key) = key {
+                                let entry = calls.entry(key.to_string()).or_default();
+                                // Only a real name counts: an empty `name`
+                                // must never overwrite (or create) one, or the
+                                // turn ends up executing an unexecutable call
+                                // that then poisons the replayed history.
                                 if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                                    entry.0 = name.to_string();
+                                    if !name.is_empty() {
+                                        entry.name = name.to_string();
+                                    }
+                                }
+                                if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str())
+                                {
+                                    if !call_id.is_empty() {
+                                        entry.call_id = Some(call_id.to_string());
+                                    }
                                 }
                                 if let Some(arguments) =
                                     item.get("arguments").and_then(|v| v.as_str())
                                 {
-                                    entry.1 = arguments.to_string();
+                                    entry.arguments = arguments.to_string();
                                 }
                             }
                         }
@@ -1294,24 +1602,40 @@ impl OpenAICompatibleProvider {
         }
 
         if let Some(response_json) = final_response {
-            return Ok(Self::parse_responses_response(&response_json));
+            let mut parsed = Self::parse_responses_response(&response_json);
+            Self::merge_streamed_fallback(&mut parsed, &content, &thinking);
+            // Same discard bug as text: the completed object can arrive with
+            // an empty `output` array after the stream already delivered a
+            // full function call. Fall back to the streamed calls so the turn
+            // continues instead of ending silently.
+            if parsed.tool_calls.is_none() {
+                parsed.tool_calls = Self::tool_calls_from_stream(calls);
+            }
+            if parsed.content.is_none() && parsed.tool_calls.is_none() {
+                warn!(
+                    "Responses stream completed with no extractable content (url: {}, status: {:?}, events: {:?}, output item types: {:?})",
+                    request_auth.request_url,
+                    final_status,
+                    event_census,
+                    response_json
+                        .get("output")
+                        .and_then(|v| v.as_array())
+                        .map(|items| items
+                            .iter()
+                            .map(|item| item
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string())
+                            .collect::<Vec<_>>()),
+                );
+            }
+            return Ok(parsed);
         }
 
-        let tool_calls = if calls.is_empty() {
-            None
-        } else {
-            Some(
-                calls
-                    .into_iter()
-                    .map(|(id, (name, arguments))| ToolCall {
-                        id,
-                        name,
-                        arguments: serde_json::from_str(&arguments)
-                            .unwrap_or(serde_json::json!({})),
-                    })
-                    .collect(),
-            )
-        };
+        // No completed object: the stream is all there is. Same filters as the
+        // fallback path — nameless calls are never executable.
+        let tool_calls = Self::tool_calls_from_stream(calls);
 
         Ok(ProviderResponse {
             content: if content.is_empty() {
@@ -1670,6 +1994,64 @@ impl OpenAICompatibleProvider {
             retry_after: Self::parse_retry_after(headers),
             error_code,
         })
+    }
+
+    /// The ChatGPT Codex backend (`chatgpt.com/backend-api/codex`), used for
+    /// every OpenAI model when OAuth is active.
+    fn is_codex_backend(request_url: &str) -> bool {
+        request_url.contains("chatgpt.com/backend-api/codex")
+    }
+
+    /// Extracts the offending parameter path from errors shaped like
+    /// "Unknown parameter: 'stream_options.include_usage'", so the caller can
+    /// strip exactly that field and retry. Backends (notably Codex) reject
+    /// documented fields they do not implement; dropping only the named field
+    /// keeps the rest of the request intact.
+    fn unknown_parameter_path(err: &OSAgentError) -> Option<String> {
+        const MARKER: &str = "unknown parameter";
+        let message = err.to_string();
+        let start = message.to_ascii_lowercase().find(MARKER)? + MARKER.len();
+        let rest = message[start..].trim_start_matches([':', ' ', '\'', '"', '`']);
+        let path: String = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '.' || *ch == '_' || *ch == '-')
+            .collect();
+        let path = path.trim_matches('.').to_string();
+        if path.is_empty() {
+            return None;
+        }
+        // Only plain object paths — never anything exotic.
+        if path.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        }) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// Removes a dotted field path (e.g. `stream_options.include_usage`)
+    /// from a request body. Returns false when the path does not resolve to
+    /// an object key, so the caller retries only when something changed.
+    fn remove_request_field(body: &mut serde_json::Value, path: &str) -> bool {
+        let mut segments: Vec<&str> = path.split('.').collect();
+        let Some(leaf) = segments.pop() else {
+            return false;
+        };
+        let mut current = body;
+        for segment in segments {
+            match current.get_mut(segment) {
+                Some(next) if next.is_object() => current = next,
+                _ => return false,
+            }
+        }
+        current
+            .as_object_mut()
+            .map(|obj| obj.remove(leaf).is_some())
+            .unwrap_or(false)
     }
 
     /// Parse an HTTP status code out of a free-form error message,
@@ -2242,11 +2624,7 @@ impl OpenAICompatibleProvider {
             &generation_settings,
             reasoning_meta.as_ref(),
         );
-        if mode == RequestMode::Responses
-            && request_auth
-                .request_url
-                .contains("chatgpt.com/backend-api/codex")
-        {
+        if mode == RequestMode::Responses && Self::is_codex_backend(&request_auth.request_url) {
             if let Some(obj) = request_body.as_object_mut() {
                 obj.remove("max_output_tokens");
             }
@@ -2299,10 +2677,36 @@ impl OpenAICompatibleProvider {
 
         if mode == RequestMode::Responses {
             request_body["stream"] = serde_json::json!(true);
-            request_body["stream_options"] = serde_json::json!({ "include_usage": true });
-            let parsed = self
-                .send_responses_request(&request_auth, &request_body, &config, session_id)
-                .await?;
+            // The Codex backend rejects `stream_options` outright
+            // (`Unknown parameter: 'stream_options.include_usage'`). Usage
+            // still arrives in `response.completed`, so omitting it loses
+            // nothing there.
+            if !Self::is_codex_backend(&request_auth.request_url) {
+                request_body["stream_options"] = serde_json::json!({ "include_usage": true });
+            }
+            // Strict backends reject documented fields they do not implement.
+            // When the error names the parameter, strip exactly that field
+            // and retry (bounded: each retry must remove something new).
+            let mut attempts = 0;
+            let parsed = loop {
+                match self
+                    .send_responses_request(&request_auth, &request_body, &config, session_id)
+                    .await
+                {
+                    Err(err) if attempts < 3 => match Self::unknown_parameter_path(&err) {
+                        Some(path) if Self::remove_request_field(&mut request_body, &path) => {
+                            attempts += 1;
+                            warn!(
+                                    "Responses endpoint rejected '{}' ({}); retrying without it (attempt {})",
+                                    path, request_auth.request_url, attempts + 1
+                                );
+                            continue;
+                        }
+                        _ => return Err(err),
+                    },
+                    other => break other?,
+                }
+            };
 
             info!(
                 "Parsed response - content: {:?}, finish_reason: {}",
@@ -2738,6 +3142,126 @@ mod tests {
         }));
     }
 
+    /// A turn cancelled between the assistant message being persisted and its
+    /// results being appended used to reach the API as a `function_call` with
+    /// no `function_call_output`, which fails the whole request with `No tool
+    /// output found for function call ...` and leaves the session unusable.
+    #[test]
+    fn unanswered_tool_calls_get_a_placeholder_result() {
+        let provider = OpenAICompatibleProvider::new(ProviderConfig::default()).unwrap();
+        let mut assistant = Message::assistant("".to_string(), None);
+        assistant.tool_calls = Some(vec![
+            ToolCall {
+                id: "call_a".to_string(),
+                name: "bash".to_string(),
+                arguments: serde_json::json!({ "command": "ls" }),
+            },
+            ToolCall {
+                id: "call_b".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({ "path": "Cargo.toml" }),
+            },
+        ]);
+        // Only the first call returned before the turn was interrupted.
+        let partial = Message::tool_result("call_a".to_string(), "Cargo.toml".to_string());
+
+        let input = provider.build_responses_input(&[
+            Message::user("hi".to_string()),
+            assistant,
+            partial,
+            Message::user("again".to_string()),
+        ]);
+
+        let calls: Vec<&str> = input
+            .iter()
+            .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+            .filter_map(|item| item.get("call_id").and_then(|v| v.as_str()))
+            .collect();
+        let outputs: Vec<&str> = input
+            .iter()
+            .filter(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+            })
+            .filter_map(|item| item.get("call_id").and_then(|v| v.as_str()))
+            .collect();
+
+        assert_eq!(calls, vec!["call_a", "call_b"]);
+        assert_eq!(outputs, vec!["call_a", "call_b"]);
+        // The placeholder sits directly after the call it answers, so the
+        // output always follows its function_call.
+        let call_index = input
+            .iter()
+            .position(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call")
+                    && item.get("call_id").and_then(|v| v.as_str()) == Some("call_b")
+            })
+            .expect("call_b present");
+        let output_index = input
+            .iter()
+            .position(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+                    && item.get("call_id").and_then(|v| v.as_str()) == Some("call_b")
+            })
+            .expect("call_b output present");
+        assert!(output_index > call_index);
+    }
+
+    /// The mirror image: a result whose call was filtered out of the request
+    /// (a nameless streamed call) is invalid input too.
+    #[test]
+    fn results_without_a_recorded_call_are_dropped() {
+        let provider = OpenAICompatibleProvider::new(ProviderConfig::default()).unwrap();
+        let mut assistant = Message::assistant("done".to_string(), None);
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_real".to_string(),
+            name: "bash".to_string(),
+            arguments: serde_json::json!({ "command": "ls" }),
+        }]);
+
+        let input = provider.build_responses_input(&[
+            Message::user("hi".to_string()),
+            assistant,
+            Message::tool_result("call_real".to_string(), "ok".to_string()),
+            Message::tool_result("call_ghost".to_string(), "stale".to_string()),
+        ]);
+
+        let outputs: Vec<&str> = input
+            .iter()
+            .filter(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+            })
+            .filter_map(|item| item.get("call_id").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(outputs, vec!["call_real"]);
+    }
+
+    /// The chat-completions shape is just as strict, so the same repair has to
+    /// apply there — an unanswered call there fails as
+    /// `messages with role 'tool' must be a response to a preceding message
+    /// with 'tool_calls'`.
+    #[test]
+    fn chat_messages_repair_unanswered_tool_calls_too() {
+        let provider = OpenAICompatibleProvider::new(ProviderConfig::default()).unwrap();
+        let mut assistant = Message::assistant("".to_string(), None);
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_x".to_string(),
+            name: "bash".to_string(),
+            arguments: serde_json::json!({ "command": "ls" }),
+        }]);
+
+        let built =
+            provider.build_messages(&[Message::user("hi".to_string()), assistant], "openai");
+
+        let tool_msg = built
+            .iter()
+            .find(|msg| msg.get("role").and_then(|v| v.as_str()) == Some("tool"))
+            .expect("synthetic tool message");
+        assert_eq!(
+            tool_msg.get("tool_call_id").and_then(|v| v.as_str()),
+            Some("call_x")
+        );
+    }
+
     #[test]
     fn extracts_responses_instructions_from_system_messages() {
         let messages = vec![
@@ -2794,6 +3318,229 @@ mod tests {
         assert_eq!(request["max_output_tokens"], serde_json::json!(2048));
         assert_eq!(request["reasoning"]["effort"], serde_json::json!("high"));
         assert!(request.get("temperature").is_none());
+    }
+
+    #[test]
+    fn openai_responses_requests_opt_into_reasoning_summaries() {
+        // Summaries are opt-in per the API spec: without `summary`, the
+        // response carries no summary text and the thinking panel stays blank.
+        let mut request = serde_json::json!({});
+        let settings = AgentConfig {
+            thinking_level: "medium".to_string(),
+            ..AgentConfig::default()
+        };
+
+        OpenAICompatibleProvider::apply_generation_controls(
+            &mut request,
+            RequestMode::Responses,
+            "openai",
+            &settings,
+            Some(&reasoning_meta(Some(
+                crate::agent::model_catalog::ReasoningLevels::Efforts(
+                    ["low", "medium", "high"]
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                ),
+            ))),
+        );
+
+        assert_eq!(request["reasoning"]["effort"], serde_json::json!("medium"));
+        assert_eq!(request["reasoning"]["summary"], serde_json::json!("auto"));
+    }
+
+    #[test]
+    fn codex_backend_is_detected_by_url() {
+        assert!(OpenAICompatibleProvider::is_codex_backend(
+            "https://chatgpt.com/backend-api/codex/responses"
+        ));
+        assert!(!OpenAICompatibleProvider::is_codex_backend(
+            "https://api.openai.com/v1/responses"
+        ));
+        assert!(!OpenAICompatibleProvider::is_codex_backend(
+            "https://api.openai.com/v1/chat/completions"
+        ));
+    }
+
+    #[test]
+    fn unknown_parameter_path_extracts_the_dotted_field() {
+        let rejection = OSAgentError::Provider(
+            "API request failed (400 Bad Request): Unknown parameter: 'stream_options.include_usage'."
+                .to_string(),
+        );
+        assert_eq!(
+            OpenAICompatibleProvider::unknown_parameter_path(&rejection).as_deref(),
+            Some("stream_options.include_usage")
+        );
+        let structured = OSAgentError::ProviderStructured(crate::error::ProviderErrorInfo {
+            message: "Unknown parameter: 'reasoning.summary'".to_string(),
+            status_code: Some(400),
+            retry_after: None,
+            error_code: Some("invalid_request_error".to_string()),
+        });
+        assert_eq!(
+            OpenAICompatibleProvider::unknown_parameter_path(&structured).as_deref(),
+            Some("reasoning.summary")
+        );
+
+        let unrelated = OSAgentError::Provider("API request failed (429): slow down".to_string());
+        assert!(OpenAICompatibleProvider::unknown_parameter_path(&unrelated).is_none());
+        let empty = OSAgentError::Provider("Unknown parameter".to_string());
+        assert!(OpenAICompatibleProvider::unknown_parameter_path(&empty).is_none());
+    }
+
+    #[test]
+    fn remove_request_field_only_resolves_object_keys() {
+        let mut body = serde_json::json!({
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "reasoning": { "effort": "medium", "summary": "auto" },
+        });
+        assert!(OpenAICompatibleProvider::remove_request_field(
+            &mut body,
+            "stream_options.include_usage"
+        ));
+        assert_eq!(body["stream_options"], serde_json::json!({}));
+        assert!(OpenAICompatibleProvider::remove_request_field(
+            &mut body,
+            "reasoning.summary"
+        ));
+        assert!(!body["reasoning"]
+            .as_object()
+            .unwrap()
+            .contains_key("summary"));
+        assert_eq!(body["reasoning"]["effort"], serde_json::json!("medium"));
+        // Missing paths and non-object walks change nothing.
+        assert!(!OpenAICompatibleProvider::remove_request_field(
+            &mut body,
+            "stream_options.include_usage"
+        ));
+        assert!(!OpenAICompatibleProvider::remove_request_field(
+            &mut body,
+            "stream.missing"
+        ));
+        assert!(!OpenAICompatibleProvider::remove_request_field(
+            &mut body, ""
+        ));
+    }
+
+    #[test]
+    fn streamed_deltas_survive_an_unparseable_completed_object() {
+        // The Codex backend shapes `response.completed` differently: the parse
+        // yields nothing, but text did stream. It must not be discarded.
+        let mut parsed = ProviderResponse {
+            content: None,
+            thinking: None,
+            tool_calls: None,
+            finish_reason: "completed".to_string(),
+            retry_count: 0,
+            context_compressed: false,
+            compressed_summary: None,
+            usage: None,
+        };
+        OpenAICompatibleProvider::merge_streamed_fallback(
+            &mut parsed,
+            "hello from the stream",
+            "some reasoning",
+        );
+        assert_eq!(parsed.content.as_deref(), Some("hello from the stream"));
+        assert_eq!(parsed.thinking.as_deref(), Some("some reasoning"));
+    }
+
+    #[test]
+    fn completed_object_wins_over_streamed_deltas() {
+        let mut parsed = ProviderResponse {
+            content: Some("authoritative".to_string()),
+            thinking: None,
+            tool_calls: None,
+            finish_reason: "completed".to_string(),
+            retry_count: 0,
+            context_compressed: false,
+            compressed_summary: None,
+            usage: None,
+        };
+        OpenAICompatibleProvider::merge_streamed_fallback(&mut parsed, "stale delta", "");
+        assert_eq!(parsed.content.as_deref(), Some("authoritative"));
+    }
+
+    #[test]
+    fn streamed_tool_calls_survive_an_empty_completed_output() {
+        // The Codex backend can stream a full function call and then complete
+        // with an empty `output` array. The streamed call must be kept so the
+        // turn continues instead of ending with no reply.
+        let mut streamed = HashMap::new();
+        streamed.insert(
+            "fc_1".to_string(),
+            super::StreamedCall {
+                name: "read_file".to_string(),
+                arguments: r#"{"path": "Cargo.toml"}"#.to_string(),
+                call_id: Some("call_1".to_string()),
+            },
+        );
+        let calls = OpenAICompatibleProvider::tool_calls_from_stream(streamed).unwrap();
+        assert_eq!(calls.len(), 1);
+        // Replies and history reference the call_id, not the item id.
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], serde_json::json!("Cargo.toml"));
+
+        let empty: HashMap<String, super::StreamedCall> = HashMap::new();
+        assert!(OpenAICompatibleProvider::tool_calls_from_stream(empty).is_none());
+    }
+
+    #[test]
+    fn nameless_streamed_calls_are_dropped_before_they_can_poison_history() {
+        let mut streamed = HashMap::new();
+        streamed.insert(
+            "fc_1".to_string(),
+            super::StreamedCall {
+                name: "".to_string(),
+                arguments: r#"{"description": "x"}"#.to_string(),
+                call_id: None,
+            },
+        );
+        // A bare item id with no call_id is still usable as the reference.
+        streamed.insert(
+            "fc_2".to_string(),
+            super::StreamedCall {
+                name: "task".to_string(),
+                arguments: r#"{"description": "y"}"#.to_string(),
+                call_id: None,
+            },
+        );
+        let calls = OpenAICompatibleProvider::tool_calls_from_stream(streamed).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "fc_2");
+        assert_eq!(calls[0].name, "task");
+    }
+
+    #[test]
+    fn refusal_blocks_surface_as_content_instead_of_empty() {
+        let response = serde_json::json!({
+            "output": [{
+                "type": "message",
+                "content": [{ "type": "refusal", "refusal": "I can't help with that." }],
+            }],
+        });
+        assert_eq!(
+            OpenAICompatibleProvider::parse_response_content(&response).as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    #[test]
+    fn text_blocks_still_win_over_refusals() {
+        let response = serde_json::json!({
+            "output": [{
+                "type": "message",
+                "content": [
+                    { "type": "output_text", "text": "Here you go." },
+                    { "type": "refusal", "refusal": "stale" },
+                ],
+            }],
+        });
+        let content = OpenAICompatibleProvider::parse_response_content(&response).unwrap();
+        assert!(content.contains("Here you go."));
     }
 
     #[test]

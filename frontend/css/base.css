@@ -58,6 +58,14 @@ body {
     to { opacity: 1; }
 }
 
+/* Transcript entry animation: opacity only. Sliding or growing card heights
+   (the old translateY + max-height animation) read as a bounce every time a
+   session reopens and its whole transcript re-renders. */
+@keyframes softFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
 @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }

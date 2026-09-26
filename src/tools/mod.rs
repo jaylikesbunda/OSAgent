@@ -6,6 +6,7 @@ pub mod codesearch;
 pub mod codesearch_tokenizer;
 pub mod coordinator;
 pub mod decision_memory;
+pub mod diagram;
 pub mod file_cache;
 pub mod files;
 pub mod fuzzy_edit;

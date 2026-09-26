@@ -1,5 +1,17 @@
 v0.6.2 changes:
 
+Added:
+* Inline SVG diagrams in chat: ask for a flow, architecture map, state machine, or timeline and it renders as a pan/zoomable, click-to-inspect diagram you can expand, copy, and save through a normal save dialog; diagrams persist with the session across reloads
+
+Fixed:
+* OpenAI OAuth sign-in from the desktop app now opens the sign-in page in your system browser and completes automatically, with login credentials sent correctly
+* OpenAI OAuth "Invalid authorize request" fixed by using OpenAI's registered loopback callback (localhost:1455)
+* Read-only bash no longer rejects quoted prose like "(add+del files)"; real nested deletes stay blocked
+* Codex models no longer fail on "Unknown parameter: 'stream_options.include_usage'"; any other rejected parameter is stripped and retried automatically
+* Codex empty replies fixed: streamed text and tool calls survive a differently-shaped completion, streamed argument fragments merge by item id with the authoritative done-event winning, nameless calls are dropped before they can poison history, and refusals surface as the reply
+* Codex thinking panel now shows reasoning summaries (requested with `summary: "auto"`, including summary done-events)
+* Sessions breaking with "No tool output found for function call ..." after an interrupted or cancelled run: a cancelled parallel tool batch now records its results, and any request whose history has a tool call without a result (or a result without a call) is repaired before it is sent — including sessions already broken before the update
+
 Changed:
 * Smoother update checks, downloads, and install progress
 * More reliable update restarts and failure recovery

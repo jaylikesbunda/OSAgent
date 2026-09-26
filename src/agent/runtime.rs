@@ -2446,7 +2446,7 @@ impl AgentRuntime {
                         tool_calls.len()
                     );
                     let message_index = (session.messages.len() as i32) - 1;
-                    let parallel_results = self
+                    let parallel_results = match self
                         .execute_parallel_tool_calls(
                             session_id,
                             &session,
@@ -2463,7 +2463,28 @@ impl AgentRuntime {
                             &user,
                             message_index,
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(results) => results,
+                        Err(e) => {
+                            // The assistant message carrying these calls is
+                            // already persisted, so leaving them without results
+                            // sends the next request a `function_call` with no
+                            // `function_call_output` — which the API rejects
+                            // outright ("No tool output found for function
+                            // call ...") and which leaves the session unable to
+                            // continue at all. Record the cancellation for
+                            // every call, exactly as the sequential path does.
+                            for tool_call in &tool_calls {
+                                session.messages.push(Message::tool_result(
+                                    tool_call.id.clone(),
+                                    format!("Tool: {}\nError: Cancelled by user", tool_call.name),
+                                ));
+                            }
+                            self.session_manager.update_session(&session).await?;
+                            return Err(e);
+                        }
+                    };
 
                     for (tool_call, result) in tool_calls.iter().zip(parallel_results) {
                         let (

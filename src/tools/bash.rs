@@ -55,8 +55,182 @@ impl BashTool {
         }
     }
 
-    fn validate_non_mutating_command(command: &str) -> Result<()> {
+    /// Words in `command`, lowercased, with single- and double-quoted spans
+    /// removed. Returns whether the quote state was balanced: on unbalanced
+    /// quotes the caller must fall back to scanning everything (fail closed),
+    /// otherwise a stray quote could hide a real mutation.
+    fn words_outside_quotes(command: &str) -> (Vec<String>, bool) {
         let lowered = command.to_lowercase();
+        let chars: Vec<char> = lowered.chars().collect();
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+
+        let mut flush = |current: &mut String, words: &mut Vec<String>| {
+            if !current.is_empty() {
+                words.push(std::mem::take(current));
+            }
+        };
+
+        for ch in chars {
+            if escaped {
+                escaped = false;
+                if !in_single && !in_double {
+                    current.push(ch);
+                }
+                continue;
+            }
+            if ch == '\\' && !in_single {
+                escaped = true;
+                continue;
+            }
+            match ch {
+                '\'' if !in_double => {
+                    in_single = !in_single;
+                }
+                '"' if !in_single => {
+                    in_double = !in_double;
+                }
+                _ => {
+                    if in_single || in_double {
+                        continue;
+                    }
+                    if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                        current.push(ch);
+                    } else {
+                        flush(&mut current, &mut words);
+                    }
+                }
+            }
+        }
+        flush(&mut current, &mut words);
+
+        (words, !in_single && !in_double)
+    }
+
+    /// Split into whole words so a command word is only matched as a word.
+    /// A raw substring test produces false positives on ordinary arguments
+    /// (e.g. "Format-Table" contains "rm", "different" contains "ren").
+    /// Quoted spans are excluded (see `words_outside_quotes`): prose inside
+    /// string literals such as `'(add+del files): '` must not trip the `del`
+    /// token. Falls back to scanning everything when quotes are unbalanced.
+    fn validation_words(command: &str) -> Vec<String> {
+        let (words, balanced) = Self::words_outside_quotes(command);
+        if balanced {
+            return words;
+        }
+        command
+            .to_lowercase()
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
+            .filter(|word| !word.is_empty())
+            .map(|word| word.to_string())
+            .collect()
+    }
+
+    /// Script bodies passed to `powershell -Command ...` / `pwsh -c ...`,
+    /// unwrapped one level so nested code is validated with the same rules.
+    /// Without this, quote-aware scanning would hide real nested mutations
+    /// such as `powershell -Command "Remove-Item foo"`. Depth-limited to
+    /// terminate on adversarial nesting.
+    fn nested_powershell_scripts(command: &str, depth: usize) -> Vec<String> {
+        if depth > 4 {
+            return Vec::new();
+        }
+        let mut scripts = Vec::new();
+        for segment in Self::split_segments(command) {
+            let Some(head) = Self::first_token(&segment).map(|h| h.to_lowercase()) else {
+                continue;
+            };
+            if !matches!(
+                head.as_str(),
+                "powershell" | "pwsh" | "powershell.exe" | "pwsh.exe"
+            ) {
+                continue;
+            }
+            if let Some(script) = Self::powershell_command_arg(&segment) {
+                scripts.push(script.clone());
+                scripts.extend(Self::nested_powershell_scripts(&script, depth + 1));
+            }
+        }
+        scripts
+    }
+
+    /// The argument following `-Command` / `-c` in a PowerShell invocation,
+    /// with one layer of surrounding quotes removed.
+    fn powershell_command_arg(segment: &str) -> Option<String> {
+        let tokens = Self::split_arg_tokens(segment);
+        let mut iter = tokens.iter().peekable();
+        while let Some(token) = iter.next() {
+            let flag = token.to_lowercase();
+            if flag == "-command" || flag == "-c" {
+                let arg = iter.next()?.clone();
+                return Some(Self::strip_one_quote_layer(&arg));
+            }
+        }
+        None
+    }
+
+    /// Quote-aware argv split: whitespace separates tokens except inside
+    /// single/double quotes (quotes are retained on the token).
+    fn split_arg_tokens(segment: &str) -> Vec<String> {
+        let chars: Vec<char> = segment.chars().collect();
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut has_content = false;
+
+        for ch in chars {
+            match ch {
+                '\'' if !in_double => {
+                    in_single = !in_single;
+                    current.push(ch);
+                    has_content = true;
+                }
+                '"' if !in_single => {
+                    in_double = !in_double;
+                    current.push(ch);
+                    has_content = true;
+                }
+                c if c.is_whitespace() && !in_single && !in_double => {
+                    if has_content {
+                        tokens.push(std::mem::take(&mut current));
+                        has_content = false;
+                    }
+                }
+                _ => {
+                    current.push(ch);
+                    has_content = true;
+                }
+            }
+        }
+        if has_content {
+            tokens.push(current);
+        }
+        tokens
+    }
+
+    fn strip_one_quote_layer(arg: &str) -> String {
+        let trimmed = arg.trim();
+        if trimmed.len() >= 2 {
+            let bytes = trimmed.as_bytes();
+            let (first, last) = (bytes[0], bytes[trimmed.len() - 1]);
+            if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+                return trimmed[1..trimmed.len() - 1].to_string();
+            }
+        }
+        trimmed.to_string()
+    }
+
+    fn validate_non_mutating_command(command: &str) -> Result<()> {
+        // Nested PowerShell scripts are code, not prose: validate them with
+        // the same rules before checking the outer command line.
+        for script in Self::nested_powershell_scripts(command, 0) {
+            Self::validate_non_mutating_command(&script)?;
+        }
+
         let mutating_tokens = [
             "mkdir",
             "rmdir",
@@ -92,15 +266,9 @@ impl BashTool {
             ">>",
         ];
 
-        // Split into whole words so a command word is only matched as a word.
-        // A raw substring test produces false positives on ordinary arguments
-        // (e.g. "Format-Table" contains "rm", "different" contains "ren").
-        let words: Vec<&str> = lowered
-            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
-            .filter(|word| !word.is_empty())
-            .collect();
+        let words = Self::validation_words(command);
 
-        let is_mutating = mutating_tokens.iter().any(|token| {
+        let matched = mutating_tokens.iter().find(|token| {
             if token.contains('>') {
                 // Redirection operators are punctuation, not words. Ignore
                 // operators inside quoted arguments (for example Python code
@@ -113,14 +281,20 @@ impl BashTool {
                     .windows(2)
                     .any(|pair| pair[0] == head && pair[1] == tail)
             } else {
-                words.iter().any(|word| word == token)
+                words.iter().any(|word| word == *token)
             }
         });
 
-        if is_mutating {
-            return Err(OSAgentError::ToolExecution(
-                "Bash read-only mode is limited to non-mutating commands".to_string(),
-            ));
+        if let Some(token) = matched {
+            let detail = if token.contains('>') {
+                "output redirection".to_string()
+            } else {
+                format!("'{}'", token)
+            };
+            return Err(OSAgentError::ToolExecution(format!(
+                "Bash read-only mode is limited to non-mutating commands (matched {})",
+                detail
+            )));
         }
 
         Ok(())
@@ -241,7 +415,10 @@ impl BashTool {
         }
     }
 
-    fn extract_command_heads(command: &str) -> Vec<String> {
+    /// Split a command line on `&&`, `||`, `|` and `;`, ignoring separators
+    /// inside quotes. Used both for head extraction and for finding nested
+    /// PowerShell invocations.
+    fn split_segments(command: &str) -> Vec<String> {
         let mut segments = Vec::new();
         let mut current = String::new();
         let mut in_single = false;
@@ -301,8 +478,11 @@ impl BashTool {
         if !current.trim().is_empty() {
             segments.push(current.trim().to_string());
         }
-
         segments
+    }
+
+    fn extract_command_heads(command: &str) -> Vec<String> {
+        Self::split_segments(command)
             .into_iter()
             .filter_map(|segment| Self::first_token(&segment))
             .collect()
@@ -363,15 +543,22 @@ impl BashTool {
     }
 
     fn contains_blocked_delete(command: &str) -> bool {
-        command
-            .to_ascii_lowercase()
-            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
-            .any(|token| {
-                matches!(
-                    token,
-                    "rm" | "del" | "erase" | "rmdir" | "rd" | "remove-item"
-                )
-            })
+        // Nested PowerShell scripts are code: `powershell -Command
+        // "Remove-Item foo"` must stay blocked even though the cmdlet sits
+        // inside quotes.
+        for script in Self::nested_powershell_scripts(command, 0) {
+            if Self::contains_blocked_delete(&script) {
+                return true;
+            }
+        }
+        // Prose inside string literals (e.g. `'(add+del files): '`) is not a
+        // delete invocation.
+        Self::validation_words(command).iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "rm" | "del" | "erase" | "rmdir" | "rd" | "remove-item"
+            )
+        })
     }
 
     fn contains_destructive_pattern(command: &str) -> bool {
@@ -781,6 +968,48 @@ mod readonly_validation_tests {
                 "should be blocked: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn allows_prose_inside_quoted_strings() {
+        // Regression: a PowerShell format string containing "(add+del files)"
+        // tokenized to the word `del` and was rejected in read-only mode, and
+        // then would have tripped the shell-delete guard too.
+        let cmd = r#"powershell -NoProfile -Command "$since='2026-08-17'; foreach($a in 'main','components','webui','build.py','docs'){ $c = git log --since=$since --pretty=oneline -- $a | Measure-Object | ForEach-Object Count; '{0,-14} {1,4} commits' -f $a, $c }; ''; 'loc churn since Aug 17:'; git log --since=$since --numstat --format='' -- main components | ForEach-Object { $_ } | Measure-Object -Line | ForEach-Object { 'lines touched (add+del files): ' + $_.Lines }""#;
+        assert!(
+            BashTool::validate_explicit_read_only(cmd).is_ok(),
+            "quoted prose must not trip read-only validation"
+        );
+        assert!(
+            !BashTool::contains_blocked_delete(cmd),
+            "quoted prose must not trip the shell-delete guard"
+        );
+    }
+
+    #[test]
+    fn still_blocks_nested_powershell_deletes() {
+        // Quote-aware scanning must not hide real code nested inside
+        // `powershell -Command "..."`.
+        for cmd in [
+            r#"powershell -NoProfile -Command "Remove-Item foo""#,
+            r#"powershell -Command 'del foo'"#,
+            r#"pwsh -c "rm -rf build""#,
+        ] {
+            assert!(
+                BashTool::validate_explicit_read_only(cmd).is_err(),
+                "nested delete should be blocked: {cmd}"
+            );
+            assert!(
+                BashTool::contains_blocked_delete(cmd),
+                "nested delete should trip the shell-delete guard: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn unbalanced_quotes_fail_closed() {
+        // A stray quote must not hide a mutation from the scanner.
+        assert!(BashTool::validate_explicit_read_only("echo \"hi; rm -rf /").is_err());
     }
 
     #[test]

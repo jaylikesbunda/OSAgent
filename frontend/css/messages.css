@@ -45,14 +45,14 @@
     border: 1px solid rgba(240, 180, 41, 0.35);
     color: #f0b429;
     font-size: 12px;
-    animation: fadeSlideUp 0.3s ease-out;
+    animation: softFadeIn 0.2s ease-out;
 }
 
 .message {
     max-width: 800px;
     margin: 0 auto 24px;
     padding: 16px 0 8px;
-    animation: fadeSlideUp 0.3s ease-out;
+    animation: softFadeIn 0.2s ease-out;
     display: flex;
     flex-direction: column;
 }
@@ -123,12 +123,12 @@
 .message-content > h2,
 .message-content > h3,
 .message-content > h4 {
-    animation: streamBlockIn 0.28s ease-out;
+    animation: streamBlockIn 0.2s ease-out;
 }
 
 @keyframes streamBlockIn {
-    from { opacity: 0; transform: translateY(3px); }
-    to { opacity: 1; transform: translateY(0); }
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -339,7 +339,7 @@
     margin: 0 auto 20px;
     width: min(800px, 100%);
     justify-content: flex-start;
-    animation: fadeSlideUp 0.3s ease-out;
+    animation: softFadeIn 0.2s ease-out;
 }
 
 .thinking-canvas {
@@ -504,7 +504,7 @@
     border-radius: var(--radius-lg);
     margin: 0 auto 20px;
     max-width: 800px;
-    animation: fadeSlideUp 0.3s ease-out;
+    animation: softFadeIn 0.2s ease-out;
 }
 
 .error-card-icon {

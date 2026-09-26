@@ -50,6 +50,24 @@ fn oauth_pkce_sessions() -> &'static dashmap::DashMap<String, PendingPkceSession
     STORE.get_or_init(dashmap::DashMap::new)
 }
 
+/// The loopback callback OpenAI's Codex client has registered. OpenAI rejects
+/// any other redirect_uri for this client with `invalid_authorize_request`,
+/// so the web UI flow must use it too — not our own `/api/oauth/...` URL.
+const OPENAI_OAUTH_CALLBACK_PORT: u16 = 1455;
+const OPENAI_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+
+fn oauth_base_url() -> String {
+    std::env::var("OSA_BASE_URL").unwrap_or_else(|_| "http://localhost:8765".to_string())
+}
+
+fn oauth_redirect_uri(provider_id: &str) -> String {
+    if provider_id == "openai" {
+        OPENAI_OAUTH_REDIRECT_URI.to_string()
+    } else {
+        format!("{}/api/oauth/{}/callback", oauth_base_url(), provider_id)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub password: String,
@@ -707,6 +725,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/local-servers/status", get(local_servers_status))
         .route("/api/oauth/providers", get(oauth_list_providers))
         .route("/api/oauth/:provider_id/start", post(oauth_start))
+        .route(
+            "/api/oauth/:provider_id/open-browser",
+            post(oauth_open_browser),
+        )
         .route("/api/oauth/:provider_id/device", post(oauth_device_code))
         .route(
             "/api/oauth/:provider_id/authorize",
@@ -3373,6 +3395,7 @@ async fn list_tools(
         "subagent",
         "plan_exit",
         "process",
+        "draw_diagram",
     ];
 
     let tools: Vec<serde_json::Value> = all_tools
@@ -3395,6 +3418,7 @@ async fn list_tools(
                     "lsp" => "code",
                     "plan_exit" => "agent",
                     "process" => "shell",
+                    "draw_diagram" => "visual",
                     _ => "other",
                 }
             })
@@ -4738,7 +4762,8 @@ pub struct OAuthStartPayload {
 }
 
 async fn oauth_start(
-    Extension(_agent): Extension<Arc<AgentRuntime>>,
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
     Path(provider_id): Path<String>,
     Json(_payload): Json<OAuthStartPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
@@ -4779,9 +4804,7 @@ async fn oauth_start(
             ));
         }
 
-        let base_url =
-            std::env::var("OSA_BASE_URL").unwrap_or_else(|_| "http://localhost:8765".to_string());
-        let redirect_uri = format!("{}/api/oauth/{}/callback", base_url, provider_id);
+        let redirect_uri = oauth_redirect_uri(&provider_id);
         oauth_pkce_sessions().insert(
             state.clone(),
             PendingPkceSession {
@@ -4790,6 +4813,27 @@ async fn oauth_start(
                 redirect_uri: redirect_uri.clone(),
             },
         );
+
+        // OpenAI only accepts its registered loopback callback, so this
+        // server itself must catch the redirect on port 1455. Bind lazily —
+        // holding the port permanently would break the launcher setup wizard
+        // and the Codex CLI, which bind it on demand the same way.
+        if provider_id == "openai" {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", OPENAI_OAUTH_CALLBACK_PORT))
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "Port {} is already in use — close the setup wizard, Codex CLI, or anything else holding it, then retry ({})",
+                                OPENAI_OAUTH_CALLBACK_PORT, e
+                            ),
+                        }),
+                    )
+                })?;
+            tokio::spawn(serve_openai_oauth_callback(agent, config_path, listener));
+        }
 
         let mut params = vec![
             ("client_id", client_id),
@@ -4901,6 +4945,113 @@ async fn oauth_start(
             }),
         ))
     }
+}
+
+/// The host an `open-browser` request may target for a provider: exactly the
+/// host of the provider's own authorization endpoint. This keeps the endpoint
+/// from becoming an open-redirect gadget — it can only ever open the sign-in
+/// page `/start` just produced.
+fn oauth_allowed_browser_host(
+    provider: &crate::oauth::provider::OAuthProviderConfig,
+) -> Option<String> {
+    provider
+        .authorization_url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .map(|host| host.to_ascii_lowercase())
+}
+
+/// Pure validation for `oauth_open_browser`: the URL must be https, must be
+/// aimed at the provider's own authorization host, and must share its path
+/// prefix so a crafted URL cannot ride the allowlisted host elsewhere.
+fn validate_open_browser_url(
+    provider: &crate::oauth::provider::OAuthProviderConfig,
+    auth_url: &str,
+) -> Result<(), String> {
+    let trimmed = auth_url.trim();
+    if trimmed.is_empty() {
+        return Err("auth_url is required".to_string());
+    }
+    if trimmed.len() > 4096 {
+        return Err("auth_url is too long".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("https://")) {
+        return Err("auth_url must use https".to_string());
+    }
+    let expected_host = oauth_allowed_browser_host(provider)
+        .ok_or_else(|| "provider has no authorization endpoint".to_string())?;
+    let after_scheme = &trimmed["https://".len()..];
+    let actual_host = after_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if actual_host != expected_host {
+        return Err(format!(
+            "auth_url must target the {} sign-in page",
+            provider.name
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthOpenBrowserPayload {
+    pub auth_url: Option<String>,
+}
+
+/// Opens the provider sign-in page in the OS default browser. This is the
+/// fallback for environments where the popup flow cannot work — notably the
+/// Tauri webview, where `window.open` popups and `window.opener` callbacks do
+/// not function. The frontend polls `/status` until the redirect back to the
+/// local callback completes the flow.
+async fn oauth_open_browser(
+    Path(provider_id): Path<String>,
+    Json(payload): Json<OAuthOpenBrowserPayload>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let provider = get_oauth_provider(&provider_id).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Unknown OAuth provider: {}", provider_id),
+            }),
+        )
+    })?;
+
+    if !is_pkce_oauth_provider(&provider_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Provider {} does not use the browser sign-in flow",
+                    provider_id
+                ),
+            }),
+        ));
+    }
+
+    let auth_url = payload.auth_url.unwrap_or_default();
+    if let Err(message) = validate_open_browser_url(&provider, &auth_url) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: message }),
+        ));
+    }
+
+    open::that(auth_url.trim()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Could not open the system browser: {}", e),
+            }),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+    })))
 }
 
 async fn oauth_device_code(
@@ -5215,13 +5366,45 @@ if (window.opener) {{
         return popup_error("OAuth state/provider mismatch".to_string());
     }
 
+    match complete_pkce_callback(&agent, &config_path, &provider_id, &pending, &code).await {
+        Ok(()) => axum::response::Html(format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><title>OAuth Success</title></head>
+<body>
+<script>
+if (window.opener) {{
+    window.opener.oauthCallback({{ success: true, provider_id: "{}" }});
+    window.close();
+}} else {{
+    document.body.innerHTML = "<h1>Sign-in complete!</h1><p>You can close this tab and return to OSA.</p>";
+}}
+</script>
+</body>
+</html>"#,
+            provider_id
+        )),
+        Err(message) => popup_error(message),
+    }
+}
+
+/// Exchanges a PKCE authorization code for tokens and stores them. Shared by
+/// the axum `/callback` route and the loopback listener below so both paths
+/// run identical validation and storage.
+async fn complete_pkce_callback(
+    agent: &AgentRuntime,
+    config_path: &std::path::Path,
+    provider_id: &str,
+    pending: &PendingPkceSession,
+    code: &str,
+) -> Result<(), String> {
     let config = agent.get_config().await;
     let provider_config = config
         .providers
         .iter()
         .find(|p| p.provider_type == provider_id);
-    let Some(default_provider) = get_oauth_provider(&provider_id) else {
-        return popup_error(format!("Unknown OAuth provider: {}", provider_id));
+    let Some(default_provider) = get_oauth_provider(provider_id) else {
+        return Err(format!("Unknown OAuth provider: {}", provider_id));
     };
 
     let (client_id, client_secret, token_url): (String, String, String) = if let Some(provider) =
@@ -5263,88 +5446,226 @@ if (window.opener) {{
     };
 
     if client_id.is_empty() {
-        return popup_error("OAuth client ID not configured".to_string());
+        return Err("OAuth client ID not configured".to_string());
     }
 
-    let redirect_uri = pending.redirect_uri;
     let mut form = vec![
         ("grant_type".to_string(), "authorization_code".to_string()),
         ("client_id".to_string(), client_id.clone()),
-        ("code".to_string(), code),
-        ("redirect_uri".to_string(), redirect_uri),
-        ("code_verifier".to_string(), pending.code_verifier),
+        ("code".to_string(), code.to_string()),
+        ("redirect_uri".to_string(), pending.redirect_uri.clone()),
+        ("code_verifier".to_string(), pending.code_verifier.clone()),
     ];
     if !client_secret.trim().is_empty() {
         form.push(("client_secret".to_string(), client_secret));
     }
 
     let client = reqwest::Client::new();
-    let token_response = client.post(&token_url).form(&form).send().await;
+    let token_response = client
+        .post(&token_url)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    if !token_response.status().is_success() {
+        let error_text = token_response.text().await.unwrap_or_default();
+        return Err(format!("OAuth token exchange failed: {}", error_text));
+    }
+    let token_data: serde_json::Value = token_response.json().await.unwrap_or_default();
 
-    match token_response {
-        Ok(response) if response.status().is_success() => {
-            let token_data: serde_json::Value = match response.json().await {
-                Ok(data) => data,
-                Err(_) => serde_json::json!({}),
-            };
+    let access_token = token_data["access_token"].as_str().unwrap_or_default();
+    if access_token.is_empty() {
+        return Err("OAuth token exchange failed: no access token returned".to_string());
+    }
+    let refresh_token = token_data.get("refresh_token").and_then(|v| v.as_str());
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_i64());
+    let expires_at = expires_in.and_then(|e| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|elapsed| elapsed.as_secs() as i64 + e)
+    });
 
-            let access_token = token_data["access_token"].as_str().unwrap_or_default();
-            let refresh_token = token_data.get("refresh_token").and_then(|v| v.as_str());
-            let expires_in = token_data.get("expires_in").and_then(|v| v.as_i64());
-            let expires_at = expires_in.map(|e| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-                    + e
-            });
+    let config_dir = config_path.parent().unwrap_or(config_path).to_path_buf();
+    let oauth_storage =
+        crate::oauth::OAuthStorage::new(crate::oauth::get_oauth_storage_path(&config_dir));
 
-            let config_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
-            let oauth_storage =
-                crate::oauth::OAuthStorage::new(crate::oauth::get_oauth_storage_path(&config_dir));
+    let token_entry = crate::oauth::OAuthTokenEntry {
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.map(|s| s.to_string()),
+        expires_at,
+        scopes: Some(
+            default_provider
+                .scopes
+                .iter()
+                .map(|scope| scope.to_string())
+                .collect(),
+        ),
+        account_id: crate::oauth::extract_account_id(
+            token_data.get("id_token").and_then(|v| v.as_str()),
+            Some(access_token),
+        ),
+    };
 
-            let token_entry = crate::oauth::OAuthTokenEntry {
-                access_token: access_token.to_string(),
-                refresh_token: refresh_token.map(|s| s.to_string()),
-                expires_at,
-                scopes: Some(
-                    default_provider
-                        .scopes
-                        .iter()
-                        .map(|scope| scope.to_string())
-                        .collect(),
-                ),
-                account_id: crate::oauth::extract_account_id(
-                    token_data.get("id_token").and_then(|v| v.as_str()),
-                    Some(access_token),
-                ),
-            };
+    oauth_storage
+        .set_token(provider_id, token_entry)
+        .map_err(|e| format!("Failed to store token: {}", e))?;
+    Ok(())
+}
 
-            let _ = oauth_storage.set_token(&provider_id, token_entry);
+fn oauth_callback_html(title: &str, heading: &str, message: &str, auto_close: bool) -> String {
+    let script = if auto_close {
+        "setTimeout(() => window.close(), 2500)".to_string()
+    } else {
+        String::new()
+    };
+    format!(
+        "<!DOCTYPE html><html><head><title>{}</title></head>\
+        <body><h1>{}</h1><p>{}</p><script>{}</script></body></html>",
+        title, heading, message, script
+    )
+}
 
-            axum::response::Html(format!(
-                r#"<!DOCTYPE html>
-<html>
-<head><title>OAuth Success</title></head>
-<body>
-<script>
-if (window.opener) {{
-    window.opener.oauthCallback({{ success: true, provider_id: "{}" }});
-    window.close();
-}} else {{
-    document.body.innerHTML = "<h1>OAuth Success!</h1><p>You can close this window.</p>";
-}}
-</script>
-</body>
-</html>"#,
-                provider_id
+fn oauth_callback_response(status: &str, title: &str, heading: &str, message: &str) -> String {
+    let html = oauth_callback_html(title, heading, message, status.starts_with("200"));
+    format!(
+        "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        html.len(),
+        html
+    )
+}
+
+/// Serves the single redirect OpenAI sends to `http://localhost:1455/auth/callback`.
+/// Accepts one connection (with a 5-minute deadline so an abandoned sign-in
+/// frees the port), completes the PKCE exchange with the exact state issued by
+/// `/start`, then exits. The frontend polls `/status` and observes the stored
+/// token — no `window.opener` needed, so this works from a system browser.
+async fn serve_openai_oauth_callback(
+    agent: Arc<AgentRuntime>,
+    config_path: PathBuf,
+    listener: tokio::net::TcpListener,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let accept = tokio::time::timeout(Duration::from_secs(300), listener.accept()).await;
+    let Ok(Ok((mut stream, _))) = accept else {
+        return;
+    };
+    let mut buffer = vec![0u8; 8192];
+    let respond = async |stream: &mut tokio::net::TcpStream,
+                         status: &str,
+                         title: &str,
+                         heading: &str,
+                         message: &str| {
+        let response = oauth_callback_response(status, title, heading, message);
+        let _ = stream.write_all(response.as_bytes()).await;
+    };
+
+    let size = match stream.read(&mut buffer).await {
+        Ok(size) if size > 0 => size,
+        _ => return,
+    };
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    if !path.starts_with("/auth/callback") {
+        respond(
+            &mut stream,
+            "404 Not Found",
+            "Not found",
+            "Not found",
+            "This port only handles the OpenAI sign-in callback.",
+        )
+        .await;
+        return;
+    }
+    let query: std::collections::HashMap<String, String> = path
+        .split('?')
+        .nth(1)
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((
+                urlencoding::decode(key).ok()?.to_string(),
+                urlencoding::decode(value).ok()?.to_string(),
             ))
+        })
+        .collect();
+
+    if let Some(error) = query.get("error") {
+        let detail = query
+            .get("error_description")
+            .map(|s| s.as_str())
+            .unwrap_or(error);
+        respond(
+            &mut stream,
+            "400 Bad Request",
+            "Authorization failed",
+            "Authorization failed",
+            detail,
+        )
+        .await;
+        return;
+    }
+    let (Some(code), Some(state)) = (query.get("code"), query.get("state")) else {
+        respond(
+            &mut stream,
+            "400 Bad Request",
+            "Authorization failed",
+            "Authorization failed",
+            "Missing authorization code or state.",
+        )
+        .await;
+        return;
+    };
+    let Some((_, pending)) = oauth_pkce_sessions().remove(state.as_str()) else {
+        respond(
+            &mut stream,
+            "400 Bad Request",
+            "Authorization failed",
+            "Authorization failed",
+            "Sign-in session expired. Please start sign-in again from OSA.",
+        )
+        .await;
+        return;
+    };
+    if pending.provider_id != "openai" {
+        respond(
+            &mut stream,
+            "400 Bad Request",
+            "Authorization failed",
+            "Authorization failed",
+            "Sign-in session does not belong to OpenAI.",
+        )
+        .await;
+        return;
+    }
+    match complete_pkce_callback(&agent, &config_path, "openai", &pending, code).await {
+        Ok(()) => {
+            respond(
+                &mut stream,
+                "200 OK",
+                "Authorization successful",
+                "Sign-in complete!",
+                "You can close this tab and return to OSA.",
+            )
+            .await;
         }
-        Ok(response) => {
-            let error_text = response.text().await.unwrap_or_default();
-            popup_error(format!("OAuth token exchange failed: {}", error_text))
+        Err(message) => {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                "Authorization failed",
+                "Authorization failed",
+                &message,
+            )
+            .await;
         }
-        Err(e) => popup_error(format!("Network error: {}", e)),
     }
 }
 
@@ -7450,6 +7771,55 @@ mod tests {
         }
 
         config
+    }
+
+    #[test]
+    fn openai_redirect_uses_the_registered_loopback_callback() {
+        // OpenAI rejects any other redirect_uri for the Codex client with
+        // `invalid_authorize_request` — this is the exact failure the web UI
+        // hit with its own /api/oauth/... callback URL.
+        assert_eq!(
+            super::oauth_redirect_uri("openai"),
+            "http://localhost:1455/auth/callback"
+        );
+        assert_eq!(super::OPENAI_OAUTH_CALLBACK_PORT, 1455);
+        // Other providers keep the hosted callback on this server.
+        assert_eq!(
+            super::oauth_redirect_uri("anthropic"),
+            format!("{}/api/oauth/anthropic/callback", super::oauth_base_url())
+        );
+    }
+
+    #[test]
+    fn open_browser_url_must_target_the_provider_sign_in_page() {
+        let openai = crate::oauth::provider::get_oauth_provider("openai").unwrap();
+        let own_page = "https://auth.openai.com/oauth/authorize?client_id=x&state=y";
+        assert!(super::validate_open_browser_url(&openai, own_page).is_ok());
+        // Case-insensitive scheme/host still passes: browsers normalize these.
+        assert!(super::validate_open_browser_url(
+            &openai,
+            &own_page.replace("https://", "HTTPS://")
+        )
+        .is_ok());
+
+        for bad in [
+            "",
+            "not a url",
+            "http://auth.openai.com/oauth/authorize",
+            "https://evil.example/oauth/authorize",
+            "https://auth.openai.com.evil.example/oauth/authorize",
+            "https://auth.openai.com:443.evil.example/",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                super::validate_open_browser_url(&openai, bad).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+
+        // A different provider's page is rejected for this provider.
+        let anthropic = crate::oauth::provider::get_oauth_provider("anthropic").unwrap();
+        assert!(super::validate_open_browser_url(&anthropic, own_page).is_err());
     }
 
     #[tokio::test]

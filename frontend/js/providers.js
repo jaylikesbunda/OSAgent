@@ -1463,6 +1463,41 @@ OSA.updateOAuthUI = async function(providerId) {
     }
 };
 
+// True inside the Tauri desktop shell, where window.open popups and
+// window.opener callbacks do not function (WebKitGTK/WebView2 webview).
+OSA.isTauriWebview = function() {
+    try {
+        return typeof window.__TAURI__ !== 'undefined' && !!window.__TAURI__;
+    } catch (err) {
+        return false;
+    }
+};
+
+// Authenticated JSON helper for the OAuth endpoints, which sit behind the
+// login gate. A bare fetch() without the Bearer token gets a 401 with an
+// empty body, and res.json() then throws a confusing parse error — surface a
+// readable message instead.
+OSA.fetchOAuthJson = async function(url, body) {
+    const res = await OSA.fetchWithAuth(url, {
+        method: 'POST',
+        body: JSON.stringify(body || {})
+    });
+    let data = null;
+    try {
+        data = await res.json();
+    } catch (err) {
+        data = null;
+    }
+    if (!res.ok) {
+        const message = (data && data.error)
+            || (res.status === 401 ? 'Request was rejected (401). Please sign in again.' : null)
+            || ('Request failed (HTTP ' + res.status + ')');
+        throw new Error(message);
+    }
+    if (data && data.error) throw new Error(data.error);
+    return data || {};
+};
+
 OSA.initiateOAuth = async function() {
     if (!OSA.currentProviderId) return;
 
@@ -1476,19 +1511,17 @@ OSA.initiateOAuth = async function() {
     // Open the popup window NOW while we still have the user gesture context.
     // Browsers block window.open() called after an await (async operation loses
     // the user gesture, causing the popup to open as about:blank or be blocked).
-    const oauthWindow = window.open('', '_blank', 'width=600,height=700');
+    // Inside the Tauri shell there is no functioning popup at all, so skip it
+    // there and use the system-browser flow below instead.
+    const useExternalBrowser = OSA.isTauriWebview();
+    const oauthWindow = useExternalBrowser ? null : window.open('', '_blank', 'width=600,height=700');
 
     try {
-        const res = await fetch('/api/oauth/' + OSA.currentProviderId + '/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
-        });
-        const data = await res.json();
+        const data = await OSA.fetchOAuthJson('/api/oauth/' + OSA.currentProviderId + '/start', {});
 
-        if (data.error || !data.success) {
+        if (!data.success) {
             if (oauthWindow) oauthWindow.close();
-            throw new Error(data.error || 'Failed to start OAuth');
+            throw new Error('Failed to start OAuth');
         }
 
         if (data.flow_type === 'pkce') {
@@ -1497,6 +1530,15 @@ OSA.initiateOAuth = async function() {
                 codeVerifier: data.code_verifier,
                 state: data.state
             };
+
+            // Tauri shell (or any environment where the popup never opened):
+            // open the sign-in page in the OS default browser and wait for the
+            // redirect back to the local callback, polling status meanwhile.
+            if (useExternalBrowser || !oauthWindow || oauthWindow.closed) {
+                if (oauthWindow && !oauthWindow.closed) oauthWindow.close();
+                await OSA.startExternalBrowserSignIn(data.auth_url);
+                return;
+            }
 
             // Navigate the already-open window to the auth URL
             if (oauthWindow) {
@@ -1569,6 +1611,62 @@ OSA.initiateOAuth = async function() {
     }
 };
 
+// System-browser sign-in: the backend opens the provider page in the OS
+// default browser (which, unlike an embedded webview, can actually render the
+// provider's login), then we poll our own status until the redirect back to
+// the local callback completes the flow.
+OSA.oauthStatusPollTimer = null;
+OSA.oauthStatusPollAttempts = 0;
+
+OSA.startExternalBrowserSignIn = async function(authUrl) {
+    const providerId = OSA.currentProviderId;
+    const errorEl = document.getElementById('oauth-error-pkce');
+    const safeUrl = OSA.safeUrl(authUrl);
+    if (!safeUrl) throw new Error('OAuth provider returned an unsupported authorization URL');
+
+    document.getElementById('oauth-loading-text').textContent = 'Opening sign-in page in your browser...';
+    await OSA.fetchOAuthJson('/api/oauth/' + providerId + '/open-browser', { auth_url: safeUrl });
+
+    document.getElementById('oauth-loading-text').textContent = 'Waiting for sign-in in your browser...';
+    OSA.oauthStatusPollAttempts = 0;
+    OSA.currentOAuthFlow = { type: 'external_browser' };
+    OSA.pollOAuthStatus();
+};
+
+OSA.pollOAuthStatus = function() {
+    if (!OSA.currentOAuthFlow || OSA.currentOAuthFlow.type !== 'external_browser') return;
+    const providerId = OSA.currentProviderId;
+    OSA.oauthStatusPollAttempts = (OSA.oauthStatusPollAttempts || 0) + 1;
+    if (OSA.oauthStatusPollAttempts > 120) {
+        OSA.currentOAuthFlow = null;
+        OSA.showOAuthView('pkce');
+        const errorEl = document.getElementById('oauth-error-pkce');
+        errorEl.textContent = 'Timed out waiting for sign-in.';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+    OSA.oauthStatusPollTimer = setTimeout(async function() {
+        try {
+            const status = await OSA.getJson('/api/oauth/' + providerId + '/status');
+            if (status.status === 'active' || status.configured) {
+                OSA.onOAuthSuccess(providerId);
+                return;
+            }
+        } catch (error) {}
+        OSA.pollOAuthStatus();
+    }, 2500);
+};
+
+OSA.cancelOAuthStatusPoll = function() {
+    if (OSA.oauthStatusPollTimer) {
+        clearTimeout(OSA.oauthStatusPollTimer);
+        OSA.oauthStatusPollTimer = null;
+    }
+    if (OSA.currentOAuthFlow && OSA.currentOAuthFlow.type === 'external_browser') {
+        OSA.currentOAuthFlow = null;
+    }
+};
+
 OSA.pollDeviceCode = function() {
     if (!OSA.currentOAuthFlow || OSA.currentOAuthFlow.type !== 'device_code') return;
 
@@ -1585,12 +1683,7 @@ OSA.pollDeviceCode = function() {
 
     OSA.deviceCodePollTimer = setTimeout(async function() {
         try {
-            const res = await fetch('/api/oauth/' + OSA.currentProviderId + '/device', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ device_code: deviceCode })
-            });
-            const data = await res.json();
+            const data = await OSA.fetchOAuthJson('/api/oauth/' + OSA.currentProviderId + '/device', { device_code: deviceCode });
 
             if (data.success && data.connected) {
                 OSA.onOAuthSuccess(OSA.currentProviderId);
@@ -1636,6 +1729,7 @@ OSA.onOAuthSuccess = async function(providerId) {
         clearTimeout(OSA.deviceCodePollTimer);
         OSA.deviceCodePollTimer = null;
     }
+    if (typeof OSA.cancelOAuthStatusPoll === 'function') OSA.cancelOAuthStatusPoll();
     OSA.currentOAuthFlow = null;
 
     OSA.updateOAuthUI(providerId);
@@ -1775,6 +1869,8 @@ OSA.closeAddProviderModal = function() {
         clearInterval(OSA.pkcePollTimer);
         OSA.pkcePollTimer = null;
     }
+    if (typeof OSA.cancelOAuthStatusPoll === 'function') OSA.cancelOAuthStatusPoll();
+    OSA.oauthStatusPollAttempts = 0;
     OSA.deviceCodePollAttempts = 0;
     OSA.currentOAuthFlow = null;
     OSA.currentProviderId = null;

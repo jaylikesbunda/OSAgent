@@ -341,6 +341,13 @@ OSA.upsertEntryToolEvent = function(entry, event, completed) {
             existing.success = event.success === true;
             if (typeof event.output === 'string') existing.output = event.output;
             if (typeof event.title === 'string') existing.title = event.title;
+            // Metadata carries what the card actually renders (diagram spec,
+            // diff files, read_file payload) and only arrives with the
+            // completion event, so a background chat that is viewed after the
+            // turn finishes would otherwise lose it here.
+            if (event.metadata && typeof event.metadata === 'object') {
+                existing.metadata = event.metadata;
+            }
         }
         return;
     }

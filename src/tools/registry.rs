@@ -10,10 +10,10 @@ use crate::mcp::{McpHandle, McpManager, MCP_TOOL_PREFIX};
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, calendar, code, codesearch, coordinator, decision_memory, files, lsp, memory,
-    native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process, question,
-    scheduler, search, sessions, skill, skill_authoring, subagent, system_status, task, todo,
-    tool_script, tool_search, weather, web,
+    bash, batch, calendar, code, codesearch, coordinator, decision_memory, diagram, files, lsp,
+    memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process,
+    question, scheduler, search, sessions, skill, skill_authoring, subagent, system_status, task,
+    todo, tool_script, tool_search, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -137,6 +137,7 @@ impl ToolProfile {
                     | "sessions"
                     | "plan_exit"
                     | "persona"
+                    | "draw_diagram"
             ),
             Self::Creative => !matches!(
                 tool_name,
@@ -596,6 +597,12 @@ impl ToolRegistry {
         let sessions_tool: Arc<dyn Tool> = Arc::new(sessions::SessionsTool::new(storage.clone()));
         tools.insert("sessions".to_string(), sessions_tool.clone());
         native_catalog.register(sessions_tool);
+        // Deferred: diagrams are a presentation capability, not something
+        // every turn needs. Advertised in the deferred manifest so "draw the
+        // auth flow" reaches `tool_search` and lands here.
+        let diagram_tool: Arc<dyn Tool> = Arc::new(diagram::DrawDiagramTool);
+        tools.insert("draw_diagram".to_string(), diagram_tool.clone());
+        native_catalog.register(diagram_tool);
 
         if let Some(ref ms) = memory_store {
             let memory_tools: Vec<Arc<dyn Tool>> = vec![
@@ -774,6 +781,7 @@ impl ToolRegistry {
             "news" => Some(Arc::new(news::NewsTool::new(config.clone()))),
             "system_status" => Some(Arc::new(system_status::SystemStatusTool::new(config))),
             "sessions" => Some(Arc::new(sessions::SessionsTool::new(storage.clone()))),
+            "draw_diagram" => Some(Arc::new(diagram::DrawDiagramTool)),
             "lsp" => Some(Arc::new(lsp::LspTool::new(config))),
             "plan_exit" => Some(Arc::new(plan::PlanExitTool::new())),
             "update_notes" => Some(Arc::new(notes::UpdateNotesTool::new(
@@ -820,6 +828,7 @@ impl ToolRegistry {
                 | "news"
                 | "system_status"
                 | "sessions"
+                | "draw_diagram"
                 | "lsp"
                 | "skill"
                 | "skill_list"

@@ -90,6 +90,7 @@ OSA.TOOL_LABELS = {
     system_status: 'System status',
     sessions: 'Past sessions',
     update_notes: 'Update notes',
+    draw_diagram: 'Diagram',
     create_goal: 'Create goal',
     update_goal: 'Update goal',
     schedule: 'Schedule',
@@ -127,6 +128,7 @@ OSA.TOOL_ICONS = {
     news: 'N',
     system_status: 'S',
     sessions: 'H',
+    draw_diagram: '◇',
 };
 
 OSA.ROW_TOOLS = new Set(['read_file', 'list_files', 'task', 'skill', 'web_fetch', 'subagent']);
@@ -921,6 +923,15 @@ OSA.summarizeToolArgs = function(toolName, args) {
     if (toolName === 'web_search' || toolName === 'websearch') {
         const q = args.query || '';
         return q.length > 60 ? q.slice(0, 60) + '\u2026' : q;
+    }
+    if (toolName === 'draw_diagram') {
+        // The node/edge JSON would swamp the row; the title is the scannable bit.
+        const title = args.title || (args.spec && args.spec.title) || '';
+        if (title) return title.length > 60 ? title.slice(0, 60) + '\u2026' : title;
+        const nodes = args.spec && Array.isArray(args.spec.nodes) ? args.spec.nodes.length : 0;
+        if (nodes) return nodes + (nodes === 1 ? ' shape' : ' shapes');
+        if (args.raw_svg) return 'raw SVG';
+        return '';
     }
     // Generic fallback so MCP/unknown tools still get a scannable subtitle.
     for (const key of ['path', 'filePath', 'file', 'command', 'query', 'pattern', 'url', 'name', 'description', 'prompt', 'message']) {

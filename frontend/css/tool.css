@@ -7,16 +7,11 @@
 .tool-card {
     border-radius: 6px;
     overflow: hidden;
-    animation: toolSlideIn 0.22s ease-out;
-}
-
-@keyframes toolSlideIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
+    animation: softFadeIn 0.18s ease-out;
 }
 
 .tool-card.tool-complete {
-    animation: toolComplete 0.3s ease-out;
+    animation: softFadeIn 0.24s ease-out;
 }
 
 /* Quiet, transcript-friendly tool surfaces. */
@@ -366,12 +361,7 @@
 
 .tool-body.visible {
     display: block;
-    animation: toolBodyOpen 0.2s ease-out;
-}
-
-@keyframes toolBodyOpen {
-    from { opacity: 0; max-height: 0; }
-    to { opacity: 1; max-height: 2000px; }
+    animation: softFadeIn 0.18s ease-out;
 }
 
 .tool-body-inner {
@@ -601,7 +591,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
-    animation: toolSlideIn 0.22s ease-out;
+    animation: softFadeIn 0.18s ease-out;
 }
 
 .subagent-header {
@@ -932,7 +922,7 @@
     margin: 0 auto 12px;
     border-radius: 8px;
     overflow: hidden;
-    animation: toolSlideIn 0.22s ease-out;
+    animation: softFadeIn 0.18s ease-out;
 }
 
 .coordinator-active {
@@ -986,7 +976,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
-    animation: toolSlideIn 0.22s ease-out;
+    animation: softFadeIn 0.18s ease-out;
 }
 
 .workflow-header {
