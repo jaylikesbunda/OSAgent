@@ -3,6 +3,14 @@ v0.6.2 changes:
 Added:
 * Inline SVG diagrams in chat: ask for a flow, architecture map, state machine, or timeline and it renders as a pan/zoomable, click-to-inspect diagram you can expand, copy, and save through a normal save dialog; diagrams persist with the session across reloads
 
+Changed:
+* Agent prompt reworked against how OpenCode handles gpt-6-class models: replies now lead with the answer and drop the "X, not Y" padding and the running commentary over routine tool calls; "can you…"/"help me…" is treated as a request to do the work, while genuine advice questions still get an answer
+* A message arriving mid-task is now treated as steering the current work instead of a replacement task, so a correction no longer makes the agent drop what it was doing and restart
+* Subagent and coordinator delegation is now opt-in (the user or a loaded skill asks, or the work genuinely will not fit one context) instead of being encouraged for any multi-file job
+* Validation is proportional to the change rather than a mandatory full lint/typecheck/test/build after every edit, and no more tests that just mirror the implementation
+* Safety wording trimmed to the rules that matter now that the runtime enforces them, so replies no longer carry advance risk warnings, permission requests for routine work, or a closing safety summary
+* Installed skills are now listed with their descriptions in the system prompt instead of only a count, so a relevant skill can be loaded without a discovery round-trip
+
 Fixed:
 * OpenAI OAuth sign-in from the desktop app now opens the sign-in page in your system browser and completes automatically, with login credentials sent correctly
 * OpenAI OAuth "Invalid authorize request" fixed by using OpenAI's registered loopback callback (localhost:1455)

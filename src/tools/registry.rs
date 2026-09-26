@@ -921,18 +921,7 @@ impl ToolRegistry {
         // Refresh counts per turn: runtime-authored skills must show up
         // without a restart. `list()` reads the in-memory map; authoring
         // tools call `load_all()` after every save/delete so this is fresh.
-        let skills = loader.list();
-        if skills.is_empty() {
-            // Even with zero skills, advertise authoring so the model knows
-            // it can create one on demand ("make a skill that...").
-            return Some(
-                "# Available Skills\nNo skills installed yet. Call `skill_list` to confirm, `skill` to read one, `skill_action` to run its actions. You can create new skills at runtime with `skill_create` (update with `skill_update`, remove with `skill_delete`) — they apply immediately, no restart.\n".to_string(),
-            );
-        }
-        Some(format!(
-            "# Available Skills\n{} skill(s) installed. Call `skill_list` to browse them by name and description, then `skill` to read instructions (and `skill_action` to run a declared action). You can create new skills at runtime with `skill_create` (update with `skill_update`, remove with `skill_delete`) — they apply immediately, no restart.\n",
-            skills.len()
-        ))
+        Some(format_skill_summary(&loader.list()))
     }
 
     pub fn get_tool_definitions_for_profile(
@@ -1320,11 +1309,99 @@ impl ToolRegistry {
     }
 }
 
+/// Render the installed-skill block for the system prompt.
+///
+/// Name and description go here rather than being left behind `skill_list`: a
+/// model cannot load a skill it does not know exists, so making it spend a
+/// round-trip discovering that a relevant skill is installed is pure overhead.
+/// Verbosity belongs in this block; the tool descriptions stay terse.
+fn format_skill_summary(skills: &[crate::skills::Skill]) -> String {
+    if skills.is_empty() {
+        // Even with zero skills, advertise authoring so the model knows it can
+        // create one on demand ("make a skill that...").
+        return "# Available Skills\nNo skills installed yet. Call `skill_list` to confirm, `skill` to read one, `skill_action` to run its actions. You can create new skills at runtime with `skill_create` (update with `skill_update`, remove with `skill_delete`) — they apply immediately, no restart.\n".to_string();
+    }
+
+    let mut sorted: Vec<&crate::skills::Skill> = skills.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut out = String::from("# Available Skills\nInstalled skills. Load one with `skill` when the task matches its description; `skill_action` runs a declared action.\n\n");
+    for skill in sorted {
+        // Descriptions come from frontmatter, so a stray newline would break the
+        // one-skill-per-line shape the model parses.
+        let description = skill
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if description.is_empty() {
+            out.push_str(&format!("- `{}`\n", skill.name));
+        } else {
+            out.push_str(&format!("- `{}` — {}\n", skill.name, description));
+        }
+    }
+    out.push_str("\nCall `skill_list` for full detail. You can create new skills at runtime with `skill_create` (update with `skill_update`, remove with `skill_delete`) — they apply immediately, no restart.\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ToolOutcome, ToolProfile, ToolResult};
+    use super::{format_skill_summary, ToolOutcome, ToolProfile, ToolResult};
     use crate::agent::provider::{ToolDefinition, ToolFunction};
+    use crate::skills::Skill;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn skill(name: &str, description: &str) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: description.to_string(),
+            content: String::new(),
+            base_dir: PathBuf::new(),
+            config_fields: Vec::new(),
+            actions: Vec::new(),
+            token_refresh: None,
+            scripts: HashMap::new(),
+            references: HashMap::new(),
+            metadata: None,
+        }
+    }
+
+    /// The whole point of the change: a model can only load a skill it can see.
+    #[test]
+    fn skill_block_names_every_installed_skill() {
+        let block = format_skill_summary(&[
+            skill("text-stats", "Count words in text"),
+            skill("link-checker", "Check links"),
+        ]);
+        assert!(block.contains("- `link-checker` — Check links"));
+        assert!(block.contains("- `text-stats` — Count words in text"));
+        // Sorted, so the cached prefix is stable turn to turn.
+        let first = block.find("link-checker").unwrap();
+        let second = block.find("text-stats").unwrap();
+        assert!(first < second);
+    }
+
+    #[test]
+    fn skill_block_flattens_multiline_descriptions() {
+        let block = format_skill_summary(&[skill("wrapped", "first line\nsecond line")]);
+        assert!(block.contains("- `wrapped` — first line second line\n"));
+    }
+
+    #[test]
+    fn skill_block_handles_a_descriptionless_skill() {
+        let block = format_skill_summary(&[skill("bare", "   ")]);
+        assert!(block.contains("- `bare`\n"));
+        assert!(!block.contains("—\n"));
+    }
+
+    #[test]
+    fn empty_skill_block_still_advertises_authoring() {
+        let block = format_skill_summary(&[]);
+        assert!(block.contains("No skills installed yet"));
+        assert!(block.contains("skill_create"));
+    }
 
     fn definitions() -> Vec<ToolDefinition> {
         [

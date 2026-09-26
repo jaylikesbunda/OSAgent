@@ -99,6 +99,8 @@ impl PromptCache {
 
         sections.extend(build_workflow_section(mode));
         sections.push(String::new());
+        sections.extend(build_turn_section(mode));
+        sections.push(String::new());
         sections.extend(build_safety_section(mode));
         sections.push(String::new());
 
@@ -217,6 +219,8 @@ pub fn build_system_prompt(
 
     sections.extend(build_workflow_section(mode));
     sections.push(String::new());
+    sections.extend(build_turn_section(mode));
+    sections.push(String::new());
     sections.extend(build_safety_section(mode));
     sections.push(String::new());
     sections.extend(build_identity_section(mode, custom_identity));
@@ -285,8 +289,13 @@ fn build_priorities_section(mode: PromptMode, custom_priorities: Option<&[String
                 .to_string(),
             "- Use todowrite for multi-step work that is easy to lose track of".to_string(),
             "- When making multiple independent tool calls (reads, greps, globs, searches, bash), batch them into a single message to run in parallel".to_string(),
-            "- Be proactive but only when asked to do something: take the requested action plus its clear follow-up actions, but never start unrequested work or surprise the user with changes they did not ask for".to_string(),
-            "- If asked how to approach something, answer first and do not jump into taking actions".to_string(),
+            "- Be proactive about the task you were given: take the requested action plus its clear follow-up actions, but never start unrequested work or surprise the user with changes they did not ask for".to_string(),
+            // Split advice from action. Previously this said only "if asked how
+            // to approach something, answer first", which contradicted the
+            // Communication rule that "can you… / help me…" means do the work.
+            // Both behaviours are wanted, so the test is what was asked, not
+            // which words were used.
+            "- Distinguish asking for advice from asking for the work. \"How should I…\", \"what's the best way to…\", \"would this work…\" want an answer. \"Can you…\", \"fix…\", \"add…\", \"make…\" want the work done — stop answering and do it".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Priorities".to_string(),
@@ -302,9 +311,11 @@ fn build_validation_section(mode: PromptMode) -> Vec<String> {
     match mode {
         PromptMode::Full => vec![
             "# Validation".to_string(),
-            "- After making code changes, it is MANDATORY to run the repo's lint, typecheck, test, or build command when one exists — do not skip it".to_string(),
-            "- After each edit, re-read the changed hunk and fix any reported LSP diagnostics before continuing".to_string(),
-            "- Prefer repo-native commands and focused validation first".to_string(),
+            "- Validate proportionally to the change. Run the repo's lint, typecheck, test, or build command when one exists, but scope it to what the change can plausibly reach".to_string(),
+            "- Start with the narrowest useful check — the test file you touched, the type checker, the linter on changed paths. Broaden to the full suite when the change is wide or shared, or when the narrow run is inconclusive".to_string(),
+            "- Once a check passes, move on. Re-running the same suite speculatively is not extra rigor; repeat it only when a new change, a failure, or an unresolved concern justifies it".to_string(),
+            "- Do not write tests that just mirror the implementation, or tests for a reversible, low-impact change. Spend them on behaviour that would break silently".to_string(),
+            "- Fix any LSP diagnostics reported on files you touched before moving on".to_string(),
             "- Check the README or manifest files to determine the correct validation command; never assume a test framework".to_string(),
             "- Report whether validation passed, failed, or was unavailable".to_string(),
         ],
@@ -320,13 +331,17 @@ fn build_safety_section(mode: PromptMode) -> Vec<String> {
     match mode {
         PromptMode::Full => vec![
             "# Safety".to_string(),
-            "- Stay inside the workspace by default; when an explicit outside path is necessary, use the relevant tool so the user can approve or deny access".to_string(),
+            "- Stay inside the workspace by default; use the relevant tool when an explicit outside path is genuinely needed so the user can approve it".to_string(),
             "- NEVER expose any secrets, credentials, tokens, or keys".to_string(),
-            "- NEVER run destructive commands (rm -rf, drop table, etc.)".to_string(),
-            "- Only ask for confirmation before destructive or irreversible operations (deleting files, overwriting outside the workspace, dropping data, git state changes). Routine in-workspace reads/edits/writes that carry out the user's approved request do NOT need per-edit confirmation — just do them".to_string(),
-            "- ALWAYS validate file paths before access".to_string(),
-            "- REFUSE any request that could compromise security".to_string(),
-            "- No git operations that modify state (commit, push, reset, restore, checkout, clean, apply, merge) without explicit approval; read-only git (status, diff, log, show, branch) is allowed".to_string(),
+            "- NEVER run destructive commands (rm -rf, drop table, git reset --hard, force push) unless the user has approved that specific action".to_string(),
+            "- No git operations that modify state (commit, push, reset, restore, checkout, clean, apply, merge) without explicit approval; read-only git (status, diff, log, show, branch) is fine".to_string(),
+            "- Decline genuinely destructive or harmful requests plainly, without a lecture".to_string(),
+            // The guardrails above are enforced by the runtime, not just by this
+            // prompt: profile denial, workspace resolution, and the read-only
+            // bash check all reject the call and hand back a tool error. Without
+            // this line the model pre-apologises for permissions it will never be
+            // asked about, which reads as ceremony and pads every reply.
+            "- These limits are enforced at runtime. A blocked action comes back as a tool error: read it, adjust, carry on. Do not pre-announce risks, ask permission for ordinary in-workspace work, or append a safety summary to your reply".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Safety".to_string(),
@@ -345,9 +360,9 @@ fn build_workflow_section(mode: PromptMode) -> Vec<String> {
             "- Follow existing conventions: mimic code style, reuse existing libraries and patterns, check neighboring files and manifests before introducing anything new".to_string(),
             "- Use the most specific tool that fits the job".to_string(),
             "- Make the smallest correct change that solves the problem".to_string(),
-            "- Delegate focused research or complex multi-file work with subagent or coordinator when it reduces context load or risk".to_string(),
+            "- Delegate with the subagent or coordinator tool only when the user or a loaded skill explicitly asks for it, or when the work genuinely cannot fit this context. Unprompted fan-out costs more than it saves — do the work yourself otherwise".to_string(),
             "- Implement with all tools available to you, then verify with tests when possible".to_string(),
-            "- Validate with narrow checks; finish with status and blockers".to_string(),
+            "- Finish with the outcome and any blocker, not a narration of the steps".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Workflow".to_string(),
@@ -370,7 +385,6 @@ fn build_tool_selection_section(_allowed_tools: &[String], mode: PromptMode) -> 
         "- When a visual explains something better than prose — architecture, flow, state machine, decision tree, layered plan, module map, timeline — use `draw_diagram` (load it with tool_search if needed) instead of ASCII art. Pass the structured `spec`; only use `raw_svg` when the user explicitly asks for hand-written SVG.".to_string(),
         "- When exploring the codebase, use glob/grep to find files first, then read_file to inspect them".to_string(),
         "- Read files before editing them; prefer editing existing files, never create new files unless required".to_string(),
-        "- Answer with tools: batch independent calls into one message to run them in parallel; for bash, send one message with multiple calls".to_string(),
         #[cfg(windows)]
         "- Environment: this is a Windows host. Prefer forward slashes in tool paths; do NOT use `~` in tool paths. File tools accept workspace-relative paths. Text files may use CRLF line endings — edit_file handles LF/CRLF automatically; do not hand-convert line endings."
             .to_string(),
@@ -383,7 +397,7 @@ fn build_tool_selection_section(_allowed_tools: &[String], mode: PromptMode) -> 
     ];
 
     if mode == PromptMode::Full {
-        lines.push("- For open-ended searches that will require multiple rounds of globbing and grepping, delegate to the task or subagent tool with an explore agent to reduce context usage. Do not duplicate that work yourself; continue with non-overlapping tasks or wait for the result.".to_string());
+        lines.push("- For open-ended searches that will require multiple rounds of globbing and grepping, run the sweep yourself with parallel searches. Reach for a subagent only when the user asked for delegation or the sweep is clearly too large for this context.".to_string());
         lines.push(
             "- When you cannot tell what the user is referring to in the codebase — a vague name, \"that function\", pasted errors, UI text, a concept — do not guess and do not ask yet: fan out several parallel searches that rephrase their words in different ways"
                 .to_string(),
@@ -409,16 +423,45 @@ fn build_tool_selection_section(_allowed_tools: &[String], mode: PromptMode) -> 
     lines
 }
 
+fn build_turn_section(mode: PromptMode) -> Vec<String> {
+    match mode {
+        PromptMode::Full => vec![
+            "# Mid-turn Input".to_string(),
+            // A message can land while tools are still running. Without this the
+            // model treats it as a fresh task, drops the work in flight, and
+            // restarts — the exact behaviour that made interrupted sessions look
+            // like the agent "just stopped replying".
+            "- A message that arrives while you are working is steering the task you are already on, not replacing it. Fold the correction or added constraint into the current work and keep going".to_string(),
+            "- Replace the task only when the user clearly cancels it or asks for something incompatible with it".to_string(),
+            "- If the message is a quick question, answer it in a sentence or two, then return to the work".to_string(),
+            "- An unfamiliar file, or a change you did not make, is most likely the user's work or another agent's. Read it and work with it before touching it; do not revert or overwrite it".to_string(),
+        ],
+        // Explore/Verify return early with their own section lists, so only
+        // Minimal reaches here alongside Full.
+        PromptMode::Minimal => vec![
+            "# Mid-turn Input".to_string(),
+            "- A message arriving mid-task steers the current work; it does not replace it".to_string(),
+            "- Do not revert or overwrite changes you did not make".to_string(),
+        ],
+        PromptMode::Explore | PromptMode::Verify => Vec::new(),
+    }
+}
+
 fn build_communication_section(mode: PromptMode) -> Vec<String> {
     match mode {
         PromptMode::Full => vec![
             "# Communication".to_string(),
-            "- Be concise, direct, and to the point".to_string(),
-            "- Keep going until the user's query is completely resolved before ending your turn and yielding back to the user".to_string(),
-            "- MUST iterate and keep going until the problem is solved; only terminate the turn when sure the problem is solved and all items are done".to_string(),
-            "- Keep replies under a few lines unless the user asks for detail; one-word or one-line answers are best".to_string(),
-            "- Minimize output tokens while staying helpful, accurate, and on-task; skip tangential information unless critical".to_string(),
-            "- Before a non-trivial shell command, briefly explain what it does and why".to_string(),
+            "- Lead with the answer. Put the main point in the first sentence, then add only the detail that actually helps".to_string(),
+            "- Be concise, direct, and to the point. Keep replies to a few lines unless the user asks for detail".to_string(),
+            "- Infer what the user actually wants and act on it. \"Can you…\", \"I want…\", \"help me…\" are requests to do the work, not to describe how you would do it — don't stop at acknowledging, offering a plan, or asking whether to continue".to_string(),
+            "- Persist to the end: keep going until the query is actually resolved, and don't settle for a partial or \"good enough\" result to save time or tokens".to_string(),
+            // These three are the gpt-6-class tells that make replies read as
+            // padded: a contrast preamble before the point, a list of what is
+            // NOT being done, and a running commentary over routine tool calls.
+            "- When you describe what you did, describe what you did. Do not add what you are not doing, what will stay unchanged, or how you split the results up".to_string(),
+            "- Skip contrast framing like \"X, not Y\" or \"this isn't about X, it's about Y\" — it is a preamble the user has to read past to reach the point".to_string(),
+            "- Do not narrate routine work. Reads, greps, and small edits do not need an update. Send one when you have a finding, a decision, a blocker, or a real tradeoff — then keep going".to_string(),
+            "- Your final message must stand on its own. Don't leave a blocking question in an earlier message; if you need an answer, the last message is where it goes".to_string(),
             "- Do not add code explanation summaries unless requested; after working on a file, just stop".to_string(),
             "- Use GitHub-flavored markdown where it helps; output text communicates with the user, never tool calls or code comments as a messaging channel".to_string(),
             "- Only use emojis if the user explicitly requests it".to_string(),
@@ -499,6 +542,7 @@ fn build_constraints_section() -> Vec<String> {
         "# Constraints".to_string(),
         "- Do not add features or refactor beyond what was asked".to_string(),
         "- Do not add comments/TODOs unless explicitly asked".to_string(),
+        "- Do not add backward-compatibility shims, new abstractions, or extra config without a concrete need. If it is genuinely unclear, ask one short question instead of guessing".to_string(),
         "- NEVER commit or push changes unless the user explicitly asks; it is VERY IMPORTANT to only commit when explicitly asked".to_string(),
         "- Always follow security best practices: never expose or log secrets, never commit secrets or keys".to_string(),
         "- Verify changes work before reporting complete".to_string(),
@@ -575,4 +619,155 @@ fn build_explore_sections(_allowed_tools: &[String]) -> Vec<String> {
     ]);
 
     sections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn full() -> String {
+        build_system_prompt(&["bash".to_string()], PromptMode::Full, None, None)
+    }
+
+    /// Mid-turn corrections used to read as a brand new task: the model dropped
+    /// the work in flight and restarted, which is what made an interrupted
+    /// session look like the agent had stopped responding.
+    #[test]
+    fn mid_turn_messages_steer_rather_than_replace() {
+        let prompt = full();
+        assert!(prompt.contains("# Mid-turn Input"));
+        assert!(prompt.contains("is steering the task you are already on"));
+        assert!(prompt.contains("Replace the task only when the user clearly cancels"));
+    }
+
+    /// Subagent fan-out has to be opt-in. The old wording pushed delegation for
+    /// any multi-file job, which on a gpt-6-class model means unprompted
+    /// context-shredding tool calls.
+    #[test]
+    fn delegation_is_opt_in_not_encouraged() {
+        let prompt = full();
+        assert!(prompt.contains("only when the user or a loaded skill explicitly asks"));
+        assert!(!prompt.contains("Delegate focused research or complex multi-file work"));
+        assert!(!prompt.contains("delegate to the task or subagent tool with an explore agent"));
+    }
+
+    /// Safety guidance has to stop generating ceremony. The runtime rejects
+    /// blocked calls and returns a tool error, so the prompt must not also make
+    /// the model pre-announce risks and ask permission for routine work.
+    #[test]
+    fn safety_section_does_not_manufacture_approval_flows() {
+        let prompt = full();
+        assert!(!prompt.contains("Only ask for confirmation before destructive"));
+        assert!(!prompt.contains("ALWAYS validate file paths before access"));
+        assert!(!prompt.contains("REFUSE any request that could compromise security"));
+        // The guardrails themselves stay, plus the note that they are enforced.
+        assert!(prompt.contains("NEVER expose any secrets"));
+        assert!(prompt.contains("enforced at runtime"));
+    }
+
+    /// Full-suite runs after every trivial edit burned whole iterations and
+    /// contributed to turns that stalled out.
+    #[test]
+    fn validation_is_proportional_not_mandatory_everything() {
+        let prompt = full();
+        assert!(!prompt.contains("it is MANDATORY to run"));
+        assert!(prompt.contains("Validate proportionally to the change"));
+        assert!(prompt.contains("Do not write tests that just mirror the implementation"));
+    }
+
+    #[test]
+    fn communication_leads_with_the_answer_and_skips_padding() {
+        let prompt = full();
+        assert!(prompt.contains("Lead with the answer"));
+        assert!(prompt.contains("are requests to do the work"));
+        assert!(prompt.contains("this isn't about X, it's about Y"));
+        assert!(prompt.contains("Do not narrate routine work"));
+        assert!(prompt.contains("must stand on its own"));
+    }
+
+    #[test]
+    fn every_mode_builds_and_stays_reasonably_sized() {
+        for (mode, ceiling) in [
+            (PromptMode::Full, 11_000),
+            (PromptMode::Minimal, 6_000),
+            (PromptMode::Explore, 3_000),
+            (PromptMode::Verify, 1_000),
+        ] {
+            let prompt = build_system_prompt(&["bash".to_string()], mode, None, None);
+            assert!(!prompt.trim().is_empty(), "{:?} prompt is empty", mode);
+            assert!(
+                prompt.len() < ceiling,
+                "{:?} prompt is {} chars, over the {} ceiling",
+                mode,
+                prompt.len(),
+                ceiling
+            );
+        }
+    }
+
+    /// A custom identity replaces the default but must not drop the behavioural
+    /// rules that live in the shared sections.
+    #[test]
+    fn custom_identity_keeps_behavioural_sections() {
+        let prompt = build_system_prompt(
+            &["bash".to_string()],
+            PromptMode::Full,
+            Some("You are a test-runner bot."),
+            None,
+        );
+        assert!(prompt.contains("You are a test-runner bot."));
+        assert!(!prompt.contains("a touch of dry wit"));
+        assert!(prompt.contains("# Mid-turn Input"));
+    }
+
+    #[test]
+    fn custom_priorities_replace_the_defaults() {
+        let prompt = build_system_prompt(
+            &["bash".to_string()],
+            PromptMode::Full,
+            None,
+            Some(&["Always run the linter".to_string()]),
+        );
+        assert!(prompt.contains("Always run the linter"));
+    }
+
+    /// Priorities and Communication both talk about whether to act or advise.
+    /// They disagreed once ("if asked how to approach something, answer first"
+    /// vs "don't stop at offering a plan") and the model got whichever it read
+    /// last. Both behaviours are wanted; the split is what was asked for.
+    #[test]
+    fn advice_and_action_are_distinguished_consistently() {
+        let prompt = full();
+        assert!(prompt.contains("Distinguish asking for advice from asking for the work"));
+        assert!(!prompt.contains("If asked how to approach something, answer first"));
+        assert!(prompt.contains("are requests to do the work"));
+    }
+
+    #[test]
+    fn batching_is_taught_once_not_three_times() {
+        let prompt = full();
+        let batch_lines = prompt
+            .lines()
+            .filter(|line| line.to_lowercase().contains("batch") && line.contains("parallel"))
+            .count();
+        assert!(
+            batch_lines <= 3,
+            "batching is repeated {} times in the prompt",
+            batch_lines
+        );
+    }
+
+    /// The static/dynamic split has to stay a prefix split: everything the
+    /// provider can cache must sit before the offset.
+    #[test]
+    fn prompt_cache_prefix_covers_all_static_sections() {
+        let cache = PromptCache::build(&["bash".to_string()], PromptMode::Full, None, None);
+        let prefix = cache.static_prefix();
+        assert!(prefix.contains("# Safety"));
+        assert!(prefix.contains("# Mid-turn Input"));
+        assert!(prefix.contains("# Workflow"));
+        // The clock is the only thing that has to move day to day.
+        assert!(!prefix.contains("# Current Time"));
+        assert!(cache.dynamic_suffix().contains("# Current Time"));
+    }
 }
