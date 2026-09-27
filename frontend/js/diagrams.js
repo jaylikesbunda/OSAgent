@@ -975,9 +975,9 @@ OSA.Diagram = (function() {
         viewport.setAttribute('role', 'application');
         viewport.setAttribute('aria-label', 'Diagram canvas. Drag to pan, ctrl+wheel to zoom.');
         // The SVG carries the scene viewBox, so the browser already fits the
-        // diagram to the viewport. Zoom/pan therefore rides on a CSS transform
-        // of the element rather than an inner transform, which would otherwise
-        // scale the same content twice.
+        // diagram to the viewport. Zoom resizes the element (see applyTransform)
+        // and pan is a plain translate, so nothing is ever scaled from a bitmap
+        // and an inner transform — which would compound the scale — is avoided.
         viewport.style.background = scene.palette.canvas;
         viewport.appendChild(scene.svg);
         card.appendChild(viewport);
@@ -994,12 +994,47 @@ OSA.Diagram = (function() {
 
         host.appendChild(card);
 
-        const state = { scale: 1, x: 0, y: 0, node: null, viewportHeight: 0 };
+        const state = { scale: 1, x: 0, y: 0, node: null, viewportHeight: 0, fit: null };
         const pointers = new Map();
 
+        // Size of the scene at 100%, and the centring offset that
+        // `preserveAspectRatio` used to apply for us.
+        //
+        // Zoom used to be a CSS `scale()` on the <svg>, which magnifies a bitmap
+        // the browser had already rasterised at viewport size — so every step
+        // past 100% was visibly soft. Growing the element instead makes the SVG
+        // lay out at the larger size and re-render its vectors at that
+        // resolution, so the diagram stays sharp at 600%. Pan is still a plain
+        // translate; the scale now lives in the width/height attributes.
+        //
+        // Cached in `state.fit` rather than measured per frame: reading
+        // getBoundingClientRect() inside applyTransform would force a layout on
+        // every pointermove of a pan. Only a resize changes it.
+        function refreshFit() {
+            const rect = viewport.getBoundingClientRect();
+            if (!rect.width || !rect.height || !scene.width || !scene.height) return null;
+            const fit = Math.min(rect.width / scene.width, rect.height / scene.height);
+            const width = scene.width * fit;
+            const height = scene.height * fit;
+            state.fit = {
+                width: width,
+                height: height,
+                offsetX: (rect.width - width) / 2,
+                offsetY: (rect.height - height) / 2,
+            };
+            return state.fit;
+        }
+
         function applyTransform() {
+            const fit = state.fit;
+            if (fit) {
+                // Bounded by MAX_SCALE times the viewport, since `fit` is the
+                // meet-fit of the scene into the viewport.
+                scene.svg.setAttribute('width', String(Math.round(fit.width * state.scale)));
+                scene.svg.setAttribute('height', String(Math.round(fit.height * state.scale)));
+            }
             scene.svg.style.transformOrigin = '0 0';
-            scene.svg.style.transform = 'translate(' + state.x + 'px,' + state.y + 'px) scale(' + state.scale + ')';
+            scene.svg.style.transform = 'translate(' + state.x + 'px,' + state.y + 'px)';
             zoomLabel.textContent = Math.round(state.scale * 100) + '%';
         }
 
@@ -1008,12 +1043,13 @@ OSA.Diagram = (function() {
         }
 
         function fitToView() {
-            // The viewBox already fits the scene, so "fit" is the identity
-            // transform. It is still worth re-running after a resize because
-            // the caller may have zoomed or panned in the meantime.
+            // At 100% the element is exactly the meet-fit of the scene in the
+            // viewport, so "fit" is the identity zoom plus whatever centring
+            // offset that fit implies.
             state.scale = 1;
-            state.x = 0;
-            state.y = 0;
+            const fit = state.fit || refreshFit();
+            state.x = fit ? fit.offsetX : 0;
+            state.y = fit ? fit.offsetY : 0;
             applyTransform();
         }
 
@@ -1152,6 +1188,7 @@ OSA.Diagram = (function() {
             else if (action === 'zoom-out') zoomAt(0.8);
             else if (action === 'fit') {
                 autoSizeViewport();
+                refreshFit();
                 fitToView();
             } else if (action === 'copy') {
                 const text = standaloneSvgString();
@@ -1175,7 +1212,13 @@ OSA.Diagram = (function() {
                 button.textContent = expanded ? 'Collapse' : 'Expand';
                 // Leaving expanded mode has to hand the inline height back.
                 if (!expanded) autoSizeViewport();
-                requestAnimationFrame(fitToView);
+                // The height just changed (CSS when expanding, ours when
+                // collapsing), so the cached fit is stale. Re-read it inside the
+                // frame, after layout, or the diagram is fitted to the old box.
+                requestAnimationFrame(function() {
+                    refreshFit();
+                    fitToView();
+                });
             }
         });
 
@@ -1265,6 +1308,7 @@ OSA.Diagram = (function() {
         // Size and fit once the element has a real box, and again on resize.
         requestAnimationFrame(function() {
             autoSizeViewport();
+            refreshFit();
             fitToView();
         });
         const cleanup = [];
@@ -1273,6 +1317,10 @@ OSA.Diagram = (function() {
             // output, and observing it would feed back on itself.
             const observer = new window.ResizeObserver(function() {
                 autoSizeViewport();
+                // After, not before: autoSizeViewport may have just changed the
+                // height, and the expanded layout takes its height from CSS, so
+                // the cached fit has to be re-read either way.
+                refreshFit();
                 fitToView();
             });
             observer.observe(card);
@@ -1280,6 +1328,7 @@ OSA.Diagram = (function() {
         } else {
             const onResize = function() {
                 autoSizeViewport();
+                refreshFit();
                 fitToView();
             };
             window.addEventListener('resize', onResize);

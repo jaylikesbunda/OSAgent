@@ -142,8 +142,12 @@
 
 .diagram-svg {
     display: block;
-    width: 100%;
-    height: 100%;
+    /* The width/height *attributes* drive the rendered size so that zooming
+       grows the element and the browser re-rasterises the vectors, instead of
+       scaling an already-rasterised bitmap. Setting width/height here would
+       win over the attributes and reintroduce the blur. */
+    max-width: none;
+    max-height: none;
     will-change: transform;
 }
 

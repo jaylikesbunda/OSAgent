@@ -601,3 +601,59 @@ test('slugify produces a safe download filename', () => {
     assert.equal(OSA.Diagram.slugify('Auth Flow / v2!'), 'auth-flow-v2');
     assert.equal(OSA.Diagram.slugify(''), 'diagram');
 });
+
+test('zoom resizes the svg element instead of scaling a rasterised bitmap', () => {
+    // Zoom used to be `transform: scale(k)` on the <svg>, which magnifies an
+    // already-rasterised bitmap and looked soft at every step past 100%. The
+    // element's width/height attributes now carry the zoom, so the browser
+    // re-renders the vectors at the new size.
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    OSA.Diagram.mount(host, spec(), {});
+    const card = host.querySelector('.diagram-card');
+    const viewport = card.querySelector('.diagram-viewport');
+    const svg = card.querySelector('.diagram-svg');
+
+    // happy-dom has no layout engine, so give the viewport a real box and
+    // re-fit now that it does.
+    const VIEWPORT_W = 600;
+    const VIEWPORT_H = 300;
+    viewport.getBoundingClientRect = () => ({
+        width: VIEWPORT_W, height: VIEWPORT_H, left: 0, top: 0, right: VIEWPORT_W, bottom: VIEWPORT_H,
+    });
+
+    card.querySelector('[data-action="fit"]').click();
+
+    const atHundred = {
+        w: Number(svg.getAttribute('width')),
+        h: Number(svg.getAttribute('height')),
+    };
+    // Meet-fit of the scene into the box: one axis is exact, the other is not.
+    assert.ok(atHundred.w > 0 && atHundred.h > 0, 'svg is sized at 100%');
+    assert.ok(
+        Math.abs(atHundred.w - VIEWPORT_W) < 1 || Math.abs(atHundred.h - VIEWPORT_H) < 1,
+        `fit should touch an edge, got ${atHundred.w}x${atHundred.h} in ${VIEWPORT_W}x${VIEWPORT_H}`,
+    );
+    assert.equal(
+        svg.style.transform.includes('scale'),
+        false,
+        'the transform must not scale a bitmap: ' + svg.style.transform,
+    );
+
+    card.querySelector('[data-action="zoom-in"]').click();
+
+    const zoomed = {
+        w: Number(svg.getAttribute('width')),
+        h: Number(svg.getAttribute('height')),
+    };
+    assert.equal(svg.style.transform.includes('scale'), false, 'still no bitmap scaling');
+    assert.ok(zoomed.w > atHundred.w, `zoom-in should grow the element: ${atHundred.w} -> ${zoomed.w}`);
+    assert.ok(zoomed.h > atHundred.h, `zoom-in should grow the element: ${atHundred.h} -> ${zoomed.h}`);
+    // 1.25x per step, within a pixel of rounding.
+    assert.ok(Math.abs(zoomed.w / atHundred.w - 1.25) < 0.02, `expected 1.25x, got ${zoomed.w / atHundred.w}`);
+
+    card.querySelector('[data-action="zoom-out"]').click();
+    const back = Number(svg.getAttribute('width'));
+    assert.ok(Math.abs(back - atHundred.w) <= 1, `zoom-out should return to the fit width, got ${back}`);
+});
+
