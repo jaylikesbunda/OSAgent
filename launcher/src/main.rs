@@ -4621,7 +4621,8 @@ fn check_and_apply_pending_update(app_handle: &AppHandle) -> bool {
             add_log(
                 &state,
                 "error",
-                "Installer updates are not supported on this platform; intent was preserved",
+                "Installer updates are not supported on this platform; intent was preserved"
+                    .to_string(),
             );
             false
         }

@@ -74,6 +74,17 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --features discord -- -D warnings
 
+      # The launcher and updater are separate crates, so the root `cargo clippy`
+      # above never sees them. They also carry `#[cfg]`-gated branches that only
+      # compile on the release runners, which is how a `&str`/`String` mismatch
+      # in the non-Windows path sat on main with a green PR. `quick` already
+      # installs the Linux system libraries, so checking both crates here costs
+      # one compile and catches that whole class on every push and PR.
+      - name: Check launcher and updater crates
+        run: |
+          cargo clippy --manifest-path launcher/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path updater/Cargo.toml --all-targets -- -D warnings
+
   test:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
