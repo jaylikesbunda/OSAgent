@@ -2290,6 +2290,9 @@ async fn stream_download(
     Ok(())
 }
 
+// Every caller is Windows-only (whisper.exe / piper.exe archives), so keep this
+// out of non-Windows builds instead of tripping dead_code under -D warnings.
+#[cfg(windows)]
 fn extract_zip_powershell(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new("powershell")
         .args([
