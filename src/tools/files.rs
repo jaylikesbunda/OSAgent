@@ -1064,12 +1064,18 @@ impl Tool for ReadFileTool {
         // Batch mode: read up to 10 paths in one call (Pi/Codex-style fan-in).
         // Each path is validated independently; one bad path fails only its
         // section, not the whole call.
-        if let Some(paths) = args.get("paths").and_then(|v| v.as_array()) {
-            if paths.is_empty() {
-                return Err(OSAgentError::ToolExecution(
-                    "Missing 'filePath' parameter (or compatibility alias 'path')".to_string(),
-                ));
-            }
+        //
+        // An *empty* `paths` array is not batch mode. The schema advertises
+        // `paths`, so models routinely send `"paths": []` alongside a perfectly
+        // good `filePath`; treating the empty array as batch mode hijacked the
+        // single-read path and failed the call with a message about the very
+        // parameter that was present. Empty means "not batch" — fall through
+        // so `filePath`/`path` decides.
+        let batch_paths = args
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .filter(|paths| !paths.is_empty());
+        if let Some(paths) = batch_paths {
             if paths.len() > 10 {
                 return Err(OSAgentError::ToolExecution(
                     "read_file batch supports at most 10 paths per call".to_string(),
@@ -2143,6 +2149,73 @@ mod tests {
         assert!(result.output.contains("3: c"));
         assert!(result.output.contains("Use offset=4 to continue"));
         assert_eq!(result.metadata["kind"], "file");
+    }
+
+    /// `paths` is advertised in the schema, so models send `"paths": []`
+    /// alongside a valid `filePath`. The empty array used to be taken as batch
+    /// mode, which failed the call with an error naming the very parameter that
+    /// was present — and the model then burned turns retrying.
+    #[tokio::test]
+    async fn empty_paths_array_falls_back_to_single_read() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("sample.txt"), "a\nb\nc\n").expect("write file");
+
+        let config = config_for_workspace(&dir.path().to_string_lossy());
+        let tool = ReadFileTool::new(config, Arc::new(FileReadCache::with_default_capacity()));
+
+        let result = Tool::execute_result(
+            &tool,
+            json!({
+                "filePath": "sample.txt",
+                "path": "",
+                "paths": [],
+                "limit": 2
+            }),
+        )
+        .await
+        .expect("read must not fail on an empty paths array");
+
+        assert!(result.output.contains("1: a"));
+        assert_eq!(result.metadata["kind"], "file");
+    }
+
+    /// Batch mode still has to work when `paths` is genuinely populated.
+    #[tokio::test]
+    async fn populated_paths_array_still_batches() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("one.txt"), "first\n").expect("write one");
+        std::fs::write(dir.path().join("two.txt"), "second\n").expect("write two");
+
+        let config = config_for_workspace(&dir.path().to_string_lossy());
+        let tool = ReadFileTool::new(config, Arc::new(FileReadCache::with_default_capacity()));
+
+        let result = Tool::execute_result(&tool, json!({ "paths": ["one.txt", "two.txt"] }))
+            .await
+            .expect("batch read");
+
+        assert!(result.output.contains("=== one.txt ==="));
+        assert!(result.output.contains("first"));
+        assert!(result.output.contains("=== two.txt ==="));
+        assert_eq!(result.metadata["kind"], "batch");
+        assert_eq!(result.metadata["count"], 2);
+    }
+
+    /// With neither `paths` nor a path parameter there is genuinely nothing to
+    /// read, and the error must still say so.
+    #[tokio::test]
+    async fn no_path_at_all_still_reports_the_missing_parameter() {
+        let dir = tempdir().expect("tempdir");
+        let config = config_for_workspace(&dir.path().to_string_lossy());
+        let tool = ReadFileTool::new(config, Arc::new(FileReadCache::with_default_capacity()));
+
+        let err = Tool::execute_result(&tool, json!({ "paths": [], "limit": 5 }))
+            .await
+            .expect_err("must reject a call with no target");
+        assert!(
+            err.to_string().contains("Missing 'filePath' parameter"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[tokio::test]

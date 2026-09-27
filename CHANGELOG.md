@@ -18,7 +18,9 @@ Fixed:
 * Codex models no longer fail on "Unknown parameter: 'stream_options.include_usage'"; any other rejected parameter is stripped and retried automatically
 * Codex empty replies fixed: streamed text and tool calls survive a differently-shaped completion, streamed argument fragments merge by item id with the authoritative done-event winning, nameless calls are dropped before they can poison history, and refusals surface as the reply
 * Codex thinking panel now shows reasoning summaries (requested with `summary: "auto"`, including summary done-events)
-* Sessions breaking with "No tool output found for function call ..." after an interrupted or cancelled run: a cancelled parallel tool batch now records its results, and any request whose history has a tool call without a result (or a result without a call) is repaired before it is sent — including sessions already broken before the update
+* `read_file` failing with "Missing 'filePath' parameter" even though the path was supplied: sending `"paths": []` alongside a valid `filePath` no longer hijacks the call into batch mode
+* One-shot scheduled jobs staying enabled after they ran: the "disable on completion" flag was bound to the SQL `CASE` inverted, so a finished job was marked completed but still listed as enabled forever
+* Sessions breaking with "No tool output found for function call ..." after an interrupted or cancelled run, or after any `batch` call: a `batch` result is now recorded in the session history like every other tool (it previously left its call permanently unanswered, which invalidated every later request), a cancelled parallel tool batch records its results, and any request whose history has a tool call without a result (or a result without a call) is repaired before it is sent — including sessions already broken before the update
 
 Changed:
 * Smoother update checks, downloads, and install progress

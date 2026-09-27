@@ -3102,51 +3102,57 @@ impl AgentRuntime {
                             self.storage.log_audit(audit_entry)?;
                         }
 
-                        if tool_call.name != "batch" {
-                            let tool_message = Self::summarize_tool_output_for_context(
-                                &tool_call.name,
-                                tool_result.outcome,
-                                &output,
-                            );
-                            let mut tool_meta = serde_json::json!({
-                                "tool_name": tool_call.name,
-                                "success": success,
-                                "tool_result": {
-                                    "title": tool_result.title,
-                                    "metadata": tool_result.metadata,
-                                }
-                            });
-                            if !success {
-                                if let Some(err) = &error_detail {
-                                    tool_meta["error_message"] = serde_json::json!(err);
+                        // Every function call needs a matching result in the
+                        // recorded history. This used to skip `batch`, which
+                        // left its `function_call` permanently unanswered: the
+                        // sub-tools report through the event bus (under their
+                        // own `batch-*` ids) and never become messages, so
+                        // nothing else supplied the result. The Responses API
+                        // rejects that history outright ("No tool output found
+                        // for function call ...") and every later request in the
+                        // session inherits the breakage.
+                        let tool_message = Self::summarize_tool_output_for_context(
+                            &tool_call.name,
+                            tool_result.outcome,
+                            &output,
+                        );
+                        let mut tool_meta = serde_json::json!({
+                            "tool_name": tool_call.name,
+                            "success": success,
+                            "tool_result": {
+                                "title": tool_result.title,
+                                "metadata": tool_result.metadata,
+                            }
+                        });
+                        if !success {
+                            if let Some(err) = &error_detail {
+                                tool_meta["error_message"] = serde_json::json!(err);
+                            }
+                        }
+                        session.messages.push(Message::tool_result_with_metadata(
+                            tool_call.id.clone(),
+                            tool_message,
+                            tool_meta,
+                        ));
+                        if !tool_result.attachments.is_empty() {
+                            if let Some(tool_msg) = session.messages.last_mut() {
+                                for attachment in &tool_result.attachments {
+                                    tool_msg.images.push(MessageImage {
+                                        filename: attachment.filename.clone(),
+                                        mime: attachment.mime.clone(),
+                                        data_url: attachment.data_url.clone(),
+                                    });
                                 }
                             }
-                            session.messages.push(Message::tool_result_with_metadata(
-                                tool_call.id.clone(),
-                                tool_message,
-                                tool_meta,
-                            ));
-                            if !tool_result.attachments.is_empty() {
-                                if let Some(tool_msg) = session.messages.last_mut() {
-                                    for attachment in &tool_result.attachments {
-                                        tool_msg.images.push(MessageImage {
-                                            filename: attachment.filename.clone(),
-                                            mime: attachment.mime.clone(),
-                                            data_url: attachment.data_url.clone(),
-                                        });
-                                    }
-                                }
-                            }
+                        }
 
-                            // Advisory repeat-call nudge travels as its
-                            // own user-role message so the tool result
-                            // above stays the tool's auditable output.
-                            if let Some(reminder) = repeat_reminder {
-                                session.messages.push(Message::synthetic_user(
-                                    reminder,
-                                    "repeat_tool_reminder",
-                                ));
-                            }
+                        // Advisory repeat-call nudge travels as its
+                        // own user-role message so the tool result
+                        // above stays the tool's auditable output.
+                        if let Some(reminder) = repeat_reminder {
+                            session
+                                .messages
+                                .push(Message::synthetic_user(reminder, "repeat_tool_reminder"));
                         }
                     }
                 }

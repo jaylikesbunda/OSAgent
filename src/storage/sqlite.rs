@@ -3201,14 +3201,20 @@ impl SqliteStorage {
                     "UPDATE scheduled_jobs
                      SET last_run_at = ?1, next_run_at = ?2, failure_count = 0,
                          attempt_count = 0, run_state = ?3,
-                         enabled = CASE WHEN ?4 = 1 THEN 0 ELSE enabled END,
+                         enabled = CASE WHEN ?4 THEN 0 ELSE enabled END,
                          last_error = NULL
                      WHERE id = ?5",
+                    // Bind `disable` itself rather than a hand-rolled 0/1
+                    // sentinel. The sentinel used to be inverted
+                    // (`if disable { 0 } else { 1 }`), so a finished one-shot
+                    // job kept `enabled = 1` and stayed in the enabled-jobs
+                    // list forever, only held back from re-running by the
+                    // `run_state = 'scheduled'` guard on claim.
                     params![
                         Utc::now().timestamp(),
                         next_run.timestamp(),
                         if disable { "completed" } else { "scheduled" },
-                        if disable { 0 } else { 1 },
+                        disable,
                         id,
                     ],
                 )
@@ -3400,6 +3406,47 @@ mod pool_tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].message, "Check the oven");
         assert_eq!(latest_id, notifications[0].id);
+        cleanup(&path);
+    }
+
+    /// The other side of `disable`: a recurring job that runs successfully must
+    /// stay enabled and go back to `scheduled`. This is the branch that was
+    /// accidentally taken by one-shot jobs when the sentinel was inverted, so
+    /// pin both directions.
+    #[test]
+    fn a_successful_recurring_job_stays_enabled() {
+        let (storage, path) = temp_storage();
+        let mut job = ScheduledJob::new(
+            "every 5m".to_string(),
+            "Check the oven".to_string(),
+            "reminder".to_string(),
+            None,
+        );
+        job.next_run_at = Utc::now() - chrono::Duration::seconds(1);
+        storage.create_scheduled_job(&job).expect("create job");
+
+        assert!(storage
+            .claim_scheduled_job(&job.id, Utc::now(), Utc::now())
+            .expect("claim"));
+
+        // disable = false: the scheduler passes `success && is_one_shot()`.
+        storage
+            .finish_scheduled_job(
+                &job.id,
+                true,
+                Utc::now() + chrono::Duration::minutes(5),
+                false,
+                false,
+                None,
+            )
+            .expect("finish");
+
+        let finished = storage
+            .get_scheduled_job(&job.id)
+            .expect("get")
+            .expect("job");
+        assert_eq!(finished.run_state, "scheduled");
+        assert!(finished.enabled, "a recurring job must stay enabled");
         cleanup(&path);
     }
 
