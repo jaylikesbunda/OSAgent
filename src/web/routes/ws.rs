@@ -156,6 +156,7 @@ async fn handle_socket(socket: WebSocket, agent: Arc<AgentRuntime>) {
                             .enqueue_message(&session_id, &message_id, &content, &[], None, &[])
                             .await
                             .and_then(|(queue_item, created)| {
+                                agent.resume_session_queue(&session_id);
                                 let started = agent.clone().spawn_next_queued_message_run(
                                     session_id.clone(),
                                     "websocket".to_string(),
@@ -191,8 +192,14 @@ async fn handle_socket(socket: WebSocket, agent: Arc<AgentRuntime>) {
                         request_id,
                         session_id,
                     } => {
-                        agent.cancel_session(&session_id);
-                        agent.cancel_subagents_for_parent(&session_id).await;
+                        if let Err(err) = agent.stop_session(&session_id).await {
+                            let _ = out_tx.send(ServerMessage::RpcError {
+                                request_id,
+                                code: -32000,
+                                error: err.to_string(),
+                            });
+                            continue;
+                        }
                         let _ = out_tx.send(ServerMessage::RpcResult {
                             request_id,
                             result: serde_json::json!({

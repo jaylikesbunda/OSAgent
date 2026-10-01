@@ -320,6 +320,7 @@ OSA.setToken = t => { OSA.token = t; OSA._safeStorageSet('token', t); };
 OSA.clearToken = () => { OSA.token = null; try { if (typeof localStorage !== 'undefined' && localStorage.removeItem) localStorage.removeItem('token'); } catch (err) {} };
 OSA.getCurrentSession = () => OSA.currentSession;
 OSA.setCurrentSession = function(s) {
+    const previousId = OSA.currentSessionId;
     OSA.currentSession = s;
     OSA.currentSessionId = (s && s.id) || null;
     if (s && s.id) {
@@ -328,6 +329,10 @@ OSA.setCurrentSession = function(s) {
         // Keep the entry's processing flag consistent with the snapshot so a
         // fresh entry created by background events starts from server truth.
         if (s.task_status !== 'running' && !entry.processing) entry.processing = false;
+    }
+    if (previousId !== OSA.currentSessionId) {
+        OSA.watchSessionGoal?.();
+        OSA.resetFileBrowser?.();
     }
     return s;
 };

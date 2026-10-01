@@ -1,6 +1,6 @@
 [package]
 name = "osagent"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.78"
 authors = ["OSA Contributors"]
@@ -141,6 +141,9 @@ path = "src/bin/optimize.rs"
 [[bin]]
 name = "osagent-bench"
 path = "src/bin/osagent-bench.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = []

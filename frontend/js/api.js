@@ -67,14 +67,13 @@ OSA.deleteJson = async function(url) {
 };
 
 OSA.cancelSession = async function(sessionId) {
-    const ws = OSA.getWebSocket ? OSA.getWebSocket() : null;
-    if (ws && ws.readyState === WebSocket.OPEN && OSA.wsRequest) {
-        return OSA.wsRequest('session.cancel', { session_id: sessionId });
-    }
-    const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/cancel`, {
+    // Cancellation must not wait behind another WebSocket RPC.
+    const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
         method: 'POST'
     });
-    return res.json().catch(() => ({}));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || `Stop failed (HTTP ${res.status})`);
+    return data;
 };
 
 OSA.getScheduledJobs = async function() {

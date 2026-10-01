@@ -9,89 +9,38 @@ OSA._ensureDiffWorker = function() {
 };
 
 OSA.computeLineDiff = function(oldText, newText) {
-    const left = typeof oldText === 'string' ? oldText : '';
-    const right = typeof newText === 'string' ? newText : '';
-    const oldLines = left.split('\n');
-    const newLines = right.split('\n');
-    const m = oldLines.length;
-    const n = newLines.length;
-    const dp = Array.from({ length: m + 1 }, function() {
-        return new Array(n + 1).fill(0);
-    });
-
-    for (let i = m - 1; i >= 0; i -= 1) {
-        for (let j = n - 1; j >= 0; j -= 1) {
-            if (oldLines[i] === newLines[j]) {
-                dp[i][j] = dp[i + 1][j + 1] + 1;
-            } else {
-                dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
-            }
-        }
-    }
-
-    const lines = [];
-    let i = 0;
-    let j = 0;
-    let oldNo = 1;
-    let newNo = 1;
-
-    while (i < m && j < n) {
-        if (oldLines[i] === newLines[j]) {
-            lines.push({ type: 'ctx', text: oldLines[i], oldNo: oldNo, newNo: newNo });
-            i += 1;
-            j += 1;
-            oldNo += 1;
-            newNo += 1;
-        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-            lines.push({ type: 'del', text: oldLines[i], oldNo: oldNo, newNo: null });
-            i += 1;
-            oldNo += 1;
-        } else {
-            lines.push({ type: 'add', text: newLines[j], oldNo: null, newNo: newNo });
-            j += 1;
-            newNo += 1;
-        }
-    }
-
-    while (i < m) {
-        lines.push({ type: 'del', text: oldLines[i], oldNo: oldNo, newNo: null });
-        i += 1;
-        oldNo += 1;
-    }
-
-    while (j < n) {
-        lines.push({ type: 'add', text: newLines[j], oldNo: null, newNo: newNo });
-        j += 1;
-        newNo += 1;
-    }
-
-    return { lines: lines };
+    return window.OSADiff.compute(oldText, newText);
 };
 
+OSA._diffJobs = new Map();
+OSA._diffJobSequence = 0;
 OSA.computeLineDiffAsync = function(oldText, newText) {
     const left = typeof oldText === 'string' ? oldText : '';
     const right = typeof newText === 'string' ? newText : '';
-    const lineCount = left.split('\n').length + right.split('\n').length;
-    if (lineCount <= 500 || typeof Worker === 'undefined') {
+    if (left.length + right.length <= 50000 || typeof Worker === 'undefined') {
         return Promise.resolve(OSA.computeLineDiff(left, right));
     }
-
     return new Promise(function(resolve, reject) {
         const worker = OSA._ensureDiffWorker();
-        const done = function(event) {
-            worker.removeEventListener('message', done);
-            resolve(event.data || { lines: [] });
-        };
-        const fail = function(error) {
-            worker.removeEventListener('error', fail);
-            reject(error);
-        };
-        worker.addEventListener('message', done, { once: true });
-        worker.addEventListener('error', fail, { once: true });
-        worker.postMessage({ oldText: left, newText: right });
+        if (!worker._routesJobs) {
+            worker._routesJobs = true;
+            worker.addEventListener('message', function(event) {
+                const job = OSA._diffJobs.get(event.data.id);
+                if (!job) return;
+                OSA._diffJobs.delete(event.data.id);
+                job.resolve(event.data);
+            });
+            worker.addEventListener('error', function(error) {
+                OSA._diffJobs.forEach(job => job.reject(error));
+                OSA._diffJobs.clear();
+                worker.terminate(); OSA._diffWorker = null;
+            });
+        }
+        const id = ++OSA._diffJobSequence;
+        OSA._diffJobs.set(id, {resolve, reject});
+        worker.postMessage({ id, oldText: left, newText: right });
     });
 };
-
 OSA.buildDiffHunks = function(lines, contextLines) {
     const context = typeof contextLines === 'number' ? contextLines : 3;
     const allLines = Array.isArray(lines) ? lines : [];
@@ -166,6 +115,10 @@ OSA.renderDiffView = function(oldContent, newContent) {
     OSA.computeLineDiffAsync(oldContent, newContent)
         .then(function(result) {
             const lines = Array.isArray(result.lines) ? result.lines : [];
+            if (lines.length > 20000) {
+                root.innerHTML = '<div class="diff-error">This diff exceeds the 20,000-line preview limit. Use Source to inspect the file.</div>';
+                return;
+            }
             const hunks = OSA.buildDiffHunks(lines, 3);
             const tableRows = hunks.map(function(hunk) {
                 const headerRow = '<tr class="diff-hunk-header">'
@@ -189,19 +142,19 @@ OSA.renderDiffView = function(oldContent, newContent) {
                 const leftText = line.type === 'add' ? '' : (line.text || '');
                 const rightText = line.type === 'del' ? '' : (line.text || '');
                 return '<tr class="diff-side-row">'
-                    + '<td class="diff-side-cell old ' + line.type + '"><code>' + OSA.escapeHtml(leftText) + '</code></td>'
-                    + '<td class="diff-side-cell new ' + line.type + '"><code>' + OSA.escapeHtml(rightText) + '</code></td>'
+                    + '<td class="diff-side-cell old ' + line.type + '"><span class="diff-side-line-number">' + (line.oldNo ?? '') + '</span><code>' + OSA.escapeHtml(leftText) + '</code></td>'
+                    + '<td class="diff-side-cell new ' + line.type + '"><span class="diff-side-line-number">' + (line.newNo ?? '') + '</span><code>' + OSA.escapeHtml(rightText) + '</code></td>'
                     + '</tr>';
             }).join('');
 
             root.innerHTML = ''
                 + '<div class="diff-toolbar">'
                 + '  <span class="diff-label">Unified diff</span>'
-                + '  <button type="button" class="diff-toggle-btn" onclick="OSA.toggleDiffSideBySide(this)">Expand side-by-side</button>'
+                + '  <button type="button" class="diff-toggle-btn" onclick="OSA.toggleDiffSideBySide(this)">Split view</button>'
                 + '</div>'
                 + '<table class="diff-table"><tbody>' + tableRows + '</tbody></table>'
                 + '<div class="diff-side-by-side hidden">'
-                + '  <table class="diff-side-table"><tbody>' + sideRows + '</tbody></table>'
+                + '  <table class="diff-side-table"><thead><tr><th>Before</th><th>After</th></tr></thead><tbody>' + sideRows + '</tbody></table>'
                 + '</div>';
         })
         .catch(function(error) {
@@ -217,5 +170,7 @@ OSA.toggleDiffSideBySide = function(button) {
     const side = root.querySelector('.diff-side-by-side');
     if (!side) return;
     const hidden = side.classList.toggle('hidden');
-    button.textContent = hidden ? 'Expand side-by-side' : 'Collapse side-by-side';
+    root.querySelector('.diff-table')?.classList.toggle('hidden', !hidden);
+    root.querySelector('.diff-label').textContent = hidden ? 'Unified diff' : 'Split diff';
+    button.textContent = hidden ? 'Split view' : 'Unified view';
 };

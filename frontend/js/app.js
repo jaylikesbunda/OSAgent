@@ -1415,6 +1415,15 @@ OSA.sendMessage = async function() {
     });
 
     if (draftMessage && OSA.getAttachments().length === 0) {
+        if (/^\/goal(?:\s|$)/i.test(draftMessage)) {
+            const succeeded = await OSA.handleGoalCommand(draftMessage);
+            if (succeeded && inputEl && inputEl.value.trim() === draftMessage) {
+                inputEl.value = '';
+                OSA.resizeMessageInput(inputEl);
+            }
+            OSA.hideSlashMenu();
+            return;
+        }
         // /compact accepts trailing focus text ("/compact focus on X");
         // everything else requires an exact match to avoid hijacking chat.
         const lower = draftMessage.toLowerCase();
@@ -1679,42 +1688,6 @@ OSA.runSendMessage = function() {
             OSA.debug?.warn('send.failed', 'pre-dispatch', error?.stack || error?.message || String(error));
             OSA.showErrorCard?.(error?.message || 'Could not send message');
         });
-};
-
-OSA.stopGeneration = async function() {
-    const currentSession = OSA.getCurrentSession();
-    if (!currentSession) return;
-
-    if (OSA.isAgentStopping()) return;
-    
-    OSA.setStopping(true);
-    
-    if (OSA._stopTimeout) {
-        clearTimeout(OSA._stopTimeout);
-    }
-    OSA._stopTimeout = setTimeout(() => {
-        OSA._forceResetState();
-    }, 5000);
-
-    try {
-        await OSA.cancelSession(currentSession.id);
-    } catch (error) {
-        console.error('Failed to cancel session:', error);
-        OSA._forceResetState();
-    }
-};
-
-OSA._forceResetState = function() {
-    OSA.setProcessing(false);
-    OSA.setStopping(false);
-    OSA.resetSendButton();
-    OSA.hideThinkingIndicator();
-    OSA.pruneEmptyStreamingMessage();
-    OSA.completeAssistantResponse();
-    if (OSA._stopTimeout) {
-        clearTimeout(OSA._stopTimeout);
-        OSA._stopTimeout = null;
-    }
 };
 
 OSA.setSendButtonStopMode = function(isStop) {
@@ -2120,6 +2093,7 @@ OSA.SLASH_COMMANDS = [
     { cmd: '/settings', label: 'Settings', desc: 'Open settings panel', action: () => OSA.openSettings() },
     { cmd: '/workflow', label: 'Workflows', desc: 'Open workflow editor', action: () => OSA.openWorkflowEditor() },
     { cmd: '/compact', label: 'Compact', desc: 'Verify notes and compact the conversation (resets context)', action: () => OSA.compactSession() },
+    { cmd: '/goal', label: 'Persistent goal', desc: 'Set an objective, or use status / pause / resume / clear', action: () => { const input = document.getElementById('message-input'); if (input) { input.value = '/goal '; input.focus(); OSA.resizeMessageInput(input); } } },
     { cmd: '/clear', label: 'Clear screen', desc: 'Clear the message display', action: () => { OSA.resetTranscriptView(); } },
     { cmd: '/reset', label: 'Reset session', desc: 'Clear messages and start fresh', action: () => OSA.createSession() },
     { cmd: '/help', label: 'Help', desc: 'Show available commands', action: () => {} },

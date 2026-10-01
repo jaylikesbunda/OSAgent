@@ -47,6 +47,58 @@ use tokio::sync::{watch, Mutex, Notify};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+async fn wait_for_cancel_signal(notify: &Notify, flag: &std::sync::atomic::AtomicBool) {
+    let notified = notify.notified();
+    tokio::pin!(notified);
+    // Register before checking the persistent flag, closing the lost-wake gap.
+    notified.as_mut().enable();
+    if flag.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    notified.await;
+}
+
+#[cfg(test)]
+mod cancellation_signal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_before_waiter_registration_is_not_lost() {
+        let notify = Notify::new();
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        notify.notify_waiters();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_for_cancel_signal(&notify, &flag),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_all_registered_tool_waiters() {
+        let notify = Arc::new(Notify::new());
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tasks = Vec::new();
+        for _ in 0..3 {
+            let notify = notify.clone();
+            let flag = flag.clone();
+            tasks.push(tokio::spawn(async move {
+                wait_for_cancel_signal(&notify, &flag).await
+            }));
+        }
+        tokio::task::yield_now().await;
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        notify.notify_waiters();
+        for task in tasks {
+            tokio::time::timeout(std::time::Duration::from_millis(100), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+}
+
 // A finish_reason completes the model output, but usage can arrive in a
 // trailing event. Bound that drain independently of the normal idle timeout.
 async fn next_provider_stream_event(
@@ -127,6 +179,7 @@ pub struct AgentRuntime {
     session_locks: DashMap<String, Arc<Mutex<()>>>,
     session_cancellation: DashMap<String, Arc<Notify>>,
     session_cancel_flags: DashMap<String, Arc<std::sync::atomic::AtomicBool>>,
+    stopped_sessions: DashMap<String, ()>,
     active_runs: Arc<DashMap<String, ActiveRunInfo>>,
     /// Per-session advisory repeat-tool-call chains. A user message
     /// resets the chain; identical (tool, canonical args) calls count
@@ -635,6 +688,7 @@ impl AgentRuntime {
             session_locks: DashMap::new(),
             session_cancellation: DashMap::new(),
             session_cancel_flags: DashMap::new(),
+            stopped_sessions: DashMap::new(),
             active_runs: Arc::new(DashMap::new()),
             repeat_reminders: DashMap::new(),
             spill_store,
@@ -751,6 +805,33 @@ impl AgentRuntime {
         self.session_cancel_flags.remove(session_id);
     }
 
+    async fn wait_for_cancellation(&self, session_id: &str) {
+        let notify = self.get_cancellation_notify(session_id);
+        let flag = self.get_cancel_flag(session_id);
+        wait_for_cancel_signal(&notify, &flag).await;
+    }
+
+    /// Explicit Stop pauses autonomous work but retains queued user messages.
+    pub async fn stop_session(&self, session_id: &str) -> Result<()> {
+        self.stopped_sessions.insert(session_id.to_string(), ());
+        self.cancel_session(session_id);
+        let goal_result = (|| {
+            if let Some(goal) = self.goal_store.get(session_id)? {
+                if goal.phase == crate::storage::GoalPhase::Active {
+                    self.goal_store
+                        .apply_action(session_id, goal.revision, "pause", None, None)?;
+                }
+            }
+            self.remove_pending_goal_rounds(session_id)
+        })();
+        self.cancel_subagents_for_parent(session_id).await;
+        goal_result
+    }
+
+    pub fn resume_session_queue(&self, session_id: &str) {
+        self.stopped_sessions.remove(session_id);
+    }
+
     /// Cancel any in-progress operation for a session
     pub fn cancel_session(&self, session_id: &str) {
         if let Some(flag) = self.session_cancel_flags.get(session_id) {
@@ -851,6 +932,10 @@ impl AgentRuntime {
     /// Acquire the run guard and spawn a continuation turn. Parks the request
     /// when another run is already active.
     async fn start_wake_turn(self: Arc<Self>, session_id: String) {
+        if self.stopped_sessions.contains_key(&session_id) {
+            self.pending_wakes.insert(session_id, ());
+            return;
+        }
         if self.active_runs.contains_key(&session_id) {
             self.pending_wakes.insert(session_id, ());
             return;
@@ -897,6 +982,11 @@ impl AgentRuntime {
             }
         };
 
+        if self.stopped_sessions.contains_key(&session_id) {
+            self.pending_wakes.insert(session_id, ());
+            return;
+        }
+
         info!(
             "Background subagent result(s) ready for session {} — starting continuation turn",
             session_id
@@ -930,6 +1020,9 @@ impl AgentRuntime {
     /// Called at run end: if a background subagent finished while this run was
     /// active, start the deferred continuation turn.
     pub fn check_pending_wake(&self, session_id: &str) {
+        if self.stopped_sessions.contains_key(session_id) {
+            return;
+        }
         if self.pending_wakes.remove(session_id).is_some() {
             info!(
                 "Pending background-result wake found for session {}",
@@ -1003,19 +1096,20 @@ impl AgentRuntime {
     }
 
     fn try_start_run(&self, session_id: &str, user: &str) -> Result<RunGuard> {
-        if self.active_runs.contains_key(session_id) {
-            return Err(OSAgentError::Session(
-                "A run is already in progress for this session".to_string(),
-            ));
-        }
-
-        self.active_runs.insert(
-            session_id.to_string(),
-            ActiveRunInfo {
-                started_at: SystemTime::now(),
-                user: user.to_string(),
-            },
-        );
+        let entry = match self.active_runs.entry(session_id.to_string()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => entry,
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                return Err(OSAgentError::Session(
+                    "A run is already in progress for this session".to_string(),
+                ))
+            }
+        };
+        self.clear_cancel_flag(session_id);
+        self.get_cancel_flag(session_id);
+        entry.insert(ActiveRunInfo {
+            started_at: SystemTime::now(),
+            user: user.to_string(),
+        });
 
         Ok(RunGuard {
             session_id: session_id.to_string(),
@@ -1068,6 +1162,9 @@ impl AgentRuntime {
         session_id: String,
         user: String,
     ) -> Result<Option<String>> {
+        if self.stopped_sessions.contains_key(&session_id) {
+            return Ok(None);
+        }
         if self.storage.get_session(&session_id)?.is_none() {
             return Err(OSAgentError::Session("Session not found".to_string()));
         }
@@ -1080,14 +1177,33 @@ impl AgentRuntime {
             Err(error) => return Err(error),
         };
 
-        let queued_message = match self.storage.claim_next_queued_message(&session_id)? {
-            Some(item) => item,
-            None => {
-                drop(run_guard);
-                // Queue fully drained: honor any deferred background-completion
-                // wake before the session goes idle.
-                self.check_pending_wake(&session_id);
+        let queued_message = loop {
+            if self.stopped_sessions.contains_key(&session_id) {
                 return Ok(None);
+            }
+            match self.storage.claim_next_queued_message(&session_id)? {
+                Some(item) if item.client_message_id.starts_with("goal-round-") => {
+                    let current = self.goal_store.get(&session_id)?;
+                    let valid = current.as_ref().is_some_and(|goal| {
+                        goal.phase == crate::storage::GoalPhase::Active
+                            && self.goal_store.is_armed(&session_id)
+                            && item
+                                .client_message_id
+                                .starts_with(&format!("goal-round-{}-", goal.id))
+                    });
+                    if valid {
+                        break item;
+                    }
+                    self.storage.delete_queued_message(&item.id)?;
+                }
+                Some(item) => break item,
+                None => {
+                    drop(run_guard);
+                    // Queue fully drained: honor any deferred background-completion
+                    // wake before the session goes idle.
+                    self.check_pending_wake(&session_id);
+                    return Ok(None);
+                }
             }
         };
 
@@ -1178,7 +1294,6 @@ impl AgentRuntime {
 
         // Get cancellation notifier for this session
         let cancel_notify = self.get_cancellation_notify(session_id);
-        self.clear_cancel_flag(session_id);
         let cancel_flag = self.get_cancel_flag(session_id);
 
         let active_run = self
@@ -1432,6 +1547,7 @@ impl AgentRuntime {
 
             // Check for cancellation at the start of each iteration
             if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
+                self.session_manager.update_session(&session).await?;
                 warn!(
                     "Operation cancelled via flag for session {} at iteration {}",
                     session_id, iteration
@@ -1443,10 +1559,11 @@ impl AgentRuntime {
                 });
                 return Err(OSAgentError::Session("Operation cancelled".to_string()));
             }
-            let cancel_fut = cancel_notify.notified();
+            let cancel_fut = self.wait_for_cancellation(session_id);
             tokio::select! {
                 _ = cancel_fut => {
                     warn!("Operation cancelled for session {} at iteration {}", session_id, iteration);
+                    self.session_manager.update_session(&session).await?;
                     self.event_bus.emit(AgentEvent::Cancelled {
                         session_id: session_id.to_string(),
                         sequence: 0,
@@ -1545,6 +1662,12 @@ impl AgentRuntime {
             }
 
             if !is_roleplay && !is_community {
+                if let Some(goal) = self.goal_store.get(&session.id)? {
+                    api_messages.push(Message::system(format!(
+                        "# Current Goal\n{}\nGoal state is authoritative over older conversation notes. Only continue an active, armed goal. Complete it only when its objective is achieved and relevant checks support that conclusion; report remaining work honestly. Use get_goal/update_goal (load through tool_search if needed) to change state. A paused, blocked, or complete goal does not authorize more autonomous work.",
+                        serde_json::to_string(&serde_json::json!({"goal": goal, "armed": self.goal_store.is_armed(&session.id)})).unwrap_or_default()
+                    )));
+                }
                 match self.decision_memory.prompt_block().await {
                     Ok(Some(decision_block)) => api_messages.push(Message::system(decision_block)),
                     Ok(None) => {}
@@ -1946,7 +2069,7 @@ impl AgentRuntime {
             }
 
             let stream_attempt = tokio::select! {
-                _ = cancel_notify.notified() => {
+                _ = self.wait_for_cancellation(session_id) => {
                     warn!("Operation cancelled for session {} during provider stream setup", session_id);
                     self.event_bus.emit(AgentEvent::Cancelled {
                         session_id: session_id.to_string(),
@@ -1985,7 +2108,7 @@ impl AgentRuntime {
                                 }
                             }
                             let response = tokio::select! {
-                                _ = cancel_notify.notified() => {
+                                _ = self.wait_for_cancellation(session_id) => {
                                     warn!("Operation cancelled for session {} during provider fallback", session_id);
                                     self.event_bus.emit(AgentEvent::Cancelled {
                                         session_id: session_id.to_string(),
@@ -2033,7 +2156,7 @@ impl AgentRuntime {
                 }
                 Err(error) if Self::is_streaming_fallback_error(&error) => {
                     let response = tokio::select! {
-                        _ = cancel_notify.notified() => {
+                        _ = self.wait_for_cancellation(session_id) => {
                             warn!("Operation cancelled for session {} during provider call", session_id);
                             self.event_bus.emit(AgentEvent::Cancelled {
                                 session_id: session_id.to_string(),
@@ -2105,7 +2228,7 @@ impl AgentRuntime {
                 );
 
                 let fallback = tokio::select! {
-                    _ = cancel_notify.notified() => {
+                    _ = self.wait_for_cancellation(session_id) => {
                         warn!("Operation cancelled for session {} during provider fallback call", session_id);
                         self.event_bus.emit(AgentEvent::Cancelled {
                             session_id: session_id.to_string(),
@@ -2767,7 +2890,7 @@ impl AgentRuntime {
                         info!("process_message: Executing tool {}", tool_call.name);
 
                         // Check for cancellation before tool execution
-                        let cancel_fut = cancel_notify.notified();
+                        let cancel_fut = self.wait_for_cancellation(session_id);
                         tokio::select! {
                             _ = cancel_fut => {
                                 warn!("Operation cancelled before tool execution for session {}", session_id);
@@ -2849,82 +2972,94 @@ impl AgentRuntime {
                             } else {
                                 None
                             };
-                        let result: Result<ToolResult> = if tool_call.name == "persona" {
-                            self.handle_persona_tool_call(&mut session, &tool_call.arguments)
+                        let execution = async {
+                            if tool_call.name == "persona" {
+                                self.handle_persona_tool_call(&mut session, &tool_call.arguments)
+                                    .map(ToolResult::new)
+                            } else if tool_call.name == "batch" {
+                                let batch_message_index = (session.messages.len() as i32) - 1;
+                                self.handle_batch_tool_call(
+                                    &mut session,
+                                    &active_workspace,
+                                    &tool_call.arguments,
+                                    batch_message_index,
+                                )
+                                .await
                                 .map(ToolResult::new)
-                        } else if tool_call.name == "batch" {
-                            let batch_message_index = (session.messages.len() as i32) - 1;
-                            self.handle_batch_tool_call(
-                                &mut session,
-                                &active_workspace,
-                                &tool_call.arguments,
-                                batch_message_index,
-                            )
-                            .await
-                            .map(ToolResult::new)
-                        } else if tool_call.name == "tool_script" {
-                            self.handle_tool_script_call(
-                                &session.id,
-                                &active_workspace,
-                                &tool_call.arguments,
-                            )
-                            .await
-                        } else {
-                            let mut tool_args = tool_call.arguments.clone();
-                            // Every tool call carries the session id so
-                            // session-scoped machinery (tool_search
-                            // activation, MCP auto-activation, todos,
-                            // goals, questions) can find its session.
-                            tool_args["session_id"] = serde_json::json!(session_id);
-                            tool_args["workspace_id"] = serde_json::json!(active_workspace.id);
-                            // Reading other conversations through the
-                            // `sessions` tool is gated by the
-                            // `session_access` policy (popup, rules) before
-                            // anything executes.
-                            let session_access = if tool_call.name == "sessions" {
-                                self.authorize_session_access(session_id, &tool_call.id, &tool_args)
-                                    .await
+                            } else if tool_call.name == "tool_script" {
+                                self.handle_tool_script_call(
+                                    &session.id,
+                                    &active_workspace,
+                                    &tool_call.arguments,
+                                )
+                                .await
                             } else {
-                                Ok(())
-                            };
-                            let external_paths = match session_access {
-                                Ok(()) => {
-                                    self.authorize_external_paths(
+                                let mut tool_args = tool_call.arguments.clone();
+                                // Every tool call carries the session id so
+                                // session-scoped machinery (tool_search
+                                // activation, MCP auto-activation, todos,
+                                // goals, questions) can find its session.
+                                tool_args["session_id"] = serde_json::json!(session_id);
+                                tool_args["workspace_id"] = serde_json::json!(active_workspace.id);
+                                // Reading other conversations through the
+                                // `sessions` tool is gated by the
+                                // `session_access` policy (popup, rules) before
+                                // anything executes.
+                                let session_access = if tool_call.name == "sessions" {
+                                    self.authorize_session_access(
                                         session_id,
-                                        &tool_call.name,
                                         &tool_call.id,
                                         &tool_args,
-                                        &active_workspace,
                                     )
                                     .await
-                                }
-                                Err(error) => Err(error),
-                            };
-                            match external_paths {
-                                Ok((workspace_additions, resolved_path)) => {
-                                    if let Some(resolved) = resolved_path {
-                                        let path_key = match tool_call.name.as_str() {
-                                            "read_file" => Some("filePath"),
-                                            "write_file" | "edit_file" | "delete_file"
-                                            | "list_files" | "grep" | "glob" => Some("path"),
-                                            "bash" | "process" => Some("workdir"),
-                                            _ => None,
-                                        };
-                                        if let Some(key) = path_key {
-                                            tool_args[key] = serde_json::Value::String(resolved);
-                                        }
-                                    }
-                                    self.tool_registry
-                                        .execute_in_workspace_with_external_result(
+                                } else {
+                                    Ok(())
+                                };
+                                let external_paths = match session_access {
+                                    Ok(()) => {
+                                        self.authorize_external_paths(
+                                            session_id,
                                             &tool_call.name,
-                                            tool_args,
-                                            Some(workspace_path.clone()),
-                                            &workspace_additions,
+                                            &tool_call.id,
+                                            &tool_args,
+                                            &active_workspace,
                                         )
                                         .await
+                                    }
+                                    Err(error) => Err(error),
+                                };
+                                match external_paths {
+                                    Ok((workspace_additions, resolved_path)) => {
+                                        if let Some(resolved) = resolved_path {
+                                            let path_key = match tool_call.name.as_str() {
+                                                "read_file" => Some("filePath"),
+                                                "write_file" | "edit_file" | "delete_file"
+                                                | "list_files" | "grep" | "glob" => Some("path"),
+                                                "bash" | "process" => Some("workdir"),
+                                                _ => None,
+                                            };
+                                            if let Some(key) = path_key {
+                                                tool_args[key] =
+                                                    serde_json::Value::String(resolved);
+                                            }
+                                        }
+                                        self.tool_registry
+                                            .execute_in_workspace_with_external_result(
+                                                &tool_call.name,
+                                                tool_args,
+                                                Some(workspace_path.clone()),
+                                                &workspace_additions,
+                                            )
+                                            .await
+                                    }
+                                    Err(error) => Err(error),
                                 }
-                                Err(error) => Err(error),
                             }
+                        };
+                        let result: Result<ToolResult> = tokio::select! {
+                            biased;
+                            _ = self.wait_for_cancellation(session_id) => Err(OSAgentError::Session("Operation cancelled".to_string())),
+                            result = execution => result,
                         };
 
                         let duration_ms = start.elapsed().as_millis() as u64;
@@ -3459,7 +3594,7 @@ impl AgentRuntime {
         );
         self.enqueue_message(
             &session.id,
-            &format!("goal-round-{}", round),
+            &format!("goal-round-{}-{}-{}", goal.id, goal.revision, round),
             &message,
             &[],
             None,
@@ -3661,7 +3796,7 @@ impl AgentRuntime {
         session_id: &str,
         session: &mut Session,
         mut stream: futures::stream::BoxStream<'static, Result<StreamEvent>>,
-        cancel_notify: Arc<Notify>,
+        _cancel_notify: Arc<Notify>,
     ) -> Result<crate::agent::provider::ProviderResponse> {
         let assistant_index = session.messages.len();
         session
@@ -3680,7 +3815,8 @@ impl AgentRuntime {
 
         loop {
             let next_event = tokio::select! {
-                _ = cancel_notify.notified() => {
+                _ = self.wait_for_cancellation(session_id) => {
+                    self.session_manager.update_session(session).await?;
                     self.event_bus.emit(AgentEvent::Cancelled {
                         session_id: session_id.to_string(),
                         sequence: 0,
@@ -5459,8 +5595,7 @@ impl AgentRuntime {
             });
         }
 
-        let cancel_notify = self.get_cancellation_notify(&session_id);
-        let cancel_fut = cancel_notify.notified();
+        let cancel_fut = self.wait_for_cancellation(&session_id);
         tokio::select! {
             _ = cancel_fut => {
                 for tool_call in tool_calls {
@@ -5490,7 +5625,6 @@ impl AgentRuntime {
             let workspace_path = workspace_path.clone();
             let registry = registry.clone();
             let event_bus = event_bus.clone();
-            let cancel_notify = self.get_cancellation_notify(&session_id);
             async move {
                 let start = Instant::now();
 
@@ -5514,7 +5648,7 @@ impl AgentRuntime {
                     50,
                 );
 
-                let cancel_fut = cancel_notify.notified();
+                let cancel_fut = self.wait_for_cancellation(&session_id);
                 tokio::select! {
                     _ = cancel_fut => {
                         Self::emit_tool_complete(
@@ -5538,9 +5672,11 @@ impl AgentRuntime {
                     _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
                 }
 
-                let result = registry
-                    .execute_in_workspace_result(&tool_name, args, Some(workspace_path))
-                    .await;
+                let result = tokio::select! {
+                    biased;
+                    _ = self.wait_for_cancellation(&session_id) => Err(OSAgentError::Session("Operation cancelled".to_string())),
+                    result = registry.execute_in_workspace_result(&tool_name, args, Some(workspace_path)) => result,
+                };
 
                 let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -6618,6 +6754,7 @@ impl AgentRuntime {
         if !promoted {
             return Ok(false);
         }
+        self.resume_session_queue(session_id);
 
         if self.is_session_busy(session_id) {
             // Stop the active run (and its subagents) the same way a Stop click
@@ -6740,8 +6877,100 @@ impl AgentRuntime {
         self.goal_store.get(session_id)
     }
 
+    pub fn is_session_goal_armed(&self, session_id: &str) -> bool {
+        self.goal_store.is_armed(session_id)
+    }
+
     pub async fn clear_session_goal(&self, session_id: &str) -> Result<bool> {
+        self.remove_pending_goal_rounds(session_id)?;
         self.goal_store.clear(session_id)
+    }
+
+    fn remove_pending_goal_rounds(&self, session_id: &str) -> Result<()> {
+        for item in self.storage.list_queued_messages(session_id)? {
+            if item.status == crate::storage::QueuedMessageStatus::Pending
+                && item.client_message_id.starts_with("goal-round-")
+            {
+                self.storage
+                    .delete_session_queued_message(session_id, &item.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn control_session_goal(
+        self: Arc<Self>,
+        session_id: &str,
+        action: &str,
+        objective: Option<&str>,
+        max_rounds: Option<i64>,
+    ) -> Result<crate::storage::Goal> {
+        let session = self
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| OSAgentError::Session("Session not found".to_string()))?;
+        if session.agent_type != "primary" {
+            return Err(OSAgentError::Session(
+                "Goal commands require a primary session".to_string(),
+            ));
+        }
+        if action != "pause" && self.is_session_busy(session_id) {
+            return Err(OSAgentError::Session(
+                "Stop the current turn before creating or resuming a goal".to_string(),
+            ));
+        }
+        let goal = match action {
+            "create" => {
+                let objective = objective
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or_else(|| {
+                        OSAgentError::Config("A goal requires an objective".to_string())
+                    })?;
+                if self
+                    .goal_store
+                    .get(session_id)?
+                    .is_some_and(|goal| goal.phase == crate::storage::GoalPhase::Complete)
+                {
+                    self.clear_session_goal(session_id).await?;
+                }
+                self.goal_store.create(
+                    session_id,
+                    objective,
+                    max_rounds.unwrap_or(crate::agent::goal::DEFAULT_MAX_ROUNDS),
+                )?
+            }
+            "resume" => {
+                self.remove_pending_goal_rounds(session_id)?;
+                self.goal_store.resume_by_user(session_id, max_rounds)?
+            }
+            "pause" => {
+                let current = self
+                    .goal_store
+                    .get(session_id)?
+                    .ok_or_else(|| OSAgentError::Session("No goal to pause".to_string()))?;
+                let goal = self.goal_store.apply_action(
+                    session_id,
+                    current.revision,
+                    "pause",
+                    None,
+                    None,
+                )?;
+                self.remove_pending_goal_rounds(session_id)?;
+                goal
+            }
+            _ => {
+                return Err(OSAgentError::Config(
+                    "Expected create, pause, or resume".to_string(),
+                ))
+            }
+        };
+        if action != "pause" {
+            self.resume_session_queue(session_id);
+            self.maybe_queue_goal_round(&session).await?;
+            self.clone()
+                .spawn_next_queued_message_run(session_id.to_string(), "web".to_string())?;
+        }
+        Ok(self.goal_store.get(session_id)?.unwrap_or(goal))
     }
 
     pub async fn revert_file_snapshot(
@@ -7584,10 +7813,9 @@ impl AgentRuntime {
 
         let timeout =
             std::time::Duration::from_secs(self.external_manager.prompt_timeout_seconds().max(1));
-        let cancel_notify = self.get_cancellation_notify(caller_session_id);
         let response = tokio::select! {
             response = tokio::time::timeout(timeout, response) => response,
-            _ = cancel_notify.notified() => {
+            _ = self.wait_for_cancellation(caller_session_id) => {
                 self.external_manager.expire_prompt(&prompt.id).await;
                 return Err(OSAgentError::Session("Operation cancelled".to_string()));
             }
@@ -7671,10 +7899,9 @@ impl AgentRuntime {
 
         let timeout =
             std::time::Duration::from_secs(self.external_manager.prompt_timeout_seconds().max(1));
-        let cancel_notify = self.get_cancellation_notify(session_id);
         let response = tokio::select! {
             response = tokio::time::timeout(timeout, response) => response,
-            _ = cancel_notify.notified() => {
+            _ = self.wait_for_cancellation(session_id) => {
                 self.external_manager.expire_prompt(&prompt.id).await;
                 return Err(OSAgentError::Session("Operation cancelled".to_string()));
             }

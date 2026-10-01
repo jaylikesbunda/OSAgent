@@ -6,8 +6,110 @@ use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
+
+/// Owns only this tool's shell tree; dropping the execution future kills it.
+struct CommandTreeGuard(Option<u32>);
+
+impl Drop for CommandTreeGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.0 else { return };
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .creation_flags(0x08000000)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        #[cfg(unix)]
+        unsafe {
+            // The child leads a dedicated process group; include descendants.
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+}
+
+async fn run_shell_command(
+    command: &str,
+    workspace: &std::path::Path,
+) -> std::io::Result<std::process::Output> {
+    #[cfg(windows)]
+    let mut builder = {
+        use std::os::windows::process::CommandExt;
+        let mut builder = tokio::process::Command::new("cmd");
+        builder
+            .as_std_mut()
+            .raw_arg(format!("/C {}", command))
+            .creation_flags(0x08000000);
+        builder
+    };
+    #[cfg(not(windows))]
+    let mut builder = {
+        let mut builder = tokio::process::Command::new("sh");
+        builder.args(["-lc", command]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            builder.as_std_mut().process_group(0);
+        }
+        builder
+    };
+    let child = builder
+        .current_dir(workspace)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut guard = CommandTreeGuard(child.id());
+    let output = child.wait_with_output().await?;
+    guard.0 = None;
+    Ok(output)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_command_future_kills_child_before_it_writes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ready = workspace.path().join("ready");
+        let late = workspace.path().join("late");
+        #[cfg(windows)]
+        let command = format!(
+            "powershell -NoProfile -Command \"Set-Content -LiteralPath '{}' -Value ready; Start-Sleep -Milliseconds 1200; Set-Content -LiteralPath '{}' -Value late\"",
+            ready.display().to_string().replace('\'', "''"), late.display().to_string().replace('\'', "''")
+        );
+        #[cfg(not(windows))]
+        let command = format!(
+            "printf ready > '{}'; sleep 1.2; printf late > '{}'",
+            ready.display(),
+            late.display()
+        );
+        let cwd = workspace.path().to_path_buf();
+        let task = tokio::spawn(async move { run_shell_command(&command, &cwd).await });
+        let ready_wait = tokio::time::timeout(Duration::from_secs(10), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        task.abort();
+        let outcome = task.await;
+        assert!(
+            ready_wait.is_ok(),
+            "Child failed to reach the controlled cancellation point"
+        );
+        assert!(outcome.unwrap_err().is_cancelled());
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        assert!(
+            !late.exists(),
+            "The shell descendant kept running after cancellation"
+        );
+    }
+}
 
 pub struct BashTool {
     config: BashToolConfig,
@@ -839,47 +941,13 @@ impl Tool for BashTool {
 
         let workspace = self.validate_workdir(workdir)?;
         let timeout_duration = Duration::from_secs(timeout_seconds);
-        let full_command_for_exec = full_command.clone();
-
         let result = tokio::time::timeout(
             timeout_duration,
-            tokio::task::spawn_blocking(move || {
-                if cfg!(windows) {
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::process::CommandExt;
-                        // cmd.exe does its own quote parsing for /C and does not
-                        // follow the standard argv-escaping convention. Passing
-                        // "/C" and the command as separate args lets Rust's default
-                        // Windows arg-quoting re-escape embedded quotes in the
-                        // command string, which cmd.exe then mis-parses (e.g. a
-                        // quoted path silently fails while the same path unquoted
-                        // works). raw_arg bypasses that quoting so cmd sees the
-                        // command line exactly as written.
-                        Command::new("cmd")
-                            .raw_arg(format!("/C {}", full_command_for_exec))
-                            .current_dir(&workspace)
-                            .output()
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        unreachable!()
-                    }
-                } else {
-                    Command::new("sh")
-                        .args(["-lc", &full_command_for_exec])
-                        .current_dir(&workspace)
-                        .output()
-                }
-            }),
+            run_shell_command(&full_command, &workspace),
         )
         .await;
-
         match result {
             Ok(Ok(output_result)) => {
-                let output_result =
-                    output_result.map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
-
                 let stdout = String::from_utf8_lossy(&output_result.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
 

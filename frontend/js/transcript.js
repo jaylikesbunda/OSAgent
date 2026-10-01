@@ -307,6 +307,7 @@ OSA.tmodelToolComplete = function(event) {
         OSA.tmodelAddTaskMessage(item.output || '');
     }
     OSA.tmodelMarkDirty('tool-complete');
+    if (OSA._previewState?.open) OSA.renderFileTree?.();
     return item;
 };
 
@@ -957,33 +958,34 @@ OSA.rebuildAfterTruncate = function(fromIndex) {
 };
 
 OSA.buildTranscriptUnits = function() {
-    const items = OSA.TModel.items;
+    // Keep hidden reasoning in the model, but do not render its empty role
+    // label or let it break an otherwise continuous run of tool calls.
+    const items = OSA.TModel.items.filter(function(item) {
+        if (item.kind !== 'message' || item.role !== 'assistant') return true;
+        let display = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
+        display = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(display) : display;
+        return !!display.trim()
+            || (OSA.getShowThinkingBlocks() && !!(item.thinking || '').trim())
+            || !!(item.images && item.images.length)
+            || !!(item.attachments && item.attachments.length);
+    });
     const units = [];
-    const PARALLEL_WINDOW_MS = 2000;
     let i = 0;
 
     while (i < items.length) {
         const item = items[i];
-        if (item.kind === 'tool' && item.context) {
-            const groupItems = [];
-            while (i < items.length && items[i].kind === 'tool' && items[i].context) {
-                groupItems.push(items[i]);
-                i += 1;
-            }
-            units.push({ type: 'context-group', key: 'ctxgrp:' + groupItems[0].key, items: groupItems });
-            continue;
-        }
-        if (item.kind === 'tool') {
+        if (item.kind === 'tool' && item.toolName !== 'draw_diagram') {
+            // Visible transcript entries delimit runs. Provider message indices
+            // and tool categories can change during uninterrupted tool work.
             const run = [item];
             let j = i + 1;
             while (j < items.length
                 && items[j].kind === 'tool'
-                && !items[j].context
-                && Math.abs((items[j].ts || 0) - (item.ts || 0)) <= PARALLEL_WINDOW_MS) {
+                && items[j].toolName !== 'draw_diagram') {
                 run.push(items[j]);
                 j += 1;
             }
-            if (run.length >= 2) {
+            if (run.length >= 2 || item.context) {
                 units.push({ type: 'parallel-group', key: 'par:' + run[0].key, items: run });
                 i = j;
             } else {
@@ -1811,6 +1813,8 @@ OSA.patchToolCardElement = function(container, item) {
     const isCompleted = item.completed === true;
     const isSuccess = item.success === true;
     container._toolArgs = item.args;
+    container.dataset.toolName = item.toolName;
+    OSA.applyToolDisclosure?.(container, item.toolName);
 
     const statusEl = container.querySelector('#status-' + OSA.cssEscape(domId));
     if (statusEl) {
@@ -2056,31 +2060,82 @@ OSA.patchContextGroupUnit = function(wrapper, unit) {
         }
         OSA.patchContextToolRow(row, item);
     });
+    OSA.patchToolGroupDisclosure(group, unit.items, true);
+};
+
+OSA.patchToolGroupDisclosure = function(group, items, context) {
+    group._groupItems = items;
+    group._contextGroup = context;
+    let header = group.querySelector(':scope > .tool-group-toggle');
+    if (!header) {
+        header = document.createElement('button');
+        header.type = 'button';
+        header.className = 'parallel-group-header tool-group-toggle';
+        header.innerHTML = '<span class="tool-group-title"></span><span class="parallel-count"></span><span class="tool-group-chevron" aria-hidden="true"></span>';
+        header.addEventListener('click', function() {
+            group._groupExpanded = header.getAttribute('aria-expanded') !== 'true';
+            OSA.patchToolGroupDisclosure(group, group._groupItems, group._contextGroup);
+        });
+        group.prepend(header);
+    }
+    const limit = typeof OSA.getToolGroupPreview === 'function' ? OSA.getToolGroupPreview() : 0;
+    const expanded = group._groupExpanded === undefined ? limit === 'all' : group._groupExpanded;
+    const visibleCount = expanded ? items.length : (limit === 'all' ? 0 : limit);
+    const running = items.filter(function(item) { return !item.completed; }).length;
+    const failed = items.filter(function(item) { return item.completed && !item.success && item.status !== 'cancelled'; }).length;
+    const cancelled = items.filter(function(item) { return item.status === 'cancelled'; }).length;
+    const counts = [];
+    if (context) {
+        const reads = items.filter(function(item) { return item.toolName === 'read_file'; }).length;
+        const lists = items.filter(function(item) { return item.toolName === 'list_files'; }).length;
+        const searches = items.length - reads - lists;
+        if (reads) counts.push(reads + ' read' + (reads === 1 ? '' : 's'));
+        if (searches) counts.push(searches + ' search' + (searches === 1 ? '' : 'es'));
+        if (lists) counts.push(lists + ' listing' + (lists === 1 ? '' : 's'));
+    }
+    const title = context ? (running ? 'Gathering context' : 'Gathered context') : items.length + ' tools';
+    const statuses = [];
+    if (counts.length) statuses.push(counts.join(', '));
+    if (running) statuses.push(running + ' running');
+    if (failed) statuses.push(failed + ' failed');
+    if (cancelled) statuses.push(cancelled + ' cancelled');
+    const hiddenCount = Math.max(0, items.length - visibleCount);
+    if (hiddenCount && visibleCount) statuses.push(hiddenCount + ' more');
+    header.querySelector('.tool-group-title').textContent = title;
+    header.querySelector('.parallel-count').textContent = statuses.join(' · ');
+    header.querySelector('.tool-group-chevron').textContent = expanded ? '▾' : '▸';
+    header.setAttribute('aria-expanded', String(expanded));
+    header.hidden = false;
+    header.dataset.running = String(running > 0);
+    Array.from(group.children).filter(function(child) { return child !== header; }).forEach(function(child, index) {
+        child.hidden = !header.hidden && index >= visibleCount;
+    });
 };
 
 OSA.patchParallelGroupUnit = function(wrapper, unit) {
+    const view = OSA.getTranscriptView();
     let group = wrapper.firstElementChild;
     if (!group || !group.classList.contains('parallel-group')) {
         group = document.createElement('div');
         group.className = 'parallel-group';
-        const header = document.createElement('div');
-        header.className = 'parallel-group-header';
-        const count = document.createElement('span');
-        count.className = 'parallel-count';
-        header.appendChild(count);
-        group.appendChild(header);
         wrapper.replaceChildren(group);
     }
 
-    const anyRunning = unit.items.some(function(item) { return !item.completed; });
-    const headerLabel = unit.items.length + ' tools' + (anyRunning ? ' running' : '');
-    const count = group.querySelector(':scope > .parallel-group-header > .parallel-count');
-    if (count && count.textContent !== headerLabel) count.textContent = headerLabel;
-
     unit.items.forEach(function(item) {
-        const card = OSA.ensureToolContainerNode(item);
+        let card;
+        if (item.context) {
+            card = view.ctxNodesByCallId.get(item.callId);
+            if (!card) {
+                card = OSA.buildContextToolRow(item);
+                view.ctxNodesByCallId.set(item.callId, card);
+            }
+            OSA.patchContextToolRow(card, item);
+        } else {
+            card = OSA.ensureToolContainerNode(item);
+        }
         if (card.parentNode !== group) group.appendChild(card);
     });
+    OSA.patchToolGroupDisclosure(group, unit.items, unit.items.every(function(item) { return item.context; }));
 };
 
 OSA.buildSubagentCardElement = function(item) {

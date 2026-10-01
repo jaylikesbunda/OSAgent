@@ -1229,6 +1229,50 @@ OSA.getChatAlignment = function() {
     return localStorage.getItem('osagent-chat-alignment') || 'split';
 };
 
+OSA.getToolGroupPreview = function() {
+    const saved = localStorage.getItem('osagent-tool-group-preview');
+    return saved === 'all' ? 'all' : (saved === '2' || saved === '5' ? Number(saved) : 0);
+};
+
+OSA.getToolDetailDefault = function(kind) {
+    return localStorage.getItem('osagent-tool-details-' + kind) === 'open';
+};
+
+OSA.applyToolDisclosure = function(container, name) {
+    const kind = ['bash', 'shell', 'process'].includes(name) ? 'shell'
+        : ['edit_file', 'write_file', 'apply_patch'].includes(name) ? 'edit' : null;
+    const expanded = container._toolExpanded ?? (kind ? OSA.getToolDetailDefault(kind) : false);
+    container.querySelector('.tool-body')?.classList.toggle('visible', expanded);
+    container.querySelector('.tool-chevron')?.classList.toggle('open', expanded);
+};
+
+OSA.setToolDetailDefault = function(kind, open) {
+    if (!['shell', 'edit'].includes(kind)) return;
+    localStorage.setItem('osagent-tool-details-' + kind, open ? 'open' : 'closed');
+    const select = document.getElementById('setting-tool-details-' + kind);
+    if (select) select.value = open ? 'open' : 'closed';
+    OSA.getTranscriptView?.().toolNodesByCallId?.forEach(function(container) {
+        const name = container.dataset.toolName;
+        const matches = kind === 'shell' ? ['bash', 'shell', 'process'].includes(name)
+            : ['edit_file', 'write_file', 'apply_patch'].includes(name);
+        if (!matches) return;
+        delete container._toolExpanded;
+        OSA.applyToolDisclosure(container, name);
+    });
+};
+
+OSA.setToolGroupPreview = function(value) {
+    const normalized = ['0', '2', '5', 'all'].includes(String(value)) ? String(value) : '0';
+    localStorage.setItem('osagent-tool-group-preview', normalized);
+    const select = document.getElementById('setting-tool-group-preview');
+    if (select) select.value = normalized;
+    document.querySelectorAll('.parallel-group, .context-inline-group').forEach(function(group) {
+        if (!group._groupItems) return;
+        delete group._groupExpanded;
+        OSA.patchToolGroupDisclosure(group, group._groupItems, group._contextGroup);
+    });
+};
+
 OSA.setChatAlignment = function(alignment) {
     const normalized = alignment === 'left' ? 'left' : 'split';
     localStorage.setItem('osagent-chat-alignment', normalized);
@@ -1338,6 +1382,12 @@ OSA.initTheme = function() {
     OSA.applyChatAlignment(chatAlignment);
     const chatAlignmentSelect = document.getElementById('setting-chat-alignment');
     if (chatAlignmentSelect) chatAlignmentSelect.value = chatAlignment;
+    const toolGroupSelect = document.getElementById('setting-tool-group-preview');
+    ['shell', 'edit'].forEach(function(kind) {
+        const select = document.getElementById('setting-tool-details-' + kind);
+        if (select) select.value = OSA.getToolDetailDefault(kind) ? 'open' : 'closed';
+    });
+    if (toolGroupSelect) toolGroupSelect.value = String(OSA.getToolGroupPreview());
 };
 
 OSA.updateMemoryHeaderStatus = function() {

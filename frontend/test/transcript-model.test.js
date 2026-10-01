@@ -23,6 +23,35 @@ function resetModel() {
     OSA.feedSpeechStream = () => {};
 }
 
+test('hidden reasoning and empty assistant rows do not split tools or display orphan role labels', () => {
+    resetModel();
+    OSA.getShowThinkingBlocks = () => false;
+    const read = OSA.tmodelToolItem({ tool_call_id: 'visible-read', tool_name: 'read_file' });
+    read.context = true;
+    OSA.tmodelAppend(read);
+    const reasoning = OSA.tmodelMessageItem('hidden-reasoning', {
+        role: 'assistant', content: '', thinking: 'Inspect the next file.',
+    }, 1);
+    OSA.tmodelAppend(reasoning);
+    OSA.tmodelAppend(OSA.tmodelMessageItem('empty-assistant', { role: 'assistant', content: ' ' }, 2));
+    OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'visible-shell', tool_name: 'bash' }));
+    const units = OSA.buildTranscriptUnits();
+    assert.equal(units.length, 1);
+    assert.deepEqual(units[0].items.map(item => item.callId), ['visible-read', 'visible-shell']);
+    assert.equal(OSA.tmodelGet(reasoning.key), reasoning);
+
+    OSA.getShowThinkingBlocks = () => true;
+    assert.deepEqual(OSA.buildTranscriptUnits().map(unit => unit.type), ['parallel-group', 'message', 'tool']);
+});
+
+test('assistant attachments remain visible even when their text and reasoning are empty', () => {
+    resetModel();
+    const item = OSA.tmodelMessageItem('attachment-only', { role: 'assistant', content: '' }, 1);
+    item.attachments = [{ filename: 'result.txt' }];
+    OSA.tmodelAppend(item);
+    assert.equal(OSA.buildTranscriptUnits()[0].item, item);
+});
+
 test('tool boundary preserves thinking and returns response text for the tool card', () => {
     resetModel();
     const segment = OSA.tmodelMessageItem('assistant:live', {

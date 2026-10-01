@@ -84,7 +84,7 @@ impl Tool for CreateGoalTool {
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when the user gives a multi-step objective worth pursuing over several turns, and no goal exists yet."
+        "Use only when the user explicitly requests a persistent goal, and no goal exists yet. Ordinary multi-step tasks do not authorize autonomous goal rounds."
     }
 
     fn parameters(&self) -> Value {

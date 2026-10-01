@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/static/css/messages.css">
     <link rel="stylesheet" href="/static/css/diagram.css">
     <link rel="stylesheet" href="/static/css/input.css">
+    <link rel="stylesheet" href="/static/css/goals.css">
     <link rel="stylesheet" href="/static/css/modal.css">
     <link rel="stylesheet" href="/static/css/tool.css">
     <link rel="stylesheet" href="/static/css/diff.css">
@@ -59,7 +60,7 @@
                 <div class="sidebar-footer">
                     <div class="mobile-sidebar-actions">
                         <button type="button" onclick="closeSidebar(); openSettings()">Settings</button>
-                        <button type="button" onclick="closeSidebar(); OSA.toggleFilePreview()">File preview</button>
+                        <button type="button" onclick="closeSidebar(); OSA.toggleFilePreview()">Files &amp; changes</button>
                         <button type="button" onclick="logout()">Sign out</button>
                     </div>
                     <div class="sidebar-footer-row">
@@ -115,7 +116,7 @@
                                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6c.26-.58.76-1 1.51-1H12a2 2 0 0 1 4 0v.09c0 .75.42 1.25 1 1.51a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.58.26 1 .76 1 1.51V12a2 2 0 0 1 0 4h-.09c-.75 0-1.25.42-1.51 1Z"></path>
                             </svg>
                         </button>
-                        <button class="settings-btn" onclick="OSA.toggleFilePreview()" title="Toggle file preview" aria-label="Toggle file preview">
+                        <button class="settings-btn" onclick="OSA.toggleFilePreview()" title="Files &amp; changes" aria-label="Toggle files and changes">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                 <rect x="3" y="4" width="18" height="16" rx="2"></rect>
                                 <path d="M8 4v16"></path>
@@ -229,6 +230,13 @@
                             </div>
                         </div>
                         <div class="composer-card">
+                            <section id="goal-panel" class="goal-panel hidden" aria-label="Current goal"></section>
+                            <form id="goal-editor" class="goal-editor hidden" onsubmit="OSA.submitGoalEditor(event)" onkeydown="if(event.key === 'Escape') { event.preventDefault(); OSA.closeGoalEditor(); }">
+                                <div class="goal-editor-heading"><label for="goal-objective">Set a goal</label><button type="button" class="goal-action" onclick="OSA.closeGoalEditor()" aria-label="Close goal editor">Cancel</button></div>
+                                <textarea id="goal-objective" rows="2" placeholder="What should OSA work towards?" required></textarea>
+                                <div class="goal-editor-footer"><label for="goal-rounds">Round budget <input id="goal-rounds" type="number" min="1" max="100" value="5" required></label><button id="goal-start" type="submit" class="goal-action goal-action-primary">Start goal</button></div>
+                                <p class="goal-editor-hint">Continues across turns. Stop pauses the goal.</p>
+                            </form>
                             <div id="queue-panel" class="queue-panel hidden" aria-live="polite"></div>
                             <div id="image-preview-container" class="image-preview-container hidden"></div>
                             <div class="composer-main">
@@ -247,6 +255,7 @@
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
                                         <span class="input-tab-label" id="context-trigger-label">Context</span>
                                     </button>
+                                    <button id="goal-trigger" class="input-icon-btn" type="button" onclick="OSA.openGoalEditor()" title="Set a goal" aria-label="Set a goal" aria-controls="goal-editor" aria-expanded="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg></button>
                                 </div>
                                 <div class="input-right-bar">
                                     <div class="model-selector">
@@ -289,6 +298,7 @@
                             <div id="mobile-composer-menu" class="mobile-composer-menu hidden" aria-label="Composer actions">
                                 <button type="button" onclick="OSA.mobileComposerAction('attach', event)">Attach file</button>
                                 <button type="button" onclick="OSA.mobileComposerAction('context', event)">Workspace &amp; persona</button>
+                                <button type="button" onclick="OSA.openGoalEditor(); OSA.toggleMobileComposerMenu(event)">Goal</button>
                                 <button type="button" onclick="OSA.mobileComposerAction('voice', event)">Voice conversation</button>
                                 <button id="mobile-tts-action" type="button" onclick="OSA.mobileComposerAction('tts', event)" aria-pressed="false">Read replies aloud</button>
                                 <button id="mobile-followup-action" class="hidden" type="button" onclick="OSA.mobileComposerAction('followup', event)">Follow-ups: Queue</button>
@@ -307,12 +317,23 @@
                 <div id="preview-resize-handle" class="preview-resize-handle hidden" role="separator" aria-orientation="vertical"></div>
                 <div id="file-preview-panel" class="file-preview-panel hidden">
                     <div class="file-preview-header">
-                        <div class="file-preview-title">
-                            <span id="file-preview-path" class="file-preview-path">No file selected</span>
-                        </div>
-                        <button class="file-preview-close" onclick="OSA.closeFilePreview()" title="Close preview">Close</button>
+                        <div class="file-browser-heading">Workspace</div>
+                        <div class="file-browser-actions"><button type="button" onclick="OSA.refreshFileBrowser()" title="Refresh files" aria-label="Refresh files">↻</button><button type="button" onclick="OSA.closeFilePreview()" title="Close files" aria-label="Close file browser">×</button></div>
                     </div>
-                    <div id="file-preview-body" class="file-preview-body"></div>
+                    <div class="file-browser-layout">
+                        <nav class="file-browser-nav" aria-label="Workspace files">
+                            <div class="file-browser-switch"><button id="browser-files-tab" type="button" aria-pressed="true" onclick="OSA.setFileBrowserMode('files')">Files</button><button id="browser-changes-tab" type="button" aria-pressed="false" onclick="OSA.setFileBrowserMode('changes')">Changes <span id="browser-change-count"></span></button></div>
+                            <select id="file-browser-root" aria-label="Workspace root" onchange="OSA.selectFileBrowserRoot(Number(this.value))"></select>
+                            <input id="file-browser-filter" type="search" placeholder="Filter visible files…" aria-label="Filter visible files" oninput="OSA.renderFileTree()" />
+                            <div id="file-browser-tree" class="file-browser-tree"></div>
+                        </nav>
+                        <section class="file-browser-content" aria-label="File viewer">
+                            <div id="file-preview-tabs" class="file-preview-tabs" aria-label="Open files"></div>
+                            <div class="file-preview-toolbar"><div id="file-preview-path" class="file-preview-path">Select a file</div><div id="file-preview-modes" class="file-preview-modes"></div></div>
+                            <div id="file-preview-body" class="file-preview-body"><div class="file-browser-empty">Open a file from the tree or review a change from chat.</div></div>
+                            <div id="file-preview-status" class="file-preview-status" role="status"></div>
+                        </section>
+                    </div>
                 </div>
         </div>
     </div>
@@ -539,6 +560,24 @@
                                 <option value="left">Left aligned</option>
                             </select>
                             <span class="settings-field-hint">Choose between a split conversation layout or the original single-column transcript.</span>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-tool-group-preview">Tool Groups</label>
+                            <select id="setting-tool-group-preview" onchange="OSA.setToolGroupPreview(this.value)">
+                                <option value="0">Collapsed by default</option>
+                                <option value="2">Show 2 tools</option>
+                                <option value="5">Show 5 tools</option>
+                                <option value="all">Show all tools</option>
+                            </select>
+                            <span class="settings-field-hint">Default visible rows for grouped reads, searches, and parallel tool calls. Click a group to expand or collapse it.</span>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-tool-details-shell">Shell details</label>
+                            <select id="setting-tool-details-shell" onchange="OSA.setToolDetailDefault('shell', this.value === 'open')"><option value="closed">Collapsed by default</option><option value="open">Expanded by default</option></select>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-tool-details-edit">Edit details</label>
+                            <select id="setting-tool-details-edit" onchange="OSA.setToolDetailDefault('edit', this.value === 'open')"><option value="closed">Collapsed by default</option><option value="open">Expanded by default</option></select>
                         </div>
                     </div>
                 </div>
@@ -1575,8 +1614,10 @@
     <script defer src="/static/js/debug.js"></script>
     <script defer src="/static/js/utils.js"></script>
     <script defer src="/static/js/api.js"></script>
+    <script defer src="/static/js/diff-core.js"></script>
     <script defer src="/static/js/diff.js"></script>
     <script defer src="/static/js/preview.js"></script>
+    <script defer src="/static/js/filebrowser.js"></script>
     <!-- Global playback bar: visible whenever speech is playing, from any source. -->
     <div id="playback-bar" class="playback-bar hidden" role="status" aria-live="polite">
         <span class="playback-bar-dot"></span>
@@ -1610,6 +1651,8 @@
 
     <script defer src="/static/js/providers.js"></script>
     <script defer src="/static/js/messages.js"></script>
+    <script defer src="/static/js/goals.js"></script>
+    <script defer src="/static/js/stop.js"></script>
     <script defer src="/static/js/transcript.js"></script>
     <script defer src="/static/js/tools.js"></script>
     <script defer src="/static/js/ws.js"></script>

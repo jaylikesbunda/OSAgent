@@ -1,4 +1,5 @@
 pub mod api;
+pub mod files;
 pub mod scheduler;
 pub mod ws;
 

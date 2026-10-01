@@ -354,7 +354,7 @@ impl OpenAICompatibleProvider {
                 repaired.push(Message::tool_result(
                     call_id,
                     "No result recorded: this tool call was interrupted before it returned. \
-                     Treat it as not run and continue without it."
+                     Its outcome is unknown. Inspect the current state before retrying any action with side effects."
                         .to_string(),
                 ));
             }
@@ -380,7 +380,7 @@ impl OpenAICompatibleProvider {
             repaired.push(Message::tool_result(
                 call_id,
                 "No result recorded: this tool call was interrupted before it returned. \
-                 Treat it as not run and continue without it."
+                 Its outcome is unknown. Inspect the current state before retrying any action with side effects."
                     .to_string(),
             ));
         }
@@ -395,7 +395,12 @@ impl OpenAICompatibleProvider {
         repaired
     }
 
-    fn build_messages(&self, messages: &[Message], provider_type: &str) -> Vec<serde_json::Value> {
+    fn build_messages(
+        &self,
+        messages: &[Message],
+        provider_type: &str,
+        model: &str,
+    ) -> Vec<serde_json::Value> {
         let messages = &Self::reconcile_tool_call_results(messages);
         let image_url_as_string = provider_type == "ollama";
         let total_images = messages.iter().map(|msg| msg.images.len()).sum::<usize>();
@@ -461,8 +466,10 @@ impl OpenAICompatibleProvider {
                             .collect();
                         value["tool_calls"] = serde_json::json!(formatted_calls);
                     }
-                    if provider_type == "deepseek" && !msg.thinking.as_deref().unwrap_or("").is_empty() {
-                        value["reasoning_content"] = serde_json::json!(msg.thinking);
+                    if provider_type == "deepseek"
+                        || model.to_lowercase().contains("deepseek")
+                    {
+                        value["reasoning_content"] = serde_json::json!(msg.thinking.as_deref().unwrap_or(""));
                     }
                     if msg.content.is_empty() && msg.tool_calls.as_ref().is_some_and(|c| !c.is_empty()) {
                         value["content"] = serde_json::Value::Null;
@@ -1901,7 +1908,9 @@ impl OpenAICompatibleProvider {
         if let Some(value) = headers.get("retry-after-ms") {
             if let Ok(ms) = value.to_str().ok()?.trim().parse::<f64>() {
                 if ms.is_finite() && ms > 0.0 {
-                    return Some(Duration::from_millis(ms as u64));
+                    if let Ok(delay) = Duration::try_from_secs_f64(ms / 1000.0) {
+                        return Some(delay);
+                    }
                 }
             }
         }
@@ -1909,7 +1918,9 @@ impl OpenAICompatibleProvider {
             let raw = value.to_str().ok()?.trim();
             if let Ok(seconds) = raw.parse::<f64>() {
                 if seconds.is_finite() && seconds > 0.0 {
-                    return Some(Duration::from_secs_f64(seconds));
+                    if let Ok(delay) = Duration::try_from_secs_f64(seconds) {
+                        return Some(delay);
+                    }
                 }
             }
             if let Ok(date) = chrono::DateTime::parse_from_rfc2822(raw) {
@@ -1921,8 +1932,10 @@ impl OpenAICompatibleProvider {
         }
         if let Some(value) = headers.get("x-ratelimit-reset") {
             if let Ok(epoch) = value.to_str().ok()?.trim().parse::<i64>() {
-                let remaining = epoch - chrono::Utc::now().timestamp();
-                if remaining > 0 {
+                if let Some(remaining) = epoch
+                    .checked_sub(chrono::Utc::now().timestamp())
+                    .filter(|value| *value > 0)
+                {
                     return Some(Duration::from_secs(remaining as u64));
                 }
             }
@@ -2429,7 +2442,7 @@ impl OpenAICompatibleProvider {
             .default_options(&config.provider_type, &config.model);
         let mut request_body = serde_json::json!({
             "model": model,
-            "messages": self.build_messages(&transformed_messages, &config.provider_type),
+            "messages": self.build_messages(&transformed_messages, &config.provider_type, &config.model),
             "stream": true,
             "stream_options": { "include_usage": true },
         });
@@ -2589,7 +2602,7 @@ impl OpenAICompatibleProvider {
         let mut request_body = match mode {
             RequestMode::ChatCompletions | RequestMode::Custom => serde_json::json!({
                 "model": model,
-            "messages": self.build_messages(&transformed_messages, &config.provider_type),
+            "messages": self.build_messages(&transformed_messages, &config.provider_type, &config.model),
             }),
             RequestMode::Responses => serde_json::json!({
                 "model": model,
@@ -3249,8 +3262,11 @@ mod tests {
             arguments: serde_json::json!({ "command": "ls" }),
         }]);
 
-        let built =
-            provider.build_messages(&[Message::user("hi".to_string()), assistant], "openai");
+        let built = provider.build_messages(
+            &[Message::user("hi".to_string()), assistant],
+            "openai",
+            "gpt-test",
+        );
 
         let tool_msg = built
             .iter()
@@ -3259,6 +3275,41 @@ mod tests {
         assert_eq!(
             tool_msg.get("tool_call_id").and_then(|v| v.as_str()),
             Some("call_x")
+        );
+    }
+
+    #[test]
+    fn deepseek_reasoning_replays_through_compatible_provider() {
+        let provider = OpenAICompatibleProvider::new(ProviderConfig::default()).unwrap();
+        let mut assistant = Message::assistant("answer".to_string(), None);
+        assistant.thinking = Some("reasoning".to_string());
+        let built = provider.build_messages(&[assistant], "openrouter", "deepseek/deepseek-r1");
+        assert_eq!(built[0]["reasoning_content"], "reasoning");
+        let empty = provider.build_messages(
+            &[Message::assistant("answer".to_string(), None)],
+            "custom",
+            "deepseek-v4",
+        );
+        assert_eq!(empty[0]["reasoning_content"], "");
+        let other = provider.build_messages(
+            &[Message::assistant("answer".to_string(), None)],
+            "custom",
+            "other-model",
+        );
+        assert!(other[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn retry_header_overflow_is_ignored_without_panicking() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "1e100".parse().unwrap());
+        headers.insert("x-ratelimit-reset", i64::MIN.to_string().parse().unwrap());
+        assert!(OpenAICompatibleProvider::parse_retry_after(&headers).is_none());
+        headers.insert("retry-after-ms", "1e100".parse().unwrap());
+        headers.insert("retry-after", "1.5".parse().unwrap());
+        assert_eq!(
+            OpenAICompatibleProvider::parse_retry_after(&headers),
+            Some(Duration::from_millis(1500))
         );
     }
 

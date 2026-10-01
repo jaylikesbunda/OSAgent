@@ -290,6 +290,7 @@ fn build_priorities_section(mode: PromptMode, custom_priorities: Option<&[String
             "- Use todowrite for multi-step work that is easy to lose track of".to_string(),
             "- When making multiple independent tool calls (reads, greps, globs, searches, bash), batch them into a single message to run in parallel".to_string(),
             "- Be proactive about the task you were given: take the requested action plus its clear follow-up actions, but never start unrequested work or surprise the user with changes they did not ask for".to_string(),
+            "- Create a persistent goal only when the user explicitly requests one. Follow its current state across turns and compaction; mark complete only after the objective is achieved, with evidence from relevant checks. A plan, partial progress, or exhausted budget is not completion".to_string(),
             // Split advice from action. Previously this said only "if asked how
             // to approach something, answer first", which contradicted the
             // Communication rule that "can you… / help me…" means do the work.

@@ -590,6 +590,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/sessions/:id/workspace",
             get(get_session_workspace).post(set_session_workspace),
         )
+        .route("/api/sessions/:id/files", get(super::files::browse))
         .route("/api/memories", get(list_memories).post(add_memory))
         .route(
             "/api/memories/:id",
@@ -672,7 +673,9 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         )
         .route(
             "/api/sessions/:id/goal",
-            get(session_goal).delete(clear_session_goal),
+            get(session_goal)
+                .post(control_session_goal)
+                .delete(clear_session_goal),
         )
         .route("/api/sessions/:id/snapshots", get(list_file_snapshots))
         .route(
@@ -2694,6 +2697,7 @@ async fn enqueue_send_message(
             )
         })?;
 
+    agent.resume_session_queue(&session_id);
     let started_queue_id = agent
         .clone()
         .spawn_next_queued_message_run(session_id.clone(), "web".to_string())
@@ -2883,8 +2887,14 @@ async fn cancel_session(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    agent.cancel_session(&id);
-    agent.cancel_subagents_for_parent(&id).await;
+    agent.stop_session(&id).await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )
+    })?;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": format!("Cancellation requested for session {}", id)
@@ -3038,7 +3048,9 @@ async fn session_goal(
             }),
         )
     })?;
-    Ok(Json(serde_json::json!({ "goal": goal })))
+    Ok(Json(
+        serde_json::json!({ "goal": goal, "armed": agent.is_session_goal_armed(&session_id) }),
+    ))
 }
 
 async fn clear_session_goal(
@@ -3054,6 +3066,55 @@ async fn clear_session_goal(
         )
     })?;
     Ok(Json(serde_json::json!({ "cleared": cleared })))
+}
+
+#[derive(Deserialize)]
+struct GoalCommandRequest {
+    action: String,
+    objective: Option<String>,
+    max_rounds: Option<i64>,
+}
+
+async fn control_session_goal(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<GoalCommandRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if payload
+        .max_rounds
+        .is_some_and(|rounds| !(1..=100).contains(&rounds))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "max_rounds must be between 1 and 100".to_string(),
+            }),
+        ));
+    }
+    let goal = agent
+        .control_session_goal(
+            &session_id,
+            &payload.action,
+            payload.objective.as_deref(),
+            payload.max_rounds,
+        )
+        .await
+        .map_err(|error| {
+            let status = match &error {
+                crate::error::OSAgentError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                crate::error::OSAgentError::Session(message) if message == "Session not found" => {
+                    StatusCode::NOT_FOUND
+                }
+                _ => StatusCode::BAD_REQUEST,
+            };
+            (
+                status,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "goal": goal })))
 }
 
 async fn put_session_feedback(

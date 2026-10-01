@@ -349,6 +349,7 @@ OSA.applySessionWorkspace = async function(requestedWorkspaceId) {
         ws.activeWorkspace = data.id;
         OSA.setWorkspaceState(ws);
         OSA.updateWorkspaceChip(data.id, OSA.primaryWorkspacePath(data));
+        OSA.resetFileBrowser?.();
         OSA.renderWorkspaceMenu();
         var nameOrId = data.name || data.id;
         OSA.setWorkspaceInlineStatus('Using ' + nameOrId + ' for this chat.');

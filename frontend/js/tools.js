@@ -1269,6 +1269,8 @@ OSA.toggleToolCard = function(domId) {
     // class is the real state; the inline style is only cleared so cards
     // toggled by the previous logic are not stuck behind `display: none`.
     const isOpen = body ? body.classList.contains('visible') : false;
+    const container = document.getElementById(domId);
+    if (container) container._toolExpanded = !isOpen;
 
     if (body) {
         body.classList.toggle('visible', !isOpen);

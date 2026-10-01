@@ -1,3 +1,25 @@
+v0.7.0 changes (unreleased):
+
+Added:
+* Browse workspace files beside chat, open files in tabs, preview Markdown, and review the agent's edits in a combined or side-by-side view
+* Collapse tool activity into compact groups. Choose how many tools appear by default in Settings → Appearance, with separate controls for expanding shell output and file edits
+* Set a goal with `/goal <objective>` and let the agent keep working across multiple turns. Check its status, pause, resume, or clear it, and set a limit on continuation rounds
+* Create and manage goals directly from the chat composer, with a compact view of the objective, progress, and pause/resume controls
+
+Changed:
+* Goals start when you ask for them, remain available when long conversations are condensed, and require the agent to check that the work is complete before finishing
+
+Fixed:
+* Consecutive tools stay together in one group, including in subagent chats. Empty “OSA” rows no longer split groups, and expanded groups stay open as new tools arrive
+* File comparisons no longer show another file's changes when several are opened at once, and large edits use less memory
+* Goals pause when their round limit is reached and stay stopped until resumed. Paused or cleared goals no longer restart from previously queued work
+* Stop more reliably interrupts running tools and shell commands while keeping partial replies. It also pauses goals and queued work, shows when stopping is still in progress, and reports failures so you can retry
+* Stopping a task no longer resets another chat if you switch sessions while waiting
+* Improved tool compatibility across providers, including tools that return no output
+* Fixed conversation errors with Mistral and DeepSeek, including when accessed through other providers
+* After an interrupted tool call, the agent checks what happened before retrying an action
+* Invalid retry instructions from providers no longer crash the agent
+
 v0.6.2 changes:
 
 Added:

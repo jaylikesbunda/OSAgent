@@ -181,13 +181,14 @@ impl GoalStore {
                         format!("Cannot pause a goal in phase {}", current.phase.as_str()),
                     ));
                 }
-                self.disarm(session_id);
-                self.update(session_id, revision, |goal| {
+                let goal = self.update(session_id, revision, |goal| {
                     goal.phase = GoalPhase::Paused;
                     goal.blocked_reason = None;
                     goal.policy_code = None;
                     Ok(())
-                })
+                })?;
+                self.disarm(session_id);
+                Ok(goal)
             }
             "resume" => {
                 if !Self::validate_transition(current.phase, GoalPhase::Active) {
@@ -196,22 +197,24 @@ impl GoalStore {
                         format!("Cannot resume a goal in phase {}", current.phase.as_str()),
                     ));
                 }
-                self.arm(session_id);
-                self.update(session_id, revision, |goal| {
+                let goal = self.update(session_id, revision, |goal| {
                     goal.phase = GoalPhase::Active;
                     goal.blocked_reason = None;
                     goal.policy_code = None;
                     Ok(())
-                })
+                })?;
+                self.arm(session_id);
+                Ok(goal)
             }
             "complete" => {
-                self.disarm(session_id);
-                self.update(session_id, revision, |goal| {
+                let goal = self.update(session_id, revision, |goal| {
                     goal.phase = GoalPhase::Complete;
                     goal.blocked_reason = None;
                     goal.policy_code = None;
                     Ok(())
-                })
+                })?;
+                self.disarm(session_id);
+                Ok(goal)
             }
             "blocked" => {
                 if !Self::validate_transition(current.phase, GoalPhase::Blocked) {
@@ -236,13 +239,14 @@ impl GoalStore {
                     .ok_or_else(|| {
                         goal_error(GOAL_NOT_FOUND, "blocked requires a blocked_reason")
                     })?;
-                self.disarm(session_id);
-                self.update(session_id, revision, |goal| {
+                let goal = self.update(session_id, revision, |goal| {
                     goal.phase = GoalPhase::Blocked;
                     goal.blocked_reason = Some(reason.to_string());
                     goal.policy_code = Some("goal_blocked".to_string());
                     Ok(())
-                })
+                })?;
+                self.disarm(session_id);
+                Ok(goal)
             }
             other => Err(goal_error(
                 GOAL_INVALID_PHASE,
@@ -259,6 +263,31 @@ impl GoalStore {
         self.storage.clear_goal(session_id)
     }
 
+    /// Only an explicit user resume may reopen a blocked goal or renew its budget.
+    pub fn resume_by_user(&self, session_id: &str, max_rounds: Option<i64>) -> Result<Goal> {
+        let current = self
+            .get(session_id)?
+            .ok_or_else(|| goal_error(GOAL_NOT_FOUND, "No goal to resume"))?;
+        if current.phase == GoalPhase::Complete {
+            return Err(goal_error(
+                GOAL_INVALID_PHASE,
+                "Completed goals cannot resume; create a new goal",
+            ));
+        }
+        let goal = self.update(session_id, current.revision, |goal| {
+            goal.phase = GoalPhase::Active;
+            goal.blocked_reason = None;
+            goal.policy_code = None;
+            goal.rounds_started = 0;
+            if let Some(max_rounds) = max_rounds {
+                goal.max_rounds = max_rounds.clamp(1, 100);
+            }
+            Ok(())
+        })?;
+        self.arm(session_id);
+        Ok(goal)
+    }
+
     /// Round driver reservation: CAS-increment `rounds_started` and
     /// return the reserved round number. `None` means no round is due
     /// (not armed, wrong phase, or rounds exhausted).
@@ -273,6 +302,11 @@ impl GoalStore {
             return Ok(None);
         }
         if current.rounds_started >= current.max_rounds {
+            self.update(session_id, current.revision, |goal| {
+                goal.phase = GoalPhase::Paused;
+                goal.policy_code = Some("round_budget_exhausted".to_string());
+                Ok(())
+            })?;
             self.disarm(session_id);
             return Ok(None);
         }
@@ -388,6 +422,46 @@ mod tests {
         assert!(store.clear(&sid).unwrap());
         assert!(store.get(&sid).unwrap().is_none());
         assert!(!store.is_armed(&sid));
+    }
+
+    #[test]
+    fn exhausted_budget_pauses_and_user_resume_renews_it() {
+        let (store, sid) = store();
+        store.create(&sid, "Objective", 1).unwrap();
+        store.reserve_round(&sid).unwrap();
+        assert!(store.reserve_round(&sid).unwrap().is_none());
+        assert_eq!(store.get(&sid).unwrap().unwrap().phase, GoalPhase::Paused);
+        let goal = store.resume_by_user(&sid, Some(2)).unwrap();
+        assert_eq!(goal.rounds_started, 0);
+        assert_eq!(goal.max_rounds, 2);
+        assert!(store.is_armed(&sid));
+        assert_eq!(store.reserve_round(&sid).unwrap().unwrap().0, 1);
+    }
+
+    #[test]
+    fn only_user_resume_reopens_blocked_goals() {
+        let (store, sid) = store();
+        store.create(&sid, "Objective", 5).unwrap();
+        for _ in 0..3 {
+            store.reserve_round(&sid).unwrap();
+        }
+        let current = store.get(&sid).unwrap().unwrap();
+        let blocked = store
+            .apply_action(
+                &sid,
+                current.revision,
+                "blocked",
+                None,
+                Some("Missing credentials"),
+            )
+            .unwrap();
+        assert!(store
+            .apply_action(&sid, blocked.revision, "resume", None, None)
+            .is_err());
+        let resumed = store.resume_by_user(&sid, None).unwrap();
+        assert_eq!(resumed.phase, GoalPhase::Active);
+        assert!(resumed.blocked_reason.is_none());
+        assert_eq!(resumed.rounds_started, 0);
     }
 
     #[test]

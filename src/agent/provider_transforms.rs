@@ -38,18 +38,30 @@ impl ProviderTransforms {
             _ => {}
         }
 
-        if model.contains("claude") {
+        let model_lower = model.to_lowercase();
+        if model_lower.contains("claude") {
+            Self::filter_empty_content_in_place(&mut result);
             Self::normalize_claude_tool_call_ids_in_place(&mut result);
         }
 
-        if model.contains("mistral") || model.to_lowercase().contains("mistral") {
+        if model_lower.contains("mistral") && provider_type != "mistral" {
             Self::normalize_mistral_tool_call_ids_in_place(&mut result);
+            Self::fix_mistral_message_sequence(&mut result);
+        }
+        if model_lower.contains("deepseek") {
+            Self::ensure_deepseek_reasoning_in_place(&mut result);
         }
 
         result
     }
 
     fn filter_empty_content_in_place(messages: &mut Vec<Message>) {
+        // Blank results still answer their calls and must survive filtering.
+        for msg in messages.iter_mut() {
+            if msg.role == "tool" && msg.content.trim().is_empty() {
+                msg.content = "Tool completed with no output.".to_string();
+            }
+        }
         messages.retain(|msg| {
             if msg.role == "tool" {
                 return !msg.content.trim().is_empty();
@@ -74,99 +86,75 @@ impl ProviderTransforms {
     }
 
     fn normalize_claude_tool_call_ids_in_place(messages: &mut [Message]) {
-        for msg in messages.iter_mut() {
-            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                if let Some(ref mut calls) = msg.tool_calls {
-                    for call in calls.iter_mut() {
-                        call.id = call
-                            .id
-                            .chars()
-                            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                            .collect();
-                        if call.id.is_empty() {
-                            call.id = format!(
-                                "tool_{}",
-                                uuid::Uuid::new_v4()
-                                    .to_string()
-                                    .replace("-", "")
-                                    .chars()
-                                    .take(8)
-                                    .collect::<String>()
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        Self::normalize_tool_ids(messages, false);
     }
 
     fn normalize_mistral_tool_call_ids_in_place(messages: &mut [Message]) {
-        for msg in messages.iter_mut() {
-            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                if let Some(ref mut calls) = msg.tool_calls {
-                    for call in calls.iter_mut() {
-                        let normalized: String = call
-                            .id
-                            .chars()
-                            .filter(|c| c.is_alphanumeric())
-                            .take(9)
-                            .collect();
-                        call.id = if normalized.len() < 9 {
-                            format!("{}{}", normalized, "0".repeat(9 - normalized.len()))
-                        } else {
-                            normalized
-                        };
-                    }
-                }
-            }
-        }
+        Self::normalize_tool_ids(messages, true);
     }
 
     fn normalize_openai_tool_call_ids_in_place(messages: &mut [Message]) {
-        for msg in messages.iter_mut() {
-            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                if let Some(ref mut calls) = msg.tool_calls {
-                    for call in calls.iter_mut() {
-                        call.id = call
-                            .id
-                            .chars()
-                            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                            .collect();
-                    }
-                }
-            }
-        }
+        Self::normalize_tool_ids(messages, false);
     }
 
     fn normalize_google_tool_call_ids_in_place(messages: &mut [Message]) {
+        Self::normalize_tool_ids(messages, false);
+    }
+
+    fn normalize_tool_ids(messages: &mut [Message], mistral: bool) {
+        let mut mapping = std::collections::HashMap::new();
+        let mut used = std::collections::HashSet::new();
+        let mut fallback = 0usize;
         for msg in messages.iter_mut() {
-            if (msg.role == "assistant" || msg.role == "tool") && msg.tool_calls.is_some() {
-                if let Some(ref mut calls) = msg.tool_calls {
-                    for call in calls.iter_mut() {
-                        call.id = call
-                            .id
+            if let Some(calls) = &mut msg.tool_calls {
+                for call in calls {
+                    let original = call.id.clone();
+                    let replacement = mapping.entry(original.clone()).or_insert_with(|| {
+                        let mut id: String = original
                             .chars()
-                            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                            .filter(|c| {
+                                c.is_ascii_alphanumeric() || (!mistral && (*c == '_' || *c == '-'))
+                            })
+                            .take(if mistral { 9 } else { usize::MAX })
                             .collect();
-                    }
+                        if mistral {
+                            id.push_str(&"0".repeat(9 - id.len()));
+                        }
+                        while id.is_empty() || used.contains(&id) {
+                            fallback += 1;
+                            id = if mistral {
+                                format!("{:09}", fallback)
+                            } else {
+                                format!("call_{}", fallback)
+                            };
+                        }
+                        used.insert(id.clone());
+                        id
+                    });
+                    call.id = replacement.clone();
+                }
+            }
+        }
+        for msg in messages {
+            if let Some(id) = &mut msg.tool_call_id {
+                if let Some(replacement) = mapping.get(id) {
+                    *id = replacement.clone();
                 }
             }
         }
     }
 
-    pub fn fix_mistral_message_sequence(messages: &mut [Message]) {
+    pub fn fix_mistral_message_sequence(messages: &mut Vec<Message>) {
         let mut i = 0;
-        while i < messages.len().saturating_sub(1) {
+        while i + 1 < messages.len() {
             if messages[i].role == "tool" && messages[i + 1].role == "user" {
-                messages[i + 1].role = "assistant".to_string();
-                if messages[i + 1].content.is_empty() {
-                    messages[i + 1].content = "Done.".to_string();
-                }
+                // Preserve the user's identity and intent; insert the separator.
+                messages.insert(i + 1, Message::assistant("Done.".to_string(), None));
+                i += 1;
             }
             i += 1;
         }
     }
-
     pub fn get_provider_headers(
         provider_type: &str,
         _base_url: &str,
@@ -432,4 +420,80 @@ pub fn transform_schema(
     model: &str,
 ) -> serde_json::Value {
     ProviderTransforms::transform_schema(schema, provider_type, model)
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::storage::ToolCall;
+
+    fn history(ids: &[&str]) -> Vec<Message> {
+        let calls = ids
+            .iter()
+            .map(|id| ToolCall {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({}),
+            })
+            .collect();
+        let mut messages = vec![Message::assistant(String::new(), Some(calls))];
+        messages.extend(
+            ids.iter()
+                .map(|id| Message::tool_result(id.to_string(), String::new())),
+        );
+        messages
+    }
+
+    #[test]
+    fn normalized_ids_remain_unique_paired_and_deterministic() {
+        for (provider, model) in [
+            ("openai", "gpt"),
+            ("anthropic", "claude"),
+            ("google", "gemini"),
+            ("mistral", "mistral"),
+            ("openrouter", "mistral-large"),
+        ] {
+            let input = history(&["call.a", "call/a", "!!!", "abcdefghijk", "abcdefghijl", "é"]);
+            let output = ProviderTransforms::transform_messages(&input, provider, model);
+            let calls = output[0].tool_calls.as_ref().unwrap();
+            let unique: std::collections::HashSet<_> = calls.iter().map(|call| &call.id).collect();
+            assert_eq!(unique.len(), calls.len(), "{provider}");
+            for (call, result) in calls.iter().zip(&output[1..]) {
+                assert_eq!(Some(&call.id), result.tool_call_id.as_ref(), "{provider}");
+                assert!(!call.id.is_empty());
+                assert!(call.id.is_ascii());
+                if model.contains("mistral") {
+                    assert_eq!(call.id.len(), 9);
+                }
+            }
+            let repeated = ProviderTransforms::transform_messages(&input, provider, model);
+            assert_eq!(
+                calls.iter().map(|call| &call.id).collect::<Vec<_>>(),
+                repeated[0]
+                    .tool_calls
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|call| &call.id)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_results_survive_and_mistral_preserves_user_role() {
+        let mut input = history(&["call/1"]);
+        input.push(Message::user("Actually, stop editing".to_string()));
+        for provider in ["anthropic", "google", "deepseek", "ollama", "groq"] {
+            let output = ProviderTransforms::transform_messages(&input, provider, "test");
+            assert_eq!(output[1].role, "tool");
+            assert_eq!(output[1].content, "Tool completed with no output.");
+        }
+        let output = ProviderTransforms::transform_messages(&input, "mistral", "mistral-large");
+        assert_eq!(output[2].role, "assistant");
+        assert_eq!(output[3].role, "user");
+        assert_eq!(output[3].content, "Actually, stop editing");
+        let twice = ProviderTransforms::transform_messages(&output, "mistral", "mistral-large");
+        assert_eq!(twice.len(), output.len());
+    }
 }

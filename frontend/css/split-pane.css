@@ -1,5 +1,5 @@
 #app-view {
-    --preview-width: 420px;
+    --preview-width: 640px;
     position: relative;
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -175,3 +175,45 @@ body.resizing-preview {
         border-top: 1px solid var(--border);
     }
 }
+
+/* Workspace browser: quiet navigation beside the source or recorded change. */
+.file-browser-heading { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-browser-actions { display: flex; gap: 4px; }
+.file-browser-actions button { border: 0; background: transparent; color: var(--text-secondary); font-size: 19px; width: 26px; height: 26px; cursor: pointer; border-radius: 5px; }
+.file-browser-actions button:hover { background: var(--bg-hover); }
+.file-browser-layout { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); flex: 1; min-height: 0; }
+.file-browser-nav { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); overflow: hidden; padding: 10px 6px; }
+.file-browser-switch { display: flex; gap: 2px; margin-bottom: 10px; }
+.file-browser-switch button, .file-preview-modes button { border: none; background: transparent; color: var(--text-muted); padding: 5px 8px; font-size: 11px; border-radius: 5px; cursor: pointer; }
+.file-browser-switch button[aria-pressed="true"], .file-preview-modes button[aria-pressed="true"] { background: var(--bg-tertiary); color: var(--text-primary); }
+#browser-change-count { font-size: 10px; }
+#file-browser-root, #file-browser-filter { width: 100%; border: 1px solid var(--border); color: var(--text-secondary); border-radius: 5px; background: transparent; padding: 6px; font-size: 11px; margin-bottom: 8px; box-sizing: border-box; }
+.file-browser-tree { flex: 1; min-height: 0; overflow: auto; }
+.file-tree-row { width: 100%; border: none; border-radius: 4px; display: flex; gap: 6px; align-items: center; padding: 6px 6px 6px calc(6px + var(--depth, 0) * 12px); background: transparent; color: var(--text-secondary); font: inherit; font-size: 11px; cursor: pointer; text-align: left; }
+.file-tree-row:hover { background: var(--bg-hover); color: var(--text-primary); }
+.file-tree-row.selected { background: var(--accent-dim); color: var(--text-primary); }
+.file-tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tree-icon { width: 10px; flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
+.file-tree-note { font: inherit; font-size: 11px; line-height: 1.6; padding: 8px; color: var(--text-muted); overflow-wrap: anywhere; border: 0; background: transparent; }
+.file-browser-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg-primary); }
+.file-preview-tabs { display: flex; overflow-x: auto; flex-shrink: 0; border-bottom: 1px solid var(--border); min-height: 35px; }
+.file-preview-tab { display: flex; flex-shrink: 0; align-items: center; max-width: 200px; border-right: 1px solid var(--border); border-bottom: 2px solid transparent; }
+.file-preview-tab.selected { border-bottom-color: var(--accent); }
+.file-preview-tab button { background: transparent; color: var(--text-muted); border: none; padding: 9px 10px; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-preview-tab.selected button { color: var(--text-primary); }
+.file-preview-tab .file-tab-close { padding: 6px; font-size: 14px; }
+.file-preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.file-preview-path { min-width: 0; flex: 1 1 100px; font-size: 10px; display: block; }
+.file-preview-modes { display: flex; flex-shrink: 0; }
+.file-preview-body { padding: 0; min-height: 0; background: var(--bg-primary); }
+.file-source { display: flex; width: max-content; min-width: 100%; padding: 12px 0; }
+.file-source pre { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; line-height: 1.55; tab-size: 4; }
+.file-source-gutter { color: var(--text-muted); text-align: right; user-select: none; padding: 0 12px; border-right: 1px solid var(--border); position: sticky; left: 0; background: var(--bg-primary); }
+.file-source-code { padding: 0 12px; }
+.file-preview-markdown { padding: 18px; }
+.file-preview-body .diff-view { margin: 0; border: none; border-radius: 0; }
+.file-preview-body .diff-toolbar { position: sticky; top: 0; }
+.file-preview-status { padding: 7px 10px; font-size: 10px; color: var(--text-muted); border-top: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.file-browser-empty { padding: 30px 20px; color: var(--text-muted); font-size: 12px; line-height: 1.7; max-width: 260px; }
+.file-preview-panel button:focus-visible, #file-browser-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (max-width: 900px) { .file-preview-panel { height: 75vh; } .file-browser-layout { grid-template-columns: 140px minmax(0, 1fr); } }

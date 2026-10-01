@@ -70,6 +70,43 @@
     color: var(--text-muted);
 }
 
+.tool-group-toggle {
+    width: 100%;
+    justify-content: flex-start;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.tool-group-toggle:hover {
+    background: var(--bg-hover);
+}
+
+.tool-group-toggle:focus-visible {
+    outline: 2px solid var(--text-secondary);
+    outline-offset: 2px;
+}
+
+.tool-group-chevron {
+    width: 12px;
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
+.tool-group-title { color: var(--text-secondary); font-size: 12px; font-weight: 500; flex-shrink: 0; }
+.tool-group-toggle .parallel-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tool-group-toggle { padding: 7px 8px; gap: 10px; }
+.tool-group-toggle[data-running="true"] .tool-group-title { color: var(--text-primary); }
+
+.parallel-group > [hidden],
+.context-inline-group > [hidden] {
+    display: none !important;
+}
+
 .parallel-group .tool-container {
     margin-bottom: 2px;
 }

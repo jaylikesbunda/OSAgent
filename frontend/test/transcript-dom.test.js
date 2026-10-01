@@ -9,6 +9,7 @@ test.before(async () => {
     global.window = window;
     global.document = window.document;
     global.navigator = window.navigator;
+    global.localStorage = window.localStorage;
     global.Node = window.Node;
     global.HTMLElement = window.HTMLElement;
     global.requestAnimationFrame = () => 1;
@@ -19,6 +20,7 @@ test.before(async () => {
 require('../js/utils.js');
     require('../js/messages.js');
     require('../js/transcript.js');
+    require('../js/settings.js');
 
     OSA.escapeHtml = value => String(value || '')
         .replace(/&/g, '&amp;')
@@ -43,6 +45,7 @@ require('../js/utils.js');
 
 test.beforeEach(() => {
     document.body.replaceChildren();
+    localStorage.clear();
     OSA.transcriptView = {
         toolNodesByCallId: new Map(),
         ctxNodesByCallId: new Map(),
@@ -228,6 +231,136 @@ test('forming a parallel group moves the first card without recreating it', () =
 
     assert.equal(document.getElementById('tool-move-a'), firstCard);
     assert.equal(firstCard.parentElement, groupWrapper.querySelector('.parallel-group'));
+});
+
+test('collapsed tool groups retain expansion and expose failures during live updates', () => {
+    const wrapper = document.createElement('div');
+    document.body.appendChild(wrapper);
+    const items = ['fold-a', 'fold-b'].map(id => OSA.tmodelToolItem({
+        tool_call_id: id, tool_name: 'bash', arguments: {},
+    }));
+    const unit = { type: 'parallel-group', items };
+    OSA.patchParallelGroupUnit(wrapper, unit);
+    const group = wrapper.firstElementChild;
+    const header = group.querySelector('button');
+    const card = document.getElementById('tool-fold-a');
+    assert.equal(card.hidden, true);
+    assert.equal(header.getAttribute('aria-expanded'), 'false');
+    header.click();
+    assert.equal(card.hidden, false);
+    items[0].completed = true;
+    items[0].success = false;
+    OSA.patchParallelGroupUnit(wrapper, unit);
+    assert.equal(header.getAttribute('aria-expanded'), 'true');
+    assert.match(header.textContent, /1 failed/);
+    assert.equal(document.getElementById('tool-fold-a'), card);
+    header.click();
+    assert.equal(card.hidden, true);
+    assert.match(header.textContent, /1 failed/);
+});
+
+test('tool preview preference persists and immediately updates existing context groups', () => {
+    const wrapper = document.createElement('div');
+    document.body.appendChild(wrapper);
+    const items = ['read_file', 'grep', 'glob'].map((name, index) => OSA.tmodelToolItem({
+        tool_call_id: 'preview-' + index, tool_name: name, arguments: {},
+    }));
+    OSA.patchContextGroupUnit(wrapper, { items });
+    const group = wrapper.firstElementChild;
+    const rows = Array.from(group.querySelectorAll('.context-inline-item'));
+    assert.equal(rows.every(row => row.hidden), true);
+    assert.match(group.textContent, /1 read, 2 searches/);
+    OSA.setToolGroupPreview('2');
+    assert.equal(localStorage.getItem('osagent-tool-group-preview'), '2');
+    assert.deepEqual(rows.map(row => row.hidden), [false, false, true]);
+    group.querySelector('button').click();
+    assert.equal(rows.every(row => !row.hidden), true);
+    OSA.setToolGroupPreview('all');
+    assert.equal(OSA.getToolGroupPreview(), 'all');
+    assert.equal(rows.every(row => !row.hidden), true);
+    group.querySelector('button').click();
+    assert.equal(rows.every(row => row.hidden), true);
+    OSA.setToolGroupPreview('invalid');
+    assert.equal(OSA.getToolGroupPreview(), 0);
+});
+
+test('diagrams remain standalone beside grouped tools', () => {
+    OSA.tmodelReset();
+    ['bash', 'draw_diagram', 'bash', 'bash'].forEach((name, index) => {
+        OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'diagram-group-' + index, tool_name: name, arguments: {} }));
+    });
+    const units = OSA.buildTranscriptUnits();
+    assert.deepEqual(units.map(unit => unit.type), ['tool', 'tool', 'parallel-group']);
+    assert.equal(units[1].items[0].toolName, 'draw_diagram');
+});
+
+test('one context read is collapsed and internal message indices do not split adjacent tools', () => {
+    const wrapper = document.createElement('div'); document.body.appendChild(wrapper);
+    const read = OSA.tmodelToolItem({tool_call_id: 'single-context', tool_name: 'read_file'});
+    OSA.patchContextGroupUnit(wrapper, {items: [read]});
+    assert.equal(wrapper.querySelector('.tool-group-toggle').hidden, false);
+    assert.equal(wrapper.querySelector('.context-inline-item').hidden, true);
+    OSA.tmodelReset();
+    [{id:'late-a', index:4, time:1000}, {id:'late-b', index:4, time:10000}, {id:'later-round', index:8, time:10001}].forEach(call => {
+        const item = OSA.tmodelToolItem({tool_call_id:call.id, tool_name:'bash', message_index:call.index});
+        item.ts = call.time; OSA.tmodelAppend(item);
+    });
+    assert.deepEqual(OSA.buildTranscriptUnits().map(unit => unit.items.length), [3]);
+});
+
+test('mixed tool categories share a group until a visible message separates them', () => {
+    OSA.tmodelReset();
+    const tools = ['read_file', 'bash', 'search_files', 'edit_file', 'read_file'].map((name, index) => {
+        const item = OSA.tmodelToolItem({tool_call_id: 'mixed-' + index, tool_name: name, message_index: index});
+        item.context = name === 'read_file' || name === 'search_files';
+        return item;
+    });
+    tools.forEach(item => OSA.tmodelAppend(item));
+    OSA.tmodelAppend({kind: 'message', key: 'visible-update', role: 'assistant', content: 'Checking the result.'});
+    OSA.tmodelAppend(OSA.tmodelToolItem({tool_call_id: 'after-update', tool_name: 'bash'}));
+    const units = OSA.buildTranscriptUnits();
+    assert.deepEqual(units.map(unit => unit.items.length), [5, 1, 1]);
+    assert.deepEqual(units.map(unit => unit.type), ['parallel-group', 'message', 'tool']);
+});
+
+test('a live context group retains expansion when other tool categories join it', () => {
+    OSA.tmodelReset();
+    const read = OSA.tmodelToolItem({tool_call_id: 'growing-read', tool_name: 'read_file'});
+    read.context = true;
+    OSA.tmodelAppend(read);
+    const wrapper = document.createElement('div');
+    document.body.appendChild(wrapper);
+    const initial = OSA.buildTranscriptUnits()[0];
+    OSA.patchUnit(wrapper, initial);
+    const group = wrapper.firstElementChild;
+    const header = group.querySelector('.tool-group-toggle');
+    const row = group.querySelector('.context-inline-item');
+    header.click();
+    const shell = OSA.tmodelToolItem({tool_call_id: 'growing-shell', tool_name: 'bash', message_index: 99});
+    OSA.tmodelAppend(shell);
+    const grown = OSA.buildTranscriptUnits()[0];
+    assert.equal(grown.key, initial.key);
+    OSA.patchUnit(wrapper, grown);
+    assert.equal(wrapper.firstElementChild, group);
+    assert.equal(group.querySelector('.tool-group-toggle'), header);
+    assert.equal(group.querySelector('.context-inline-item'), row);
+    assert.equal(header.getAttribute('aria-expanded'), 'true');
+    assert.equal(row.hidden, false);
+    assert.equal(group.querySelector('.tool-container').hidden, false);
+    assert.match(header.textContent, /2 tools/);
+});
+
+test('shell detail defaults apply immediately and preserve an explicit fold during progress', () => {
+    const wrapper = document.createElement('div'); document.body.appendChild(wrapper);
+    const item = OSA.tmodelToolItem({tool_call_id:'detail-default', tool_name:'bash'});
+    OSA.patchToolUnit(wrapper, {items:[item]});
+    const container = document.getElementById('tool-detail-default');
+    OSA.setToolDetailDefault('shell', true);
+    assert.equal(container.querySelector('.tool-body').classList.contains('visible'), true);
+    container._toolExpanded = false;
+    item.completed = true; item.success = true;
+    OSA.patchToolCardElement(container, item);
+    assert.equal(container.querySelector('.tool-body').classList.contains('visible'), false);
 });
 
 test('context tool progress patches fields without rebuilding the row', () => {
