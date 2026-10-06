@@ -93,7 +93,7 @@ impl Tool for CreateGoalTool {
             "properties": {
                 "session_id": {"type": "string", "description": "Session ID (injected automatically)"},
                 "objective": {"type": "string", "description": "What the user wants, stated as a durable objective"},
-                "max_rounds": {"type": "integer", "description": "Maximum goal rounds before the goal pauses", "default": DEFAULT_MAX_ROUNDS}
+                "max_rounds": {"type": "integer", "description": "Maximum goal rounds before the goal pauses; 0 means no round limit", "default": DEFAULT_MAX_ROUNDS}
             },
             "required": ["objective"]
         })
@@ -108,9 +108,14 @@ impl Tool for CreateGoalTool {
         })?;
         let max_rounds = args["max_rounds"].as_i64().unwrap_or(DEFAULT_MAX_ROUNDS);
         let goal = self.goals.create(session_id, objective, max_rounds)?;
+        let budget = if goal.max_rounds <= 0 {
+            "no round limit".to_string()
+        } else {
+            format!("up to {} rounds", goal.max_rounds)
+        };
         Ok(format!(
-            "Goal created (id {}, revision {}): \"{}\" — up to {} rounds. Subsequent turns continue working toward it automatically.",
-            goal.id, goal.revision, goal.objective, goal.max_rounds
+            "Goal created (id {}, revision {}): \"{}\" - {}. Subsequent turns continue working toward it automatically.",
+            goal.id, goal.revision, goal.objective, budget
         ))
     }
 }

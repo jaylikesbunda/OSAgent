@@ -22,4 +22,6 @@
 .goal-editor-footer label, .goal-editor-hint { color: var(--text-muted); font-size: 11px; }
 .goal-editor-hint { margin: 8px 0 0; }
 .goal-action-primary { background: var(--text-primary); color: var(--bg-primary); border-color: transparent; }
+.goal-unlimited-toggle { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.goal-unlimited-toggle input[type="checkbox"], .goal-options input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
 @media (max-width: 600px) { .goal-options-body { max-width: 220px; } .goal-row { gap: 8px; } }

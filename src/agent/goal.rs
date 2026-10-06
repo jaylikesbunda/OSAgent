@@ -20,6 +20,20 @@ use std::sync::Arc;
 
 pub const DEFAULT_MAX_ROUNDS: i64 = 5;
 pub const DEFAULT_BLOCKED_AFTER_ROUNDS: i64 = 3;
+/// `max_rounds` value that means "no round limit": the goal keeps running
+/// until the user pauses/clears it or it completes on its own.
+pub const UNLIMITED_ROUNDS: i64 = 0;
+
+/// Sample a user-supplied round budget into the stored representation:
+/// positive values are clamped to 1..=100, and anything at or below zero means
+/// unlimited (`UNLIMITED_ROUNDS`).
+pub fn normalize_max_rounds(max_rounds: i64) -> i64 {
+    if max_rounds <= UNLIMITED_ROUNDS {
+        UNLIMITED_ROUNDS
+    } else {
+        max_rounds.clamp(1, 100)
+    }
+}
 
 /// Stable error codes surfaced to the model, mirroring DSH's closed
 /// failure-code vocabulary.
@@ -73,7 +87,7 @@ impl GoalStore {
         if objective.is_empty() {
             return Err(goal_error(GOAL_NOT_FOUND, "Objective cannot be empty"));
         }
-        let max_rounds = max_rounds.clamp(1, 100);
+        let max_rounds = normalize_max_rounds(max_rounds);
         match self
             .storage
             .create_goal_row(session_id, objective, max_rounds)?
@@ -280,7 +294,7 @@ impl GoalStore {
             goal.policy_code = None;
             goal.rounds_started = 0;
             if let Some(max_rounds) = max_rounds {
-                goal.max_rounds = max_rounds.clamp(1, 100);
+                goal.max_rounds = normalize_max_rounds(max_rounds);
             }
             Ok(())
         })?;
@@ -301,7 +315,7 @@ impl GoalStore {
         if current.phase != GoalPhase::Active {
             return Ok(None);
         }
-        if current.rounds_started >= current.max_rounds {
+        if current.max_rounds > UNLIMITED_ROUNDS && current.rounds_started >= current.max_rounds {
             self.update(session_id, current.revision, |goal| {
                 goal.phase = GoalPhase::Paused;
                 goal.policy_code = Some("round_budget_exhausted".to_string());
@@ -413,6 +427,29 @@ mod tests {
         // disarms itself.
         assert!(store.reserve_round(&sid).unwrap().is_none());
         assert!(!store.is_armed(&sid));
+    }
+
+    #[test]
+    fn unlimited_rounds_never_exhaust() {
+        let (store, sid) = store();
+        store.create(&sid, "Objective", 0).unwrap();
+        for expected in 1..=8 {
+            let reserved = store.reserve_round(&sid).unwrap();
+            assert_eq!(reserved.as_ref().map(|(round, _)| *round), Some(expected));
+        }
+        assert!(store.is_armed(&sid));
+        assert_eq!(store.get(&sid).unwrap().unwrap().phase, GoalPhase::Active);
+    }
+
+    #[test]
+    fn user_resume_can_lift_the_round_limit() {
+        let (store, sid) = store();
+        store.create(&sid, "Objective", 1).unwrap();
+        store.reserve_round(&sid).unwrap();
+        assert!(store.reserve_round(&sid).unwrap().is_none());
+        let goal = store.resume_by_user(&sid, Some(0)).unwrap();
+        assert_eq!(goal.max_rounds, 0);
+        assert!(store.reserve_round(&sid).unwrap().is_some());
     }
 
     #[test]

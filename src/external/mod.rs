@@ -2,7 +2,7 @@ use globset::Glob;
 use globset::GlobMatcher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
@@ -205,7 +205,17 @@ impl ExternalDirectoryManager {
 
         if allowed && always {
             let mut permissions = self.granted_permissions.write().await;
-            permissions.insert(prompt.path.clone(), chrono::Utc::now());
+            let now = chrono::Utc::now();
+            permissions.insert(prompt.path.clone(), now);
+            // `patterns` carries the folder the approval covers (for example
+            // `C:\outside\**`). Remember that folder too so "Always allow"
+            // holds for every subdirectory beneath it instead of only the
+            // exact path that triggered the prompt.
+            for pattern in &prompt.patterns {
+                if let Some(root) = grant_root_from_pattern(pattern) {
+                    permissions.insert(root, now);
+                }
+            }
         }
 
         if let Some(sender) = self.pending_responses.write().await.remove(prompt_id) {
@@ -233,7 +243,18 @@ impl ExternalDirectoryManager {
 
     pub async fn has_granted_permission(&self, path: &str) -> bool {
         let permissions = self.granted_permissions.read().await;
-        permissions.contains_key(path)
+        if permissions.contains_key(path) {
+            return true;
+        }
+        // An approval remembers the folder it covered, so anything beneath
+        // that folder (any subdirectory) counts as approved too. Session
+        // resources (`session://…`) are matched exactly only.
+        if path.starts_with("session://") {
+            return false;
+        }
+        permissions
+            .keys()
+            .any(|granted| !granted.starts_with("session://") && path_is_within(path, granted))
     }
 
     pub async fn clear_expired_permissions(&self, ttl_hours: i64) {
@@ -253,6 +274,43 @@ impl ExternalDirectoryManager {
         }
         false
     }
+}
+
+/// Extracts the directory root from an approval pattern such as
+/// `C:\outside\**` or `/outside/**`.
+fn grant_root_from_pattern(pattern: &str) -> Option<String> {
+    let root = pattern
+        .strip_suffix("/**")
+        .or_else(|| pattern.strip_suffix("\\**"))?;
+    let trimmed = root.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Normalises a path for prefix comparison: forward slashes, no trailing
+/// separator, and case-folded on Windows.
+fn normalise_for_compare(value: &Path) -> String {
+    let text = value.to_string_lossy().replace('\\', "/");
+    let trimmed = text.trim_end_matches('/');
+    if cfg!(windows) {
+        trimmed.to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// True when `path` is the granted `root` or lives beneath it. Canonicalises
+/// both sides first (falling back to the lexical form for paths that do not
+/// exist yet) so a folder approval covers all of its subdirectories.
+fn path_is_within(path: &str, root: &str) -> bool {
+    let candidate = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let root_path = std::fs::canonicalize(root).unwrap_or_else(|_| PathBuf::from(root));
+    let candidate = normalise_for_compare(&candidate);
+    let root = normalise_for_compare(&root_path);
+    candidate == root || candidate.starts_with(&format!("{}/", root))
 }
 
 impl Default for ExternalDirectoryManager {
@@ -307,5 +365,59 @@ mod tests {
             .expect("pending prompt");
 
         assert!(manager.has_granted_permission("/outside/file.txt").await);
+    }
+
+    #[tokio::test]
+    async fn always_response_covers_subdirectories() {
+        let manager = ExternalDirectoryManager::default();
+        let (prompt, _response) = manager
+            .create_waiting_prompt(
+                "session".to_string(),
+                "read_file:call".to_string(),
+                "/outside/project/src/main.rs".to_string(),
+                "read".to_string(),
+                vec!["/outside/project/src/**".to_string()],
+            )
+            .await;
+
+        manager
+            .respond_to_prompt(&prompt.id, true, true)
+            .await
+            .expect("pending prompt");
+
+        // Siblings and anything deeper under the approved folder are covered.
+        assert!(manager
+            .has_granted_permission("/outside/project/src/lib.rs")
+            .await);
+        assert!(manager
+            .has_granted_permission("/outside/project/src/nested/deep/mod.rs")
+            .await);
+        // A sibling folder that merely shares a name prefix is not.
+        assert!(!manager
+            .has_granted_permission("/outside/project/src-other/file.rs")
+            .await);
+    }
+
+    #[tokio::test]
+    async fn once_response_does_not_grant_subdirectories() {
+        let manager = ExternalDirectoryManager::default();
+        let (prompt, _response) = manager
+            .create_waiting_prompt(
+                "session".to_string(),
+                "read_file:call".to_string(),
+                "/outside/project/src/main.rs".to_string(),
+                "read".to_string(),
+                vec!["/outside/project/src/**".to_string()],
+            )
+            .await;
+
+        manager
+            .respond_to_prompt(&prompt.id, true, false)
+            .await
+            .expect("pending prompt");
+
+        assert!(!manager
+            .has_granted_permission("/outside/project/src/lib.rs")
+            .await);
     }
 }

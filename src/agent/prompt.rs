@@ -466,6 +466,7 @@ fn build_communication_section(mode: PromptMode) -> Vec<String> {
             "- Do not add code explanation summaries unless requested; after working on a file, just stop".to_string(),
             "- Use GitHub-flavored markdown where it helps; output text communicates with the user, never tool calls or code comments as a messaging channel".to_string(),
             "- Only use emojis if the user explicitly requests it".to_string(),
+            "- Avoid overusing em dashes. Use commas, periods, or parentheses instead; keep a dash for the rare break that genuinely needs one".to_string(),
             "- Reference code as filepath:line_number".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![

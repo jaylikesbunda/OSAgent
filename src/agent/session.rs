@@ -32,6 +32,23 @@ impl SessionManager {
         self.storage.update_session(session)
     }
 
+    pub async fn update_session_title(&self, id: &str, title: &str) -> Result<()> {
+        self.storage.update_session_title(id, title)
+    }
+
+    pub async fn update_session_title_if_untitled(&self, id: &str, title: &str) -> Result<()> {
+        self.storage.update_session_title_if_untitled(id, title)
+    }
+
+    pub async fn set_session_metadata_value(
+        &self,
+        id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<()> {
+        self.storage.set_session_metadata_value(id, key, value)
+    }
+
     pub async fn list_sessions(&self) -> Result<Vec<Session>> {
         self.storage.list_sessions()
     }

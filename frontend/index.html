@@ -142,6 +142,9 @@
                             <div class="empty-state-text">Start a new chat to begin</div>
                         </div>
                     </div>
+                    <button id="scroll-to-bottom" class="scroll-to-bottom hidden" type="button" onclick="OSA.jumpToLatest()" aria-label="Scroll to latest" title="Scroll to latest">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+                    </button>
                     <div class="input-area">
                         <div id="todo-dock" class="todo-dock hidden" onclick="OSA.toggleTodoDock()">
                             <div class="dock-header">
@@ -234,7 +237,7 @@
                             <form id="goal-editor" class="goal-editor hidden" onsubmit="OSA.submitGoalEditor(event)" onkeydown="if(event.key === 'Escape') { event.preventDefault(); OSA.closeGoalEditor(); }">
                                 <div class="goal-editor-heading"><label for="goal-objective">Set a goal</label><button type="button" class="goal-action" onclick="OSA.closeGoalEditor()" aria-label="Close goal editor">Cancel</button></div>
                                 <textarea id="goal-objective" rows="2" placeholder="What should OSA work towards?" required></textarea>
-                                <div class="goal-editor-footer"><label for="goal-rounds">Round budget <input id="goal-rounds" type="number" min="1" max="100" value="5" required></label><button id="goal-start" type="submit" class="goal-action goal-action-primary">Start goal</button></div>
+                                <div class="goal-editor-footer"><label for="goal-rounds">Round budget <input id="goal-rounds" type="number" min="1" max="100" value="5" required></label><label class="goal-unlimited-toggle" for="goal-unlimited"><input id="goal-unlimited" type="checkbox" onchange="OSA.toggleGoalRoundLimit()"> No limit</label><button id="goal-start" type="submit" class="goal-action goal-action-primary">Start goal</button></div>
                                 <p class="goal-editor-hint">Continues across turns. Stop pauses the goal.</p>
                             </form>
                             <div id="queue-panel" class="queue-panel hidden" aria-live="polite"></div>

@@ -7,19 +7,29 @@ OSA.parseGoalCommand = function(text) {
     const actionMatch = /^(status|pause|resume|clear)(?:\s|$)/i.exec(rest);
     const action = actionMatch ? actionMatch[1].toLowerCase() : (rest ? 'create' : 'status');
     if (actionMatch) rest = rest.slice(actionMatch[0].length).trim();
-    if (/^--rounds(?:\s|$)/.test(rest)) {
+    if (/^--no-limit(?:\s|$)/.test(rest)) {
+        maxRounds = 0;
+        rest = rest.slice('--no-limit'.length).trim();
+    } else if (/^--rounds(?:\s|$)/.test(rest)) {
         const budget = /^--rounds\s+(\d+)(?:\s|$)/.exec(rest);
         if (!budget || Number(budget[1]) < 1 || Number(budget[1]) > 100) {
-            throw new Error('Use --rounds with a number from 1 to 100.');
+            throw new Error('Use --rounds with a number from 1 to 100, or --no-limit.');
         }
         maxRounds = Number(budget[1]);
         rest = rest.slice(budget[0].length).trim();
     }
-    if (action === 'create' && !rest) throw new Error('Use /goal [--rounds N] <objective>.');
+    if (action === 'create' && !rest) throw new Error('Use /goal [--rounds N | --no-limit] <objective>.');
     if (action !== 'create' && (rest || (maxRounds !== undefined && action !== 'resume'))) {
-        throw new Error('Use /goal status, pause, clear, or resume [--rounds N].');
+        throw new Error('Use /goal status, pause, clear, or resume [--rounds N | --no-limit].');
     }
     return { action, ...(action === 'create' ? { objective: rest } : {}), ...(maxRounds === undefined ? {} : { max_rounds: maxRounds }) };
+};
+
+// `max_rounds` of 0 means the goal runs without a round limit.
+OSA.goalBudgetText = function(goal) {
+    return goal.max_rounds > 0
+        ? `${goal.rounds_started} / ${goal.max_rounds} rounds`
+        : `${goal.rounds_started} rounds, no limit`;
 };
 
 OSA.handleGoalCommand = async function(text) {
@@ -48,7 +58,7 @@ OSA.handleGoalCommand = async function(text) {
             if (data.goal) {
                 const goal = data.goal;
                 const reason = goal.blocked_reason || (goal.policy_code === 'round_budget_exhausted' ? 'Round budget reached; use /goal resume to continue.' : '');
-                OSA.showToast?.(`Goal ${goal.phase}: ${goal.objective} (${goal.rounds_started}/${goal.max_rounds} rounds). ${reason}`.trim());
+                OSA.showToast?.(`Goal ${goal.phase}: ${goal.objective} (${OSA.goalBudgetText(goal)}). ${reason}`.trim());
             } else {
                 OSA.showToast?.(command.action === 'clear' ? 'Goal cleared. The current turn, if running, can finish.' : 'No goal set. Use /goal <objective> to start one.');
             }
@@ -78,6 +88,7 @@ OSA.renderGoalPanel = function() {
     panel._goalSignature = signature;
     const moreOpen = panel.querySelector('details')?.open || false;
     const previousRounds = panel.dataset.goalId === String(goal.id) ? panel.querySelector('#goal-resume-rounds')?.value : null;
+    const previousUnlimited = panel.dataset.goalId === String(goal.id) ? panel.querySelector('#goal-resume-unlimited')?.checked : null;
     const restoreBudgetFocus = document.activeElement?.id === 'goal-resume-rounds';
     panel.dataset.goalId = goal.id;
     const node = (tag, cls, text) => {
@@ -103,7 +114,7 @@ OSA.renderGoalPanel = function() {
     if (goal.phase !== 'complete') row.append(action(running ? 'Pause' : 'Resume', () => OSA.runGoalPanelAction(running ? 'pause' : 'resume')));
     const meta = node('div', 'goal-meta');
     // This meter describes budget consumption, never estimated completion.
-    meta.append(node('span', '', `${goal.rounds_started} / ${goal.max_rounds} rounds`));
+    meta.append(node('span', '', OSA.goalBudgetText(goal)));
     const more = node('details', 'goal-options');
     more.open = moreOpen;
     more.append(node('summary', '', 'Options'));
@@ -111,12 +122,27 @@ OSA.renderGoalPanel = function() {
     const reason = goal.blocked_reason || (goal.policy_code === 'round_budget_exhausted' ? 'Round budget reached. Resume to continue.' : !OSA._goalSnapshot.armed && goal.phase === 'active' ? 'Resume to continue after restart.' : '');
     if (reason) options.append(node('p', 'goal-note', reason));
     if (goal.phase !== 'complete') {
+        const unlimitedCurrent = !(goal.max_rounds > 0);
         const label = node('label', '', 'Next budget ');
         const rounds = node('input');
-        rounds.type = 'number'; rounds.min = '1'; rounds.max = '100'; rounds.value = previousRounds ?? goal.max_rounds;
+        rounds.type = 'number'; rounds.min = '1'; rounds.max = '100';
+        rounds.value = previousRounds ?? (goal.max_rounds > 0 ? goal.max_rounds : '5');
         rounds.setAttribute('aria-label', 'Round budget for resume');
         rounds.id = 'goal-resume-rounds';
-        label.append(rounds); options.append(label);
+        const unlimitedLabel = node('label', 'goal-unlimited-toggle');
+        const unlimited = node('input');
+        unlimited.type = 'checkbox';
+        unlimited.id = 'goal-resume-unlimited';
+        unlimited.checked = previousUnlimited ?? unlimitedCurrent;
+        const syncRounds = () => {
+            rounds.disabled = unlimited.checked;
+            rounds.required = !unlimited.checked;
+        };
+        unlimited.addEventListener('change', syncRounds);
+        syncRounds();
+        unlimitedLabel.append(unlimited, node('span', '', 'No limit'));
+        label.append(rounds);
+        options.append(label, unlimitedLabel);
     }
     options.append(action('Clear goal', event => {
         const button = event.currentTarget;
@@ -168,6 +194,9 @@ OSA.openGoalEditor = function() {
         if (options) options.open = !options.open;
         return;
     }
+    const unlimited = document.getElementById('goal-unlimited');
+    if (unlimited) unlimited.checked = false;
+    OSA.toggleGoalRoundLimit();
     document.getElementById('goal-editor')?.classList.remove('hidden');
     document.getElementById('goal-trigger')?.setAttribute('aria-expanded', 'true');
     document.getElementById('goal-objective')?.focus();
@@ -183,8 +212,12 @@ OSA.runGoalPanelAction = async function(action) {
     if (OSA._goalActionPending) return;
     const sessionId = OSA.getCurrentSession()?.id;
     const rounds = document.getElementById('goal-resume-rounds');
-    if (action === 'resume' && rounds && !rounds.reportValidity()) return;
-    const budget = action === 'resume' && rounds ? ` --rounds ${rounds.value}` : '';
+    const unlimited = document.getElementById('goal-resume-unlimited');
+    const useUnlimited = action === 'resume' && !!unlimited?.checked;
+    if (action === 'resume' && !useUnlimited && rounds && !rounds.reportValidity()) return;
+    const budget = action !== 'resume' ? ''
+        : useUnlimited ? ' --no-limit'
+        : rounds ? ` --rounds ${rounds.value}` : '';
     OSA._goalActionPending = true;
     OSA.renderGoalPanel();
     try { await OSA.handleGoalCommand(`/goal ${action}${budget}`); }
@@ -193,21 +226,38 @@ OSA.runGoalPanelAction = async function(action) {
     }
 };
 
+OSA.toggleGoalRoundLimit = function() {
+    const unlimited = document.getElementById('goal-unlimited');
+    const rounds = document.getElementById('goal-rounds');
+    if (!rounds) return;
+    const on = !!unlimited?.checked;
+    rounds.disabled = on;
+    rounds.required = !on;
+};
+
 OSA.submitGoalEditor = async function(event) {
     event.preventDefault();
     const form = document.getElementById('goal-editor');
     const button = document.getElementById('goal-start');
+    OSA.toggleGoalRoundLimit();
     if (button.disabled || !form.reportValidity()) return;
     const objective = document.getElementById('goal-objective');
     const rounds = document.getElementById('goal-rounds');
+    const unlimited = document.getElementById('goal-unlimited');
+    const useUnlimited = !!unlimited?.checked;
     const sessionId = OSA.getCurrentSession()?.id;
     const draft = objective.value;
     if (!draft.trim()) { objective.focus(); return; }
     button.disabled = true;
     try {
-        if (await OSA.handleGoalCommand(`/goal --rounds ${rounds.value} ${draft.trim()}`)) {
+        const command = useUnlimited
+            ? `/goal --no-limit ${draft.trim()}`
+            : `/goal --rounds ${rounds.value} ${draft.trim()}`;
+        if (await OSA.handleGoalCommand(command)) {
             if ((sessionId && sessionId === OSA.getCurrentSession()?.id) || (!sessionId && OSA._goalSnapshot?.goal?.objective === draft.trim())) {
                 if (objective.value === draft) objective.value = '';
+                if (unlimited) unlimited.checked = false;
+                OSA.toggleGoalRoundLimit();
                 OSA.closeGoalEditor();
             }
         }

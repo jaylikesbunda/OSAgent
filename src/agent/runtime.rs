@@ -32,6 +32,9 @@ use crate::storage::{
 use crate::tools::bash::BashTool;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::guard::ensure_relative_path_not_backups;
+use crate::tools::loop_detect::{
+    LoopDetectionConfig, LoopDetectionResult, LoopSeverity, ToolLoopDetector,
+};
 use crate::tools::output::path_touches_tool_outputs;
 use crate::tools::registry::{ToolOutcome, ToolProfile, ToolRegistry, ToolResult};
 use crate::tools::truncation::{self, TruncationOptions};
@@ -1498,8 +1501,18 @@ impl AgentRuntime {
 
         let mut iteration = 0;
         let agent_settings = self.agent_settings.read().await;
-        let max_iterations = agent_settings.max_iterations;
+        let max_iterations = agent_settings.max_iterations.max(1);
         drop(agent_settings);
+        // Long agentic runs used to be cut off the moment the configured
+        // budget was spent. Treat that value as the first checkpoint instead:
+        // each time it is reached the model is nudged to continue and gets
+        // another budget-sized chunk, up to a hard ceiling that bounds
+        // worst-case cost.
+        let hard_iteration_ceiling = max_iterations
+            .saturating_mul(4)
+            .max(max_iterations.saturating_add(100));
+        let mut iteration_budget = max_iterations;
+        let mut iteration_extensions = 0usize;
         let mut response_truncated = false;
         let mut max_iterations_reached = false;
         let mut tool_success_count = 0usize;
@@ -1509,6 +1522,11 @@ impl AgentRuntime {
         let mut recent_tool_intents: Vec<String> = Vec::new();
         let mut recent_tool_signatures: Vec<String> = Vec::new();
         let mut recent_tool_outcomes: Vec<(String, bool, String)> = Vec::new();
+        // Rolling-window loop detector (generic repeats, ping-pong, poll with no
+        // progress, global failure circuit breaker). Previously this module was
+        // compiled but never instantiated, so only the narrow "two identical
+        // calls in a row" guard below could fire.
+        let mut tool_loop_detector = ToolLoopDetector::new(LoopDetectionConfig::default());
 
         // A fresh user prompt resets the advisory repeat-tool-call chain:
         // the loop the reminder was watching is over once a human steers.
@@ -1541,8 +1559,8 @@ impl AgentRuntime {
         loop {
             iteration += 1;
             info!(
-                "process_message: Iteration {} of {}",
-                iteration, max_iterations
+                "process_message: Iteration {} (budget {}, ceiling {})",
+                iteration, iteration_budget, hard_iteration_ceiling
             );
 
             // Check for cancellation at the start of each iteration
@@ -1576,10 +1594,41 @@ impl AgentRuntime {
                 }
             }
 
-            if iteration > max_iterations {
-                warn!("Max iterations reached for session {}", session_id);
+            if iteration > hard_iteration_ceiling {
+                warn!(
+                    "Hard iteration ceiling ({}) reached for session {}",
+                    hard_iteration_ceiling, session_id
+                );
                 max_iterations_reached = true;
                 break;
+            }
+
+            if iteration > iteration_budget {
+                iteration_extensions += 1;
+                iteration_budget =
+                    (iteration_budget + max_iterations).min(hard_iteration_ceiling);
+                warn!(
+                    "Iteration budget reached for session {} - extending to {} (extension {})",
+                    session_id, iteration_budget, iteration_extensions
+                );
+                Self::push_session_event(
+                    &mut session,
+                    "iteration_budget_extended",
+                    serde_json::json!({
+                        "iteration": iteration,
+                        "new_budget": iteration_budget,
+                        "extensions": iteration_extensions,
+                    }),
+                )?;
+                session.messages.push(Message::synthetic_user(
+                    "You reached the per-turn tool budget. Keep going from where you left off: \
+                     do not repeat completed steps, do not restate the plan, and only stop when \
+                     the task is finished or you are genuinely blocked."
+                        .to_string(),
+                    "iteration_budget_nudge",
+                ));
+                self.session_manager.update_session(&session).await?;
+                continue;
             }
 
             let active_persona = Self::active_persona_from_session(&session);
@@ -2083,74 +2132,139 @@ impl AgentRuntime {
 
             let (mut response, used_streaming) = match stream_attempt {
                 Ok(stream) => {
-                    match self
-                        .consume_provider_stream(
-                            session_id,
-                            &mut session,
-                            stream,
-                            cancel_notify.clone(),
-                        )
-                        .await
-                    {
-                        Ok(response) => (response, true),
-                        Err(e) if Self::is_streaming_fallback_error(&e) => {
-                            warn!(
-                                "Stream consumption failed with fallback-eligible error in session {}: {}. Falling back to non-streaming.",
-                                session_id, e
-                            );
-                            // Remove the empty assistant message pushed by consume_provider_stream
-                            if let Some(last) = session.messages.last() {
-                                if last.role == "assistant"
-                                    && last.content.is_empty()
-                                    && last.tool_calls.is_none()
-                                {
-                                    session.messages.pop();
-                                }
+                    let mut stream = stream;
+                    let mut stream_retries: u32 = 0;
+                    loop {
+                        match self
+                            .consume_provider_stream(
+                                session_id,
+                                &mut session,
+                                stream,
+                                cancel_notify.clone(),
+                            )
+                            .await
+                        {
+                            Ok(mut response) => {
+                                response.retry_count =
+                                    response.retry_count.saturating_add(stream_retries);
+                                break (response, true);
                             }
-                            let response = tokio::select! {
-                                _ = self.wait_for_cancellation(session_id) => {
-                                    warn!("Operation cancelled for session {} during provider fallback", session_id);
-                                    self.event_bus.emit(AgentEvent::Cancelled {
-                                        session_id: session_id.to_string(),
-                                        sequence: 0,
-                                        timestamp: SystemTime::now(),
-                                    });
-                                    return Err(OSAgentError::Session("Operation cancelled".to_string()));
-                                }
-                                result = provider.complete(Some(session_id), &api_messages, &tools) => {
-                                    result.map_err(|e| {
-                                        error!("Provider error in session {}: {}", session_id, e);
+                            Err(e) if Self::is_streaming_fallback_error(&e) => {
+                                warn!(
+                                    "Stream consumption failed with fallback-eligible error in session {}: {}. Falling back to non-streaming.",
+                                    session_id, e
+                                );
+                                // Remove the empty assistant message pushed by consume_provider_stream
+                                Self::reset_failed_stream_message(&mut session);
+                                let response = tokio::select! {
+                                    _ = self.wait_for_cancellation(session_id) => {
+                                        warn!("Operation cancelled for session {} during provider fallback", session_id);
+                                        self.event_bus.emit(AgentEvent::Cancelled {
+                                            session_id: session_id.to_string(),
+                                            sequence: 0,
+                                            timestamp: SystemTime::now(),
+                                        });
+                                        return Err(OSAgentError::Session("Operation cancelled".to_string()));
+                                    }
+                                    result = provider.complete(Some(session_id), &api_messages, &tools) => {
+                                        result.map_err(|e| {
+                                            error!("Provider error in session {}: {}", session_id, e);
+                                            self.event_bus.emit(AgentEvent::Error {
+                                                session_id: session_id.to_string(),
+                                                sequence: 0,
+                                                error: e.to_string(),
+                                                recoverable: e.is_recoverable(),
+                                                timestamp: SystemTime::now(),
+                                            });
+                                            e
+                                        })?
+                                    }
+                                };
+                                break (response, false);
+                            }
+                            // A transient failure while reading the stream body
+                            // (truncated connection, undecodable SSE frame) is
+                            // retried here rather than ending the turn. Only
+                            // safe when nothing has been committed to the
+                            // transcript yet, so a retry cannot duplicate text.
+                            Err(e)
+                                if !is_operation_cancelled(&e)
+                                    && e.is_retryable()
+                                    && stream_retries + 1 < MAX_RETRIES
+                                    && Self::reset_failed_stream_message(&mut session) =>
+                            {
+                                stream_retries += 1;
+                                let delay = OpenAICompatibleProvider::retry_delay_for_attempt(
+                                    stream_retries,
+                                    &e,
+                                );
+                                warn!(
+                                    "Provider stream failed mid-response (attempt {}/{}): {}. Retrying in {}s...",
+                                    stream_retries,
+                                    MAX_RETRIES,
+                                    e,
+                                    delay.as_secs()
+                                );
+                                self.emit_provider_stream_retry(
+                                    session_id,
+                                    stream_retries,
+                                    delay,
+                                    &e.to_string(),
+                                );
+                                self.session_manager.update_session(&session).await?;
+                                tokio::time::sleep(delay).await;
+                                let retried = tokio::select! {
+                                    _ = self.wait_for_cancellation(session_id) => {
+                                        warn!("Operation cancelled for session {} during provider stream retry", session_id);
+                                        self.event_bus.emit(AgentEvent::Cancelled {
+                                            session_id: session_id.to_string(),
+                                            sequence: 0,
+                                            timestamp: SystemTime::now(),
+                                        });
+                                        return Err(OSAgentError::Session("Operation cancelled".to_string()));
+                                    }
+                                    result = provider.complete_stream(Some(session_id), &api_messages, &tools) => result,
+                                };
+                                match retried {
+                                    Ok(next) => {
+                                        stream = next;
+                                        continue;
+                                    }
+                                    Err(setup_error) => {
+                                        error!(
+                                            "Provider stream retry failed in session {}: {}",
+                                            session_id, setup_error
+                                        );
                                         self.event_bus.emit(AgentEvent::Error {
                                             session_id: session_id.to_string(),
                                             sequence: 0,
-                                            error: e.to_string(),
-                                            recoverable: e.is_recoverable(),
+                                            error: setup_error.to_string(),
+                                            recoverable: setup_error.is_recoverable(),
                                             timestamp: SystemTime::now(),
                                         });
-                                        e
-                                    })?
+                                        return Err(setup_error);
+                                    }
                                 }
-                            };
-                            (response, false)
-                        }
-                        Err(e) => {
-                            // `consume_provider_stream` already emitted a
-                            // `Cancelled` event when the stream was stopped by
-                            // the user. Surface the cancellation as-is instead
-                            // of re-classifying it as a provider `Error`
-                            // ("Session error: Operation cancelled").
-                            if is_operation_cancelled(&e) {
+                            }
+                            Err(e) => {
+                                // `consume_provider_stream` already emitted a
+                                // `Cancelled` event when the stream was stopped by
+                                // the user. Surface the cancellation as-is instead
+                                // of re-classifying it as a provider `Error`
+                                // ("Session error: Operation cancelled").
+                                if is_operation_cancelled(&e) {
+                                    return Err(e);
+                                }
+                                error!("Provider stream error in session {}: {}", session_id, e);
+                                self.event_bus.emit(AgentEvent::Error {
+                                    session_id: session_id.to_string(),
+                                    sequence: 0,
+                                    error: e.to_string(),
+                                    recoverable: e.is_recoverable(),
+                                    timestamp: SystemTime::now(),
+                                });
                                 return Err(e);
                             }
-                            error!("Provider stream error in session {}: {}", session_id, e);
-                            self.event_bus.emit(AgentEvent::Error {
-                                session_id: session_id.to_string(),
-                                sequence: 0,
-                                error: e.to_string(),
-                                recoverable: e.is_recoverable(),
-                                timestamp: SystemTime::now(),
-                            });
-                            return Err(e);
                         }
                     }
                 }
@@ -2645,6 +2759,16 @@ impl AgentRuntime {
                             }
                         }
 
+                        if self.check_tool_loop(
+                            &mut tool_loop_detector,
+                            &mut session,
+                            &tool_call.name,
+                            &tool_call.arguments,
+                            success,
+                        )? {
+                            loop_guard_triggered = true;
+                        }
+
                         let context_window_tokens =
                             std::cmp::max(runtime_config.agent.max_tokens * 4, 131_072);
                         let truncated_output = truncation::maybe_truncate_tool_result(
@@ -2785,6 +2909,54 @@ impl AgentRuntime {
                                 Self::consecutive_repeat_count(&recent_tool_intents, intent)
                             })
                             .unwrap_or(0);
+                        // The consecutive guard below misses a rotating set of
+                        // near-identical attempts (for example cycling through
+                        // probe scripts) that never repeats twice in a row.
+                        // Flag a repeated intent anywhere in the recent window
+                        // as an advisory nudge instead of a hard block.
+                        let intent_window_count = tool_intent
+                            .as_ref()
+                            .map(|intent| {
+                                recent_tool_intents
+                                    .iter()
+                                    .filter(|previous| *previous == intent)
+                                    .count()
+                            })
+                            .unwrap_or(0);
+                        if intent_window_count >= 2 {
+                            let loop_msg = format!(
+                                "Loop guard: '{}' has repeated the same intent {} times in the last {} calls. {}",
+                                tool_call.name,
+                                intent_window_count + 1,
+                                recent_tool_intents.len() + 1,
+                                Self::tool_loop_guidance(&tool_call.name)
+                            );
+                            warn!(
+                                "Advisory repeated-intent loop in session {}: {}",
+                                session_id, loop_msg
+                            );
+                            self.record_session_event(
+                                &mut session,
+                                "loop_detected",
+                                serde_json::json!({
+                                    "detector": "RepeatedIntent",
+                                    "level": "warning",
+                                    "count": intent_window_count + 1,
+                                    "tool_name": tool_call.name,
+                                    "message": &loop_msg,
+                                }),
+                            )?;
+                            self.event_bus.emit(AgentEvent::LoopDetected {
+                                session_id: session_id.to_string(),
+                                sequence: 0,
+                                detector: "RepeatedIntent".to_string(),
+                                level: "warning".to_string(),
+                                count: intent_window_count + 1,
+                                message: loop_msg,
+                                timestamp: SystemTime::now(),
+                            });
+                            loop_guard_triggered = true;
+                        }
                         if repeat_count >= 2 || intent_repeat_count >= 2 {
                             let loop_msg = format!(
                                 "Loop guard: blocked repeated {} tool call '{}' after {} consecutive attempts. {}",
@@ -3192,6 +3364,16 @@ impl AgentRuntime {
                             }
                         }
 
+                        if self.check_tool_loop(
+                            &mut tool_loop_detector,
+                            &mut session,
+                            &tool_call.name,
+                            &tool_call.arguments,
+                            success,
+                        )? {
+                            loop_guard_triggered = true;
+                        }
+
                         let first_non_empty_line = truncated_output
                             .lines()
                             .map(|line| line.trim())
@@ -3324,7 +3506,7 @@ impl AgentRuntime {
                 info!("process_message: No tool calls, response complete");
 
                 let finish = response.finish_reason.to_lowercase();
-                if finish == "length" && iteration < max_iterations {
+                if finish == "length" && iteration < hard_iteration_ceiling {
                     warn!(
                         "Response truncated (finish_reason=length) for session {} - requesting continuation",
                         session_id
@@ -3471,9 +3653,9 @@ impl AgentRuntime {
         if max_iterations_reached {
             let total_tools = tool_success_count + tool_failure_count;
             let base = if total_tools > 0 {
-                "Status: partial. I finished running tools, but hit the iteration limit before finalizing.".to_string()
+                "Status: partial. I finished running tools, but hit the iteration ceiling before finalizing.".to_string()
             } else {
-                "Status: partial. I hit the iteration limit before completing the task.".to_string()
+                "Status: partial. I hit the iteration ceiling before completing the task.".to_string()
             };
 
             let counts = if total_tools > 0 {
@@ -3751,6 +3933,75 @@ impl AgentRuntime {
                 });
             },
         )
+    }
+
+    /// Removes the placeholder assistant message pushed by
+    /// `consume_provider_stream` when the stream failed before delivering any
+    /// content. Returns true when it was safe to retry: nothing user-visible
+    /// (text, thinking, or tool call) had been committed.
+    fn reset_failed_stream_message(session: &mut Session) -> bool {
+        match session.messages.last() {
+            Some(last)
+                if last.role == "assistant"
+                    && last.content.is_empty()
+                    && last.tool_calls.is_none()
+                    && last
+                        .thinking
+                        .as_deref()
+                        .map(|text| text.trim().is_empty())
+                        .unwrap_or(true) =>
+            {
+                session.messages.pop();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Emits the same `Retry` event the provider-level retry listener does, for
+    /// a retry the runtime performs itself after a mid-stream failure.
+    fn emit_provider_stream_retry(
+        &self,
+        session_id: &str,
+        attempt: u32,
+        delay: std::time::Duration,
+        reason: &str,
+    ) {
+        let reason_text = format!(
+            "Provider stream failed mid-response: {}; retrying in ~{}s",
+            reason,
+            delay.as_secs()
+        );
+        let parent_id = self
+            .storage
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|session| session.parent_id);
+        if let Some(parent) = parent_id {
+            self.event_bus.emit(AgentEvent::Retry {
+                session_id: parent,
+                sequence: 0,
+                scope: "provider".to_string(),
+                attempt_count: attempt,
+                max_attempts: MAX_RETRIES,
+                next_retry_in_ms: delay.as_millis() as u64,
+                subagent_session_id: Some(session_id.to_string()),
+                reason: reason_text.clone(),
+                timestamp: SystemTime::now(),
+            });
+        }
+        self.event_bus.emit(AgentEvent::Retry {
+            session_id: session_id.to_string(),
+            sequence: 0,
+            scope: "provider".to_string(),
+            attempt_count: attempt,
+            max_attempts: MAX_RETRIES,
+            next_retry_in_ms: delay.as_millis() as u64,
+            subagent_session_id: None,
+            reason: reason_text,
+            timestamp: SystemTime::now(),
+        });
     }
 
     fn is_streaming_fallback_error(error: &OSAgentError) -> bool {
@@ -4772,6 +5023,16 @@ impl AgentRuntime {
         if compact_end == 0 || compact_end >= session.messages.len() {
             return Ok(None);
         }
+
+        // The summarization pass that follows can take a while, so tell the
+        // UI to show a persistent "Compacting" indicator for its duration.
+        // The matching `Compaction` event on completion (or the next stream
+        // event) clears it.
+        self.event_bus.emit(AgentEvent::CompactionStarted {
+            session_id: session.id.clone(),
+            sequence: 0,
+            timestamp: SystemTime::now(),
+        });
 
         // Prune only the retained tail: rewriting the prefix before it is
         // archived would persist pruned text instead of the original content.
@@ -6098,6 +6359,60 @@ impl AgentRuntime {
         count
     }
 
+    /// Records a completed tool call in the rolling loop detector and, when it
+    /// reports a loop, emits and persists a `LoopDetected` event. Returns
+    /// `true` when the loop is critical so the caller can nudge the model
+    /// before the next iteration.
+    fn check_tool_loop(
+        &self,
+        detector: &mut ToolLoopDetector,
+        session: &mut Session,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        success: bool,
+    ) -> Result<bool> {
+        let LoopDetectionResult::Stuck {
+            detector: kind,
+            level,
+            count,
+            message,
+        } = detector.record_and_check(tool_name, arguments, success)
+        else {
+            return Ok(false);
+        };
+
+        let level_str = match level {
+            LoopSeverity::Critical => "critical",
+            LoopSeverity::Warning => "warning",
+        };
+        let kind_str = format!("{:?}", kind);
+        warn!(
+            "Tool loop detected for session {} ({} {} x{}): {}",
+            session.id, level_str, kind_str, count, message
+        );
+        self.record_session_event(
+            session,
+            "loop_detected",
+            serde_json::json!({
+                "detector": &kind_str,
+                "level": level_str,
+                "count": count,
+                "tool_name": tool_name,
+                "message": &message,
+            }),
+        )?;
+        self.event_bus.emit(AgentEvent::LoopDetected {
+            session_id: session.id.clone(),
+            sequence: 0,
+            detector: kind_str,
+            level: level_str.to_string(),
+            count,
+            message,
+            timestamp: SystemTime::now(),
+        });
+        Ok(matches!(level, LoopSeverity::Critical))
+    }
+
     fn tool_loop_guidance(tool_name: &str) -> &'static str {
         match tool_name {
             "grep" | "glob" | "list_files" => {
@@ -6826,6 +7141,13 @@ impl AgentRuntime {
         self.storage.list_session_events(session_id)
     }
 
+    /// Pre-compaction messages archived by context compaction, oldest first.
+    /// The web UI merges these back into the transcript so a compacted chat
+    /// still looks the way it did, with the summary card at the boundary.
+    pub fn get_session_archive(&self, session_id: &str) -> Result<Vec<Message>> {
+        self.storage.get_archived_session_messages(session_id, 10_000)
+    }
+
     pub async fn append_session_event(
         &self,
         session_id: &str,
@@ -7013,6 +7335,31 @@ impl AgentRuntime {
 
     pub async fn update_session(&self, session: &Session) -> Result<()> {
         self.session_manager.update_session(session).await
+    }
+
+    /// Rename a session without rewriting its transcript or metadata blob, so
+    /// renaming a chat mid-turn does not race the running turn's persistence.
+    pub async fn update_session_title(&self, id: &str, title: &str) -> Result<()> {
+        self.session_manager.update_session_title(id, title).await
+    }
+
+    /// Auto-naming variant: only applies when the session is still untitled,
+    /// so a generated title cannot clobber a user's rename.
+    pub async fn auto_name_session_title(&self, id: &str, title: &str) -> Result<()> {
+        self.session_manager
+            .update_session_title_if_untitled(id, title)
+            .await
+    }
+
+    pub async fn set_session_metadata_value(
+        &self,
+        id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<()> {
+        self.session_manager
+            .set_session_metadata_value(id, key, value)
+            .await
     }
 
     pub async fn set_discord_community_profile(
@@ -7832,8 +8179,9 @@ impl AgentRuntime {
             Err(_) => {
                 self.external_manager.expire_prompt(&prompt.id).await;
                 Err(OSAgentError::ToolExecution(format!(
-                    "Permission request for '{}' timed out",
-                    resource
+                    "Permission request for '{}' timed out after {}s. Approve the prompt when it appears, or allow the path in Settings so it is not requested again.",
+                    resource,
+                    self.external_manager.prompt_timeout_seconds()
                 )))
             }
         }
@@ -7882,10 +8230,10 @@ impl AgentRuntime {
         } else {
             "read"
         };
-        let parent_pattern = Path::new(&path)
-            .parent()
-            .map(|parent| format!("{}{}**", parent.display(), std::path::MAIN_SEPARATOR))
-            .unwrap_or_else(|| path.clone());
+        let parent_pattern = {
+            let root = execution_root.trim_end_matches(['/', '\\']);
+            format!("{}{}**", root, std::path::MAIN_SEPARATOR)
+        };
         let (prompt, response) = self
             .external_manager
             .create_waiting_prompt(
@@ -7918,8 +8266,9 @@ impl AgentRuntime {
             Err(_) => {
                 self.external_manager.expire_prompt(&prompt.id).await;
                 Err(OSAgentError::ToolExecution(format!(
-                    "Permission request for '{}' timed out",
-                    path
+                    "Permission request for '{}' timed out after {}s. Approve the prompt when it appears, or add the path to a workspace or the external permission whitelist so it is allowed automatically.",
+                    path,
+                    self.external_manager.prompt_timeout_seconds()
                 )))
             }
         }

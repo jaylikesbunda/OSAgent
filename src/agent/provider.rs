@@ -1885,7 +1885,7 @@ impl OpenAICompatibleProvider {
         result
     }
 
-    fn retry_delay_for_attempt(attempt: u32, error: &OSAgentError) -> Duration {
+    pub(crate) fn retry_delay_for_attempt(attempt: u32, error: &OSAgentError) -> Duration {
         // Honor the server's Retry-After hint when present; it is authoritative
         // and avoids retrying too early on long rate-limit windows.
         if let Some(delay) = error.retry_after_delay() {

@@ -32,6 +32,7 @@ impl Drop for CommandTreeGuard {
     }
 }
 
+#[cfg(test)]
 async fn run_shell_command(
     command: &str,
     workspace: &std::path::Path,
@@ -66,6 +67,127 @@ async fn run_shell_command(
     let output = child.wait_with_output().await?;
     guard.0 = None;
     Ok(output)
+}
+
+/// Result of a bounded shell run that keeps whatever the process wrote before
+/// it was terminated. The previous timeout path returned a bare
+/// `OSAgentError::Timeout` and discarded partial stdout/stderr, so a timed-out
+/// build looked like it produced nothing and the agent had no error text to
+/// act on.
+struct ShellCapture {
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+}
+
+async fn drain_pipe<R>(mut reader: R, buffer: std::sync::Arc<std::sync::Mutex<String>>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let text = String::from_utf8_lossy(&chunk[..read]).into_owned();
+                if let Ok(mut guard) = buffer.lock() {
+                    guard.push_str(&text);
+                }
+            }
+        }
+    }
+}
+
+async fn run_shell_command_capture(
+    command: &str,
+    workspace: &std::path::Path,
+    timeout: Duration,
+) -> std::io::Result<ShellCapture> {
+    #[cfg(windows)]
+    let mut builder = {
+        use std::os::windows::process::CommandExt;
+        let mut builder = tokio::process::Command::new("cmd");
+        builder
+            .as_std_mut()
+            .raw_arg(format!("/C {}", command))
+            .creation_flags(0x08000000);
+        builder
+    };
+    #[cfg(not(windows))]
+    let mut builder = {
+        let mut builder = tokio::process::Command::new("sh");
+        builder.args(["-lc", command]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            builder.as_std_mut().process_group(0);
+        }
+        builder
+    };
+
+    let mut child = builder
+        .current_dir(workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let stdout_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
+    let stdout_task = child.stdout.take().map(|stream| {
+        let buffer = stdout_buffer.clone();
+        tokio::spawn(async move { drain_pipe(stream, buffer).await })
+    });
+    let stderr_task = child.stderr.take().map(|stream| {
+        let buffer = stderr_buffer.clone();
+        tokio::spawn(async move { drain_pipe(stream, buffer).await })
+    });
+
+    let mut guard = CommandTreeGuard(child.id());
+    let (exit_code, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            guard.0 = None;
+            (status.code(), false)
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            // Dropping the guard `taskkill`s the whole tree; keep whatever the
+            // pipes already delivered.
+            drop(guard);
+            (None, true)
+        }
+    };
+
+    let join_readers = async {
+        if let Some(task) = stdout_task {
+            let _ = task.await;
+        }
+        if let Some(task) = stderr_task {
+            let _ = task.await;
+        }
+    };
+    // Bound the wait: if a killed child refuses to release its pipes we still
+    // return the captured output instead of hanging the turn.
+    let _ = tokio::time::timeout(Duration::from_millis(1000), join_readers).await;
+
+    let stdout = stdout_buffer
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let stderr = stderr_buffer
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+
+    Ok(ShellCapture {
+        stdout,
+        stderr,
+        exit_code,
+        timed_out,
+    })
 }
 
 #[cfg(test)]
@@ -941,63 +1063,59 @@ impl Tool for BashTool {
 
         let workspace = self.validate_workdir(workdir)?;
         let timeout_duration = Duration::from_secs(timeout_seconds);
-        let result = tokio::time::timeout(
-            timeout_duration,
-            run_shell_command(&full_command, &workspace),
-        )
-        .await;
-        match result {
-            Ok(Ok(output_result)) => {
-                let stdout = String::from_utf8_lossy(&output_result.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
+        let capture = run_shell_command_capture(&full_command, &workspace, timeout_duration)
+            .await
+            .map_err(|e| {
+                OSAgentError::ToolExecution(format!("Failed to spawn command: {}", e))
+            })?;
 
-                let (merged_output, exit_code) = if !output_result.status.success() {
-                    (
-                        format!(
-                            "Exit code: {}\nStdout:\n{}\nStderr:\n{}",
-                            output_result.status.code().unwrap_or(-1),
-                            stdout,
-                            stderr
-                        ),
-                        output_result.status.code().unwrap_or(-1),
-                    )
-                } else if stderr.is_empty() {
-                    (stdout, 0)
-                } else {
-                    (format!("{}\n{}", stdout, stderr), 0)
-                };
+        let (merged_output, exit_code) = if capture.timed_out {
+            (
+                format!(
+                    "Command timed out after {}s and was terminated.\nStdout:\n{}\nStderr:\n{}",
+                    timeout_seconds, capture.stdout, capture.stderr
+                ),
+                capture.exit_code.unwrap_or(-1),
+            )
+        } else if let Some(code) = capture.exit_code.filter(|code| *code != 0) {
+            (
+                format!(
+                    "Exit code: {}\nStdout:\n{}\nStderr:\n{}",
+                    code, capture.stdout, capture.stderr
+                ),
+                code,
+            )
+        } else if capture.stderr.is_empty() {
+            (capture.stdout, 0)
+        } else {
+            (format!("{}\n{}", capture.stdout, capture.stderr), 0)
+        };
 
-                let summarized = maybe_store_large_output_result(
-                    &self.default_workspace()?,
-                    self.writable,
-                    "bash",
-                    &merged_output,
-                );
+        let summarized = maybe_store_large_output_result(
+            &self.default_workspace()?,
+            self.writable,
+            "bash",
+            &merged_output,
+        );
 
-                Ok(ToolResult {
-                    output: summarized.display_output,
-                    outcome: if exit_code == 0 {
-                        ToolOutcome::Success
-                    } else {
-                        ToolOutcome::Failure
-                    },
-                    title: Some(full_command),
-                    metadata: json!({
-                        "exit_code": exit_code,
-                        "truncated": summarized.truncated,
-                        "output_path": summarized.output_path,
-                        "original_chars": summarized.original_chars,
-                        "original_lines": summarized.original_lines,
-                    }),
-                    attachments: Vec::new(),
-                })
-            }
-            Ok(Err(e)) => Err(OSAgentError::ToolExecution(format!(
-                "Failed to spawn command: {}",
-                e
-            ))),
-            Err(_) => Err(OSAgentError::Timeout),
-        }
+        Ok(ToolResult {
+            output: summarized.display_output,
+            outcome: if capture.timed_out || exit_code != 0 {
+                ToolOutcome::Failure
+            } else {
+                ToolOutcome::Success
+            },
+            title: Some(full_command),
+            metadata: json!({
+                "exit_code": exit_code,
+                "timed_out": capture.timed_out,
+                "truncated": summarized.truncated,
+                "output_path": summarized.output_path,
+                "original_chars": summarized.original_chars,
+                "original_lines": summarized.original_lines,
+            }),
+            attachments: Vec::new(),
+        })
     }
 }
 

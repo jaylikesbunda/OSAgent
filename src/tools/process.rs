@@ -4,6 +4,7 @@ use crate::tools::registry::{Tool, ToolExample};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
@@ -217,7 +218,7 @@ impl ProcessTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
 
@@ -225,29 +226,61 @@ impl ProcessTool {
         let session = ProcessSession::new(command, cwd, Some(pid));
         let session_id = self.registry.register(session);
 
+        // Stream stdout/stderr into the registry as the child runs. The old
+        // `wait_with_output` path buffered everything until exit, so `poll` and
+        // `log` reported "(no output)" for the entire lifetime of a long job —
+        // which made a healthy background process look hung.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
         let registry = self.registry.clone();
         let session_id_clone = session_id.clone();
 
-        tokio::spawn(async move {
-            let output = tokio::task::spawn_blocking(move || child.wait_with_output())
-                .await
-                .ok()
-                .and_then(|r| r.ok());
-
-            if let Some(output) = output {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                registry.append_output(&session_id_clone, &stdout);
-                registry.append_error(&session_id_clone, &stderr);
-
-                if let Some(mut session) = registry.get(&session_id_clone) {
-                    if output.status.success() {
-                        session.status =
-                            ProcessStatus::Completed(output.status.code().unwrap_or(0));
-                    } else {
-                        session.status = ProcessStatus::Failed(output.status.code().unwrap_or(-1));
+        std::thread::spawn(move || {
+            let out_registry = registry.clone();
+            let out_session = session_id_clone.clone();
+            let out_thread = stdout.map(|stream| {
+                std::thread::spawn(move || {
+                    for line in std::io::BufReader::new(stream).lines() {
+                        match line {
+                            Ok(line) => out_registry.append_output(&out_session, &(line + "\n")),
+                            Err(_) => break,
+                        }
                     }
+                })
+            });
+
+            let err_registry = registry.clone();
+            let err_session = session_id_clone.clone();
+            let err_thread = stderr.map(|stream| {
+                std::thread::spawn(move || {
+                    for line in std::io::BufReader::new(stream).lines() {
+                        match line {
+                            Ok(line) => err_registry.append_error(&err_session, &(line + "\n")),
+                            Err(_) => break,
+                        }
+                    }
+                })
+            });
+
+            let status = child.wait();
+
+            // Drain the reader threads before publishing the final status so a
+            // poll immediately after completion still sees the trailing output.
+            if let Some(thread) = out_thread {
+                let _ = thread.join();
+            }
+            if let Some(thread) = err_thread {
+                let _ = thread.join();
+            }
+
+            if let Ok(status) = status {
+                if let Some(mut session) = registry.get(&session_id_clone) {
+                    session.status = if status.success() {
+                        ProcessStatus::Completed(status.code().unwrap_or(0))
+                    } else {
+                        ProcessStatus::Failed(status.code().unwrap_or(-1))
+                    };
                     let _ = registry.update(&session_id_clone, session);
                 }
             }

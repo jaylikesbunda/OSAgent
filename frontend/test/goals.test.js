@@ -9,6 +9,8 @@ test('goal commands separate objectives, controls, and bounded budgets', () => {
     assert.deepEqual(OSA.parseGoalCommand('/goal'), { action: 'status' });
     assert.deepEqual(OSA.parseGoalCommand('/GOAL --rounds 8 Fix the build'), { action: 'create', objective: 'Fix the build', max_rounds: 8 });
     assert.deepEqual(OSA.parseGoalCommand('/goal resume --rounds 2'), { action: 'resume', max_rounds: 2 });
+    assert.deepEqual(OSA.parseGoalCommand('/goal --no-limit Fix the build'), { action: 'create', objective: 'Fix the build', max_rounds: 0 });
+    assert.deepEqual(OSA.parseGoalCommand('/goal resume --no-limit'), { action: 'resume', max_rounds: 0 });
     for (const command of ['/goal --rounds 0 fix', '/goal --rounds 101 fix', '/goal --rounds 3', '/goal pause something', '/goal status --rounds 5']) {
         assert.throws(() => OSA.parseGoalCommand(command));
     }

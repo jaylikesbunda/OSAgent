@@ -10,6 +10,12 @@
     animation: softFadeIn 0.18s ease-out;
 }
 
+/* New tool rows/cards added mid-turn slide in instead of popping into the
+   list. Opt-in (class) so bulk session renders stay static. */
+.tool-container.tool-enter {
+    animation: softRise 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .tool-card.tool-complete {
     animation: softFadeIn 0.24s ease-out;
 }
@@ -68,6 +74,7 @@
 .parallel-count {
     font-size: 11px;
     color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
 }
 
 .tool-group-toggle {
@@ -101,6 +108,13 @@
 .tool-group-toggle .parallel-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .tool-group-toggle { padding: 7px 8px; gap: 10px; }
 .tool-group-toggle[data-running="true"] .tool-group-title { color: var(--text-primary); }
+
+/* Thinking cards interleaved between the tool calls in a group. They reuse
+   the message thinking card styling; only spacing differs. Hidden until the
+   group is expanded, so they collapse together with the tools. */
+.tool-group-thinking-card {
+    margin: 4px 0 8px;
+}
 
 .parallel-group > [hidden],
 .context-inline-group > [hidden] {
@@ -618,169 +632,154 @@
     background: var(--bg-tertiary);
 }
 
-/* ---- Subagent card ---- */
+/* ---- Subagent chip ---- */
 
 .subagent-card {
     width: min(800px, 100%);
     max-width: 800px;
-    margin: 0 auto 12px;
-    background: var(--bg-secondary);
+    margin: 0 auto 8px;
+    flex-shrink: 0;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-secondary) 55%, transparent);
     overflow: hidden;
-    animation: softFadeIn 0.18s ease-out;
+    animation: softRise 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.subagent-card:hover {
+    border-color: var(--border-hover);
+}
+
+.subagent-card[data-expanded="true"] {
+    background: var(--bg-secondary);
 }
 
 .subagent-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
+    gap: 8px;
+    min-height: 34px;
+    padding: 5px 10px 5px 12px;
     cursor: pointer;
     user-select: none;
-    transition: background 0.15s ease;
+    transition: background var(--transition-fast);
 }
 
 .subagent-header:hover {
     background: var(--bg-hover);
 }
 
-.subagent-info {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
+.subagent-header:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 
-.subagent-icon {
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    color: var(--text-primary);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    font-weight: 700;
+.subagent-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
     flex-shrink: 0;
+    background: var(--text-muted);
+    box-shadow: 0 0 0 3px transparent;
+    transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.subagent-card[data-status="running"] .subagent-dot,
+.subagent-card[data-status="retrying"] .subagent-dot {
+    background: var(--accent);
+    animation: subagentDotPulse 1.6s ease-in-out infinite;
+}
+
+.subagent-card[data-status="completed"] .subagent-dot { background: var(--success); }
+.subagent-card[data-status="partial"] .subagent-dot,
+.subagent-card[data-status="timeout"] .subagent-dot { background: var(--warning); }
+.subagent-card[data-status="failed"] .subagent-dot { background: var(--error); }
+.subagent-card[data-status="cancelled"] .subagent-dot { background: var(--text-muted); }
+
+@keyframes subagentDotPulse {
+    0%, 100% { box-shadow: 0 0 0 3px var(--accent-dim); }
+    50% { box-shadow: 0 0 0 5px transparent; }
 }
 
 .subagent-title {
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 500;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.subagent-card[data-status="completed"] .subagent-title,
+.subagent-card[data-status="cancelled"] .subagent-title {
+    color: var(--text-secondary);
 }
 
 .subagent-type {
     font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
     font-size: 10px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 6px;
-    border-radius: 3px;
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    border: 1px solid var(--border);
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
     flex-shrink: 0;
+}
+
+.subagent-spacer {
+    flex: 1 1 auto;
+    min-width: 8px;
 }
 
 .subagent-status {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-shrink: 0;
 }
 
 .subagent-status-badge {
-    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-    font-size: 10px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 6px;
-    border-radius: 3px;
-    flex-shrink: 0;
-}
-
-.subagent-status-badge.running {
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
-    animation: badgePulse 1.5s ease-in-out infinite;
-}
-
-.subagent-status-badge.completed {
-    color: #22c55e;
-    background: rgba(34, 197, 94, 0.1);
-}
-
-.subagent-status-badge.partial {
-    color: #f0b429;
-    background: rgba(240, 180, 41, 0.12);
-}
-
-.subagent-status-badge.cancelled {
-    color: var(--text-muted);
-    background: var(--bg-tertiary);
-}
-
-.subagent-status-badge.failed {
-    color: #ef4444;
-    background: rgba(239, 68, 68, 0.1);
-}
-
-.subagent-status-badge.retrying {
-    color: #f0b429;
-    background: rgba(240, 180, 41, 0.12);
-    animation: badgePulse 1.5s ease-in-out infinite;
-}
-
-.subagent-status-badge.timeout {
-    color: #f0b429;
-    background: rgba(240, 180, 41, 0.12);
-}
-
-.subagent-live {
-    padding: 4px 14px;
-    border-top: 1px solid var(--border);
-    background: var(--bg-secondary);
-}
-
-.subagent-current-tool {
-    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-    font-size: 11px;
-    color: var(--text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
     white-space: nowrap;
-    display: block;
+    color: var(--text-muted);
 }
+
+.subagent-status-badge.running { color: var(--accent); }
+.subagent-status-badge.completed { color: var(--success); }
+.subagent-status-badge.partial,
+.subagent-status-badge.timeout,
+.subagent-status-badge.retrying { color: var(--warning); }
+.subagent-status-badge.failed { color: var(--error); }
+.subagent-status-badge.cancelled { color: var(--text-muted); }
 
 .subagent-tool-count {
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--text-muted);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
 }
 
 .subagent-chevron {
-    font-size: 10px;
+    width: 12px;
+    text-align: center;
+    font-size: 9px;
     color: var(--text-muted);
-    transition: transform 0.2s ease;
     display: inline-block;
+    flex-shrink: 0;
+    transition: transform var(--transition-base);
 }
 
+/* The context gauge is a compact 18px ring with no inner label; the exact
+   percentage lives in the tooltip. */
 .subagent-context-ring {
-    display: inline-block;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
     cursor: default;
-    width: 28px;
-    height: 28px;
 }
 
 .subagent-context-ring svg {
@@ -789,11 +788,11 @@
 }
 
 .subagent-context-ring .context-ring-bg {
-    stroke-width: 3;
+    stroke-width: 3.5;
 }
 
 .subagent-context-ring .context-ring-progress {
-    stroke-width: 3;
+    stroke-width: 3.5;
 }
 
 .subagent-context-ring.danger .context-ring-progress {
@@ -805,79 +804,117 @@
 }
 
 .subagent-context-ring .context-ring-text {
-    font-size: 5.5px;
-    font-weight: 700;
+    display: none;
+}
+
+.subagent-live {
+    display: flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 0 12px 6px 27px;
+    animation: softFadeIn 0.18s ease-out;
+}
+
+.subagent-current-tool {
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 10.5px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+    min-width: 0;
 }
 
 .subagent-body {
-    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-rows: 0fr;
+    background: var(--bg-primary);
+    border-top: 1px solid transparent;
+    transition: grid-template-rows 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+                border-color var(--transition-fast);
+}
+
+.subagent-card[data-expanded="true"] .subagent-body {
+    grid-template-rows: 1fr;
+    border-top-color: var(--border);
 }
 
 .subagent-body-inner {
     padding: 0;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.subagent-section {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.subagent-section:last-of-type {
+    border-bottom: none;
+}
+
+.subagent-section-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 6px;
 }
 
 .subagent-prompt {
-    padding: 12px 14px;
-    font-size: 13px;
+    font-size: 12.5px;
     color: var(--text-primary);
-    background: var(--bg-primary);
-    border-bottom: 1px solid var(--border);
+    line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-word;
-    line-height: 1.5;
-    max-height: 200px;
+    max-height: 180px;
     overflow-y: auto;
 }
 
 .subagent-tools {
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--border);
-    max-height: 150px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 180px;
     overflow-y: auto;
-}
-
-.subagent-tool-item {
-    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-    font-size: 11px;
-    color: var(--text-secondary);
-    padding: 3px 0;
-    border-bottom: 1px solid var(--border);
-}
-
-.subagent-tool-item:last-child {
-    border-bottom: none;
-}
-
-.subagent-tool-repeat {
-    color: var(--text-muted);
-    font-size: 10px;
-}
-
-/* The tool rows live inside a capped scroll box; the header and live strip
-   keep a steady footprint so rapid tool updates do not shift the card. */
-.subagent-live {
-    min-height: 24px;
 }
 
 .subagent-tools:empty {
     display: none;
 }
 
-.subagent-tool-item.completed {
-    color: #22c55e;
+.subagent-tool-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 0;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
 }
 
-.subagent-tool-item.failed {
-    color: #ef4444;
+.subagent-tool-item::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--text-muted);
+}
+
+.subagent-tool-item.completed::before { background: var(--success); }
+.subagent-tool-item.failed::before { background: var(--error); }
+
+.subagent-tool-repeat {
+    color: var(--text-muted);
+    font-size: 10px;
 }
 
 .subagent-result {
-    padding: 10px 14px;
-    background: var(--bg-primary);
-    border-bottom: 1px solid var(--border);
-    max-height: 320px;
-    overflow-y: auto;
+    background: transparent;
 }
 
 .subagent-result-head {
@@ -885,42 +922,44 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
+}
+
+.subagent-result-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
 }
 
 .subagent-result-copy {
     padding: 2px 8px;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: 5px;
     color: var(--text-secondary);
     font-size: 10px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: all var(--transition-fast);
 }
 
 .subagent-result-copy:hover {
     color: var(--text-primary);
-    border-color: var(--text-primary);
-}
-
-.subagent-result-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 4px;
+    border-color: var(--border-hover);
+    background: var(--bg-tertiary);
 }
 
 .subagent-result-text {
     font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-    font-size: 11px;
+    font-size: 11.5px;
     color: var(--text-secondary);
     white-space: pre-wrap;
     word-break: break-word;
-    line-height: 1.5;
+    line-height: 1.55;
+    max-height: 320px;
+    overflow-y: auto;
 }
 
 .subagent-actions {
@@ -930,26 +969,42 @@
 }
 
 .subagent-btn {
-    padding: 6px 12px;
+    padding: 5px 11px;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 7px;
     color: var(--text-secondary);
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: all var(--transition-fast);
 }
 
 .subagent-btn:hover {
     background: var(--bg-tertiary);
     color: var(--text-primary);
-    border-color: var(--text-primary);
+    border-color: var(--border-hover);
+}
+
+.subagent-btn-primary {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+}
+
+.subagent-btn-primary:hover {
+    background: var(--bg-hover);
 }
 
 .subagent-btn-cancel:hover {
-    color: #ef4444;
-    border-color: #ef4444;
+    color: var(--error);
+    border-color: var(--error);
+}
+
+@media (max-width: 560px) {
+    .subagent-type,
+    .subagent-tool-count {
+        display: none;
+    }
 }
 
 /* ---- Coordinator status ---- */

@@ -66,6 +66,27 @@ body {
     to { opacity: 1; }
 }
 
+/* Live-add animation. Applied only to nodes that appear mid-turn (a new tool
+   row, a new subagent card) — never to a bulk session render, which is why it
+   is opt-in via a class instead of baked into every card. */
+@keyframes softRise {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .unit-enter,
+    .tool-enter,
+    .subagent-card,
+    .message,
+    .tool-card {
+        animation: none !important;
+    }
+    .subagent-chevron {
+        transition: none !important;
+    }
+}
+
 @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }

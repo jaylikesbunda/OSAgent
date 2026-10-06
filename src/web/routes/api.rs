@@ -631,6 +631,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         )
         .route("/api/sessions/:id/compact", post(compact_session))
         .route(
+            "/api/sessions/:id/archive",
+            get(get_session_archive_messages),
+        )
+        .route(
             "/api/sessions/:id",
             get(get_session).patch(patch_session).delete(delete_session),
         )
@@ -1312,6 +1316,17 @@ async fn update_config(
     new_config.providers = current_config.providers.clone();
     new_config.default_provider = current_config.default_provider.clone();
     new_config.default_model = current_config.default_model.clone();
+
+    // Workspaces are managed exclusively through /api/workspaces,
+    // /api/workspaces/active and /api/sessions/:id/workspace, which persist
+    // immediately. A settings snapshot can predate a workspace added from the
+    // context menu, and trusting its `agent` workspace fields deleted the
+    // just-added workspace from the runtime config and disk — leaving the
+    // client showing a workspace the server no longer had, so re-adding it
+    // failed with "Workspace with ID '...' not found".
+    new_config.agent.workspaces = current_config.agent.workspaces.clone();
+    new_config.agent.active_workspace = current_config.agent.active_workspace.clone();
+    new_config.agent.workspace = current_config.agent.workspace.clone();
 
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
@@ -2178,6 +2193,24 @@ async fn compact_session(
     }))
 }
 
+/// Pre-compaction history for a session, oldest first. The client merges it
+/// into the transcript so a compacted chat still shows what came before, with
+/// the compaction summary card sitting at the boundary rather than the top.
+async fn get_session_archive_messages(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let messages = agent.get_session_archive(&id).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "messages": messages })))
+}
+
 async fn create_session(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Json(payload): Json<CreateSessionRequest>,
@@ -2308,20 +2341,37 @@ async fn patch_session(
 
     let mut updated_session = session;
     if let Some(name) = payload.name {
-        updated_session.metadata["name"] = serde_json::json!(name);
+        // Persist the name in its own column. A turn that is still running
+        // rewrites the whole metadata blob from its in-memory snapshot, which
+        // would otherwise revert a rename made mid-turn.
+        agent.update_session_title(&id, &name).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
     }
     if let Some(voice_mode) = payload.voice_mode {
-        updated_session.metadata["voice_mode"] = serde_json::json!(voice_mode);
+        agent
+            .set_session_metadata_value(&id, "voice_mode", serde_json::json!(voice_mode))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
     }
 
-    agent.update_session(&updated_session).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    // Re-read so the response reflects the just-written title/metadata and the
+    // latest transcript, rather than the snapshot taken before the update.
+    if let Ok(Some(refreshed)) = agent.get_session(&id).await {
+        updated_session = refreshed;
+    }
 
     Ok(Json(updated_session))
 }
@@ -3082,12 +3132,12 @@ async fn control_session_goal(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if payload
         .max_rounds
-        .is_some_and(|rounds| !(1..=100).contains(&rounds))
+        .is_some_and(|rounds| !(0..=100).contains(&rounds))
     {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "max_rounds must be between 1 and 100".to_string(),
+                error: "max_rounds must be between 1 and 100, or 0 for no limit".to_string(),
             }),
         ));
     }
@@ -7136,20 +7186,35 @@ async fn auto_name_session(
 
     tracing::info!("auto_name_session: naming session {} -> {:?}", id, title);
 
-    let mut updated = session;
-    updated.metadata["name"] = serde_json::json!(title);
-    agent.update_session(&updated).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    // Only applies while the session is still untitled, so a user who renamed
+    // the chat while the model was generating keeps their name.
+    agent
+        .auto_name_session_title(&id, &title)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
-    Ok(Json(
-        serde_json::json!({ "name": updated.metadata["name"] }),
-    ))
+    let applied = agent
+        .get_session(&id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|session| {
+            session
+                .metadata
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
+        .unwrap_or(title);
+
+    Ok(Json(serde_json::json!({ "name": applied })))
 }
 
 #[derive(Debug, Serialize)]
@@ -7801,7 +7866,7 @@ async fn update_status(
 mod tests {
     use super::{auth_status, get_config, login, update_config, LoginRequest};
     use crate::agent::runtime::AgentRuntime;
-    use crate::config::{Config, DiscordConfig, WorkspacePath, WorkspacePermission};
+    use crate::config::{Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission};
     use crate::web::auth;
     use axum::{extract::Extension, http::StatusCode, response::IntoResponse, Json};
     use std::sync::Arc;
@@ -7995,6 +8060,64 @@ mod tests {
         assert_eq!(
             persisted.discord.as_ref().unwrap().token,
             "discord-bot-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_update_preserves_workspaces() {
+        let temp_dir = tempdir().unwrap();
+        let mut config = test_config(temp_dir.path());
+
+        let extra_path = temp_dir.path().join("rhumb");
+        std::fs::create_dir_all(&extra_path).unwrap();
+        config.agent.workspaces.push(WorkspaceConfig {
+            id: "rhumb".to_string(),
+            name: "Rhumb".to_string(),
+            paths: vec![WorkspacePath {
+                path: extra_path.to_string_lossy().to_string(),
+                permission: WorkspacePermission::ReadWrite,
+                description: None,
+            }],
+            path: extra_path.to_string_lossy().to_string(),
+            description: None,
+            permission: WorkspacePermission::ReadWrite,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            last_used: None,
+        });
+        config.agent.active_workspace = Some("rhumb".to_string());
+
+        let config_path = temp_dir.path().join("config.toml");
+        config.save(&config_path).unwrap();
+
+        let agent = AgentRuntime::new(config.clone()).unwrap();
+
+        // A settings pane PUTs a snapshot taken before "rhumb" existed, so its
+        // `agent.workspaces`/`active_workspace` are stale.
+        let mut stale = config.redacted_for_api();
+        stale.agent.workspaces = vec![config.agent.workspaces[0].clone()];
+        stale.agent.active_workspace = Some("default".to_string());
+        stale.agent.temperature = 0.25;
+
+        update_config(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Json(stale),
+        )
+        .await
+        .unwrap();
+
+        let updated = agent.get_config().await;
+        assert_eq!(updated.agent.temperature, 0.25);
+        assert!(
+            updated.agent.workspaces.iter().any(|w| w.id == "rhumb"),
+            "a workspace added via the workspaces API was dropped by a settings save"
+        );
+        assert_eq!(updated.agent.active_workspace.as_deref(), Some("rhumb"));
+
+        let persisted = Config::load(config_path.to_str().unwrap()).unwrap();
+        assert!(
+            persisted.agent.workspaces.iter().any(|w| w.id == "rhumb"),
+            "the workspace was dropped from the persisted config"
         );
     }
 }

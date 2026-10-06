@@ -189,6 +189,13 @@ pub enum AgentEvent {
         replayed: bool,
         timestamp: SystemTime,
     },
+    /// Emitted immediately before compaction runs so the UI can show a
+    /// persistent "Compacting" indicator instead of a transient toast.
+    CompactionStarted {
+        session_id: String,
+        sequence: u64,
+        timestamp: SystemTime,
+    },
     StepFinish {
         session_id: String,
         sequence: u64,
@@ -429,6 +436,7 @@ impl AgentEvent {
             AgentEvent::ThinkingEnd { session_id, .. } => session_id,
             AgentEvent::Retry { session_id, .. } => session_id,
             AgentEvent::Compaction { session_id, .. } => session_id,
+            AgentEvent::CompactionStarted { session_id, .. } => session_id,
             AgentEvent::StepFinish { session_id, .. } => session_id,
             AgentEvent::Error { session_id, .. } => session_id,
             AgentEvent::Cancelled { session_id, .. } => session_id,
@@ -470,6 +478,7 @@ impl AgentEvent {
             AgentEvent::ThinkingEnd { sequence, .. } => *sequence,
             AgentEvent::Retry { sequence, .. } => *sequence,
             AgentEvent::Compaction { sequence, .. } => *sequence,
+            AgentEvent::CompactionStarted { sequence, .. } => *sequence,
             AgentEvent::StepFinish { sequence, .. } => *sequence,
             AgentEvent::Error { sequence, .. } => *sequence,
             AgentEvent::Cancelled { sequence, .. } => *sequence,
@@ -717,6 +726,15 @@ impl AgentEvent {
                 pruned_messages,
                 compacted_messages,
                 replayed,
+                timestamp,
+            },
+            AgentEvent::CompactionStarted {
+                session_id,
+                timestamp,
+                ..
+            } => AgentEvent::CompactionStarted {
+                session_id,
+                sequence: value,
                 timestamp,
             },
             AgentEvent::StepFinish {
@@ -1110,6 +1128,7 @@ impl AgentEvent {
             AgentEvent::ThinkingEnd { .. } => "thinking_end",
             AgentEvent::Retry { .. } => "retry",
             AgentEvent::Compaction { .. } => "compaction",
+            AgentEvent::CompactionStarted { .. } => "compaction_started",
             AgentEvent::StepFinish { .. } => "step_finish",
             AgentEvent::Error { .. } => "error",
             AgentEvent::Cancelled { .. } => "cancelled",
@@ -1204,15 +1223,27 @@ impl EventBus {
 
             sequenced_event = sequenced_event.with_sequence(next_sequence);
 
-            if let Some(storage) = &self.storage {
-                let data = serde_json::to_value(&sequenced_event)
-                    .unwrap_or_else(|_| serde_json::json!({ "error": "serialize_failed" }));
-                let _ = storage.append_session_event_with_sequence(
-                    &session_id,
-                    sequenced_event.event_type(),
-                    data,
-                    next_sequence,
-                );
+            // High-frequency streaming deltas are broadcast to live clients but
+            // not persisted. Storing one row per token filled `session_events`
+            // with tens of thousands of rows for a single turn (45k+ for one
+            // observed session) and slowed every session write. The assembled
+            // text still streams live, and the final content is stored on the
+            // session message when the reply completes.
+            let persist_event = !matches!(
+                &sequenced_event,
+                AgentEvent::ThinkingDelta { .. } | AgentEvent::ToolProgress { .. }
+            );
+            if persist_event {
+                if let Some(storage) = &self.storage {
+                    let data = serde_json::to_value(&sequenced_event)
+                        .unwrap_or_else(|_| serde_json::json!({ "error": "serialize_failed" }));
+                    let _ = storage.append_session_event_with_sequence(
+                        &session_id,
+                        sequenced_event.event_type(),
+                        data,
+                        next_sequence,
+                    );
+                }
             }
         }
 

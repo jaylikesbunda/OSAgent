@@ -299,7 +299,7 @@ OSA.handleAgentEvent = function(event) {
     const chain = entry ? entry.chain : OSA.getMessageChain();
     const isCurrent = !targetId || targetId === currentId;
     const isStopping = entry ? !!entry.stopping : OSA.isAgentStopping();
-    const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_retrying', 'subagent_completed', 'retry', 'compaction', 'step_finish', 'reasoning', 'question_asked', 'workflow_started', 'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed', 'workflow_completed', 'workflow_failed'];
+    const ignoreDuringStop = ['thinking', 'thinking_start', 'thinking_delta', 'thinking_end', 'response_start', 'response_chunk', 'tool_start', 'tool_progress', 'tool_complete', 'context_update', 'subagent_created', 'subagent_progress', 'subagent_retrying', 'subagent_completed', 'retry', 'compaction', 'compaction_started', 'step_finish', 'reasoning', 'question_asked', 'workflow_started', 'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed', 'workflow_completed', 'workflow_failed'];
     
     if (isStopping && ignoreDuringStop.includes(event.type)) {
         return;
@@ -523,10 +523,24 @@ OSA.handleAgentEvent = function(event) {
             OSA.scheduleSessionInspectorRefresh();
             break;
 
+        case 'compaction_started': {
+            if (!event.subagent_session_id) {
+                // Compaction summarizes with a model call, so show the same
+                // animated indicator as thinking under a "Compacting" label.
+                OSA.showThinkingIndicator();
+                OSA.setThinkingStatus('Compacting', 'Summarizing earlier messages');
+            }
+            break;
+        }
+
         case 'compaction': {
             if (!event.subagent_session_id) {
-                OSA.showThinkingIndicator();
-                OSA.setThinkingStatus('Organizing', 'Compacting conversation context');
+                // The summary is in place; drop the "Compacting" label so the
+                // next stream event restores the normal working state.
+                OSA.setThinkingStatus('Thinking', '');
+                if (typeof OSA.refreshSessionArchive === 'function') {
+                    OSA.refreshSessionArchive(event.session_id);
+                }
             }
             const current = OSA.getCurrentSession && OSA.getCurrentSession();
             if (current && current.id === event.session_id && !OSA.isAgentProcessing()) {
@@ -1693,15 +1707,17 @@ OSA.handleWorkflowApprovalRequested = function(event) {
 };
 
 OSA.toggleSubagentCard = function(subagentId) {
+    const card = document.getElementById(`subagent-${subagentId}`);
     const body = document.getElementById(`subagent-body-${subagentId}`);
     const chevron = document.getElementById(`subagent-chevron-${subagentId}`);
-    if (!body) return;
+    const header = card ? card.querySelector('.subagent-header') : null;
+    if (!card || !body) return;
 
-    const isExpanded = body.style.display !== 'none';
-    body.style.display = isExpanded ? 'none' : 'block';
-    if (chevron) {
-        chevron.style.transform = isExpanded ? '' : 'rotate(90deg)';
-    }
+    const isExpanded = card.dataset.expanded === 'true';
+    const next = !isExpanded;
+    card.dataset.expanded = String(next);
+    if (chevron) chevron.style.transform = next ? 'rotate(90deg)' : '';
+    if (header) header.setAttribute('aria-expanded', String(next));
 };
 
 OSA.openSubagentSession = function(subagentId) {

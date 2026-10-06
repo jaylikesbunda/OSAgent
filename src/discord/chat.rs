@@ -449,5 +449,10 @@ impl Handler {
                 .await;
             }
         }
+
+        // The Discord turn is over. Stop routing this session's questions here
+        // so a later web UI turn on the same session cannot leak them into
+        // Discord.
+        super::clear_session_channel(&session_id).await;
     }
 }

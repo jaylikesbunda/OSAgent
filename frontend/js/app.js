@@ -24,6 +24,18 @@ OSA.closeMobileComposerMenu = function() {
     document.removeEventListener('keydown', OSA._mobileComposerEscape, true);
 };
 
+// Transient composer popovers (model picker, context menu, slash commands,
+// mobile actions, goal editor) belong to the session that opened them. Close
+// them whenever the active session changes so an open dropdown cannot linger
+// over the composer after a switch.
+OSA.closeTransientPopovers = function() {
+    OSA.closeContextMenu?.();
+    OSA.closeModelDropdown?.(false);
+    OSA.closeMobileComposerMenu?.();
+    document.getElementById('slash-menu')?.classList.add('hidden');
+    OSA.closeGoalEditor?.();
+};
+
 OSA._mobileComposerOutsideClick = function(event) {
     if (!event.target.closest?.('#mobile-composer-menu, #mobile-actions-btn')) {
         OSA.closeMobileComposerMenu();
@@ -987,6 +999,10 @@ OSA.selectSession = async function(sessionId) {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
             signal,
         }).catch(() => null);
+        const pendingArchiveRequest = fetch(`/api/sessions/${sessionId}/archive`, {
+            headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
+            signal,
+        }).catch(() => null);
         const pendingSubagentsRequest = fetch(`/api/sessions/${sessionId}/subagents`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
             signal,
@@ -1071,13 +1087,22 @@ OSA.selectSession = async function(sessionId) {
         OSA.loadSessionPersona();
         OSA.loadSessionBreadcrumb(sessionId);
 
-        const [toolStartsRes, subagentsRes, historyRes, queueRes] = await Promise.all([
+        const [toolStartsRes, subagentsRes, historyRes, queueRes, archiveRes] = await Promise.all([
             pendingToolsRequest,
             pendingSubagentsRequest,
             pendingHistoryRequest,
-            pendingQueueRequest
+            pendingQueueRequest,
+            pendingArchiveRequest
         ]);
         if (!isCurrentSelection()) return;
+
+        if (archiveRes && archiveRes.ok) {
+            const archiveData = await archiveRes.json().catch(() => null);
+            if (!isCurrentSelection()) return;
+            if (archiveData && Array.isArray(archiveData.messages)) {
+                OSA.setSessionArchive(sessionId, archiveData.messages);
+            }
+        }
 
         await pendingCheckpointsRequest;
         if (!isCurrentSelection()) return;
@@ -2326,6 +2351,7 @@ OSA.deleteSession = async function(sessionId) {
         }
         OSA.clearSessionCheckpoints(sessionId);
         OSA.markSessionSeen(sessionId);
+        if (typeof OSA.setSessionArchive === 'function') OSA.setSessionArchive(sessionId, []);
         if (OSA.SessionStore) delete OSA.SessionStore[sessionId];
         if (OSA.getCurrentSession() && OSA.getCurrentSession().id === sessionId) {
             OSA.setCurrentSession(null);

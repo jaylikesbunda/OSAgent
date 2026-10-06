@@ -80,6 +80,15 @@ pub(crate) async fn register_session_channel(session_id: &str, channel_id: u64) 
     }
 }
 
+/// Drop the Discord routing entry for a session once its turn finishes.
+///
+/// The mapping must only describe a *currently running* Discord turn. Keeping
+/// it around meant a session first used from Discord, then driven from the web
+/// UI, still had its questions delivered to the old Discord channel.
+pub(crate) async fn clear_session_channel(session_id: &str) {
+    session_to_channel().write().await.remove(session_id);
+}
+
 pub async fn get_last_discord_channel_id() -> u64 {
     *last_channel().read().await
 }
@@ -883,17 +892,20 @@ impl Handler {
                         questions,
                         ..
                     } => {
+                        // Only sessions actually being talked to from Discord
+                        // are registered here (see `register_session_channel`).
+                        // Never fall back to the last-seen channel: a question
+                        // asked from the web UI, a subagent, or any other
+                        // surface has no Discord destination and would
+                        // otherwise be posted into whatever server/channel the
+                        // bot last touched — including a public community
+                        // server.
                         let channel_id =
                             session_to_channel().read().await.get(&session_id).copied();
-                        let channel_id = match channel_id {
-                            Some(channel_id) => channel_id,
-                            None => get_last_discord_channel_id().await,
-                        };
 
-                        if channel_id == 0 {
-                            warn!("Discord: question for session {session_id} has nowhere to go");
+                        let Some(channel_id) = channel_id.filter(|id| *id != 0) else {
                             continue;
-                        }
+                        };
 
                         handler
                             .present_question(

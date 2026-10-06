@@ -894,7 +894,10 @@ OSA.compactSession = async function(options = {}) {
         return;
     }
     try {
-        OSA.showToast?.('Compacting conversation...');
+        // Compaction summarizes with a model call that can take a while, so
+        // show the animated indicator instead of a toast that vanishes.
+        OSA.showThinkingIndicator?.();
+        OSA.setThinkingStatus?.('Compacting', 'Summarizing earlier messages');
         const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(session.id)}/compact`, {
             method: 'POST',
             body: JSON.stringify(options && options.focus ? { focus: options.focus } : {}),
@@ -906,6 +909,12 @@ OSA.compactSession = async function(options = {}) {
         const parts = [];
         if (data.compacted_messages) parts.push(`${data.compacted_messages} summarized`);
         if (data.pruned_messages) parts.push(`${data.pruned_messages} pruned`);
+        // The archive gained the freshly compacted span; refresh it before the
+        // reload so the full history is restored with the summary card at the
+        // compaction boundary rather than at the top.
+        if (typeof OSA.refreshSessionArchive === 'function') {
+            await OSA.refreshSessionArchive(session.id);
+        }
         OSA.showToast?.(parts.length ? `Compacted: ${parts.join(', ')}.` : 'Nothing to compact yet.');
         if (typeof OSA.selectSession === 'function') {
             await OSA.selectSession(session.id);
@@ -918,6 +927,11 @@ OSA.compactSession = async function(options = {}) {
     } catch (error) {
         console.error('Compaction failed:', error);
         OSA.showToast?.(error.message || 'Compaction failed.');
+    } finally {
+        if (!(OSA.isAgentProcessing && OSA.isAgentProcessing())) {
+            OSA.hideThinkingIndicator?.();
+            OSA.setThinkingStatus?.('Thinking', '');
+        }
     }
 };
 
@@ -1969,6 +1983,7 @@ OSA.renderEmptyTranscript = function(text = 'Start a new chat to begin') {
     empty.className = 'empty-state';
     empty.innerHTML = `<div class="empty-state-icon">+</div><div class="empty-state-title">Start a conversation</div><div class="empty-state-text">${OSA.escapeHtml(text)}</div>`;
     messagesDiv.appendChild(empty);
+    if (OSA.updateScrollToBottomButton) OSA.updateScrollToBottomButton(messagesDiv);
 };
 
 OSA.appendUserMessageToChat = function(content, options = {}) {

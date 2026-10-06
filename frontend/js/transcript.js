@@ -706,8 +706,56 @@ OSA.getMessageRenderSignature = function(message) {
     ].join('\u0001');
 };
 
+// Pre-compaction history fetched from the backend, kept per session so any
+// rebuild (session switch, snapshot adopt, truncate) can splice it back in.
+OSA.sessionArchives = OSA.sessionArchives || new Map();
+
+OSA.getSessionArchive = function(sessionId) {
+    if (!sessionId) return [];
+    return OSA.sessionArchives.get(sessionId) || [];
+};
+
+OSA.setSessionArchive = function(sessionId, messages) {
+    if (!sessionId) return;
+    if (Array.isArray(messages) && messages.length) {
+        OSA.sessionArchives.set(sessionId, messages);
+    } else {
+        OSA.sessionArchives.delete(sessionId);
+    }
+};
+
+// A compaction just archived more history, so the cached prefix is stale.
+// Refetch it before the next rebuild or the compacted messages would vanish.
+OSA.refreshSessionArchive = async function(sessionId) {
+    if (!sessionId) return;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(sessionId)}/archive`);
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (data && Array.isArray(data.messages)) {
+            OSA.setSessionArchive(sessionId, data.messages);
+        }
+    } catch (_) {
+        // Keep whatever was cached; the transcript still renders.
+    }
+};
+
 OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTasks = [], options = {}) {
-    const messages = (session && Array.isArray(session.messages)) ? session.messages : [];
+    let messages = (session && Array.isArray(session.messages)) ? session.messages : [];
+    // Pre-compaction history the backend archived. Splice it back in just
+    // before the compaction summary that replaced it, so the chat keeps its
+    // earlier messages and tool groups, and the summary card lands at the
+    // compaction boundary rather than at the top.
+    const archived = Array.isArray(options.archivedMessages)
+        ? options.archivedMessages
+        : (session ? OSA.getSessionArchive(session.id) : []);
+    if (archived.length) {
+        let insertAt = messages.findIndex(function(message) {
+            return OSA.isCompactionSummaryMessage && OSA.isCompactionSummaryMessage(message);
+        });
+        if (insertAt < 0) insertAt = 0;
+        messages = messages.slice(0, insertAt).concat(archived, messages.slice(insertAt));
+    }
     const priorItems = OSA.TModel.items.slice();
     const items = [];
 
@@ -957,6 +1005,19 @@ OSA.rebuildAfterTruncate = function(fromIndex) {
     OSA.rebuildTranscriptFromSession(session, tools, OSA.getSessionSubagentTasks() || []);
 };
 
+// A reasoning-only assistant segment: it carries thinking but no visible
+// text/images/attachments. These are the segments the stream finalizes before
+// a tool call, so they normally sit right next to a run of tools.
+OSA.isThinkingOnlyMessage = function(item) {
+    if (!item || item.kind !== 'message' || item.role !== 'assistant') return false;
+    if (!OSA.getShowThinkingBlocks() || !(item.thinking || '').trim()) return false;
+    if (item.images && item.images.length) return false;
+    if (item.attachments && item.attachments.length) return false;
+    let display = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
+    display = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(display) : display;
+    return !display.trim();
+};
+
 OSA.buildTranscriptUnits = function() {
     // Keep hidden reasoning in the model, but do not render its empty role
     // label or let it break an otherwise continuous run of tool calls.
@@ -970,23 +1031,78 @@ OSA.buildTranscriptUnits = function() {
             || !!(item.attachments && item.attachments.length);
     });
     const units = [];
+    // Reasoning immediately followed by a run of tool calls folds into that
+    // group instead of standing as its own "Thinking" card.
+    const pendingReasoning = [];
     let i = 0;
 
     while (i < items.length) {
         const item = items[i];
+
+        if (OSA.isThinkingOnlyMessage(item)) {
+            let k = i;
+            while (k < items.length && OSA.isThinkingOnlyMessage(items[k])) k += 1;
+            if (k < items.length && items[k].kind === 'tool' && items[k].toolName !== 'draw_diagram') {
+                for (let m = i; m < k; m++) {
+                    pendingReasoning.push({ key: items[m].key, text: items[m].thinking || '', item: items[m] });
+                }
+                i = k;
+                continue;
+            }
+        }
+
         if (item.kind === 'tool' && item.toolName !== 'draw_diagram') {
             // Visible transcript entries delimit runs. Provider message indices
             // and tool categories can change during uninterrupted tool work.
             const run = [item];
+            const reasoning = pendingReasoning.splice(0, pendingReasoning.length);
+            // Ordered mix of tools and reasoning so thinking can render between
+            // the tool cards it actually preceded, not lumped at the top.
+            const entries = reasoning.map(function(r) {
+                return { kind: 'reasoning', key: r.key, text: r.text, item: r.item };
+            });
+            entries.push({ kind: 'tool', item: item });
             let j = i + 1;
-            while (j < items.length
-                && items[j].kind === 'tool'
-                && items[j].toolName !== 'draw_diagram') {
-                run.push(items[j]);
-                j += 1;
+            while (j < items.length) {
+                const next = items[j];
+                if (next.kind === 'tool' && next.toolName !== 'draw_diagram') {
+                    run.push(next);
+                    entries.push({ kind: 'tool', item: next });
+                    j += 1;
+                    continue;
+                }
+                // Reasoning between two tool calls belongs to the same group
+                // rather than starting a new one, so a turn with several
+                // think/tool cycles collapses into a single tool group with
+                // every reasoning block inside it.
+                if (OSA.isThinkingOnlyMessage(next)) {
+                    let k = j;
+                    const folded = [];
+                    while (k < items.length && OSA.isThinkingOnlyMessage(items[k])) {
+                        folded.push({ key: items[k].key, text: items[k].thinking || '', item: items[k] });
+                        k += 1;
+                    }
+                    if (k < items.length && items[k].kind === 'tool' && items[k].toolName !== 'draw_diagram') {
+                        folded.forEach(function(r) {
+                            reasoning.push(r);
+                            entries.push({ kind: 'reasoning', key: r.key, text: r.text, item: r.item });
+                        });
+                        j = k;
+                        continue;
+                    }
+                }
+                break;
             }
-            if (run.length >= 2 || item.context) {
-                units.push({ type: 'parallel-group', key: 'par:' + run[0].key, items: run });
+            // A single tool with no reasoning stays a standalone card; once
+            // reasoning is attached it needs a group to collapse into.
+            if (run.length >= 2 || item.context || reasoning.length) {
+                units.push({
+                    type: 'parallel-group',
+                    key: 'par:' + run[0].key,
+                    items: run,
+                    reasoning: reasoning,
+                    entries: entries,
+                });
                 i = j;
             } else {
                 units.push({ type: 'tool', key: item.key, items: [item] });
@@ -994,14 +1110,22 @@ OSA.buildTranscriptUnits = function() {
             }
             continue;
         }
+
         units.push({ type: item.kind, key: item.key, item, items: [item] });
         i += 1;
     }
+
+    // Safety net: reasoning is only stashed when a tool run follows, but if
+    // that ever stops being true, render it rather than dropping it.
+    pendingReasoning.forEach(function(r) {
+        units.push({ type: 'message', key: r.item.key, item: r.item, items: [r.item] });
+    });
+
     return units;
 };
 
 OSA.unitSignature = function(unit) {
-    return unit.items.map(function(item) {
+    const base = unit.items.map(function(item) {
         if (item.kind === 'message') {
             let sigContent = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
             sigContent = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(sigContent) : sigContent;
@@ -1050,6 +1174,18 @@ OSA.unitSignature = function(unit) {
         }
         return JSON.stringify(item);
     }).join('\u0001');
+
+    if (unit.entries && unit.entries.length) {
+        return base + '\u0001E:' + unit.entries.map(function(entry) {
+            return entry.kind === 'reasoning'
+                ? 'R:' + (entry.text || '')
+                : 'T:' + ((entry.item && (entry.item.callId || entry.item.key)) || '');
+        }).join('\u0002');
+    }
+    if (unit.reasoning && unit.reasoning.length) {
+        return base + '\u0001R:' + unit.reasoning.map(function(r) { return r.text || ''; }).join('\u0002');
+    }
+    return base;
 };
 
 OSA.unitHasLiveStream = function(unit) {
@@ -1084,11 +1220,13 @@ OSA.updateTranscriptScrollState = function(view, messagesDiv) {
         } else {
             view.userPinnedToBottom = false;
         }
+        OSA.updateScrollToBottomButton(messagesDiv);
         return;
     }
 
     view.userPinnedToBottom = distance < 120;
     if (distance >= 120) view.forceStickBottom = false;
+    OSA.updateScrollToBottomButton(messagesDiv);
 };
 
 OSA.ensureMessageLayers = function() {
@@ -1144,6 +1282,23 @@ OSA.ensureMessageLayers = function() {
             if (event.deltaY < 0) OSA.pauseTranscriptAutoScroll(view);
         }, { passive: true });
         view.scrollHandlerAttached = true;
+    }
+
+    if (!view.resizeHandlerAttached) {
+        window.addEventListener('resize', function() {
+            OSA.positionScrollToBottomButton();
+        });
+        view.resizeHandlerAttached = true;
+    }
+
+    if (!view.inputResizeObserver && typeof ResizeObserver !== 'undefined') {
+        const inputArea = document.querySelector('.chat-area > .input-area');
+        if (inputArea) {
+            view.inputResizeObserver = new ResizeObserver(function() {
+                OSA.positionScrollToBottomButton();
+            });
+            view.inputResizeObserver.observe(inputArea);
+        }
     }
 
     if (!view.ioTop) {
@@ -1274,6 +1429,45 @@ OSA.scrollMessagesToBottom = function() {
     messagesDiv.style.scrollBehavior = prev;
 };
 
+// Show the jump-to-latest affordance only when the viewport is detached from
+// the tail. Being at (or near) the bottom hides it again.
+OSA.updateScrollToBottomButton = function(messagesDiv) {
+    const button = document.getElementById('scroll-to-bottom');
+    if (!button) return;
+    const div = messagesDiv || document.getElementById('messages');
+    if (!div) return;
+    const distance = Math.max(0, div.scrollHeight - div.scrollTop - div.clientHeight);
+    const hasContent = !!(OSA.TModel && OSA.TModel.items && OSA.TModel.items.length);
+    const shouldShow = hasContent && distance > 80;
+    if (button.classList.contains('hidden') === shouldShow) {
+        button.classList.toggle('hidden', !shouldShow);
+        if (shouldShow) OSA.positionScrollToBottomButton();
+    }
+};
+
+// Keep the button just above the composer, whose height changes with the
+// number of lines and with the todo/permission docks above it.
+OSA.positionScrollToBottomButton = function() {
+    const button = document.getElementById('scroll-to-bottom');
+    if (!button) return;
+    const inputArea = document.querySelector('.chat-area > .input-area');
+    if (!inputArea) return;
+    const height = inputArea.getBoundingClientRect().height;
+    if (height > 0) button.style.bottom = Math.round(height + 12) + 'px';
+};
+
+// Explicit user intent: re-attach to the tail and resume auto-scroll.
+OSA.jumpToLatest = function() {
+    const view = OSA.getTranscriptView && OSA.getTranscriptView();
+    if (view) {
+        view.autoScrollPaused = false;
+        view.userPinnedToBottom = true;
+        view.forceStickBottom = true;
+    }
+    OSA.scrollMessagesToBottom();
+    OSA.updateScrollToBottomButton();
+};
+
 OSA.scheduleTranscriptRender = function() {
     if (OSA.TModel.frame != null) return;
     OSA.TModel.frame = requestAnimationFrame(function() {
@@ -1297,6 +1491,16 @@ OSA.renderTranscript = function(options = {}) {
         return;
     }
     view.isRendering = true;
+
+    // Entry animations are only for nodes that appear mid-turn. Bulk renders
+    // (session switch, rebuild, window shift) mount a whole screen at once and
+    // must not slide every card in.
+    view.animateEnter = !(
+        options.reason === 'session-switch'
+        || options.reason === 'rebuild'
+        || options.reason === 'window-shift'
+        || options.keepWindow
+    );
 
     try {
         const units = OSA.buildTranscriptUnits();
@@ -1403,6 +1607,8 @@ OSA.renderTranscript = function(options = {}) {
             }
         }
 
+        OSA.updateScrollToBottomButton(messagesDiv);
+
         if (!OSA.tmodelStreamingItem()) {
             OSA.setStreamingAssistantDomId(null);
         }
@@ -1468,6 +1674,13 @@ OSA.ensureUnitNode = function(view, unit) {
         wrapper.className = 'transcript-entry';
         wrapper.dataset.unitKey = unit.key;
         view.wrapperNodesByKey.set(unit.key, wrapper);
+        if (view.animateEnter) {
+            wrapper.classList.add('unit-enter');
+            wrapper.addEventListener('animationend', function(event) {
+                if (event.target !== wrapper) return;
+                wrapper.classList.remove('unit-enter');
+            });
+        }
     }
     wrapper.dataset.unitKey = unit.key;
     OSA.patchUnit(wrapper, unit);
@@ -1765,6 +1978,14 @@ OSA.buildToolCardElement = function(item) {
     container.className = 'tool-container';
     container.dataset.callId = item.callId;
     container._toolArgs = item.args;
+    const view = OSA.getTranscriptView();
+    if (view && view.animateEnter) {
+        container.classList.add('tool-enter');
+        container.addEventListener('animationend', function(event) {
+            if (event.target !== container) return;
+            container.classList.remove('tool-enter');
+        });
+    }
 
     // A diagram is the answer, not a footnote: it renders as its own card in
     // the message column instead of behind a tool row that has to be opened.
@@ -2049,35 +2270,105 @@ OSA.patchContextGroupUnit = function(wrapper, unit) {
         wrapper.replaceChildren(group);
     }
 
-    unit.items.forEach(function(item) {
-        let row = view.ctxNodesByCallId.get(item.callId);
-        if (!row || !row.isConnected || row.parentNode !== group) {
-            if (!row) {
-                row = OSA.buildContextToolRow(item);
-                view.ctxNodesByCallId.set(item.callId, row);
-            }
-            group.appendChild(row);
-        }
-        OSA.patchContextToolRow(row, item);
-    });
+    OSA.renderToolGroupEntries(group, unit, view, true);
     OSA.patchToolGroupDisclosure(group, unit.items, true);
+};
+
+// Tool groups render an ordered mix of tool cards and thinking cards, so
+// reasoning sits between the calls it introduced. The header stays first;
+// everything after it is reconciled by key to preserve node identity.
+OSA.ensureToolGroupHeader = function(group) {
+    let header = group.querySelector(':scope > .tool-group-toggle');
+    if (header) return header;
+    header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'parallel-group-header tool-group-toggle';
+    header.innerHTML = '<span class="tool-group-title"></span>'
+        + '<span class="parallel-count"></span>'
+        + '<span class="tool-group-chevron" aria-hidden="true"></span>';
+    header.addEventListener('click', function() {
+        group._groupExpanded = header.getAttribute('aria-expanded') !== 'true';
+        OSA.patchToolGroupDisclosure(group, group._groupItems, group._contextGroup);
+    });
+    group.prepend(header);
+    return header;
+};
+
+// A collapsible thinking card using the same markup/style as message
+// reasoning, mounted inline in the tool group.
+OSA.ensureGroupThinkingNode = function(group, entry) {
+    if (!group._reasoningNodes) group._reasoningNodes = new Map();
+    const key = entry.key || ('reasoning:' + group._reasoningNodes.size);
+    let node = group._reasoningNodes.get(key);
+    if (!node || !node.isConnected) {
+        node = document.createElement('div');
+        node.className = 'message-thinking tool-group-thinking-card';
+        node.dataset.groupRole = 'reasoning';
+        node.innerHTML = '<button type="button" class="thinking-toggle" onclick="OSA.toggleThinkingBlock(this)">'
+            + '<span class="thinking-toggle-label">Thinking</span>'
+            + '<span class="thinking-preview"></span>'
+            + '</button>'
+            + '<div class="thinking-body"></div>';
+        group._reasoningNodes.set(key, node);
+    }
+    const text = entry.text || '';
+    const body = node.querySelector('.thinking-body');
+    if (body && body.dataset.rawText !== text) {
+        body.innerHTML = OSA.formatMessage(text);
+        body.dataset.rawText = text;
+    }
+    OSA.setThinkingPreview(node, text);
+    return node;
+};
+
+OSA.renderToolGroupEntries = function(group, unit, view, forceContext) {
+    const header = OSA.ensureToolGroupHeader(group);
+    const entries = unit.entries && unit.entries.length
+        ? unit.entries
+        : (unit.reasoning || []).map(function(r) {
+            return { kind: 'reasoning', key: r.key, text: r.text, item: r.item };
+        }).concat(unit.items.map(function(item) {
+            return { kind: 'tool', item: item };
+        }));
+
+    const desired = entries.map(function(entry) {
+        if (entry.kind === 'reasoning') {
+            return OSA.ensureGroupThinkingNode(group, entry);
+        }
+        const item = entry.item;
+        let card;
+        if (forceContext || item.context) {
+            card = view.ctxNodesByCallId.get(item.callId);
+            if (!card) {
+                card = OSA.buildContextToolRow(item);
+                view.ctxNodesByCallId.set(item.callId, card);
+            }
+            OSA.patchContextToolRow(card, item);
+        } else {
+            card = OSA.ensureToolContainerNode(item);
+        }
+        card.dataset.groupRole = 'tool';
+        return card;
+    });
+
+    const desiredSet = new Set(desired);
+    let cursor = header.nextSibling;
+    desired.forEach(function(node) {
+        if (node === cursor) {
+            cursor = cursor.nextSibling;
+            return;
+        }
+        group.insertBefore(node, cursor);
+    });
+    Array.from(group.children).forEach(function(child) {
+        if (child !== header && !desiredSet.has(child)) child.remove();
+    });
 };
 
 OSA.patchToolGroupDisclosure = function(group, items, context) {
     group._groupItems = items;
     group._contextGroup = context;
-    let header = group.querySelector(':scope > .tool-group-toggle');
-    if (!header) {
-        header = document.createElement('button');
-        header.type = 'button';
-        header.className = 'parallel-group-header tool-group-toggle';
-        header.innerHTML = '<span class="tool-group-title"></span><span class="parallel-count"></span><span class="tool-group-chevron" aria-hidden="true"></span>';
-        header.addEventListener('click', function() {
-            group._groupExpanded = header.getAttribute('aria-expanded') !== 'true';
-            OSA.patchToolGroupDisclosure(group, group._groupItems, group._contextGroup);
-        });
-        group.prepend(header);
-    }
+    const header = OSA.ensureToolGroupHeader(group);
     const limit = typeof OSA.getToolGroupPreview === 'function' ? OSA.getToolGroupPreview() : 0;
     const expanded = group._groupExpanded === undefined ? limit === 'all' : group._groupExpanded;
     const visibleCount = expanded ? items.length : (limit === 'all' ? 0 : limit);
@@ -2093,7 +2384,9 @@ OSA.patchToolGroupDisclosure = function(group, items, context) {
         if (searches) counts.push(searches + ' search' + (searches === 1 ? '' : 'es'));
         if (lists) counts.push(lists + ' listing' + (lists === 1 ? '' : 's'));
     }
-    const title = context ? (running ? 'Gathering context' : 'Gathered context') : items.length + ' tools';
+    const title = context
+        ? (running ? 'Gathering context' : 'Gathered context')
+        : items.length + ' tool' + (items.length === 1 ? '' : 's');
     const statuses = [];
     if (counts.length) statuses.push(counts.join(', '));
     if (running) statuses.push(running + ' running');
@@ -2101,14 +2394,35 @@ OSA.patchToolGroupDisclosure = function(group, items, context) {
     if (cancelled) statuses.push(cancelled + ' cancelled');
     const hiddenCount = Math.max(0, items.length - visibleCount);
     if (hiddenCount && visibleCount) statuses.push(hiddenCount + ' more');
-    header.querySelector('.tool-group-title').textContent = title;
-    header.querySelector('.parallel-count').textContent = statuses.join(' · ');
-    header.querySelector('.tool-group-chevron').textContent = expanded ? '▾' : '▸';
-    header.setAttribute('aria-expanded', String(expanded));
-    header.hidden = false;
-    header.dataset.running = String(running > 0);
-    Array.from(group.children).filter(function(child) { return child !== header; }).forEach(function(child, index) {
-        child.hidden = !header.hidden && index >= visibleCount;
+    const titleEl = header.querySelector('.tool-group-title');
+    if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+    const countEl = header.querySelector('.parallel-count');
+    const countText = statuses.join(' · ');
+    if (countEl && countEl.textContent !== countText) countEl.textContent = countText;
+    const chevronEl = header.querySelector('.tool-group-chevron');
+    const chevronText = expanded ? '▾' : '▸';
+    if (chevronEl && chevronEl.textContent !== chevronText) chevronEl.textContent = chevronText;
+    const aria = String(expanded);
+    if (header.getAttribute('aria-expanded') !== aria) header.setAttribute('aria-expanded', aria);
+    if (header.hidden) header.hidden = false;
+    const runningAttr = String(running > 0);
+    if (header.dataset.running !== runningAttr) header.dataset.running = runningAttr;
+
+    // Thinking cards collapse with the tools; the tool preview limit applies
+    // to tool cards only, in order.
+    let toolIndex = 0;
+    Array.from(group.children).forEach(function(child) {
+        if (child === header) return;
+        const role = child.dataset.groupRole
+            || (child.classList.contains('tool-group-thinking-card') ? 'reasoning' : 'tool');
+        let shouldHide;
+        if (role === 'reasoning') {
+            shouldHide = !expanded;
+        } else {
+            shouldHide = toolIndex >= visibleCount;
+            toolIndex += 1;
+        }
+        if (child.hidden !== shouldHide) child.hidden = shouldHide;
     });
 };
 
@@ -2121,21 +2435,26 @@ OSA.patchParallelGroupUnit = function(wrapper, unit) {
         wrapper.replaceChildren(group);
     }
 
-    unit.items.forEach(function(item) {
-        let card;
-        if (item.context) {
-            card = view.ctxNodesByCallId.get(item.callId);
-            if (!card) {
-                card = OSA.buildContextToolRow(item);
-                view.ctxNodesByCallId.set(item.callId, card);
-            }
-            OSA.patchContextToolRow(card, item);
-        } else {
-            card = OSA.ensureToolContainerNode(item);
-        }
-        if (card.parentNode !== group) group.appendChild(card);
-    });
-    OSA.patchToolGroupDisclosure(group, unit.items, unit.items.every(function(item) { return item.context; }));
+    OSA.renderToolGroupEntries(group, unit, view);
+    OSA.patchToolGroupDisclosure(
+        group,
+        unit.items,
+        unit.items.every(function(item) { return item.context; })
+    );
+};
+
+OSA.subagentStatusLabel = function(status, isRunning) {
+    if (isRunning) return 'Running';
+    switch (status) {
+        case 'completed': return 'Done';
+        case 'partial': return 'Partial';
+        case 'failed': return 'Failed';
+        case 'cancelled': return 'Cancelled';
+        case 'timeout': return 'Timed out';
+        case 'retrying': return 'Retrying';
+        default:
+            return status ? String(status).charAt(0).toUpperCase() + String(status).slice(1) : '';
+    }
 };
 
 OSA.buildSubagentCardElement = function(item) {
@@ -2144,32 +2463,38 @@ OSA.buildSubagentCardElement = function(item) {
     const card = document.createElement('div');
     card.id = 'subagent-' + subagentId;
     card.className = 'subagent-card';
-    const contextRingHtml = OSA.buildContextRingHtml(item.contextState, subagentId);
-    const durationText = OSA.formatSubagentDuration(item.durationMs);
+    card.dataset.status = item.isRunning ? 'running' : (item.status || 'completed');
+    card.dataset.expanded = 'false';
     card.innerHTML = `
-        <div class="subagent-header" onclick="OSA.toggleSubagentCard(${OSA.jsArg(subagentId)})">
-            <div class="subagent-info">
-                <span class="subagent-icon">A</span>
-                <span class="subagent-title">${OSA.escapeHtml(item.description)}</span>
-                <span class="subagent-type">${OSA.escapeHtml(item.agentType)}</span>
-            </div>
-            <div class="subagent-status">
-                ${contextRingHtml}
+        <div class="subagent-header" role="button" tabindex="0" aria-expanded="false"
+             onclick="OSA.toggleSubagentCard(${OSA.jsArg(subagentId)})"
+             onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();OSA.toggleSubagentCard(${OSA.jsArg(subagentId)});}">
+            <span class="subagent-dot" aria-hidden="true"></span>
+            <span class="subagent-title">${OSA.escapeHtml(item.description)}</span>
+            <span class="subagent-type">${OSA.escapeHtml(item.agentType)}</span>
+            <span class="subagent-spacer"></span>
+            <span class="subagent-tool-count" id="subagent-count-${sid}"></span>
+            <span class="subagent-status">
                 <span class="subagent-status-badge" id="subagent-status-${sid}"></span>
-                <span class="subagent-tool-count" id="subagent-count-${sid}"></span>
-                <span class="subagent-chevron" id="subagent-chevron-${sid}">&#x25B6;</span>
-            </div>
+            </span>
+            <span class="subagent-chevron" id="subagent-chevron-${sid}" aria-hidden="true">&#x25B6;</span>
         </div>
         <div class="subagent-live" id="subagent-live-${sid}" style="display:none">
             <span class="subagent-current-tool" id="subagent-current-${sid}"></span>
         </div>
-        <div class="subagent-body" id="subagent-body-${sid}" style="display:none">
+        <div class="subagent-body" id="subagent-body-${sid}">
             <div class="subagent-body-inner">
-                <div class="subagent-prompt" id="subagent-prompt-${sid}"></div>
-                <div class="subagent-tools" id="subagent-tools-${sid}"></div>
-                <div class="subagent-result" id="subagent-result-${sid}" style="display:none"></div>
+                <section class="subagent-section">
+                    <div class="subagent-section-label">Task</div>
+                    <div class="subagent-prompt" id="subagent-prompt-${sid}"></div>
+                </section>
+                <section class="subagent-section">
+                    <div class="subagent-section-label">Activity</div>
+                    <div class="subagent-tools" id="subagent-tools-${sid}"></div>
+                </section>
+                <section class="subagent-section subagent-result" id="subagent-result-${sid}" style="display:none"></section>
                 <div class="subagent-actions">
-                    <button class="subagent-btn" onclick="OSA.openSubagentSession(${OSA.jsArg(subagentId)})">Open Session</button>
+                    <button type="button" class="subagent-btn subagent-btn-primary" onclick="OSA.openSubagentSession(${OSA.jsArg(subagentId)})">Open session</button>
                 </div>
             </div>
         </div>
@@ -2191,9 +2516,11 @@ OSA.patchSubagentUnit = function(wrapper, unit) {
         statusWrap.insertAdjacentHTML('afterbegin', OSA.buildContextRingHtml(item.contextState, subagentId));
     }
     const badgeStatus = item.retryText ? 'retrying' : (item.isRunning ? 'running' : (item.status || 'running'));
+    card.dataset.status = badgeStatus;
     const statusBadge = card.querySelector('#subagent-status-' + OSA.cssEscape(subagentId));
     if (statusBadge) {
-        if (statusBadge.textContent !== badgeStatus) statusBadge.textContent = badgeStatus;
+        const label = OSA.subagentStatusLabel(badgeStatus, item.isRunning);
+        if (statusBadge.textContent !== label) statusBadge.textContent = label;
         statusBadge.className = 'subagent-status-badge ' + badgeStatus;
     }
 

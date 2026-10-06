@@ -41,7 +41,76 @@ test('hidden reasoning and empty assistant rows do not split tools or display or
     assert.equal(OSA.tmodelGet(reasoning.key), reasoning);
 
     OSA.getShowThinkingBlocks = () => true;
-    assert.deepEqual(OSA.buildTranscriptUnits().map(unit => unit.type), ['parallel-group', 'message', 'tool']);
+    const withReasoning = OSA.buildTranscriptUnits();
+    assert.deepEqual(withReasoning.map(unit => unit.type), ['parallel-group']);
+    assert.deepEqual(withReasoning[0].items.map(item => item.callId), ['visible-read', 'visible-shell']);
+    assert.equal(withReasoning[0].reasoning.length, 1);
+    assert.equal(withReasoning[0].reasoning[0].text, 'Inspect the next file.');
+});
+
+test('reasoning before a tool run folds into the group', () => {
+    resetModel();
+    OSA.tmodelAppend(OSA.tmodelMessageItem('reason-fold', {
+        role: 'assistant', content: '', thinking: 'Check the config first.',
+    }, 1));
+    OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'fold-1', tool_name: 'read_file' }));
+    OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'fold-2', tool_name: 'bash' }));
+
+    const units = OSA.buildTranscriptUnits();
+    assert.deepEqual(units.map(unit => unit.type), ['parallel-group']);
+    assert.deepEqual(units[0].items.map(item => item.callId), ['fold-1', 'fold-2']);
+    assert.equal(units[0].reasoning.length, 1);
+    assert.equal(units[0].reasoning[0].text, 'Check the config first.');
+});
+
+test('multiple think-tool cycles collapse into one tool group', () => {
+    resetModel();
+    OSA.tmodelAppend(OSA.tmodelMessageItem('cycle-1', {
+        role: 'assistant', content: '', thinking: 'First thought.',
+    }, 1));
+    OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'cycle-call-1', tool_name: 'read_file' }));
+    OSA.tmodelAppend(OSA.tmodelMessageItem('cycle-2', {
+        role: 'assistant', content: '', thinking: 'Second thought.',
+    }, 2));
+    OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'cycle-call-2', tool_name: 'bash' }));
+    OSA.tmodelAppend(OSA.tmodelMessageItem('cycle-3', {
+        role: 'assistant', content: '', thinking: 'Third thought.',
+    }, 3));
+    OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'cycle-call-3', tool_name: 'grep' }));
+
+    const units = OSA.buildTranscriptUnits();
+    assert.deepEqual(units.map(unit => unit.type), ['parallel-group']);
+    assert.deepEqual(units[0].items.map(item => item.callId), ['cycle-call-1', 'cycle-call-2', 'cycle-call-3']);
+    assert.deepEqual(units[0].reasoning.map(r => r.text), ['First thought.', 'Second thought.', 'Third thought.']);
+    // Thinking stays interleaved with the tools it introduced.
+    assert.deepEqual(units[0].entries.map(entry => entry.kind),
+        ['reasoning', 'tool', 'reasoning', 'tool', 'reasoning', 'tool']);
+});
+
+test('a lone tool with reasoning becomes a group so the reasoning can collapse', () => {
+    resetModel();
+    OSA.tmodelAppend(OSA.tmodelMessageItem('reason-solo', {
+        role: 'assistant', content: '', thinking: 'One call is enough.',
+    }, 1));
+    OSA.tmodelAppend(OSA.tmodelToolItem({ tool_call_id: 'solo', tool_name: 'bash' }));
+
+    const units = OSA.buildTranscriptUnits();
+    assert.deepEqual(units.map(unit => unit.type), ['parallel-group']);
+    assert.equal(units[0].reasoning.length, 1);
+});
+
+test('reasoning not followed by a tool stays its own card', () => {
+    resetModel();
+    OSA.tmodelAppend(OSA.tmodelMessageItem('reason-tail', {
+        role: 'assistant', content: '', thinking: 'Wrapping up.',
+    }, 1));
+    OSA.tmodelAppend(OSA.tmodelMessageItem('final-answer', {
+        role: 'assistant', content: 'All done.',
+    }, 2));
+
+    const units = OSA.buildTranscriptUnits();
+    assert.deepEqual(units.map(unit => unit.type), ['message', 'message']);
+    assert.equal(units[0].item.thinking, 'Wrapping up.');
 });
 
 test('assistant attachments remain visible even when their text and reasoning are empty', () => {
@@ -152,6 +221,44 @@ test('multiple think-response-tool cycles retain every reasoning segment in orde
     assert.deepEqual(messages.map(item => item.thinking), ['First thought.', 'Second thought.']);
     assert.deepEqual(tools.map(item => item.prelude), ['Checking the first path.', 'Checking the second path.']);
     assert.deepEqual(OSA.TModel.items.map(item => item.kind), ['message', 'tool', 'message', 'tool']);
+});
+
+test('archived pre-compaction history is restored before the summary card', () => {
+    resetModel();
+    const session = {
+        id: 'archive-session',
+        task_status: 'active',
+        messages: [
+            {
+                role: 'assistant',
+                content: '<compacted-summary>Earlier work summarized.</compacted-summary>',
+                timestamp: '2026-09-13T00:00:02Z',
+                metadata: { synthetic: true, kind: 'compaction_summary' },
+            },
+            { role: 'user', content: 'after compaction', metadata: {} },
+        ],
+    };
+    const archived = [
+        { role: 'user', content: 'old question', metadata: {} },
+        { role: 'assistant', content: 'old answer', metadata: {} },
+    ];
+
+    OSA.rebuildTranscriptFromSession(session, [], [], {
+        adoptStreaming: false,
+        archivedMessages: archived,
+    });
+
+    assert.deepEqual(
+        OSA.TModel.items.map(item => item.kind === 'compaction' ? 'compaction' : item.content),
+        ['old question', 'old answer', 'compaction', 'after compaction'],
+    );
+
+    // Without the archive the summary would sit at the very top.
+    OSA.rebuildTranscriptFromSession(session, [], [], { adoptStreaming: false });
+    assert.deepEqual(
+        OSA.TModel.items.map(item => item.kind === 'compaction' ? 'compaction' : item.content),
+        ['compaction', 'after compaction'],
+    );
 });
 
 test('snapshot ownership ignores optimistic users and expires completed agent activity', () => {

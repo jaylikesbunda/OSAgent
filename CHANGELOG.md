@@ -2,23 +2,40 @@ v0.7.0 changes (unreleased):
 
 Added:
 * Browse workspace files beside chat, open files in tabs, preview Markdown, and review the agent's edits in a combined or side-by-side view
-* Collapse tool activity into compact groups. Choose how many tools appear by default in Settings → Appearance, with separate controls for expanding shell output and file edits
+* Collapse tool activity into compact groups, now with defaults in Settings → Appearance for how many tools appear and separate controls for expanding shell output and file edits
+* Fold reasoning into its tool group as collapsible thinking cards interleaved between the tool calls, so a turn with several think/tool cycles collapses into one group instead of one group per think
 * Set a goal with `/goal <objective>` and let the agent keep working across multiple turns. Check its status, pause, resume, or clear it, and set a limit on continuation rounds
 * Create and manage goals directly from the chat composer, with a compact view of the objective, progress, and pause/resume controls
+* Jump back to the latest reply with a button that appears when you scroll up; the transcript keeps following the agent while you stay at the bottom
+* Run a goal with no round limit: the goal editor and the goal's options both offer a "No limit" toggle, and the panel shows rounds started instead of a budget
 
 Changed:
-* Goals start when you ask for them, remain available when long conversations are condensed, and require the agent to check that the work is complete before finishing
+* Long turns no longer stop cold at the configured tool budget: the agent is nudged to continue in budget-sized chunks up to a hard ceiling, then summarizes if it still has not finished
+* Compaction shows a persistent animated indicator for the whole summarization pass instead of a toast that disappears
+* Replies avoid overusing em dashes, using ordinary punctuation instead
 
 Fixed:
 * Consecutive tools stay together in one group, including in subagent chats. Empty “OSA” rows no longer split groups, and expanded groups stay open as new tools arrive
+* "Always allow" for access outside the workspace now covers the whole folder, including all of its subdirectories
+* Renaming a chat while it is still replying no longer reverts the name or disturbs the running turn, and an in-flight auto-generated title can no longer overwrite a rename
+* The todo dock no longer stretches across the window; it matches the width of the compact permission dock
 * File comparisons no longer show another file's changes when several are opened at once, and large edits use less memory
-* Goals pause when their round limit is reached and stay stopped until resumed. Paused or cleared goals no longer restart from previously queued work
+* Compacting a conversation no longer collapses the chat: the earlier messages and tool groups stay visible, with the summary card placed where compaction happened instead of at the top
 * Stop more reliably interrupts running tools and shell commands while keeping partial replies. It also pauses goals and queued work, shows when stopping is still in progress, and reports failures so you can retry
 * Stopping a task no longer resets another chat if you switch sessions while waiting
 * Improved tool compatibility across providers, including tools that return no output
 * Fixed conversation errors with Mistral and DeepSeek, including when accessed through other providers
 * After an interrupted tool call, the agent checks what happened before retrying an action
 * Invalid retry instructions from providers no longer crash the agent
+* Background jobs started with the `process` tool now stream output as they run, so `poll`/`log` no longer report "(no output)" until the job exits
+* A `bash` command that hits its timeout now returns the output it produced before being stopped instead of only "Timeout error"
+* Checkpoints no longer commit disk/ROM images (`*.iso`, `*.wbfs`, and similar) into the shadow repository, and oversized diffs are skipped, so one workspace can no longer grow the checkpoint database by gigabytes
+* The tool loop detector is now active: repeated calls, ping-pong pairs, stalled polling, and a run of consecutive failures are detected instead of only two identical calls in a row
+* A repeated tool intent across recent calls (for example cycling through the same probe scripts) now raises a loop warning before it becomes a runaway turn
+* Streaming thinking is no longer stored as one database row per token, which had added tens of thousands of rows to a single session
+* An outside-workspace permission request that times out now states the timeout and how to allow the path, instead of a bare "timed out"
+* An open model picker or context dropdown no longer stays above the composer after you switch chats
+* More provider failures are retried, including truncated or undecodable streaming responses (`error decoding response body`); a mid-response stream failure restarts the request when nothing has been written yet
 
 v0.6.2 changes:
 

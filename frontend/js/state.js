@@ -331,6 +331,7 @@ OSA.setCurrentSession = function(s) {
         if (s.task_status !== 'running' && !entry.processing) entry.processing = false;
     }
     if (previousId !== OSA.currentSessionId) {
+        OSA.closeTransientPopovers?.();
         OSA.watchSessionGoal?.();
         OSA.resetFileBrowser?.();
     }

@@ -29,6 +29,15 @@ test('goal panel renders text safely and preserves options and budget edits duri
     assert.equal(document.getElementById('goal-resume-rounds').value, '8');
     assert.match(document.querySelector('.goal-meta').textContent, /3 \/ 5 rounds/);
 });
+test('a goal with no round limit is labelled and offers an unlimited resume', () => {
+    OSA._goalSnapshot.goal.max_rounds = 0;
+    OSA._goalSnapshot.goal.rounds_started = 4;
+    OSA.renderGoalPanel();
+    assert.match(document.querySelector('.goal-meta').textContent, /4 rounds, no limit/);
+    const unlimited = document.getElementById('goal-resume-unlimited');
+    assert.equal(unlimited.checked, true);
+    assert.equal(document.getElementById('goal-resume-rounds').disabled, true);
+});
 test('a restart-disarmed goal offers Resume rather than claiming it is active', () => {
     OSA._goalSnapshot.armed = false;
     OSA.renderGoalPanel();

@@ -8,6 +8,12 @@ use std::process::Command;
 use tracing::warn;
 use uuid::Uuid;
 
+/// Upper bound on the unified diff persisted per changed file. Anything larger
+/// is replaced with a short notice, so one regenerated artifact or extracted
+/// asset cannot bloat `checkpoint_diffs` (a real session reached ~700 MB for a
+/// single end-of-turn checkpoint).
+const MAX_STORED_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
 fn shadow_git_dir(workspace: &Path) -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -41,6 +47,7 @@ impl CheckpointManager {
             })?;
             self.run_shadow_git(&git_dir, workspace, &["init"])?;
         }
+        Self::write_shadow_excludes(&git_dir);
         let gitignore = workspace.join(".gitignore");
         let needed = match std::fs::read_to_string(&gitignore) {
             Ok(content) => !content.contains(crate::tools::output::TOOL_OUTPUT_DIR_NAME),
@@ -55,6 +62,43 @@ impl CheckpointManager {
                 .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
         }
         Ok(git_dir)
+    }
+
+    /// Patterns git must ignore inside the shadow repo. Written to
+    /// `$GIT_DIR/info/exclude` rather than the workspace `.gitignore` so the
+    /// user's own project files are not touched. Disk/ROM images are excluded
+    /// because `git add -A` otherwise hashes gigabytes per checkpoint and the
+    /// resulting diffs filled the checkpoint database with multiple GB of
+    /// binary/extracted game data.
+    const SHADOW_EXCLUDES: &'static str = "\
+# OSAgent checkpoint ignores (managed automatically)
+.osa_tool_outputs
+*.iso
+*.wbfs
+*.wia
+*.gcm
+*.rvz
+*.nkit
+*.wad
+*.nsp
+*.xci
+*.nsz
+*.3ds
+*.cia
+*.cci
+*.cxi
+*.app
+";
+
+    fn write_shadow_excludes(git_dir: &Path) {
+        let info_dir = git_dir.join("info");
+        if let Err(error) = std::fs::create_dir_all(&info_dir) {
+            warn!("Failed to create shadow git info dir: {}", error);
+            return;
+        }
+        if let Err(error) = std::fs::write(info_dir.join("exclude"), Self::SHADOW_EXCLUDES) {
+            warn!("Failed to write shadow git exclude file: {}", error);
+        }
     }
 
     pub async fn create_checkpoint(
@@ -200,6 +244,15 @@ impl CheckpointManager {
                 &workspace,
                 &["diff", "--unified=3", base.as_str(), git_commit, "--", path],
             )?;
+            let diff = if diff_output.len() > MAX_STORED_DIFF_BYTES {
+                format!(
+                    "[diff omitted: {} bytes exceeds the {} byte checkpoint diff cap]",
+                    diff_output.len(),
+                    MAX_STORED_DIFF_BYTES
+                )
+            } else {
+                diff_output
+            };
             let status = if status_raw.starts_with('A') {
                 "added"
             } else if status_raw.starts_with('D') {
@@ -212,7 +265,7 @@ impl CheckpointManager {
                 id: Uuid::new_v4().to_string(),
                 checkpoint_id: checkpoint_id.to_string(),
                 path: path.to_string(),
-                diff: diff_output,
+                diff,
                 status: status.to_string(),
             });
         }

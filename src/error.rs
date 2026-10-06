@@ -108,6 +108,48 @@ pub enum OSAgentError {
 
 pub type Result<T> = std::result::Result<T, OSAgentError>;
 
+/// Substrings that mark a provider or transport failure as transient and worth
+/// retrying, independent of HTTP status or provider error code. This covers
+/// connection failures and truncated or undecodable stream/body responses
+/// (for example an SSE body that fails with "error decoding response body"),
+/// which previously fell through as hard, unrecoverable failures.
+const TRANSIENT_PROVIDER_MARKERS: &[&str] = &[
+    "timeout",
+    "timed out",
+    "connection reset",
+    "connection closed",
+    "connection error",
+    "connection aborted",
+    "connection refused",
+    "broken pipe",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "internal server error",
+    "overloaded",
+    "try again",
+    "stream error",
+    "error decoding response body",
+    "error reading response body",
+    "failed to decode",
+    "unexpected end of file",
+    "unexpected eof",
+    "incomplete message",
+    "channel closed",
+    "socket closed",
+    "status code 500",
+    "status code 502",
+    "status code 503",
+    "status code 504",
+    "status code 524",
+    "(500",
+    "(502",
+    "(503",
+    "(504",
+    "(524",
+];
+
 impl OSAgentError {
     pub fn is_rate_limited(&self) -> bool {
         match self {
@@ -256,64 +298,11 @@ impl OSAgentError {
                 // even when the error text doesn't say so explicitly.
                 info.status_code.is_some_and(|status| status >= 500)
                     || self.is_rate_limited()
-                    || contains_any(
-                        &info.message.to_lowercase(),
-                        &[
-                            "timeout",
-                            "timed out",
-                            "connection reset",
-                            "connection closed",
-                            "broken pipe",
-                            "temporarily unavailable",
-                            "service unavailable",
-                            "bad gateway",
-                            "gateway timeout",
-                            "internal server error",
-                            "overloaded",
-                            "try again",
-                            "status code 500",
-                            "status code 502",
-                            "status code 503",
-                            "status code 504",
-                            "status code 524",
-                            "(500",
-                            "(502",
-                            "(503",
-                            "(504",
-                            "(524",
-                        ],
-                    )
+                    || contains_any(&info.message.to_lowercase(), TRANSIENT_PROVIDER_MARKERS)
             }
             Self::Provider(message) => {
-                let lower = message.to_lowercase();
                 self.is_rate_limited()
-                    || contains_any(
-                        &lower,
-                        &[
-                            "timeout",
-                            "timed out",
-                            "connection reset",
-                            "connection closed",
-                            "broken pipe",
-                            "temporarily unavailable",
-                            "service unavailable",
-                            "bad gateway",
-                            "gateway timeout",
-                            "internal server error",
-                            "overloaded",
-                            "try again",
-                            "status code 500",
-                            "status code 502",
-                            "status code 503",
-                            "status code 504",
-                            "status code 524",
-                            "(500",
-                            "(502",
-                            "(503",
-                            "(504",
-                            "(524",
-                        ],
-                    )
+                    || contains_any(&message.to_lowercase(), TRANSIENT_PROVIDER_MARKERS)
             }
             _ => false,
         }
@@ -456,6 +445,29 @@ mod tests {
 
         let err = OSAgentError::Provider("maximum context length exceeded".to_string());
         assert!(err.is_context_limit());
+    }
+
+    #[test]
+    fn stream_body_failures_are_retryable() {
+        // The exact shape emitted for an undecodable SSE body: no status code,
+        // previously classified as a hard failure.
+        let err = OSAgentError::ProviderStructured(ProviderErrorInfo::new(
+            "stream error: error decoding response body",
+        ));
+        assert!(err.is_retryable());
+        assert!(err.is_recoverable());
+
+        for message in [
+            "error decoding response body",
+            "connection error: connection reset",
+            "unexpected end of file",
+            "incomplete message",
+        ] {
+            assert!(
+                OSAgentError::Provider(message.to_string()).is_retryable(),
+                "expected retryable: {message}"
+            );
+        }
     }
 
     #[test]

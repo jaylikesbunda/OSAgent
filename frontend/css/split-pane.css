@@ -177,43 +177,389 @@ body.resizing-preview {
 }
 
 /* Workspace browser: quiet navigation beside the source or recorded change. */
-.file-browser-heading { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-browser-actions { display: flex; gap: 4px; }
-.file-browser-actions button { border: 0; background: transparent; color: var(--text-secondary); font-size: 19px; width: 26px; height: 26px; cursor: pointer; border-radius: 5px; }
-.file-browser-actions button:hover { background: var(--bg-hover); }
-.file-browser-layout { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); flex: 1; min-height: 0; }
-.file-browser-nav { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); overflow: hidden; padding: 10px 6px; }
-.file-browser-switch { display: flex; gap: 2px; margin-bottom: 10px; }
-.file-browser-switch button, .file-preview-modes button { border: none; background: transparent; color: var(--text-muted); padding: 5px 8px; font-size: 11px; border-radius: 5px; cursor: pointer; }
-.file-browser-switch button[aria-pressed="true"], .file-preview-modes button[aria-pressed="true"] { background: var(--bg-tertiary); color: var(--text-primary); }
-#browser-change-count { font-size: 10px; }
-#file-browser-root, #file-browser-filter { width: 100%; border: 1px solid var(--border); color: var(--text-secondary); border-radius: 5px; background: transparent; padding: 6px; font-size: 11px; margin-bottom: 8px; box-sizing: border-box; }
-.file-browser-tree { flex: 1; min-height: 0; overflow: auto; }
-.file-tree-row { width: 100%; border: none; border-radius: 4px; display: flex; gap: 6px; align-items: center; padding: 6px 6px 6px calc(6px + var(--depth, 0) * 12px); background: transparent; color: var(--text-secondary); font: inherit; font-size: 11px; cursor: pointer; text-align: left; }
-.file-tree-row:hover { background: var(--bg-hover); color: var(--text-primary); }
-.file-tree-row.selected { background: var(--accent-dim); color: var(--text-primary); }
-.file-tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-tree-icon { width: 10px; flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
-.file-tree-note { font: inherit; font-size: 11px; line-height: 1.6; padding: 8px; color: var(--text-muted); overflow-wrap: anywhere; border: 0; background: transparent; }
-.file-browser-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg-primary); }
-.file-preview-tabs { display: flex; overflow-x: auto; flex-shrink: 0; border-bottom: 1px solid var(--border); min-height: 35px; }
-.file-preview-tab { display: flex; flex-shrink: 0; align-items: center; max-width: 200px; border-right: 1px solid var(--border); border-bottom: 2px solid transparent; }
-.file-preview-tab.selected { border-bottom-color: var(--accent); }
-.file-preview-tab button { background: transparent; color: var(--text-muted); border: none; padding: 9px 10px; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-preview-tab.selected button { color: var(--text-primary); }
-.file-preview-tab .file-tab-close { padding: 6px; font-size: 14px; }
-.file-preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
-.file-preview-path { min-width: 0; flex: 1 1 100px; font-size: 10px; display: block; }
-.file-preview-modes { display: flex; flex-shrink: 0; }
-.file-preview-body { padding: 0; min-height: 0; background: var(--bg-primary); }
-.file-source { display: flex; width: max-content; min-width: 100%; padding: 12px 0; }
-.file-source pre { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; line-height: 1.55; tab-size: 4; }
-.file-source-gutter { color: var(--text-muted); text-align: right; user-select: none; padding: 0 12px; border-right: 1px solid var(--border); position: sticky; left: 0; background: var(--bg-primary); }
-.file-source-code { padding: 0 12px; }
-.file-preview-markdown { padding: 18px; }
-.file-preview-body .diff-view { margin: 0; border: none; border-radius: 0; }
-.file-preview-body .diff-toolbar { position: sticky; top: 0; }
-.file-preview-status { padding: 7px 10px; font-size: 10px; color: var(--text-muted); border-top: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
-.file-browser-empty { padding: 30px 20px; color: var(--text-muted); font-size: 12px; line-height: 1.7; max-width: 260px; }
-.file-preview-panel button:focus-visible, #file-browser-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-@media (max-width: 900px) { .file-preview-panel { height: 75vh; } .file-browser-layout { grid-template-columns: 140px minmax(0, 1fr); } }
+.file-browser-heading {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-browser-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.file-browser-actions button {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.file-browser-actions button:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.file-browser-layout {
+    display: grid;
+    grid-template-columns: minmax(140px, 200px) minmax(0, 1fr);
+    flex: 1;
+    min-height: 0;
+}
+
+.file-browser-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+    padding: 10px;
+}
+
+.file-browser-switch {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.file-browser-switch button,
+.file-preview-modes button {
+    flex: 1;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 5px 8px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.file-preview-modes button {
+    flex: 0 0 auto;
+}
+
+.file-browser-switch button:hover,
+.file-preview-modes button:hover {
+    color: var(--text-primary);
+}
+
+.file-browser-switch button[aria-pressed="true"],
+.file-preview-modes button[aria-pressed="true"] {
+    background: var(--accent-dim);
+    color: var(--text-primary);
+    box-shadow: inset 0 0 0 1px var(--border-hover);
+}
+
+#browser-change-count {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+#file-browser-root,
+#file-browser-filter {
+    width: 100%;
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color var(--transition-fast);
+}
+
+#file-browser-root:focus,
+#file-browser-filter:focus {
+    border-color: var(--text-primary);
+}
+
+#file-browser-filter::placeholder {
+    color: var(--text-muted);
+}
+
+.file-browser-tree {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+.file-tree-row {
+    width: 100%;
+    border: none;
+    border-radius: var(--radius-sm);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 6px 8px 6px calc(8px + var(--depth, 0) * 14px);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.file-tree-row:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.file-tree-row.selected {
+    background: var(--accent-dim);
+    color: var(--text-primary);
+    box-shadow: inset 0 0 0 1px var(--border-hover);
+}
+
+.file-tree-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-tree-icon {
+    width: 12px;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+.file-tree-note {
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.6;
+    padding: 8px;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    cursor: default;
+}
+
+.file-browser-content {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-primary);
+}
+
+.file-preview-tabs {
+    display: flex;
+    overflow-x: auto;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    min-height: 38px;
+    background: var(--bg-secondary);
+}
+
+.file-preview-tab {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    max-width: 220px;
+    border-right: 1px solid var(--border);
+    border-bottom: 2px solid transparent;
+}
+
+.file-preview-tab.selected {
+    border-bottom-color: var(--accent);
+    background: var(--bg-primary);
+}
+
+.file-preview-tab button {
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    padding: 10px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-preview-tab.selected button {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.file-preview-tab .file-tab-close {
+    padding: 8px;
+    font-size: 14px;
+    border-radius: var(--radius-sm);
+}
+
+.file-preview-tab .file-tab-close:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.file-preview-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.file-preview-path {
+    min-width: 0;
+    flex: 1 1 120px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
+.file-preview-modes {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.file-preview-body {
+    padding: 0;
+    min-height: 0;
+    overflow: auto;
+    background: var(--bg-primary);
+}
+
+.file-source {
+    display: flex;
+    width: max-content;
+    min-width: 100%;
+    padding: 14px 0;
+}
+
+.file-source pre {
+    font-family: 'JetBrains Mono', Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    tab-size: 4;
+}
+
+.file-source-gutter {
+    color: var(--text-muted);
+    text-align: right;
+    user-select: none;
+    padding: 0 14px;
+    border-right: 1px solid var(--border);
+    position: sticky;
+    left: 0;
+    background: var(--bg-primary);
+}
+
+.file-source-code {
+    padding: 0 14px;
+}
+
+.file-preview-markdown {
+    padding: 18px;
+}
+
+.file-preview-body .diff-view {
+    margin: 0;
+    border: none;
+    border-radius: 0;
+    background: var(--bg-primary);
+}
+
+.file-preview-body .diff-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 9px 14px;
+    background: var(--bg-secondary);
+}
+
+.file-preview-body .diff-line td,
+.file-preview-body .diff-side-row td {
+    line-height: 1.6;
+}
+
+.file-preview-body .diff-text {
+    padding: 3px 12px;
+}
+
+.file-preview-body .diff-loc,
+.file-preview-body .diff-prefix {
+    padding: 3px 10px;
+}
+
+.file-preview-body .diff-toggle-btn {
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    font-size: 12px;
+    padding: 5px 10px;
+    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.file-preview-body .diff-toggle-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+    background: var(--bg-hover);
+}
+
+.file-preview-status {
+    padding: 8px 14px;
+    font-size: 11px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.file-browser-empty {
+    padding: 32px 24px;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.7;
+    max-width: 280px;
+}
+
+.file-preview-panel button:focus-visible,
+#file-browser-filter:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+@media (max-width: 900px) {
+    .file-preview-panel {
+        height: 75vh;
+    }
+
+    .file-browser-layout {
+        grid-template-columns: 140px minmax(0, 1fr);
+    }
+}

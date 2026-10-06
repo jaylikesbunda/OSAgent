@@ -233,6 +233,44 @@ test('forming a parallel group moves the first card without recreating it', () =
     assert.equal(firstCard.parentElement, groupWrapper.querySelector('.parallel-group'));
 });
 
+test('thinking cards render between tools and collapse with the group', () => {
+    const wrapper = document.createElement('div');
+    document.body.appendChild(wrapper);
+    const first = OSA.tmodelToolItem({ tool_call_id: 'r-a', tool_name: 'bash', arguments: {} });
+    const second = OSA.tmodelToolItem({ tool_call_id: 'r-b', tool_name: 'bash', arguments: {} });
+    const unit = {
+        type: 'parallel-group',
+        items: [first, second],
+        entries: [
+            { kind: 'tool', item: first },
+            { kind: 'reasoning', key: 'reason-1', text: 'Think before acting.' },
+            { kind: 'tool', item: second },
+        ],
+        reasoning: [{ key: 'reason-1', text: 'Think before acting.' }],
+    };
+    OSA.patchParallelGroupUnit(wrapper, unit);
+    const group = wrapper.firstElementChild;
+    const header = group.querySelector('.parallel-group-header');
+    const card = group.querySelector('.tool-group-thinking-card');
+    assert.ok(card, 'thinking card exists');
+    assert.equal(card.hidden, true);
+    // The old header badge is gone.
+    assert.equal(header.querySelector('.tool-group-thinking'), null);
+    assert.doesNotMatch(header.textContent, /Thinking/);
+    assert.match(card.textContent, /Think before acting/);
+
+    // Sits between the two tool cards, in order.
+    const ordered = Array.from(group.children).filter(child => child !== header);
+    assert.equal(ordered[0], document.getElementById('tool-r-a'));
+    assert.equal(ordered[1], card);
+    assert.equal(ordered[2], document.getElementById('tool-r-b'));
+
+    header.click();
+    assert.equal(card.hidden, false);
+    assert.equal(group.querySelector('.tool-group-thinking-card'), card);
+    assert.equal(document.getElementById('tool-r-a'), group.querySelector('#tool-r-a'));
+});
+
 test('collapsed tool groups retain expansion and expose failures during live updates', () => {
     const wrapper = document.createElement('div');
     document.body.appendChild(wrapper);
@@ -419,4 +457,32 @@ test('keyed list reconciliation preserves existing node identity while inserting
     assert.deepEqual(Array.from(list.children), [first, middle, second]);
     assert.equal(OSA.reconcileTranscriptList(list, [first, second]), true);
     assert.deepEqual(Array.from(list.children), [first, second]);
+});
+
+test('jump-to-latest button follows scroll position and re-pins on click', () => {
+    const messages = document.createElement('div');
+    messages.id = 'messages';
+    document.body.appendChild(messages);
+    const button = document.createElement('button');
+    button.id = 'scroll-to-bottom';
+    button.className = 'scroll-to-bottom hidden';
+    document.body.appendChild(button);
+
+    OSA.TModel.items = [{}];
+
+    // Detached from the tail: the affordance is visible.
+    OSA.updateScrollToBottomButton({ scrollTop: 200, scrollHeight: 1000, clientHeight: 100 });
+    assert.equal(button.classList.contains('hidden'), false);
+
+    // Back at the bottom: it hides again.
+    OSA.updateScrollToBottomButton({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 });
+    assert.equal(button.classList.contains('hidden'), true);
+
+    const view = { autoScrollPaused: true, userPinnedToBottom: false, forceStickBottom: false };
+    OSA.getTranscriptView = () => view;
+    OSA.scrollMessagesToBottom = () => {};
+    OSA.jumpToLatest();
+    assert.equal(view.autoScrollPaused, false);
+    assert.equal(view.userPinnedToBottom, true);
+    assert.equal(button.classList.contains('hidden'), true);
 });

@@ -1,7 +1,7 @@
 .diff-view {
     margin-top: 8px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
     background: var(--bg-secondary);
 }
@@ -24,7 +24,7 @@
 
 .diff-toggle-btn {
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     background: var(--bg-secondary);
     color: var(--text-secondary);
     font-size: 11px;
@@ -78,11 +78,11 @@
 }
 
 .diff-line.add {
-    background: rgba(34, 197, 94, 0.12);
+    background: var(--success-dim);
 }
 
 .diff-line.del {
-    background: rgba(239, 68, 68, 0.12);
+    background: var(--error-dim);
 }
 
 .diff-side-by-side {
@@ -102,12 +102,12 @@
 
 .diff-side-cell.new.add,
 .diff-side-cell.new.modified {
-    background: rgba(34, 197, 94, 0.1);
+    background: var(--success-dim);
 }
 
 .diff-side-cell.old.del,
 .diff-side-cell.old.modified {
-    background: rgba(239, 68, 68, 0.1);
+    background: var(--error-dim);
 }
 
 .diff-loading,

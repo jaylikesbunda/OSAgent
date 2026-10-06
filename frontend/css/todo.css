@@ -116,8 +116,8 @@
 }
 
 .todo-dock {
-    width: min(1120px, calc(100% - 32px));
-    max-width: 1120px;
+    width: min(640px, calc(100% - 32px));
+    max-width: 640px;
     margin: 12px auto 18px;
     padding: 10px 14px;
     background: var(--bg-tertiary);

@@ -380,22 +380,36 @@ OSA.saveWorkspaceInline = async function() {
 
     const ws = OSA.getWorkspaceState();
     const exists = ws.workspaces.some(w => w.id === id);
-    const url = exists ? '/api/workspaces/' + encodeURIComponent(id) : '/api/workspaces';
+    const createUrl = '/api/workspaces';
+    const updateUrl = '/api/workspaces/' + encodeURIComponent(id);
+    const body = JSON.stringify({
+        id: id,
+        name: name,
+        paths: [{ path: path, permission: OSA._wsEditorPerm || 'read_write' }],
+        description: null
+    });
+    const send = (url) => OSA.fetchWithAuth(url, { method: 'POST', body });
 
+    let created = !exists;
     try {
-        const res = await OSA.fetchWithAuth(url, {
-            method: 'POST',
-            body: JSON.stringify({
-                id: id,
-                name: name,
-                paths: [{ path: path, permission: OSA._wsEditorPerm || 'read_write' }],
-                description: null
-            })
-        });
-        const data = await res.json();
+        let res = await send(exists ? updateUrl : createUrl);
+        let data = await res.json();
+        // The cached workspace list can drift from the server (for example a
+        // settings save may have replaced the config). Recover from either
+        // direction instead of surfacing a confusing "not found" / "already
+        // exists" error when adding a folder.
+        if (!res.ok && exists && /not found/i.test(data.error || '')) {
+            created = true;
+            res = await send(createUrl);
+            data = await res.json();
+        } else if (!res.ok && !exists && /already exists/i.test(data.error || '')) {
+            created = false;
+            res = await send(updateUrl);
+            data = await res.json();
+        }
         if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
         await OSA.loadWorkspaces();
-        OSA.setWorkspaceInlineStatus((exists ? 'Updated ' : 'Added ') + (data.name || data.id) + '.');
+        OSA.setWorkspaceInlineStatus((created ? 'Added ' : 'Updated ') + (data.name || data.id) + '.');
         return data;
     } catch (error) {
         OSA.setWorkspaceInlineStatus('Failed to save: ' + error.message, true);

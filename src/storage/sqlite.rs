@@ -95,6 +95,28 @@ fn message_fingerprint(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// User-facing session names live in the dedicated `title` column so a turn
+/// that is still running — and rewrites the whole `metadata` blob from the
+/// snapshot it loaded at the start — can never revert a rename. Reads overlay
+/// the title back onto `metadata.name`, which is what the rest of the app
+/// (and older rows that predate the column) still uses.
+fn apply_session_title(metadata: &mut serde_json::Value, title: Option<String>) {
+    let Some(title) = title else { return };
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "name".to_string(),
+            serde_json::Value::String(trimmed.to_string()),
+        );
+    }
+}
+
 /// Returns its connection to the pool on drop, including on the error and panic
 /// paths, so a failing query cannot leak a connection out of the pool.
 struct PooledConn<'a> {
@@ -279,6 +301,18 @@ impl SqliteStorage {
                     conn.execute("ALTER TABLE sessions ADD COLUMN context_state BLOB", [])?;
                 }
 
+                let has_title: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('sessions') WHERE name='title'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_title {
+                    conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT", [])?;
+                }
+
                 let has_notified_at: bool = conn
                     .query_row(
                         "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('subagent_tasks') WHERE name='notified_at'",
@@ -344,6 +378,31 @@ impl SqliteStorage {
                         [],
                     )?;
                 }
+
+                // The archive now keeps the full serialized message so the web
+                // UI can render pre-compaction history (including tool calls)
+                // exactly as it looked before compaction.
+                let archive_exists: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='session_archive'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if archive_exists {
+                    let has_archive_body: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('session_archive') WHERE name='body'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(false);
+
+                    if !has_archive_body {
+                        conn.execute("ALTER TABLE session_archive ADD COLUMN body BLOB", [])?;
+                    }
+                }
             } else {
                 conn.execute_batch(
                     r#"
@@ -358,7 +417,8 @@ impl SqliteStorage {
                         parent_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
                         agent_type TEXT NOT NULL DEFAULT 'primary',
                         task_status TEXT NOT NULL DEFAULT 'active',
-                        context_state BLOB
+                        context_state BLOB,
+                        title TEXT
                     );
                     CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id);
                     "#,
@@ -423,6 +483,7 @@ impl SqliteStorage {
                     content TEXT NOT NULL,
                     timestamp INTEGER NOT NULL,
                     archived_at INTEGER NOT NULL,
+                    body BLOB,
                     PRIMARY KEY (session_id, batch_hash, seq),
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
@@ -855,7 +916,7 @@ impl SqliteStorage {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE id = ?1")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, context_state, title FROM sessions WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![id], |row| {
@@ -873,8 +934,12 @@ impl SqliteStorage {
                     provider: row.get(4)?,
                     // Filled in from session_transcript below.
                     messages: Vec::new(),
-                    metadata: serde_json::from_slice(&metadata_bytes)
-                        .unwrap_or_else(|_| serde_json::json!({})),
+                    metadata: {
+                        let mut metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        apply_session_title(&mut metadata, row.get(10)?);
+                        metadata
+                    },
                     parent_id: row.get(6)?,
                     agent_type: row.get(7)?,
                     task_status: row.get(8)?,
@@ -1006,12 +1071,12 @@ impl SqliteStorage {
             return Ok(0);
         }
 
-        let bodies: Vec<Vec<u8>> = messages
+        let bodies: Vec<Option<Vec<u8>>> = messages
             .iter()
-            .filter_map(|message| serde_json::to_vec(message).ok())
+            .map(|message| serde_json::to_vec(message).ok())
             .collect();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for body in &bodies {
+        for body in bodies.iter().flatten() {
             message_fingerprint(body).hash(&mut hasher);
         }
         use std::hash::{Hash, Hasher};
@@ -1022,10 +1087,11 @@ impl SqliteStorage {
             let tx = conn.transaction().map_err(OSAgentError::Storage)?;
             let mut inserted = 0usize;
             for (seq, message) in messages.iter().enumerate() {
+                let body = bodies.get(seq).and_then(|value| value.as_ref());
                 let done = tx
                     .execute(
-                        "INSERT OR IGNORE INTO session_archive (session_id, batch_hash, seq, role, content, timestamp, archived_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT OR IGNORE INTO session_archive (session_id, batch_hash, seq, role, content, timestamp, archived_at, body)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             session_id,
                             batch_hash,
@@ -1034,6 +1100,7 @@ impl SqliteStorage {
                             message.content,
                             message.timestamp.timestamp(),
                             now,
+                            body,
                         ],
                     )
                     .map_err(OSAgentError::Storage)?;
@@ -1090,6 +1157,38 @@ impl SqliteStorage {
                     archived_at: chrono::DateTime::from_timestamp(archived_at, 0)
                         .unwrap_or_else(Utc::now),
                 });
+            }
+            Ok(messages)
+        })
+    }
+
+    /// Full archived messages (with tool calls, thinking, and metadata) so the
+    /// web UI can render pre-compaction history exactly as it looked before
+    /// compaction. Rows written before the `body` column existed have no body
+    /// and are skipped.
+    pub fn get_archived_session_messages(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let limit = limit.max(1) as i64;
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT body FROM session_archive \
+                     WHERE session_id = ?1 AND body IS NOT NULL \
+                     ORDER BY timestamp ASC, seq ASC LIMIT ?2",
+                )
+                .map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map(params![session_id, limit], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(OSAgentError::Storage)?;
+            let mut messages = Vec::new();
+            for row in rows {
+                let body = row.map_err(OSAgentError::Storage)?;
+                if let Ok(message) = serde_json::from_slice::<Message>(&body) {
+                    messages.push(message);
+                }
             }
             Ok(messages)
         })
@@ -1296,10 +1395,82 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Atomically set the user-facing session name. Stored in its own column
+    /// so a turn still running — and rewriting the whole `metadata` blob from
+    /// the snapshot it loaded — cannot revert a rename.
+    pub fn update_session_title(&self, id: &str, title: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                params![title.trim(), Utc::now().timestamp(), id],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    /// Like [`Self::update_session_title`], but only when the session has no
+    /// title yet. Auto-naming uses this so a title the model generates can
+    /// never overwrite a rename the user made while it was generating.
+    pub fn update_session_title_if_untitled(&self, id: &str, title: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE sessions SET title = ?1, updated_at = ?2 \
+                 WHERE id = ?3 AND (title IS NULL OR TRIM(title) = '')",
+                params![title.trim(), Utc::now().timestamp(), id],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    /// Update a single metadata key without rewriting messages, task status,
+    /// or any other column.
+    pub fn set_session_metadata_value(
+        &self,
+        id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<()> {
+        self.with_conn_mut(|conn| {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(OSAgentError::Storage)?;
+            let bytes: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT metadata FROM sessions WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+            let Some(bytes) = bytes else {
+                return Err(OSAgentError::Storage(rusqlite::Error::QueryReturnedNoRows));
+            };
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({}));
+            if !metadata.is_object() {
+                metadata = serde_json::json!({});
+            }
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert(key.to_string(), value);
+            }
+            let encoded =
+                serde_json::to_vec(&metadata).map_err(|e| OSAgentError::Parse(e.to_string()))?;
+            tx.execute(
+                "UPDATE sessions SET metadata = ?1, updated_at = ?2 WHERE id = ?3",
+                params![encoded, Utc::now().timestamp(), id],
+            )
+            .map_err(OSAgentError::Storage)?;
+            tx.commit().map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, context_state FROM sessions ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, context_state, title FROM sessions ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let mut sessions = stmt
                 .query_map([], |row| {
@@ -1316,8 +1487,13 @@ impl SqliteStorage {
                         model: row.get(3)?,
                         provider: row.get(4)?,
                         messages: Vec::new(),
-                        metadata: serde_json::from_slice(&metadata_bytes)
-                            .unwrap_or_else(|_| serde_json::json!({})),
+                        metadata: {
+                            let mut metadata: serde_json::Value =
+                                serde_json::from_slice(&metadata_bytes)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                            apply_session_title(&mut metadata, row.get(10)?);
+                            metadata
+                        },
                         parent_id: row.get(6)?,
                         agent_type: row.get(7)?,
                         task_status: row.get(8)?,
@@ -1367,11 +1543,14 @@ impl SqliteStorage {
     pub fn list_session_summaries(&self) -> Result<Vec<SessionSummary>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status FROM sessions ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, title FROM sessions ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let summaries = stmt
                 .query_map([], |row| {
                     let metadata_bytes: Vec<u8> = row.get(5)?;
+                    let mut metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    apply_session_title(&mut metadata, row.get(9)?);
                     Ok(SessionSummary {
                         id: row.get(0)?,
                         created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(1)?, 0)
@@ -1380,8 +1559,7 @@ impl SqliteStorage {
                             .unwrap_or_else(Utc::now),
                         model: row.get(3)?,
                         provider: row.get(4)?,
-                        metadata: serde_json::from_slice(&metadata_bytes)
-                            .unwrap_or_else(|_| serde_json::json!({})),
+                        metadata,
                         parent_id: row.get(6)?,
                         agent_type: row.get(7)?,
                         task_status: row.get(8)?,
@@ -1406,7 +1584,7 @@ impl SqliteStorage {
     pub fn get_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state FROM sessions WHERE parent_id = ?1 ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state, title FROM sessions WHERE parent_id = ?1 ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let sessions = stmt
                 .query_map(params![parent_id], |row| {
@@ -1424,8 +1602,13 @@ impl SqliteStorage {
                         model: row.get(3)?,
                         provider: row.get(4)?,
                         messages: serde_json::from_slice(&messages_bytes).unwrap_or_default(),
-                        metadata: serde_json::from_slice(&metadata_bytes)
-                            .unwrap_or_else(|_| serde_json::json!({})),
+                        metadata: {
+                            let mut metadata: serde_json::Value =
+                                serde_json::from_slice(&metadata_bytes)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                            apply_session_title(&mut metadata, row.get(11)?);
+                            metadata
+                        },
                         parent_id: row.get(7)?,
                         agent_type: row.get(8)?,
                         task_status: row.get(9)?,
@@ -3968,5 +4151,81 @@ mod subagent_task_tests {
 
         // A second sweep is a no-op.
         assert_eq!(storage.fail_stale_running_subagent_tasks().unwrap(), 0);
+    }
+
+    #[test]
+    fn rename_survives_a_concurrent_whole_session_write() {
+        let storage = SqliteStorage::new_in_memory().expect("storage");
+        let session = storage
+            .create_session("m".to_string(), "p".to_string(), Some("Session 1".to_string()))
+            .expect("session");
+
+        // The user renames while a turn is running.
+        storage
+            .update_session_title(&session.id, "My rename")
+            .expect("rename");
+
+        // The running turn then persists the whole snapshot it loaded before
+        // the rename — including the stale metadata name — which must not
+        // revert the title column.
+        let mut stale = storage.get_session(&session.id).unwrap().unwrap();
+        stale.metadata["name"] = serde_json::json!("Session 1");
+        storage.update_session(&stale).expect("turn persist");
+
+        let reloaded = storage.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(reloaded.metadata["name"], serde_json::json!("My rename"));
+    }
+
+    #[test]
+    fn auto_name_never_clobbers_a_user_rename() {
+        let storage = SqliteStorage::new_in_memory().expect("storage");
+        let session = storage
+            .create_session("m".to_string(), "p".to_string(), Some("Session 1".to_string()))
+            .expect("session");
+
+        storage
+            .update_session_title(&session.id, "User name")
+            .expect("rename");
+        // An auto-name request that was already in flight must not overwrite it.
+        storage
+            .update_session_title_if_untitled(&session.id, "Generated title")
+            .expect("auto name");
+
+        let reloaded = storage.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(reloaded.metadata["name"], serde_json::json!("User name"));
+
+        // A session that is still untitled is named normally.
+        let fresh = storage
+            .create_session("m".to_string(), "p".to_string(), Some("Session 2".to_string()))
+            .expect("fresh");
+        storage
+            .update_session_title_if_untitled(&fresh.id, "Generated title")
+            .expect("auto name");
+        let reloaded = storage.get_session(&fresh.id).unwrap().unwrap();
+        assert_eq!(reloaded.metadata["name"], serde_json::json!("Generated title"));
+    }
+
+    #[test]
+    fn archived_messages_keep_full_bodies_for_history_render() {
+        let storage = SqliteStorage::new_in_memory().expect("storage");
+        let session = storage
+            .create_session("m".to_string(), "p".to_string(), None)
+            .expect("session");
+
+        let mut message = Message::user("hello".to_string());
+        message.thinking = Some("reasoning".to_string());
+        message.metadata = serde_json::json!({ "kind": "note" });
+        storage
+            .archive_messages(&session.id, std::slice::from_ref(&message))
+            .expect("archive");
+
+        let restored = storage
+            .get_archived_session_messages(&session.id, 100)
+            .expect("restore");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].role, "user");
+        assert_eq!(restored[0].content, "hello");
+        assert_eq!(restored[0].thinking.as_deref(), Some("reasoning"));
+        assert_eq!(restored[0].metadata, serde_json::json!({ "kind": "note" }));
     }
 }
