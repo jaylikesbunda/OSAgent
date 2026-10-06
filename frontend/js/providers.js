@@ -583,7 +583,14 @@ OSA.renderModelSearchResults = function(models, currentModel) {
     }));
     const orderedProviders = OSA.sortProvidersForDropdown(
         Object.keys(grouped).map(function(name) {
-            return providersByName[name] || { name: name, connected: false };
+            const catalogProvider = providersByName[name];
+            const providerModels = grouped[name] || [];
+            // Prefer the catalog's connected flag, but fall back to each model's
+            // own `available` flag: search can run before the catalog has
+            // loaded, and connected providers must still sort to the top.
+            const connected = !!(catalogProvider && catalogProvider.connected)
+                || providerModels.some(function(m) { return !!m.available; });
+            return { name: name, connected: connected };
         })
     );
 
@@ -945,8 +952,14 @@ OSA.renderModelsPane = function(query) {
 
 OSA.modelsSearchHtml = function(providers, q, rawQuery) {
     const currentModel = OSA.modelsCurrentModelId();
+    const connectedMap = OSA.modelsConnectedMap || {};
+    // Connected providers first, following the same preferred provider order as
+    // the dropdown, so their matches are not pushed out by the search cap.
+    const orderedProviders = OSA.sortProvidersForDropdown(providers.map(function(provider) {
+        return Object.assign({}, provider, { connected: !!connectedMap[provider.id] });
+    }));
     const rows = [];
-    for (const provider of providers) {
+    for (const provider of orderedProviders) {
         const models = provider.models || [];
         for (const m of models) {
             if ((m.name || '').toLowerCase().includes(q)
@@ -970,7 +983,9 @@ OSA.modelsSearchHtml = function(providers, q, rawQuery) {
 OSA.modelsCardHtml = function(provider, connectedEntry, currentModel) {
     const models = provider.models || [];
     const connected = !!connectedEntry;
-    const expanded = connected || !!OSA.expandedModels[provider.id];
+    // Provider cards start collapsed, including connected ones. Users expand a
+    // card explicitly via the toggle, whose state lives in OSA.expandedModels.
+    const expanded = !!OSA.expandedModels[provider.id];
     const isDefault = connectedEntry && connectedEntry.is_default;
 
     let badge;

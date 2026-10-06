@@ -13,6 +13,8 @@ Changed:
 * Long turns no longer stop cold at the configured tool budget: the agent is nudged to continue in budget-sized chunks up to a hard ceiling, then summarizes if it still has not finished
 * Compaction shows a persistent animated indicator for the whole summarization pass instead of a toast that disappears
 * Replies avoid overusing em dashes, using ordinary punctuation instead
+* Provider cards in Settings → Models now start collapsed, including connected ones, so the list opens as a scannable summary; expand a card to browse its models
+* The model picker and Settings → Models search now list connected providers' models first, so an available provider is not buried under unconfigured ones
 
 Fixed:
 * Consecutive tools stay together in one group, including in subagent chats. Empty “OSA” rows no longer split groups, and expanded groups stay open as new tools arrive

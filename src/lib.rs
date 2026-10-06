@@ -11,6 +11,9 @@
 #![allow(clippy::map_identity)]
 #![allow(clippy::vec_init_then_push)]
 #![allow(clippy::match_like_matches_macro)]
+// `async_trait` adds `#[must_use]` to the generated boxed futures; newer Clippy
+// versions flag that as a redundant `double_must_use` on every async trait fn.
+#![allow(clippy::double_must_use)]
 
 pub mod agent;
 pub mod auth_store;
