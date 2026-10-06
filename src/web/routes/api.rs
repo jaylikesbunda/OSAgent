@@ -7866,7 +7866,9 @@ async fn update_status(
 mod tests {
     use super::{auth_status, get_config, login, update_config, LoginRequest};
     use crate::agent::runtime::AgentRuntime;
-    use crate::config::{Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission};
+    use crate::config::{
+        Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission,
+    };
     use crate::web::auth;
     use axum::{extract::Extension, http::StatusCode, response::IntoResponse, Json};
     use std::sync::Arc;

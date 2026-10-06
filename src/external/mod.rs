@@ -386,16 +386,22 @@ mod tests {
             .expect("pending prompt");
 
         // Siblings and anything deeper under the approved folder are covered.
-        assert!(manager
-            .has_granted_permission("/outside/project/src/lib.rs")
-            .await);
-        assert!(manager
-            .has_granted_permission("/outside/project/src/nested/deep/mod.rs")
-            .await);
+        assert!(
+            manager
+                .has_granted_permission("/outside/project/src/lib.rs")
+                .await
+        );
+        assert!(
+            manager
+                .has_granted_permission("/outside/project/src/nested/deep/mod.rs")
+                .await
+        );
         // A sibling folder that merely shares a name prefix is not.
-        assert!(!manager
-            .has_granted_permission("/outside/project/src-other/file.rs")
-            .await);
+        assert!(
+            !manager
+                .has_granted_permission("/outside/project/src-other/file.rs")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -416,8 +422,10 @@ mod tests {
             .await
             .expect("pending prompt");
 
-        assert!(!manager
-            .has_granted_permission("/outside/project/src/lib.rs")
-            .await);
+        assert!(
+            !manager
+                .has_granted_permission("/outside/project/src/lib.rs")
+                .await
+        );
     }
 }

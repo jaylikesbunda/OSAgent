@@ -4157,7 +4157,11 @@ mod subagent_task_tests {
     fn rename_survives_a_concurrent_whole_session_write() {
         let storage = SqliteStorage::new_in_memory().expect("storage");
         let session = storage
-            .create_session("m".to_string(), "p".to_string(), Some("Session 1".to_string()))
+            .create_session(
+                "m".to_string(),
+                "p".to_string(),
+                Some("Session 1".to_string()),
+            )
             .expect("session");
 
         // The user renames while a turn is running.
@@ -4180,7 +4184,11 @@ mod subagent_task_tests {
     fn auto_name_never_clobbers_a_user_rename() {
         let storage = SqliteStorage::new_in_memory().expect("storage");
         let session = storage
-            .create_session("m".to_string(), "p".to_string(), Some("Session 1".to_string()))
+            .create_session(
+                "m".to_string(),
+                "p".to_string(),
+                Some("Session 1".to_string()),
+            )
             .expect("session");
 
         storage
@@ -4196,13 +4204,20 @@ mod subagent_task_tests {
 
         // A session that is still untitled is named normally.
         let fresh = storage
-            .create_session("m".to_string(), "p".to_string(), Some("Session 2".to_string()))
+            .create_session(
+                "m".to_string(),
+                "p".to_string(),
+                Some("Session 2".to_string()),
+            )
             .expect("fresh");
         storage
             .update_session_title_if_untitled(&fresh.id, "Generated title")
             .expect("auto name");
         let reloaded = storage.get_session(&fresh.id).unwrap().unwrap();
-        assert_eq!(reloaded.metadata["name"], serde_json::json!("Generated title"));
+        assert_eq!(
+            reloaded.metadata["name"],
+            serde_json::json!("Generated title")
+        );
     }
 
     #[test]

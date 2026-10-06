@@ -1605,8 +1605,7 @@ impl AgentRuntime {
 
             if iteration > iteration_budget {
                 iteration_extensions += 1;
-                iteration_budget =
-                    (iteration_budget + max_iterations).min(hard_iteration_ceiling);
+                iteration_budget = (iteration_budget + max_iterations).min(hard_iteration_ceiling);
                 warn!(
                     "Iteration budget reached for session {} - extending to {} (extension {})",
                     session_id, iteration_budget, iteration_extensions
@@ -3655,7 +3654,8 @@ impl AgentRuntime {
             let base = if total_tools > 0 {
                 "Status: partial. I finished running tools, but hit the iteration ceiling before finalizing.".to_string()
             } else {
-                "Status: partial. I hit the iteration ceiling before completing the task.".to_string()
+                "Status: partial. I hit the iteration ceiling before completing the task."
+                    .to_string()
             };
 
             let counts = if total_tools > 0 {
@@ -7145,7 +7145,8 @@ impl AgentRuntime {
     /// The web UI merges these back into the transcript so a compacted chat
     /// still looks the way it did, with the summary card at the boundary.
     pub fn get_session_archive(&self, session_id: &str) -> Result<Vec<Message>> {
-        self.storage.get_archived_session_messages(session_id, 10_000)
+        self.storage
+            .get_archived_session_messages(session_id, 10_000)
     }
 
     pub async fn append_session_event(

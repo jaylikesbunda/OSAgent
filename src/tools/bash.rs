@@ -1065,9 +1065,7 @@ impl Tool for BashTool {
         let timeout_duration = Duration::from_secs(timeout_seconds);
         let capture = run_shell_command_capture(&full_command, &workspace, timeout_duration)
             .await
-            .map_err(|e| {
-                OSAgentError::ToolExecution(format!("Failed to spawn command: {}", e))
-            })?;
+            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to spawn command: {}", e)))?;
 
         let (merged_output, exit_code) = if capture.timed_out {
             (
