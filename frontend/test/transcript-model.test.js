@@ -359,3 +359,78 @@ test('subagent progress updates one stable row and counts genuine reruns', () =>
     OSA.tmodelSubagentProgress({ subagent_session_id: 'child-1', status: 'executing', tool_name: 'grep', tool_count: 2 });
     assert.deepEqual(subagent.tools, [{ name: 'grep', status: 'running', count: 2 }]);
 });
+
+// Reference implementation of the pre-optimization placement: scan backwards
+// from the end of the growing list and splice the entry after the last item
+// whose anchor is <= the entry's anchor. Compaction cards have no anchor and
+// never act as boundaries.
+function referenceAnchorPlacement(base, entries) {
+    const result = base.slice();
+    entries.forEach(entry => {
+        const target = Number.isInteger(entry.anchorIndex) ? entry.anchorIndex : -1;
+        let pos = result.length;
+        for (let i = result.length - 1; i >= 0; i--) {
+            const item = result[i];
+            const anchor = item.kind === 'message' ? item.messageIndex : item.anchorIndex;
+            if (anchor !== null && anchor !== undefined && anchor <= target) {
+                pos = i + 1;
+                break;
+            }
+        }
+        result.splice(pos, 0, entry);
+    });
+    return result;
+}
+
+test('one-pass tool insertion matches the scan-and-splice placement exactly', () => {
+    let seed = 0x2f6e2b1 >>> 0;
+    const rand = () => {
+        seed = (seed + 0x6d2b79f5) >>> 0;
+        let t = seed;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+
+    for (let trial = 0; trial < 200; trial++) {
+        const base = [];
+        let index = 0;
+        const baseCount = 1 + Math.floor(rand() * 40);
+        for (let i = 0; i < baseCount; i++) {
+            index += 1 + Math.floor(rand() * 2);
+            if (rand() < 0.2) {
+                // Compaction card: has a messageIndex but no anchor.
+                base.push({ kind: 'compaction', key: 'c' + i, messageIndex: index, anchorIndex: undefined });
+            } else {
+                base.push({ kind: 'message', key: 'm' + i, messageIndex: index });
+            }
+        }
+
+        const maxAnchor = index;
+        const entryCount = Math.floor(rand() * 30);
+        const sortedEntries = [];
+        const unsortedEntries = [];
+        let anchor = 0;
+        for (let e = 0; e < entryCount; e++) {
+            anchor = Math.min(maxAnchor, anchor + Math.floor(rand() * 4));
+            const entry = { kind: 'tool', key: 't' + trial + '-' + e, anchorIndex: anchor };
+            sortedEntries.push(entry);
+            unsortedEntries.push(entry);
+        }
+        // Shuffle a copy to exercise the fallback path.
+        for (let i = unsortedEntries.length - 1; i > 0; i--) {
+            const j = Math.floor(rand() * (i + 1));
+            [unsortedEntries[i], unsortedEntries[j]] = [unsortedEntries[j], unsortedEntries[i]];
+        }
+
+        const expectedSorted = referenceAnchorPlacement(base, sortedEntries);
+        const actualSorted = OSA.mergeAnchorOrderedItems(base, sortedEntries);
+        assert.deepEqual(actualSorted.map(item => item.key), expectedSorted.map(item => item.key),
+            `sorted placement mismatch on trial ${trial}`);
+
+        const expectedUnsorted = referenceAnchorPlacement(base, unsortedEntries);
+        const actualUnsorted = OSA.mergeAnchorOrderedItems(base, unsortedEntries);
+        assert.deepEqual(actualUnsorted.map(item => item.key), expectedUnsorted.map(item => item.key),
+            `fallback placement mismatch on trial ${trial}`);
+    }
+});

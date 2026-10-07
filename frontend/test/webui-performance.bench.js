@@ -300,6 +300,31 @@ test('transcript reconstruction benchmark preserves ordering at realistic histor
     assert.equal(new Set(items.map(item => item.key)).size, items.length);
 });
 
+test('long-session rebuild benchmark stays linear with thousands of blocks', async () => {
+    const session = makeMessageFixture('very-long-session', 1200);
+    const rebuild = () => OSA.rebuildTranscriptFromSession(session, session.tools, [], { reason: 'benchmark' });
+
+    rebuild();
+    // A session with 1200 tool calls and 4800 persisted messages used to make
+    // the placement pass quadratic. Keep a much larger fixture than the
+    // "realistic" case so a regression is visible in the p50.
+    const result = await benchmark('transcript rebuild (4800 persisted messages, 1200 tools)', rebuild, 5);
+
+    const items = OSA.TModel.items;
+    assert.ok(Number.isFinite(result.p50) && result.p50 >= 0);
+    assert.equal(items.filter(item => item.kind === 'tool').length, 1200);
+    assert.equal(items.filter(item => item.role === 'user').length, 1200);
+    assert.equal(items.filter(item => item.role === 'assistant').length, 2400);
+    assert.equal(new Set(items.map(item => item.key)).size, items.length);
+    // Every tool card still lands immediately after the assistant message that
+    // owns it, proving the one-pass placement matches the old scan.
+    items.forEach((item, index) => {
+        if (item.kind !== 'tool') return;
+        assert.equal(items[index - 1].messageIndex, item.anchorIndex);
+    });
+    assert.equal(items.at(-1).content, 'Module 1199 is ready.');
+});
+
 function makeModel(id, provider, category = 'popular') {
     return {
         id: `${provider.id}/model-${id}`,

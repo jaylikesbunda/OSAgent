@@ -38,6 +38,7 @@ Fixed:
 * An outside-workspace permission request that times out now states the timeout and how to allow the path, instead of a bare "timed out"
 * An open model picker or context dropdown no longer stays above the composer after you switch chats
 * More provider failures are retried, including truncated or undecodable streaming responses (`error decoding response body`); a mid-response stream failure restarts the request when nothing has been written yet
+* Opening a long chat is much faster: tool cards are placed in one pass instead of rescanning and splicing the whole transcript per card, and the backend indexes tool calls once instead of rescanning every message for each one
 
 v0.6.2 changes:
 

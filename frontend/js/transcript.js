@@ -740,6 +740,88 @@ OSA.refreshSessionArchive = async function(sessionId) {
     }
 };
 
+// Insert anchor-ordered entries (tool cards) into the message/compaction list
+// exactly the way the old scan-and-splice did: each entry lands immediately
+// after the last item whose integer anchor is <= the entry's anchor. Chat
+// messages are the only boundaries; a compaction card carries a messageIndex
+// but no anchor, so entries can land before it.
+//
+// The naive implementation rescans backwards and splices per entry, which is
+// O(entries x base) and dominates load time on sessions with thousands of
+// blocks. Because entries arrive with non-decreasing anchors, the boundary
+// only ever moves forward, so one pass reproduces the same order. One quirk of
+// the original survives: if an entry has no preceding message boundary it is
+// appended past everything, and every later entry chains after it.
+//
+// When entries are not anchor-ordered (rare compaction/archive splices), it
+// falls back to the incremental insertion so placement is unchanged.
+OSA.mergeAnchorOrderedItems = function(base, entries) {
+    if (!entries.length) return base;
+    for (let i = 1; i < entries.length; i++) {
+        if (!(entries[i - 1].anchorIndex <= entries[i].anchorIndex)) {
+            return OSA.insertItemsByAnchorFallback(base, entries);
+        }
+    }
+
+    const messagePositions = [];
+    const messageAnchors = [];
+    for (let i = 0; i < base.length; i++) {
+        if (base[i].kind === 'message' && Number.isInteger(base[i].messageIndex)) {
+            messagePositions.push(i);
+            messageAnchors.push(base[i].messageIndex);
+        }
+    }
+
+    const groups = new Map();
+    let mi = 0;
+    for (let e = 0; e < entries.length; e++) {
+        const anchor = entries[e].anchorIndex;
+        while (mi < messageAnchors.length && messageAnchors[mi] <= anchor) mi++;
+        const boundary = mi - 1;
+        if (boundary < 0) {
+            // No preceding message: the original appended this entry past
+            // everything, and each later entry chained after it.
+            return base.concat(entries);
+        }
+        const position = messagePositions[boundary];
+        let list = groups.get(position);
+        if (!list) {
+            list = [];
+            groups.set(position, list);
+        }
+        list.push(entries[e]);
+    }
+
+    const merged = [];
+    for (let i = 0; i < base.length; i++) {
+        merged.push(base[i]);
+        const list = groups.get(i);
+        if (list) {
+            for (let k = 0; k < list.length; k++) merged.push(list[k]);
+        }
+    }
+    return merged;
+};
+
+// Exact-but-quadratic placement used only when entries are not anchor-ordered.
+OSA.insertItemsByAnchorFallback = function(base, entries) {
+    const result = base.slice();
+    entries.forEach(function(entry) {
+        const target = Number.isInteger(entry.anchorIndex) ? entry.anchorIndex : -1;
+        let pos = result.length;
+        for (let i = result.length - 1; i >= 0; i--) {
+            const item = result[i];
+            const anchor = item.kind === 'message' ? item.messageIndex : item.anchorIndex;
+            if (anchor !== null && anchor !== undefined && anchor <= target) {
+                pos = i + 1;
+                break;
+            }
+        }
+        result.splice(pos, 0, entry);
+    });
+    return result;
+};
+
 OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTasks = [], options = {}) {
     let messages = (session && Array.isArray(session.messages)) ? session.messages : [];
     // Pre-compaction history the backend archived. Splice it back in just
@@ -757,7 +839,7 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         messages = messages.slice(0, insertAt).concat(archived, messages.slice(insertAt));
     }
     const priorItems = OSA.TModel.items.slice();
-    const items = [];
+    let items = [];
 
     messages.forEach(function(message, idx) {
         if (!message || message.role === 'tool') return;
@@ -795,11 +877,6 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         items.push(OSA.tmodelMessageItem(OSA.getMessageRenderKey(message, idx), message, idx));
     });
 
-    const anchorOf = function(entry) {
-        if (entry.kind === 'message') return entry.messageIndex;
-        return entry.anchorIndex;
-    };
-
     // Tool events created before message_index was persisted (and events
     // written by older clients with the default value 0) can still be placed
     // exactly by matching their call id to the assistant tool-call message.
@@ -831,13 +908,19 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
             });
         });
     }
-    const tools = toolSource
-        .filter(function(t) { return t && t.tool_call_id && t.tool_name !== 'subagent'; })
-        .sort(function(a, b) {
-            const delta = (a.message_index || 0) - (b.message_index || 0);
-            if (delta !== 0) return delta;
-            return (OSA.eventTimestampMs(a.timestamp) || 0) - (OSA.eventTimestampMs(b.timestamp) || 0);
-        });
+    const filteredToolSource = toolSource
+        .filter(function(t) { return t && t.tool_call_id && t.tool_name !== 'subagent'; });
+    // Parse each timestamp once instead of inside the comparator, which runs
+    // O(tools log tools) times and otherwise rebuilds a Date per comparison.
+    const toolSortMs = new Map();
+    filteredToolSource.forEach(function(t) {
+        toolSortMs.set(t, OSA.eventTimestampMs(t.timestamp) || 0);
+    });
+    const tools = filteredToolSource.sort(function(a, b) {
+        const delta = (a.message_index || 0) - (b.message_index || 0);
+        if (delta !== 0) return delta;
+        return toolSortMs.get(a) - toolSortMs.get(b);
+    });
 
     // Fold persisted tool-prelude narration into the card it introduced so a
     // history reload renders the same single card as the live stream did.
@@ -856,6 +939,7 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         preludeByAnchor.get(index).push(text.trim());
     });
 
+    const toolItems = [];
     tools.forEach(function(t) {
         const inferredAnchor = toolCallAnchors.has(t.tool_call_id)
             ? toolCallAnchors.get(t.tool_call_id)
@@ -865,10 +949,10 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
         // recorded message_index is pre-compaction and would splice the card
         // at a wrong position, so drop it instead of misplacing it.
         if (inferredAnchor === null) return;
-        const anchorPrelude = inferredAnchor !== null && preludeByAnchor.has(inferredAnchor)
+        const anchorPrelude = preludeByAnchor.has(inferredAnchor)
             ? preludeByAnchor.get(inferredAnchor).join('\n\n')
             : '';
-        const item = OSA.tmodelToolItem({
+        toolItems.push(OSA.tmodelToolItem({
             tool_call_id: t.tool_call_id,
             tool_name: t.tool_name,
             arguments: t.arguments || {},
@@ -878,17 +962,14 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
             metadata: t.metadata,
             message_index: inferredAnchor,
             timestamp: t.timestamp,
-        }, { completed: t.completed === true, success: t.success === true, live: false });
-        let pos = items.length;
-        for (let i = items.length - 1; i >= 0; i--) {
-            const anchor = anchorOf(items[i]);
-            if (anchor !== null && anchor <= (item.anchorIndex === null ? -1 : item.anchorIndex)) {
-                pos = i + 1;
-                break;
-            }
-        }
-        items.splice(pos, 0, item);
+        }, { completed: t.completed === true, success: t.success === true, live: false }));
     });
+
+    // Place every tool card in one pass. The previous approach scanned back
+    // through the growing items array and spliced for each tool, which is
+    // O(tools x items) and dominates load time once a session has thousands
+    // of blocks.
+    items = OSA.mergeAnchorOrderedItems(items, toolItems);
 
     const subagentSource = (Array.isArray(subagentTasks) ? subagentTasks : []).slice();
     if (options.keepCurrentArtifacts) {
@@ -953,20 +1034,54 @@ OSA.rebuildTranscriptFromSession = function(session, toolEvents = [], subagentTa
     });
 
     if (options.preserveKeys) {
+        // Index the previous model once. Matching each item against every
+        // prior item was O(items x priorItems), which stalled the periodic
+        // running-snapshot rebuild on long sessions.
+        const priorMessageByClientId = new Map();
+        const priorMessageByIndex = new Map();
+        const priorMessageByIndexNoClientId = new Map();
+        const priorSubagentById = new Map();
+        priorItems.forEach(function(candidate) {
+            if (!candidate) return;
+            if (candidate.kind === 'message') {
+                if (candidate.clientMessageId) {
+                    const clientKey = candidate.role + '\u0000' + candidate.clientMessageId;
+                    if (!priorMessageByClientId.has(clientKey)) {
+                        priorMessageByClientId.set(clientKey, candidate);
+                    }
+                } else if (candidate.messageIndex !== null) {
+                    const indexKey = candidate.role + '\u0000' + candidate.messageIndex;
+                    if (!priorMessageByIndexNoClientId.has(indexKey)) {
+                        priorMessageByIndexNoClientId.set(indexKey, candidate);
+                    }
+                }
+                if (candidate.messageIndex !== null) {
+                    const indexKey = candidate.role + '\u0000' + candidate.messageIndex;
+                    if (!priorMessageByIndex.has(indexKey)) {
+                        priorMessageByIndex.set(indexKey, candidate);
+                    }
+                }
+            } else if (candidate.kind === 'subagent' && !priorSubagentById.has(candidate.subagentId)) {
+                priorSubagentById.set(candidate.subagentId, candidate);
+            }
+        });
         items.forEach(function(item) {
             if (item.kind === 'message') {
-                const prior = priorItems.find(function(candidate) {
-                    if (!candidate || candidate.kind !== 'message' || candidate.role !== item.role) return false;
-                    if (item.clientMessageId && candidate.clientMessageId) {
-                        return candidate.clientMessageId === item.clientMessageId;
-                    }
-                    return item.messageIndex !== null && candidate.messageIndex === item.messageIndex;
-                });
+                let prior = null;
+                if (item.clientMessageId) {
+                    prior = priorMessageByClientId.get(item.role + '\u0000' + item.clientMessageId) || null;
+                }
+                if (!prior && item.messageIndex !== null) {
+                    // The old predicate only matched by index when the item
+                    // carried no client id or the candidate lacked one.
+                    const indexKey = item.role + '\u0000' + item.messageIndex;
+                    prior = item.clientMessageId
+                        ? (priorMessageByIndexNoClientId.get(indexKey) || null)
+                        : (priorMessageByIndex.get(indexKey) || null);
+                }
                 if (prior) item.key = prior.key;
             } else if (item.kind === 'subagent') {
-                const prior = priorItems.find(function(candidate) {
-                    return candidate && candidate.kind === 'subagent' && candidate.subagentId === item.subagentId;
-                });
+                const prior = priorSubagentById.get(item.subagentId);
                 if (prior) {
                     item.tools = prior.tools;
                     item.currentTool = prior.currentTool;

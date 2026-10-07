@@ -2460,6 +2460,24 @@ async fn get_session_tools(
         }
     }
 
+    // Index the owning assistant message for every tool call once. Rescanning
+    // the whole transcript for each `tool_start` made opening a long session
+    // quadratic in (tool calls x messages), which is what made sessions with
+    // thousands of tool blocks take a noticeable beat to load.
+    let mut tool_call_message_index: std::collections::HashMap<String, i32> =
+        std::collections::HashMap::new();
+    if let Some(session) = session.as_ref() {
+        for (index, message) in session.messages.iter().enumerate() {
+            if let Some(calls) = message.tool_calls.as_ref() {
+                for call in calls {
+                    tool_call_message_index
+                        .entry(call.id.clone())
+                        .or_insert(index as i32);
+                }
+            }
+        }
+    }
+
     let mut seen_call_ids = std::collections::HashSet::new();
     let tools: Vec<SessionToolEvent> = history
         .into_iter()
@@ -2476,20 +2494,9 @@ async fn get_session_tools(
                 .get("message_index")
                 .and_then(|v| v.as_i64())
                 .map(|value| value as i32);
-            let inferred_message_index = session.as_ref().and_then(|session| {
-                session
-                    .messages
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, message)| {
-                        let contains_call = message
-                            .tool_calls
-                            .as_ref()
-                            .map(|calls| calls.iter().any(|call| call.id == tool_call_id))
-                            .unwrap_or(false);
-                        contains_call.then_some(index as i32)
-                    })
-            });
+            // First message containing the call wins, matching the previous
+            // find_map over the transcript.
+            let inferred_message_index = tool_call_message_index.get(&tool_call_id).copied();
             // Older persisted events often contain the client fallback value
             // 0 rather than the assistant message that owns the call. Prefer
             // the authoritative tool-call association whenever available.
