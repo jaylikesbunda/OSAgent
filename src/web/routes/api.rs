@@ -558,6 +558,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
     let protected_routes = Router::new()
         .merge(workflow_router)
         .merge(skills_router)
+        .merge(super::browser::create_browser_router())
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
@@ -3514,6 +3515,7 @@ async fn list_tools(
         "plan_exit",
         "process",
         "draw_diagram",
+        "browser",
     ];
 
     let tools: Vec<serde_json::Value> = all_tools
@@ -3527,7 +3529,7 @@ async fn list_tools(
                     "bash" => "shell",
                     "read_file" | "write_file" | "edit_file" | "list_files" | "delete_file" | "apply_patch" => "files",
                     "grep" | "glob" => "search",
-                    "web_fetch" | "web_search" => "web",
+                    "web_fetch" | "web_search" | "browser" => "web",
                     "code_python" | "code_node" | "code_bash" => "code",
                     "task" | "subagent" => "management",
                     "persona" => "management",

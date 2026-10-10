@@ -10,7 +10,7 @@ use crate::mcp::{McpHandle, McpManager, MCP_TOOL_PREFIX};
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, calendar, code, codesearch, coordinator, decision_memory, diagram, files, lsp,
+    bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory, diagram, files, lsp,
     memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process,
     question, scheduler, search, sessions, skill, skill_authoring, subagent, system_status, task,
     todo, tool_script, tool_search, weather, web,
@@ -581,6 +581,15 @@ impl ToolRegistry {
             process_registry.clone(),
         ));
         tools.insert("process".to_string(), process_tool);
+        // Deferred: a real browser is heavyweight and only needed for
+        // JS-heavy or interactive pages. One manager is shared so a
+        // session's browser survives per-workspace tool rebuilds.
+        if config.browser.enabled {
+            let manager = browser::BrowserManager::new(&config);
+            let browser_tool: Arc<dyn Tool> = Arc::new(browser::BrowserTool::new(manager));
+            tools.insert("browser".to_string(), browser_tool.clone());
+            native_catalog.register(browser_tool);
+        }
         let calendar_tool: Arc<dyn Tool> = Arc::new(calendar::CalendarTool::new(config.clone()));
         tools.insert("calendar".to_string(), calendar_tool.clone());
         native_catalog.register(calendar_tool);

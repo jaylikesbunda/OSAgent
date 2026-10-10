@@ -1,5 +1,6 @@
 pub mod bash;
 pub mod batch;
+pub mod browser;
 pub mod calendar;
 pub mod code;
 pub mod codesearch;

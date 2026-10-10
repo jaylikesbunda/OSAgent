@@ -1288,3 +1288,24 @@
         animation: none !important;
     }
 }
+
+/* ---- Tool screenshots (browser) ---- */
+
+.tool-screenshots {
+    padding: 10px 14px;
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border);
+}
+
+.tool-screenshot {
+    display: block;
+    max-width: 100%;
+    max-height: 420px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: zoom-in;
+}
+
+.tool-screenshot + .tool-screenshot {
+    margin-top: 8px;
+}

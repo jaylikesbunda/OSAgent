@@ -8,6 +8,8 @@ Added:
 * Create and manage goals directly from the chat composer, with a compact view of the objective, progress, and pause/resume controls
 * Jump back to the latest reply with a button that appears when you scroll up; the transcript keeps following the agent while you stay at the bottom
 * Run a goal with no round limit: the goal editor and the goal's options both offer a "No limit" toggle, and the panel shows rounds started instead of a budget
+* Let the agent drive a real, sandboxed browser (headless Chromium) for JavaScript-heavy or interactive pages, seeing pages through accessibility snapshots with element refs and optional annotated screenshots. It runs in a throwaway profile, blocks local and private network addresses, and is found through tool search
+* Settings → Browser configures the browser tool and can import signed-in sessions from Firefox, LibreWolf, Chrome, Brave, Edge and Opera, one site at a time
 
 Changed:
 * Long turns no longer stop cold at the configured tool budget: the agent is nudged to continue in budget-sized chunks up to a hard ceiling, then summarizes if it still has not finished

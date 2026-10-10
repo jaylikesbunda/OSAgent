@@ -54,6 +54,8 @@ pub struct Config {
     pub spill: SpillConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub browser: BrowserConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -688,6 +690,73 @@ impl Default for SchedulerConfig {
     }
 }
 
+/// Sandboxed headless-Chromium browser the agent can drive and see.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// Registers the `browser` tool (deferred; found through `tool_search`).
+    pub enabled: bool,
+    /// Chrome/Chromium/Edge/Brave binary. Empty auto-detects.
+    pub executable_path: String,
+    pub headless: bool,
+    /// Empty keeps the browser's own user agent.
+    pub user_agent: String,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    pub navigation_timeout_ms: u64,
+    pub action_timeout_ms: u64,
+    /// A session's browser process is reaped after this much inactivity.
+    pub idle_timeout_seconds: u64,
+    /// Oldest idle browser is closed when a new session would exceed this.
+    pub max_concurrent_sessions: usize,
+    /// `jpeg` or `png`.
+    pub screenshot_format: String,
+    pub screenshot_quality: u32,
+    pub max_screenshot_bytes: usize,
+    /// Cap on accessibility-snapshot text returned to the model.
+    pub max_snapshot_chars: usize,
+    /// Allows the `eval` action (arbitrary page JavaScript).
+    pub allow_javascript_eval: bool,
+    /// Refuse requests that resolve to loopback/private/link-local addresses.
+    pub block_private_network: bool,
+    /// Host patterns (`example.com`, `*.docs.rs`). Empty allows every public host.
+    pub allowed_hosts: Vec<String>,
+    pub blocked_hosts: Vec<String>,
+    /// Pass `--no-sandbox`. Only for containers/root where Chromium cannot
+    /// create its OS sandbox; weakens isolation.
+    pub no_sandbox: bool,
+    /// Load cookies imported from the user's own browsers (Settings ->
+    /// Browser) into each new agent browser, so it is signed in to them.
+    pub import_cookies: bool,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            executable_path: String::new(),
+            headless: true,
+            user_agent: String::new(),
+            viewport_width: 1280,
+            viewport_height: 800,
+            navigation_timeout_ms: 20_000,
+            action_timeout_ms: 10_000,
+            idle_timeout_seconds: 300,
+            max_concurrent_sessions: 2,
+            screenshot_format: "jpeg".to_string(),
+            screenshot_quality: 70,
+            max_screenshot_bytes: 1_200_000,
+            max_snapshot_chars: 8_000,
+            allow_javascript_eval: false,
+            block_private_network: true,
+            allowed_hosts: Vec::new(),
+            blocked_hosts: Vec::new(),
+            no_sandbox: false,
+            import_cookies: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpConfig {
@@ -1277,6 +1346,7 @@ impl Config {
             mcp: McpConfig::default(),
             spill: SpillConfig::default(),
             compaction: CompactionConfig::default(),
+            browser: BrowserConfig::default(),
         };
         cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();

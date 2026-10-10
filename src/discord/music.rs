@@ -324,11 +324,13 @@ impl Handler {
             .await;
             return;
         };
-        if self.command_access_level(cmd).await.is_none() {
+        let access = self.command_access_level(cmd).await;
+        if access.is_none() {
             Self::send_unauthorized_response_command(ctx, cmd).await;
             return;
         }
-        self.remember_channel(cmd.channel_id.get()).await;
+        self.remember_channel_if_trusted(access, cmd.channel_id.get())
+            .await;
         let voice_channel = match self.user_voice_channel(ctx, guild_id, cmd.user.id).await {
             Some(ch) => ch,
             None => {

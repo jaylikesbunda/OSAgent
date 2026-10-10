@@ -35,6 +35,7 @@ const JS_LOAD_ORDER = [
   "js/permission.js",
   "js/skills.js",
   "js/mcp.js",
+  "js/browser.js",
   "js/jobs.js",
   "js/app.js",
 ];

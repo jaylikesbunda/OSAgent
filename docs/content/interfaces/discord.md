@@ -1,15 +1,16 @@
 ---
 title: "Discord Bot"
-description: "Per-channel sessions, community mode, and trusted access."
+description: "One conversation per user, community mode, and trusted access."
 weight: 20
 toc: true
 ---
 
 ## What this does
 
-Runs OSAgent inside Discord with per-channel sessions. Requires building with
-the `discord` feature. Audio attachments are decoded to 16-bit WAV in-process
-before Whisper transcription.
+Runs OSAgent inside Discord. Trusted users get one conversation that carries
+across every channel and DM they use. Community members get one conversation
+per server. Requires building with the `discord` feature. Audio attachments are
+decoded to 16-bit WAV in-process before Whisper transcription.
 
 > **Note:** `symphonia`/`ogg`/`opus` decode deps are gated behind the
 > `discord` feature, and `songbird` playback behind `discord-voice`, so default

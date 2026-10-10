@@ -584,6 +584,15 @@ impl Handler {
             .clone()
     }
 
+    /// Make this channel the default delivery target for scheduled jobs and
+    /// workflow notifications, but only for trusted access. A community channel
+    /// must never become the place private notifications land.
+    async fn remember_channel_if_trusted(&self, access: Option<AccessLevel>, channel_id: u64) {
+        if access == Some(AccessLevel::Trusted) {
+            self.remember_channel(channel_id).await;
+        }
+    }
+
     /// Make this the fallback channel for notifications that carry no target.
     async fn remember_channel(&self, channel_id: u64) {
         set_last_discord_channel_id(channel_id).await;

@@ -1090,7 +1090,7 @@ impl PublicWebFetchTool {
         Self { storage_dir }
     }
 
-    fn is_public_ip(ip: IpAddr) -> bool {
+    pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
         match ip {
             IpAddr::V4(ip) => {
                 let [a, b, c, _] = ip.octets();

@@ -377,3 +377,26 @@ database = "~/.osagent/osagent.db"
 #   xai:         Grok 3, Grok 3 Mini
 #
 # Browse the full catalog in Settings > Provider or use the model dropdown in the header.
+
+[browser]
+# Sandboxed headless Chromium the agent can drive (discoverable via tool_search).
+enabled = true
+executable_path = ""            # "" = auto-detect Chrome / Edge / Brave / Chromium
+headless = true
+user_agent = ""                 # "" = browser default
+viewport_width = 1280
+viewport_height = 800
+navigation_timeout_ms = 20000
+action_timeout_ms = 10000
+idle_timeout_seconds = 300      # close a session's browser after this much inactivity
+max_concurrent_sessions = 2
+screenshot_format = "jpeg"      # jpeg | png
+screenshot_quality = 70
+max_screenshot_bytes = 1200000
+max_snapshot_chars = 8000
+allow_javascript_eval = false   # lets the agent run arbitrary page scripts
+block_private_network = true    # refuse localhost / LAN / link-local requests
+allowed_hosts = []              # empty = all public hosts; e.g. ["docs.rs", "*.github.com"]
+blocked_hosts = []
+no_sandbox = false              # only for containers / root where Chromium cannot sandbox itself
+import_cookies = true           # use sessions imported in Settings -> Browser

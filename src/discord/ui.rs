@@ -1,6 +1,6 @@
 //! Rendering helpers shared by the command, panel, and chat surfaces.
 
-use serenity::builder::CreateEmbed;
+use serenity::builder::{CreateAllowedMentions, CreateEmbed, CreateMessage};
 use serenity::http::Http;
 use serenity::model::colour::Colour;
 use serenity::model::id::ChannelId;
@@ -126,6 +126,15 @@ pub(super) fn split_message(text: &str, limit: usize) -> Vec<String> {
     out
 }
 
+/// Mention limits for any plain-text message. Agent output is untrusted text
+/// (it can echo web pages or user input), so it must not ping `@everyone`,
+/// `@here` or roles.
+pub(super) fn no_mass_mentions() -> CreateAllowedMentions {
+    CreateAllowedMentions::new()
+        .everyone(false)
+        .all_roles(false)
+}
+
 /// Send a response as one or more messages, attaching `footer` as subtext on the last one.
 pub(super) async fn send_chunks(
     http: &Http,
@@ -147,7 +156,10 @@ pub(super) async fn send_chunks(
             _ => chunk.clone(),
         };
 
-        if let Err(e) = channel_id.say(http, body).await {
+        let message = CreateMessage::new()
+            .content(body)
+            .allowed_mentions(no_mass_mentions());
+        if let Err(e) = channel_id.send_message(http, message).await {
             error!("Discord: failed to send response chunk: {e}");
             break;
         } else {

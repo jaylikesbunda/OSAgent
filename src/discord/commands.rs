@@ -295,11 +295,13 @@ impl Handler {
             name,
             "play" | "join" | "leave" | "skip" | "stop" | "queue" | "nowplaying"
         ) {
-            if self.command_access_level(command).await.is_none() {
+            let access = self.command_access_level(command).await;
+            if access.is_none() {
                 Self::send_unauthorized_response_command(ctx, command).await;
                 return;
             }
-            self.remember_channel(command.channel_id.get()).await;
+            self.remember_channel_if_trusted(access, command.channel_id.get())
+                .await;
             match name {
                 "play" => self.handle_music_play(ctx, command).await,
                 "join" => self.handle_music_join(ctx, command).await,
@@ -317,9 +319,11 @@ impl Handler {
             return;
         }
 
-        // Anything that talks to a channel should make that channel the default
-        // delivery target for scheduled jobs and workflow notifications.
-        self.remember_channel(command.channel_id.get()).await;
+        // Trusted control use should make that channel the default delivery
+        // target for scheduled jobs and workflow notifications.
+        let access = self.command_access_level(command).await;
+        self.remember_channel_if_trusted(access, command.channel_id.get())
+            .await;
 
         match name {
             "settings" => self.open_settings_panel(ctx, command).await,

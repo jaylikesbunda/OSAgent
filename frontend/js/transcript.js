@@ -1273,7 +1273,11 @@ OSA.unitSignature = function(unit) {
                 item.output || '',
                 item.title || '',
                 item.prelude || '',
-                item.metadata ? JSON.stringify(item.metadata) : '',
+                item.metadata ? JSON.stringify(item.metadata, function(key, value) {
+                    // Screenshots are large base64 images; their size is
+                    // enough for change detection.
+                    return key === 'data_url' && typeof value === 'string' ? value.length : value;
+                }) : '',
             ].join('\u0002');
         }
         if (item.kind === 'subagent') {
@@ -2200,6 +2204,8 @@ OSA.patchToolCardElement = function(container, item) {
         return;
     }
 
+    OSA.patchToolScreenshots(container, domId, item);
+
     const outputChanged = container._toolOutput !== item.output;
     if (outputChanged) {
         container._toolOutput = item.output;
@@ -2250,6 +2256,30 @@ OSA.patchToolCardElement = function(container, item) {
     } else if (!isCompleted) {
         OSA.setToolCardPreviewData(domId, OSA.tmodelToolEventView(item));
     }
+};
+
+// Tools that capture an image (the browser's `screenshot`) ship it in
+// `metadata.screenshots`, so the expanded card shows what the agent saw
+// both live and after a reload.
+OSA.patchToolScreenshots = function(container, domId, item) {
+    const shots = item.metadata && Array.isArray(item.metadata.screenshots)
+        ? item.metadata.screenshots.filter(function(s) { return s && typeof s.data_url === 'string' && s.data_url.indexOf('data:image/') === 0; })
+        : [];
+    if (!shots.length || container.dataset.shotsDone === '1') return;
+    const bodyInner = container.querySelector('.tool-body-inner');
+    if (!bodyInner) return;
+    container.dataset.shotsDone = '1';
+    const wrap = document.createElement('div');
+    wrap.className = 'tool-screenshots';
+    shots.forEach(function(shot) {
+        const img = document.createElement('img');
+        img.className = 'tool-screenshot expandable-image';
+        img.alt = shot.filename || 'screenshot';
+        img.loading = 'lazy';
+        img.src = shot.data_url;
+        wrap.appendChild(img);
+    });
+    bodyInner.appendChild(wrap);
 };
 
 OSA.cssEscape = function(value) {

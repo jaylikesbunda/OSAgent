@@ -427,6 +427,10 @@ OSA.saveSettings = async function() {
     
     const useCustomPriorities = document.getElementById('setting-use-custom-priorities').checked;
     
+    if (OSA.BrowserUI) {
+        newConfig.browser = OSA.BrowserUI.collect(newConfig.browser);
+    }
+
     newConfig.agent = {
         ...newConfig.agent,
         max_tokens: parseInt(document.getElementById('setting-max-tokens').value) || 4096,
@@ -603,6 +607,8 @@ OSA.switchSettingsTab = async function(tabId) {
         await OSA.loadDoctorStatus();
     } else if (tabId === 'skills') {
         await OSA.loadSkillsUI();
+    } else if (tabId === 'browser') {
+        await OSA.loadBrowserUI();
     } else if (tabId === 'mcp') {
         await OSA.loadMcpUI();
     } else if (tabId === 'updates') {
