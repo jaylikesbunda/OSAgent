@@ -73,6 +73,10 @@ pub struct SessionSummary {
     pub parent_id: Option<String>,
     pub agent_type: String,
     pub task_status: String,
+    /// Transcript rows. Zero means the chat is still empty, so its workspace
+    /// can still change.
+    #[serde(default)]
+    pub message_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

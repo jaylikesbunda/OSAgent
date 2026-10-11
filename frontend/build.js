@@ -62,6 +62,7 @@ const CSS_LOAD_ORDER = [
   "css/skills.css",
   "css/mcp.css",
   "css/jobs.css",
+  "css/settings.css",
 ];
 
 const COPY_FILES = [

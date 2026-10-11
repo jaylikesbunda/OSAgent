@@ -1,14 +1,16 @@
 //! Sandboxed, stateful browser the agent can drive and see.
 //!
 //! One `browser` tool with an `action` field. Each OSA session owns an
-//! isolated headless Chromium (throwaway profile, loopback-only debugging,
-//! egress policy) that is reaped when idle. Pages are observed through an
-//! accessibility snapshot with stable `[ref=eN]` handles; screenshots are
-//! opt-in because they cost vision tokens.
+//! isolated Chromium (isolated profile, loopback-only debugging, egress
+//! policy, opt-in fingerprint stealth) that is reaped when idle. Pages are
+//! observed through an accessibility snapshot with stable `[ref=eN]`
+//! handles; screenshots are opt-in because they cost vision tokens.
 
 pub mod cdp;
+pub mod fingerprint;
 pub mod import;
 pub mod input;
+pub mod job;
 pub mod policy;
 pub mod sandbox;
 pub mod session;
@@ -111,10 +113,19 @@ impl BrowserManager {
             }
         }
 
-        let profile_dir = self
-            .data_root
-            .join(uuid::Uuid::new_v4().to_string())
-            .join("profile");
+        let profile_dir = if self.config.persistent_profile {
+            // Stable per-OSA-session directory: cookies, history and
+            // localStorage survive restarts, so sites see a returning
+            // browser instead of a freshly-wiped one. The `keep-` prefix
+            // protects it from stale-profile cleanup.
+            self.data_root
+                .join(sandbox::persistent_profile_name(id))
+                .join("profile")
+        } else {
+            self.data_root
+                .join(uuid::Uuid::new_v4().to_string())
+                .join("profile")
+        };
         let cookies = if self.config.import_cookies {
             import::CookieJar::load(&self.config_dir).cookies
         } else {
@@ -190,6 +201,20 @@ async fn close_entry(entry: Entry) {
     if let Ok(mutex) = Arc::try_unwrap(entry.session) {
         mutex.into_inner().close().await;
     }
+}
+
+/// Writes a screenshot under OSA's data folder so a chat can embed it. The
+/// chat's image endpoint serves files from that folder.
+fn save_screenshot(config_dir: &std::path::Path, shot: &session::Screenshot) -> Option<PathBuf> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(shot.base64.as_bytes())
+        .ok()?;
+    let dir = config_dir.join("screenshots");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{}.{}", uuid::Uuid::new_v4(), shot.extension));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
 }
 
 pub struct BrowserTool {
@@ -287,6 +312,20 @@ impl BrowserTool {
                 if let Some(legend) = legend.filter(|l| !l.is_empty()) {
                     out.push_str(&format!("\nLabelled elements:\n{legend}"));
                 }
+                if let Some(saved) = save_screenshot(&self.manager.config_dir, &shot) {
+                    let shown = saved
+                        .display()
+                        .to_string()
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    out.push_str(&format!(
+                        "\nSaved to {shown}. To show it in your reply, write ![screenshot]({shown}) on its own line."
+                    ));
+                }
+                let (view_w, view_h) = session.viewport_size().await.map_err(step)?;
+                out.push_str(&format!(
+                    "
+Viewport: {view_w:.0}x{view_h:.0} CSS px. click_at x,y use these coordinates."
+                ));
                 let attachment = ToolAttachment {
                     filename: format!("screenshot.{}", shot.extension),
                     mime: shot.mime.to_string(),
@@ -418,6 +457,23 @@ impl BrowserTool {
                         ));
                     }
                 }
+                self.report(session, false, before, note).await
+            }
+            "click_at" => {
+                let before = session.last_fingerprint();
+                let x = args["x"]
+                    .as_f64()
+                    .ok_or_else(|| Self::fail("`x` is required for click_at"))?;
+                let y = args["y"]
+                    .as_f64()
+                    .ok_or_else(|| Self::fail("`y` is required for click_at"))?;
+                let button = text("button").unwrap_or("left");
+                let double = args["double"].as_bool().unwrap_or(false);
+                session
+                    .click_at(x, y, button, double)
+                    .await
+                    .map_err(step)?;
+                let note = Some(format!("clicked {button} at ({x:.0}, {y:.0}) CSS px"));
                 self.report(session, false, before, note).await
             }
             "press" => {
@@ -576,7 +632,7 @@ impl Tool for BrowserTool {
     }
 
     fn description(&self) -> &str {
-        "Drive a real sandboxed web browser (headless Chromium) to read and interact with JavaScript-heavy or interactive pages. Observe pages through accessibility snapshots with [ref=eN] element handles; act by ref (click, type, select, press, scroll, hover). Keeps state across calls within a session: pages, tabs, logins in that browser. Local and private network addresses are blocked."
+        "Drive a real sandboxed web browser (Chromium; headless by default) to read and interact with JavaScript-heavy or interactive pages. Observe pages through accessibility snapshots with [ref=eN] element handles; act by ref (click, type, select, press, scroll, hover). Keeps state across calls within a session: pages, tabs, logins in that browser. Local and private network addresses are blocked."
     }
 
     fn when_to_use(&self) -> &str {
@@ -607,11 +663,15 @@ impl Tool for BrowserTool {
                 "action": {
                     "type": "string",
                     "enum": ["open","navigate","back","forward","reload","snapshot","read","screenshot",
-                             "find","click","double_click","hover","type","fill","select","press","scroll",
+                             "find","click","double_click","click_at","hover","type","fill","select","press","scroll",
                              "wait","tabs","eval","close"],
-                    "description": "open/navigate load a URL and return a snapshot. snapshot lists page content with refs. click/type/etc. act on an element by ref (from the latest snapshot), selector, or visible text. screenshot is for visual checks only (costly); prefer snapshot/read."
+                    "description": "open/navigate load a URL and return a snapshot. snapshot lists page content with refs. click/type/etc. act on an element by ref (from the latest snapshot), selector, or visible text. click_at clicks at x,y in CSS pixels of the viewport, like a mouse, for things with no ref (canvas, maps, custom widgets); a screenshot reports the viewport size. screenshot is for visual checks only (costly); prefer snapshot/read."
                 },
                 "url": {"type": "string", "description": "open/navigate/tabs new"},
+                "x": {"type": "number", "description": "click_at: horizontal position in CSS pixels of the viewport (the screenshot reports its size)"},
+                "y": {"type": "number", "description": "click_at: vertical position in CSS pixels of the viewport"},
+                "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "click_at: mouse button (default left)"},
+                "double": {"type": "boolean", "description": "click_at: double click"},
                 "ref": {"type": "string", "description": "Element ref from the latest snapshot, e.g. e12"},
                 "selector": {"type": "string", "description": "CSS selector, when no ref is available"},
                 "text": {"type": "string", "description": "click/hover: visible name of the element. type: the text to enter (into ref/selector, or the focused element if none given). find: text to look for. wait: text that must appear."},

@@ -56,6 +56,25 @@ pub struct Config {
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub browser: BrowserConfig,
+    /// What the composer model dropdown lists. Only trims the connected
+    /// catalog: the active model and favourites always show.
+    #[serde(default)]
+    pub model_menu: ModelMenuConfig,
+}
+
+/// Visibility filter for the composer model dropdown. Empty lists mean
+/// "show everything connected", so a fresh install behaves as before.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ModelMenuConfig {
+    /// Provider ids left out of the model menu entirely.
+    pub hidden_providers: Vec<String>,
+    /// `provider_id:model_id` entries left out of the model menu. Provider
+    /// ids never contain ':', so the first colon is always the separator.
+    pub hidden_models: Vec<String>,
+    /// Hide models released longer ago than this many days. None keeps every
+    /// model. Models without a known release date are never hidden by age.
+    pub hide_older_than_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -728,6 +747,18 @@ pub struct BrowserConfig {
     /// Load cookies imported from the user's own browsers (Settings ->
     /// Browser) into each new agent browser, so it is signed in to them.
     pub import_cookies: bool,
+    /// Reduce bot-detection fingerprinting: scrub headless markers from
+    /// the user agent and UA client hints, keep WebGL off SwiftShader,
+    /// and patch `navigator.webdriver`. On by default; costs nothing.
+    pub stealth: bool,
+    /// Reuse one profile directory per OSA session instead of a throwaway,
+    /// so cookies, history and localStorage persist and sites see a
+    /// returning browser rather than a fresh one. Slightly weakens the
+    /// sandbox: state survives between agent sessions.
+    pub persistent_profile: bool,
+    /// Pass `--disable-gpu`. Leave off: headless Chrome then falls back to
+    /// SwiftShader, whose WebGL renderer string is a well-known bot signal.
+    pub disable_gpu: bool,
 }
 
 impl Default for BrowserConfig {
@@ -753,6 +784,9 @@ impl Default for BrowserConfig {
             blocked_hosts: Vec::new(),
             no_sandbox: false,
             import_cookies: true,
+            stealth: true,
+            persistent_profile: false,
+            disable_gpu: false,
         }
     }
 }
@@ -1328,6 +1362,7 @@ impl Config {
             small_provider: String::new(),
             enabled_providers: vec![],
             disabled_providers: vec![],
+            model_menu: ModelMenuConfig::default(),
             provider: ProviderConfig::default(),
             agent: AgentConfig::default(),
             telegram: None,
@@ -2326,10 +2361,32 @@ fn generate_jwt_secret() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DiscordConfig, McpServerConfig, ProviderConfig, TelegramConfig};
+    use super::{
+        Config, DiscordConfig, McpServerConfig, ModelMenuConfig, ProviderConfig, TelegramConfig,
+    };
     use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
+
+    /// Configs written before the model menu existed have no `[model_menu]`
+    /// table; they must load with everything visible.
+    #[test]
+    fn model_menu_defaults_to_showing_everything() {
+        let menu: ModelMenuConfig = toml::from_str("").unwrap();
+        assert_eq!(menu, ModelMenuConfig::default());
+        assert!(menu.hidden_providers.is_empty());
+        assert!(menu.hidden_models.is_empty());
+
+        let menu: ModelMenuConfig = toml::from_str(
+            r#"
+hidden_providers = ["openrouter"]
+hidden_models = ["openai:gpt-4o-mini", "ollama:qwen3:8b"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(menu.hidden_providers, vec!["openrouter"]);
+        assert_eq!(menu.hidden_models[1], "ollama:qwen3:8b");
+    }
 
     /// A snowflake must survive the trip through the web UI unchanged — as a
     /// JSON number it would come back rounded to the nearest multiple of 64.

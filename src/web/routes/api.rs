@@ -591,7 +591,18 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
             "/api/sessions/:id/workspace",
             get(get_session_workspace).post(set_session_workspace),
         )
+        .route(
+            "/api/sessions/:id/context",
+            get(list_session_context).post(add_session_context),
+        )
+        .route(
+            "/api/sessions/:id/context/:source_id",
+            delete(remove_session_context),
+        )
         .route("/api/sessions/:id/files", get(super::files::browse))
+        .route("/api/files/raw", get(super::files::raw))
+        .route("/api/files/reveal", post(super::files::reveal))
+        .route("/api/system/open-url", post(super::files::open_url))
         .route("/api/memories", get(list_memories).post(add_memory))
         .route(
             "/api/memories/:id",
@@ -726,6 +737,7 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/providers/catalog", get(catalog_handler))
         .route("/api/providers/models", get(models_handler))
         .route("/api/providers/switch", post(switch_provider_model))
+        .route("/api/providers/menu", put(update_provider_menu))
         .route("/api/providers/search", get(search_models))
         .route("/api/providers/find", get(search_providers))
         .route("/api/providers/validate", post(validate_provider))
@@ -751,6 +763,9 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/voice/install", post(voice_install))
         .route("/api/voice/transcribe", post(voice_transcribe))
         .route("/api/tts/synthesize", post(tts_synthesize))
+        .route("/api/voice/sherpa/status", get(sherpa_status))
+        .route("/api/voice/sherpa/install", post(sherpa_install))
+        .route("/api/voice/sherpa/remove", post(sherpa_remove))
         .route("/api/voice/models", get(voice_models))
         .route("/api/voice/installed", get(voice_installed))
         .route("/api/voice/download", post(voice_download))
@@ -1329,6 +1344,10 @@ async fn update_config(
     new_config.agent.active_workspace = current_config.agent.active_workspace.clone();
     new_config.agent.workspace = current_config.agent.workspace.clone();
 
+    // Same for the model menu: /api/providers/menu persists each toggle, and a
+    // settings save from a snapshot taken before the toggle would undo it.
+    new_config.model_menu = current_config.model_menu.clone();
+
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
         discord.allowed_users.dedup();
@@ -1719,6 +1738,55 @@ async fn set_session_workspace(
             )
         })?;
     Ok(Json(workspace))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddSessionContextRequest {
+    pub session_id: String,
+}
+
+fn context_error(error: crate::error::OSAgentError) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
+async fn list_session_context(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::agent::runtime::SessionContextEntry>>, (StatusCode, Json<ErrorResponse>)>
+{
+    let entries = agent
+        .list_session_context(&id)
+        .await
+        .map_err(context_error)?;
+    Ok(Json(entries))
+}
+
+async fn add_session_context(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+    Json(payload): Json<AddSessionContextRequest>,
+) -> Result<Json<crate::agent::runtime::SessionContextEntry>, (StatusCode, Json<ErrorResponse>)> {
+    let entry = agent
+        .add_session_context(&id, &payload.session_id)
+        .await
+        .map_err(context_error)?;
+    Ok(Json(entry))
+}
+
+async fn remove_session_context(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path((id, source_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    agent
+        .remove_session_context(&id, &source_id)
+        .await
+        .map_err(context_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_memories(
@@ -3643,7 +3711,33 @@ async fn tts_synthesize(
         ));
     }
 
-    match normalized_tts_provider(voice_config.tts_provider.as_str()) {
+    // The offline voice speaks when it is chosen. It also speaks for "browser"
+    // output when installed, because the desktop window has no browser voice.
+    let provider = normalized_tts_provider(voice_config.tts_provider.as_str());
+    if provider == "sherpa-local" || (provider == "browser" && crate::voice::sherpa::is_installed())
+    {
+        let output_path = std::env::temp_dir().join(format!("tts_{}.wav", uuid::Uuid::new_v4()));
+        crate::voice::sherpa::synthesize(&payload.text, &output_path)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error: e }),
+                )
+            })?;
+        let audio = std::fs::read(&output_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read audio: {}", e),
+                }),
+            )
+        })?;
+        let _ = std::fs::remove_file(&output_path);
+        return Ok(audio);
+    }
+
+    match provider {
         "browser" => {
             Err((
                 StatusCode::BAD_REQUEST,
@@ -3692,6 +3786,88 @@ async fn tts_synthesize(
             ))
         }
     }
+}
+
+async fn sherpa_status() -> Json<crate::voice::sherpa::SherpaStatus> {
+    Json(crate::voice::sherpa::status())
+}
+
+/// Points input and output at the offline voice, or moves them off it when it
+/// is removed.
+async fn set_sherpa_voice(
+    agent: &AgentRuntime,
+    config_path: &std::path::Path,
+    installed: bool,
+) -> Result<(), String> {
+    let mut config = agent.get_config().await;
+    let mut voice = config.voice.clone().unwrap_or_default();
+    if installed {
+        voice.enabled = true;
+        voice.stt_provider = "sherpa-local".to_string();
+        voice.tts_provider = "sherpa-local".to_string();
+    } else {
+        if voice.stt_provider == "sherpa-local" {
+            voice.stt_provider = "browser".to_string();
+        }
+        if voice.tts_provider == "sherpa-local" {
+            voice.tts_provider = "browser".to_string();
+        }
+    }
+    config.voice = Some(voice);
+    agent.replace_config(config).await;
+    agent
+        .save_config(config_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Starts the one-button install in the background. The page follows progress
+/// through the status route. When it finishes, the offline voice becomes the
+/// input and output.
+async fn sherpa_install(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if crate::voice::sherpa::progress().running {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Offline voice is already being set up.".to_string(),
+            }),
+        ));
+    }
+    tokio::spawn(async move {
+        match crate::voice::sherpa::install().await {
+            Ok(()) => {
+                if let Err(error) = set_sherpa_voice(&agent, &config_path, true).await {
+                    tracing::warn!("Offline voice installed, but settings were not saved: {error}");
+                }
+            }
+            Err(error) => tracing::warn!("Offline voice setup failed: {error}"),
+        }
+    });
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+async fn sherpa_remove(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    crate::voice::sherpa::remove().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+    set_sherpa_voice(&agent, &config_path, false)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "removed": true })))
 }
 
 #[derive(Debug, Serialize)]
@@ -3811,7 +3987,13 @@ async fn voice_transcribe(
         .voice
         .as_ref()
         .filter(|v| {
-            v.enabled && normalized_stt_provider(v.stt_provider.as_str()) == "whisper-local"
+            v.enabled
+                && match normalized_stt_provider(v.stt_provider.as_str()) {
+                    "whisper-local" | "sherpa-local" => true,
+                    // The desktop window sends browser speech here when the offline voice is installed.
+                    "browser" => crate::voice::sherpa::is_installed(),
+                    _ => false,
+                }
         })
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3876,12 +4058,16 @@ async fn voice_transcribe(
         )
     })??;
 
-    let text = crate::voice::whisper::transcribe(
-        &audio_path,
-        Some(&voice_config.language),
-        voice_config.whisper_model.as_deref(),
-    )
-    .await
+    let text = if normalized_stt_provider(voice_config.stt_provider.as_str()) == "whisper-local" {
+        crate::voice::whisper::transcribe(
+            &audio_path,
+            Some(&voice_config.language),
+            voice_config.whisper_model.as_deref(),
+        )
+        .await
+    } else {
+        crate::voice::sherpa::transcribe(&audio_path).await
+    }
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4616,15 +4802,15 @@ async fn add_provider(
         .into_iter()
         .collect();
     new_keys.sort();
+    let mut stored_keys = crate::auth_store::load_auth_keys(&config_dir);
     if !new_keys.is_empty() {
-        let mut stored = crate::auth_store::load_auth_keys(&config_dir);
-        let bucket = stored.entry(entry_id.clone()).or_default();
+        let bucket = stored_keys.entry(entry_id.clone()).or_default();
         for key in &new_keys {
             if !bucket.iter().any(|k| k == key) {
                 bucket.push(key.clone());
             }
         }
-        crate::auth_store::save_auth_keys(&config_dir, &stored).map_err(|e| {
+        crate::auth_store::save_auth_keys(&config_dir, &stored_keys).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -4633,6 +4819,9 @@ async fn add_provider(
             )
         })?;
     }
+    // The runtime entry needs every key it already had, not just the ones
+    // typed now. An edit that leaves the key field blank keeps its stored keys.
+    let entry_keys = stored_keys.get(&entry_id).cloned().unwrap_or_default();
 
     let declared_models: Vec<String> = payload
         .models
@@ -4654,7 +4843,7 @@ async fn add_provider(
         api_key: String::new(),
         api_keys: vec![],
         models: declared_models,
-        auth_file_keys: new_keys,
+        auth_file_keys: entry_keys,
         base_url: payload
             .base_url
             .filter(|value| !value.trim().is_empty())
@@ -4853,6 +5042,44 @@ async fn delete_provider(
         "success": true,
         "message": "Provider deleted successfully"
     })))
+}
+
+/// Saves which providers and models the composer model dropdown lists.
+/// Persists immediately, like the other provider routes.
+async fn update_provider_menu(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Json(payload): Json<crate::config::ModelMenuConfig>,
+) -> Result<Json<crate::config::ModelMenuConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let clean = |values: Vec<String>| -> Vec<String> {
+        let mut out: Vec<String> = values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    };
+    let menu = crate::config::ModelMenuConfig {
+        hidden_providers: clean(payload.hidden_providers),
+        hidden_models: clean(payload.hidden_models),
+        hide_older_than_days: payload.hide_older_than_days.filter(|days| *days > 0),
+    };
+
+    let mut config = agent.get_config().await;
+    config.model_menu = menu.clone();
+    agent.replace_config(config).await;
+    agent.save_config(&config_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to save config: {}", e),
+            }),
+        )
+    })?;
+
+    Ok(Json(menu))
 }
 
 async fn oauth_list_providers() -> Json<serde_json::Value> {
@@ -6563,6 +6790,7 @@ async fn fetch_live_ollama_models_uncached(
                 available: true,
                 input_cost_per_1m: 0.0,
                 output_cost_per_1m: 0.0,
+                release_date: None,
             })
         })
         .collect();
@@ -6797,6 +7025,7 @@ async fn fetch_live_unsloth_models_uncached(
                     available: true,
                     input_cost_per_1m: 0.0,
                     output_cost_per_1m: 0.0,
+                    release_date: None,
                 })
             })
             .collect();
@@ -6890,7 +7119,17 @@ async fn catalog_handler(
     for provider in &mut catalog.providers {
         provider.models.clear();
     }
-    Json(serde_json::to_value(&catalog).unwrap_or(serde_json::json!({})))
+    let mut value = serde_json::to_value(&catalog).unwrap_or(serde_json::json!({}));
+    // The dropdown filters this catalog by the model menu. The menu lives in
+    // config, so it rides along here rather than in the catalog state.
+    let menu = agent.get_config().await.model_menu;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "model_menu".to_string(),
+            serde_json::to_value(menu).unwrap_or(serde_json::json!({})),
+        );
+    }
+    Json(value)
 }
 
 async fn models_handler(
@@ -7873,7 +8112,10 @@ async fn update_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_status, get_config, login, update_config, LoginRequest};
+    use super::{
+        add_provider, auth_status, get_config, login, update_config, update_provider_menu,
+        AddProviderRequest, LoginRequest,
+    };
     use crate::agent::runtime::AgentRuntime;
     use crate::config::{
         Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission,
@@ -8072,6 +8314,101 @@ mod tests {
             persisted.discord.as_ref().unwrap().token,
             "discord-bot-token"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_menu_is_cleaned_persisted_and_survives_settings_saves() {
+        let temp_dir = tempdir().unwrap();
+        let config = test_config(temp_dir.path());
+        let config_path = temp_dir.path().join("config.toml");
+        config.save(&config_path).unwrap();
+        let agent = AgentRuntime::new(config.clone()).unwrap();
+
+        let saved = update_provider_menu(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Json(crate::config::ModelMenuConfig {
+                hidden_providers: vec![
+                    " openrouter ".to_string(),
+                    "openrouter".to_string(),
+                    String::new(),
+                ],
+                hidden_models: vec!["openai:gpt-4o-mini".to_string()],
+                hide_older_than_days: Some(365),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(saved.hidden_providers, vec!["openrouter"]);
+        assert_eq!(saved.hide_older_than_days, Some(365));
+        assert_eq!(saved.hidden_models, vec!["openai:gpt-4o-mini"]);
+
+        // A settings save PUTs a snapshot taken before the toggle.
+        let mut stale = config.redacted_for_api();
+        stale.model_menu = Default::default();
+        stale.agent.temperature = 0.25;
+        update_config(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Json(stale),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(agent.get_config().await.model_menu, saved);
+        let persisted = Config::load(config_path.to_str().unwrap()).unwrap();
+        assert_eq!(persisted.model_menu, saved);
+    }
+
+    #[tokio::test]
+    async fn editing_a_provider_without_a_new_key_keeps_its_stored_key() {
+        let temp_dir = tempdir().unwrap();
+        let config = test_config(temp_dir.path());
+        let config_path = temp_dir.path().join("config.toml");
+        config.save(&config_path).unwrap();
+        let agent = AgentRuntime::new(config.clone()).unwrap();
+
+        let connect: AddProviderRequest = serde_json::from_value(serde_json::json!({
+            "provider_id": "openai",
+            "api_key": "sk-stored",
+        }))
+        .unwrap();
+        let added = add_provider(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Json(connect),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(added["success"], true);
+
+        // The edit modal submits with the key field left blank.
+        let edit: AddProviderRequest = serde_json::from_value(serde_json::json!({
+            "provider_id": "openai",
+            "model": "gpt-4o",
+        }))
+        .unwrap();
+        let edited = add_provider(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Json(edit),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(edited["success"], true);
+
+        let entry = agent
+            .get_config()
+            .await
+            .providers
+            .into_iter()
+            .find(|p| p.effective_id() == "openai")
+            .expect("openai entry");
+        assert_eq!(entry.key_candidates(), vec!["sk-stored".to_string()]);
+        assert_eq!(entry.model, "gpt-4o");
     }
 
     #[tokio::test]

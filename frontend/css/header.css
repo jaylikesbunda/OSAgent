@@ -963,3 +963,24 @@
         padding-inline: 7px;
     }
 }
+
+/* ---- Thinking level: styled like the model picker ---- */
+.header-thinking-control {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.header-thinking-trigger {
+    width: auto;
+    min-width: 96px;
+    max-width: 150px;
+}
+
+.header-thinking-menu {
+    width: 220px;
+}
+
+/* Age-hidden models stay listed in settings, but cannot be ticked on there. */
+.provider-model-check.is-aged {
+    opacity: 0.5;
+}

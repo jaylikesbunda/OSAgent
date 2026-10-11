@@ -25,6 +25,7 @@
     <link rel="stylesheet" href="/static/css/skills.css">
     <link rel="stylesheet" href="/static/css/mcp.css">
     <link rel="stylesheet" href="/static/css/jobs.css">
+    <link rel="stylesheet" href="/static/css/settings.css">
 </head>
 <body>
     <div class="app">
@@ -242,6 +243,7 @@
                             </form>
                             <div id="queue-panel" class="queue-panel hidden" aria-live="polite"></div>
                             <div id="image-preview-container" class="image-preview-container hidden"></div>
+                            <div id="chat-context-chips" class="chat-context-chips hidden" aria-label="Chats used as context"></div>
                             <div class="composer-main">
                                 <textarea id="message-input" rows="1" placeholder="Message OSA..." onkeydown="OSA.handleComposerKeydown(event)" oninput="OSA.handleSlashInput(); OSA.resizeMessageInput(this)"></textarea>
                             </div>
@@ -276,9 +278,16 @@
                                         </div>
                                     </div>
                                     <div class="header-thinking-control">
-                                        <select id="header-thinking-level" class="header-thinking-select" onchange="OSA.handleQuickThinkingChange(event)" title="Thinking level">
+                                        <select id="header-thinking-level" class="hidden" onchange="OSA.handleQuickThinkingChange(event)" tabindex="-1" aria-hidden="true">
                                             <option value="auto">Auto</option>
                                         </select>
+                                        <button class="model-trigger header-thinking-trigger" id="header-thinking-trigger" type="button" onclick="OSA.toggleThinkingMenu()" onkeydown="OSA.handleThinkingTriggerKeydown(event)" title="Thinking level" aria-haspopup="listbox" aria-expanded="false" aria-controls="header-thinking-menu">
+                                            <span class="model-trigger-label" id="header-thinking-label">Auto</span>
+                                            <span class="model-trigger-chevron" aria-hidden="true">&#9662;</span>
+                                        </button>
+                                        <div id="header-thinking-menu" class="model-picker-popover header-thinking-menu hidden" role="listbox" aria-label="Thinking level">
+                                            <div class="model-dropdown-list" id="header-thinking-list"></div>
+                                        </div>
                                     </div>
                                     <button id="mic-btn" class="input-icon-btn" onclick="toggleRecording()" title="Voice input" aria-pressed="false">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>
@@ -591,18 +600,36 @@
                 <div class="settings-pane active" id="pane-models">
                     <div class="settings-pane-header">
                         <h2>Models</h2>
-                        <p class="settings-pane-desc">Your active model, connected providers, and the model catalog.</p>
+                        <p class="settings-pane-desc">Connect providers and choose which of their models appear in the model menu.</p>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Current Route</div>
                         <div id="provider-routing-summary" class="provider-routing-summary">Loading...</div>
                     </div>
                     <div class="settings-group">
-                        <div class="settings-group-title">Providers</div>
+                        <div class="settings-group-title">Model Menu</div>
                         <div class="settings-field">
-                            <input type="text" id="model-catalog-search" placeholder="Search all models..." oninput="OSA.debounce('settingsModelSearch', () => OSA.filterSettingsModels(this.value), 200)" />
+                            <label for="model-menu-age">Hide models older than</label>
+                            <select id="model-menu-age" onchange="OSA.setModelMenuAge(this.value)">
+                                <option value="">Off (show all)</option>
+                                <option value="90">3 months</option>
+                                <option value="180">6 months</option>
+                                <option value="365">1 year</option>
+                                <option value="730">2 years</option>
+                            </select>
+                            <span class="settings-field-hint">Uses each model's release date from models.dev. Models with no known date always show. Your active model and favourites are never hidden.</span>
                         </div>
-                        <div id="model-catalog-list" class="model-catalog-list">Loading...</div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Connected</div>
+                        <div id="connected-provider-list" class="provider-list">Loading...</div>
+                        <button type="button" class="btn-ghost provider-add-toggle" id="add-provider-toggle" onclick="OSA.toggleAddProviderList()" aria-expanded="false" aria-controls="add-provider-panel">+ Add provider</button>
+                        <div id="add-provider-panel" class="provider-add-panel hidden">
+                            <div class="settings-field">
+                                <input type="text" id="add-provider-search" placeholder="Find a provider..." autocomplete="off" oninput="OSA.filterAvailableProviders(this.value)" />
+                            </div>
+                            <div id="available-provider-list" class="provider-list"></div>
+                        </div>
                     </div>
                     <details class="settings-advanced">
                         <summary>Advanced</summary>
@@ -966,16 +993,18 @@
                                 <select id="setting-stt-provider">
                                     <option value="browser">Browser built-in</option>
                                     <option value="whisper-local">Local Whisper</option>
+                                    <option value="sherpa-local">Offline voice</option>
                                 </select>
-                                <span class="settings-field-hint">Where dictated mic audio is transcribed. Local Whisper needs the runtime and a model installed below.</span>
+                                <span class="settings-field-hint">Where dictated mic audio is transcribed. Local Whisper needs the runtime and a model installed below. Offline voice is set up in the card below.</span>
                             </div>
                             <div class="settings-field flex-1">
                                 <label for="setting-tts-provider">Output &mdash; text to speech</label>
                                 <select id="setting-tts-provider">
                                     <option value="browser">Browser built-in</option>
                                     <option value="piper-local">Local Piper</option>
+                                    <option value="sherpa-local">Offline voice</option>
                                 </select>
-                                <span class="settings-field-hint">Which engine speaks replies. Local Piper needs the runtime and a voice installed below.</span>
+                                <span class="settings-field-hint">Which engine speaks replies. Local Piper needs the runtime and a voice installed below. Offline voice is set up in the card below.</span>
                             </div>
                         </div>
                         <div class="settings-field-row">
@@ -1049,6 +1078,17 @@
                                 </div>
                             </div>
                         </details>
+                    </div>
+                    <div class="settings-group sherpa-voice-card" id="sherpa-voice-card">
+                        <div class="settings-group-title">Offline Voice</div>
+                        <p class="settings-field-hint">Speech input and output that run on this computer with no network service. One download of about 525 MB. Use it when browser speech is blocked, as it is in the desktop app.</p>
+                        <div class="sherpa-voice-state" id="sherpa-voice-state">Checking…</div>
+                        <div class="sherpa-voice-progress hidden" id="sherpa-voice-progress">
+                            <span class="sherpa-voice-bar-fill" id="sherpa-voice-bar-fill"></span>
+                        </div>
+                        <div class="sherpa-voice-actions">
+                            <button type="button" class="btn-primary" id="sherpa-voice-action" data-mode="install" onclick="OSA.onSherpaVoiceAction()">Set up offline voice</button>
+                        </div>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Voice Models</div>
@@ -1472,22 +1512,26 @@
                         </div>
                         <div class="validation-badge hidden" id="validation-badge"></div>
                     </div>
-                    <div class="provider-input-group">
-                        <label for="provider-base-url" class="provider-input-label">Base URL</label>
-                        <div class="provider-input-wrapper">
-                            <svg class="provider-input-icon" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8.523 12.129l-1.771 1.771a4.25 4.25 0 0 1-5.98-5.98l1.772-1.771.707.707-1.771 1.771a3.25 3.25 0 0 0 4.56 4.56l1.772-1.771.707.707zm1.394-1.394l1.771-1.771a4.25 4.25 0 0 0-5.98-5.98L2.546 4.756l.707.707 1.771-1.771a3.25 3.25 0 0 1 4.56 4.56l-1.771 1.771.707.707zM5.563 10.437l5.06-5.06.707.707-5.06 5.06-.707-.707z"/></svg>
-                            <input type="text" id="provider-base-url" class="provider-input" placeholder="https://api.example.com/v1" />
-                        </div>
-                    </div>
                     <a href="#" class="api-key-link hidden" id="api-key-link">
                         <svg class="icon-inline" viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M8.523 12.129l-1.771 1.771a4.25 4.25 0 0 1-5.98-5.98l1.772-1.771.707.707-1.771 1.771a3.25 3.25 0 0 0 4.56 4.56l1.772-1.771.707.707zm1.394-1.394l1.771-1.771a4.25 4.25 0 0 0-5.98-5.98L2.546 4.756l.707.707 1.771-1.771a3.25 3.25 0 0 1 4.56 4.56l-1.771 1.771.707.707z"/></svg>
                         Get API key from <span id="api-key-link-name">provider</span>
                     </a>
+                    <!-- Endpoint is only needed for custom and local servers, so it stays folded for the presets. -->
+                    <details class="provider-advanced" id="provider-advanced">
+                        <summary>Endpoint</summary>
+                        <div class="provider-input-group">
+                            <label for="provider-base-url" class="provider-input-label">Base URL</label>
+                            <div class="provider-input-wrapper">
+                                <svg class="provider-input-icon" viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8.523 12.129l-1.771 1.771a4.25 4.25 0 0 1-5.98-5.98l1.772-1.771.707.707-1.771 1.771a3.25 3.25 0 0 0 4.56 4.56l1.772-1.771.707.707zm1.394-1.394l1.771-1.771a4.25 4.25 0 0 0-5.98-5.98L2.546 4.756l.707.707 1.771-1.771a3.25 3.25 0 0 1 4.56 4.56l-1.771 1.771.707.707zM5.563 10.437l5.06-5.06.707.707-5.06 5.06-.707-.707z"/></svg>
+                                <input type="text" id="provider-base-url" class="provider-input" placeholder="https://api.example.com/v1" />
+                            </div>
+                        </div>
+                    </details>
                 </div>
 
                 <!-- Model Section -->
                 <div class="provider-section">
-                    <label class="provider-input-label">Default Model (Optional)</label>
+                    <label class="provider-input-label">Default Model</label>
                     <div class="model-select-wrapper" id="modal-model-select-wrapper">
                         <div class="model-select-display" id="modal-model-select-display" onclick="OSA.toggleModalModelDropdown()">
                             <span id="modal-model-select-text">Use provider default (choose later)</span>
@@ -1507,13 +1551,14 @@
                 <div class="provider-section">
                     <label class="provider-checkbox">
                         <input type="checkbox" id="provider-default" />
-                        <span>Set as default provider</span>
+                        <span>Use as default provider</span>
                     </label>
                 </div>
             </div>
             <div class="provider-modal-footer">
+                <button type="button" class="btn-ghost btn-danger provider-remove-btn hidden" id="provider-remove-btn" onclick="OSA.removeProvider()">Remove</button>
                 <button class="btn-ghost" onclick="OSA.closeAddProviderModal()">Cancel</button>
-                <button class="btn-action" onclick="OSA.addProvider()" id="add-provider-btn">Add Provider</button>
+                <button class="btn-action" onclick="OSA.addProvider()" id="add-provider-btn">Connect</button>
             </div>
         </div>
     </div>

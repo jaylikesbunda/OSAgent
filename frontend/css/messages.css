@@ -981,3 +981,34 @@
     content: none !important;
     display: none !important;
 }
+
+/* ---- Local images and files in chat ---- */
+.chat-local-image {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: zoom-in;
+}
+
+.chat-local-image:not([src]) {
+    width: 160px;
+    height: 100px;
+    background: var(--bg-tertiary);
+}
+
+.chat-local-file {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+.chat-local-image-error {
+    display: inline-block;
+    margin: 4px 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}

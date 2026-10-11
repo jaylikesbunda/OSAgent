@@ -417,10 +417,12 @@ const TITLEBAR_INJECTION_SCRIPT: &str = r#"(function () {
     if (!root) { setTimeout(init, 100); return; }
     var bar = document.createElement('div');
     bar.id = BAR_ID;
-    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;height:36px;background:#0f0f0f;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;padding:0 8px;z-index:2147483647;user-select:none;-webkit-user-select:none;font-family:"Segoe UI",system-ui,sans-serif;color:#e8e8e8;font-size:12px;';
+    // Colors come from the page's theme variables, so the bar follows the
+    // palette the user picks, including live changes.
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;height:36px;background:var(--bg-primary,#0a0a0a);border-bottom:1px solid var(--border,#1c1c1c);display:flex;align-items:center;padding:0 8px;z-index:2147483647;user-select:none;-webkit-user-select:none;font-family:"Segoe UI",system-ui,sans-serif;color:var(--text-primary,#e8e8e8);font-size:12px;';
     var brand = document.createElement('div');
     brand.textContent = 'OSAgent';
-    brand.style.cssText = 'font-weight:600;letter-spacing:.3px;padding:0 8px;';
+    brand.style.cssText = 'font-weight:600;letter-spacing:.3px;padding:0 8px;color:var(--text-primary,#e8e8e8);';
     var controls = document.createElement('div');
     controls.id = 'osagent-titlebar-controls';
     controls.style.cssText = 'display:flex;gap:2px;margin-left:auto;height:28px;';
@@ -428,18 +430,18 @@ const TITLEBAR_INJECTION_SCRIPT: &str = r#"(function () {
       var b = document.createElement('button');
       b.innerHTML = svg;
       b.title = title;
-      b.style.cssText = 'width:34px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:0;border-radius:4px;cursor:pointer;color:#b0b0b0;padding:0;';
-      b.addEventListener('mouseenter', function () { b.style.background = hoverBg; b.style.color = '#ffffff'; });
-      b.addEventListener('mouseleave', function () { b.style.background = 'transparent'; b.style.color = '#b0b0b0'; });
+      b.style.cssText = 'width:34px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:0;border-radius:4px;cursor:pointer;color:var(--text-muted,#b0b0b0);padding:0;';
+      b.addEventListener('mouseenter', function () { b.style.background = hoverBg; b.style.color = 'var(--text-primary,#ffffff)'; });
+      b.addEventListener('mouseleave', function () { b.style.background = 'transparent'; b.style.color = 'var(--text-muted,#b0b0b0)'; });
       b.addEventListener('click', handler);
       return b;
     }
     var win = (window.__TAURI__ && (window.__TAURI__.window || window.__TAURI__)) || {};
     var appWindow = win.getCurrentWindow ? win.getCurrentWindow() : (win.appWindow || null);
-    var minimize = btn('<svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.4"/></svg>', 'Minimize', '#262626', function () {
+    var minimize = btn('<svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.4"/></svg>', 'Minimize', 'var(--bg-hover,#262626)', function () {
       if (appWindow) { appWindow.minimize().catch(function () {}); }
     });
-    var close = btn('<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>', 'Close to tray', '#c0392b', function () {
+    var close = btn('<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>', 'Close to tray', 'var(--error,#c0392b)', function () {
       if (appWindow) { appWindow.hide().catch(function () {}); }
     });
     controls.appendChild(minimize);
@@ -3148,6 +3150,10 @@ async fn open_native_webui_impl(app: AppHandle) -> Result<(), String> {
             .min_inner_size(800.0, 600.0)
             .decorations(false)
             .center()
+            // Tauri's native file-drop handler swallows in-page HTML5 drag and
+            // drop on Windows, which breaks reordering sidebar sections and
+            // dropping files onto the composer. The page handles drops itself.
+            .disable_drag_drop_handler()
             .initialization_script(TITLEBAR_INJECTION_SCRIPT)
             .build()
             .map_err(|e| e.to_string())?;

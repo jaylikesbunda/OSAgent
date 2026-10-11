@@ -8,7 +8,7 @@ OSA.currentProviderApiKeyUrl = null;
 OSA.currentProviderOAuthSupported = false;
 OSA.pendingProviderModel = null;
 OSA.validationDebounce = null;
-OSA.expandedModels = {};
+OSA.currentProviderConnected = false;
 OSA.modalModelDropdownOpen = false;
 OSA.modalModelSearchQuery = '';
 OSA.modalProviderModels = [];
@@ -45,6 +45,7 @@ OSA.modelDropdownCatalogKey = function() {
         OSA.currentModelProviderId || '',
         OSA.currentModelId || '',
         favourites,
+        OSA.modelMenuSignature(),
     ].join('#');
 };
 
@@ -74,9 +75,12 @@ OSA.toggleFavourite = function(modelId, providerId, modelName, providerName) {
         OSA.favourites.push({ id: modelId, provider_id: providerId, name: modelName, provider_name: providerName });
     }
     OSA.saveFavourites();
-    if (OSA.modelDropdownOpen) OSA.renderModelDropdown();
-    const searchInput = document.getElementById('model-catalog-search');
-    OSA.renderSettingsModelList(searchInput ? searchInput.value : '');
+    if (OSA.modelDropdownOpen) {
+        // The list re-renders in place, so keep the user's scroll position.
+        const list = document.querySelector('#model-dropdown .model-dropdown-list');
+        OSA._pendingModelListScroll = list ? list.scrollTop : null;
+        OSA.renderModelDropdown();
+    }
 };
 
 // ── Model Option HTML Builder ────────────────────────────────
@@ -300,8 +304,11 @@ OSA.openModelDropdown = function(initialQuery) {
         OSA.modelSearchQuery = initialQuery || '';
         searchInput.focus();
     }
+    // Reset the list's cache key rather than overwriting its markup: the
+    // render below restores the cached list, and a stale key used to skip
+    // that restore and leave the "Loading" placeholder on screen.
     const list = dropdown.querySelector('.model-dropdown-list');
-    if (list) list.innerHTML = '<div class="model-empty">Loading models...</div>';
+    if (list) list._osaModelDropdownCacheKey = '';
     OSA.renderModelDropdown();
     OSA.refreshProviderCatalogInBackground();
 };
@@ -403,6 +410,11 @@ OSA.afterModelDropdownRender = function() {
     OSA.modelPickerActiveIndex = OSA.modelOptionNodes.findIndex(function(option) {
         return option.classList.contains('active');
     });
+    const list = dropdown.querySelector('.model-dropdown-list');
+    if (list && OSA._pendingModelListScroll != null) {
+        list.scrollTop = OSA._pendingModelListScroll;
+        OSA._pendingModelListScroll = null;
+    }
     OSA.positionModelDropdown();
 };
 
@@ -413,12 +425,15 @@ OSA.renderModelDropdown = async function() {
     const query = OSA.modelSearchQuery.trim();
     const requestId = ++OSA.modelSearchRequestId;
     const currentModel = (OSA.currentModelId || document.getElementById('model-input')?.dataset.modelId || '').toLowerCase();
+    // The model menu applies to browse and search alike. The active model and
+    // favourites are never hidden (see OSA.modelShownInMenu).
+    const hidden = OSA.modelMenuFilter();
 
     if (query.length >= 1) {
         try {
             const models = await OSA.getJson(`/api/providers/search?q=${encodeURIComponent(query)}`);
             if (!OSA.modelDropdownOpen || requestId !== OSA.modelSearchRequestId || query !== OSA.modelSearchQuery.trim()) return;
-            OSA.renderModelSearchResults(models, currentModel);
+            OSA.renderModelSearchResults((models || []).filter(function(m) { return OSA.modelShownInMenu(hidden, m.provider_id, m); }), currentModel);
         } catch (e) {
             if (!OSA.modelDropdownOpen || requestId !== OSA.modelSearchRequestId) return;
             dropdown.querySelector('.model-dropdown-list').innerHTML = '<div class="model-empty">Search failed</div>';
@@ -479,6 +494,10 @@ OSA.renderModelDropdown = async function() {
         }
     }
 
+    // Only the Current entry hides a row from the provider groups below. A
+    // favourite appears in its favourites block and again under its provider.
+    const currentKeys = new Set(renderedModelKeys);
+
     if (OSA.favourites.length > 0) {
         html += '<div class="model-group-title model-group-favs">★ Favourites</div>';
         for (const fav of OSA.favourites) {
@@ -502,7 +521,7 @@ OSA.renderModelDropdown = async function() {
 
     const connectedModels = (all_models || []).filter(function(m) {
         var p = providersById[m.provider_id];
-        return p && p.connected;
+        return p && p.connected && OSA.modelShownInMenu(hidden, m.provider_id, m);
     });
     const grouped = {};
     for (var i = 0; i < connectedModels.length; i++) {
@@ -523,7 +542,7 @@ OSA.renderModelDropdown = async function() {
         for (var mi = 0; mi < gModels.length; mi++) {
             var gm = gModels[mi];
             var gKey = gm.id + '|' + gm.provider_id;
-            if (renderedModelKeys.has(gKey.toLowerCase())) continue;
+            if (currentKeys.has(gKey.toLowerCase())) continue;
             html += OSA.buildModelOptionHtml(gm, gm.provider_id, currentModel, {});
             renderedModelKeys.add(gKey.toLowerCase());
         }
@@ -537,7 +556,7 @@ OSA.renderModelDropdown = async function() {
     for (var pi = 0; pi < sortedProviders.length; pi++) {
         var provider2 = sortedProviders[pi];
         if (provider2.connected) continue;
-        var pCount = (provider2.models || []).length;
+        var pCount = (provider2.models || []).filter(function(m) { return OSA.modelShownInMenu(hidden, provider2.id, m); }).length;
         if (pCount === 0) continue;
         unconnectedProviders++;
         unconnectedCount += pCount;
@@ -892,188 +911,340 @@ OSA.selectModalModel = function(modelId, modelName, providerId) {
     OSA.closeModalModelDropdown();
 };
 
-// ── Settings Model Filter ────────────────────────────────────
+// ── Settings Models: connected providers, model menu, add provider ───────
+// Connected providers are the rows people manage. Each row carries its own
+// model-menu switch and a model list that renders on first expand. The catalog
+// is cached (loadProviderCatalog), so toggling and expanding never refetch it.
 
-OSA.filterSettingsModels = function(query) {
-    OSA.renderSettingsModelList(query || '');
-};
-
-// ── Settings Models Tab: one search box, one unified provider list ───────
-// The catalog is fetched once and cached (loadProviderCatalog). Expands and
-// searches render from that cache: opening the tab and toggling a provider
-// never re-downloads the catalog.
-
-OSA.modelsShowAll = OSA.modelsShowAll || {};
 OSA.modelsConnectedMap = OSA.modelsConnectedMap || {};
-OSA.MODELS_SEARCH_CAP = 100;
-OSA.MODELS_BROWSE_CAP = 12;
-
-OSA.filterSettingsModels = function(query) {
-    OSA.renderModelsPane(query || '');
-};
 
 OSA.modelsCurrentModelId = function() {
     return (OSA.currentModelId || document.getElementById('model-input')?.dataset.modelId || '').toLowerCase();
 };
 
-OSA.renderModelsPane = function(query) {
-    const catalogList = document.getElementById('model-catalog-list');
-    if (!catalogList) return;
-
+OSA.findCatalogProvider = function(providerId) {
     const providers = (OSA.providerCatalog && OSA.providerCatalog.providers) || [];
-    if (providers.length === 0) {
-        catalogList.innerHTML = '<div class="model-empty">No providers available</div>';
-        return;
-    }
-
-    const q = (query || '').toLowerCase().trim();
-    if (q) {
-        catalogList.innerHTML = OSA.modelsSearchHtml(providers, q, (query || '').trim());
-        return;
-    }
-
-    const connectedMap = OSA.modelsConnectedMap || {};
-    const currentModel = OSA.modelsCurrentModelId();
-    const connected = [];
-    const rest = [];
-    for (const provider of providers) {
-        (connectedMap[provider.id] ? connected : rest).push(provider);
-    }
-
-    let html = '';
-    for (const provider of connected) {
-        html += OSA.modelsCardHtml(provider, connectedMap[provider.id], currentModel);
-    }
-    for (const provider of rest) {
-        html += OSA.modelsCardHtml(provider, null, currentModel);
-    }
-    catalogList.innerHTML = html;
+    return providers.find(function(p) { return p.id === providerId; }) || null;
 };
 
-OSA.modelsSearchHtml = function(providers, q, rawQuery) {
-    const currentModel = OSA.modelsCurrentModelId();
-    const connectedMap = OSA.modelsConnectedMap || {};
-    // Connected providers first, following the same preferred provider order as
-    // the dropdown, so their matches are not pushed out by the search cap.
-    const orderedProviders = OSA.sortProvidersForDropdown(providers.map(function(provider) {
-        return Object.assign({}, provider, { connected: !!connectedMap[provider.id] });
-    }));
-    const rows = [];
-    for (const provider of orderedProviders) {
-        const models = provider.models || [];
-        for (const m of models) {
-            if ((m.name || '').toLowerCase().includes(q)
-                || (m.id || '').toLowerCase().includes(q)
-                || (provider.name || '').toLowerCase().includes(q)) {
-                rows.push(OSA.buildModelOptionHtml(m, provider.id, currentModel, { inSettings: true, showProvider: true }));
-                if (rows.length >= OSA.MODELS_SEARCH_CAP) break;
-            }
-        }
-        if (rows.length >= OSA.MODELS_SEARCH_CAP) break;
-    }
-    if (rows.length === 0) {
-        return '<div class="model-empty">No models match "' + OSA.escapeHtml(rawQuery) + '"</div>';
-    }
-    return rows.join('')
-        + (rows.length >= OSA.MODELS_SEARCH_CAP
-            ? '<div class="model-empty">Showing first ' + OSA.MODELS_SEARCH_CAP + ' — refine your search</div>'
-            : '');
+// ── Model menu visibility ───────────────────────────────────
+// Stored in config (PUT /api/providers/menu) and delivered with the catalog.
+// The active model and favourites are never hidden, so the menu can never
+// strand the user away from the model they are using.
+
+OSA.modelMenu = function() {
+    const menu = (OSA.providerCatalog && OSA.providerCatalog.model_menu) || {};
+    return {
+        hidden_providers: menu.hidden_providers || [],
+        hidden_models: menu.hidden_models || [],
+        hide_older_than_days: menu.hide_older_than_days || null,
+    };
 };
 
-OSA.modelsCardHtml = function(provider, connectedEntry, currentModel) {
-    const models = provider.models || [];
-    const connected = !!connectedEntry;
-    // Provider cards start collapsed, including connected ones. Users expand a
-    // card explicitly via the toggle, whose state lives in OSA.expandedModels.
-    const expanded = !!OSA.expandedModels[provider.id];
-    const isDefault = connectedEntry && connectedEntry.is_default;
+// Earliest release date (YYYY-MM-DD) still shown when hiding by age, or '' when off.
+OSA.modelMenuCutoff = function(days) {
+    if (!days) return '';
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    return cutoff.toISOString().slice(0, 10);
+};
 
-    let badge;
-    if (connected) {
-        badge = provider.oauth_supported
-            ? '<span class="badge badge-oauth">OAuth</span>'
-            : '<span class="badge badge-apikey">Connected</span>';
-        if (isDefault) badge += ' <span class="badge badge-apikey" style="opacity:0.7">active</span>';
-    } else {
-        badge = '<span class="badge badge-disconnected">Not connected</span>';
+// True when a model's release date is older than the menu's age threshold.
+// Models without a known date are never hidden by age.
+OSA.modelIsTooOld = function(releaseDate) {
+    const cutoff = OSA.modelMenuCutoff(OSA.modelMenu().hide_older_than_days);
+    return !!(cutoff && releaseDate && releaseDate < cutoff);
+};
+
+OSA.modelMenuKey = function(providerId, modelId) {
+    return providerId + ':' + modelId;
+};
+
+// Returns a predicate that says whether a model is kept out of the dropdown,
+// either by an explicit choice or by the age threshold. Pass no release date
+// to test explicit choices only. Built once per render, so a 6k-model catalog
+// costs a few Set lookups per model.
+OSA.modelMenuFilter = function() {
+    const menu = OSA.modelMenu();
+    const providers = new Set(menu.hidden_providers);
+    const models = new Set(menu.hidden_models);
+    const cutoff = OSA.modelMenuCutoff(menu.hide_older_than_days);
+    return function(providerId, modelId, releaseDate) {
+        if (providers.has(providerId) || models.has(OSA.modelMenuKey(providerId, modelId))) return true;
+        return !!(cutoff && releaseDate && releaseDate < cutoff);
+    };
+};
+
+// Favourites always show, and so does anything the dropdown would not hide.
+OSA.modelShownInMenu = function(hidden, providerId, model) {
+    return OSA.isFavourite(model.id, providerId) || !hidden(providerId, model.id, model.release_date);
+};
+
+OSA.modelMenuSignature = function() {
+    const menu = OSA.modelMenu();
+    return menu.hidden_providers.join(',') + '|' + menu.hidden_models.join(',') + '|' + (menu.hide_older_than_days || '');
+};
+
+// Optimistic: the UI and the cached catalog change first, then the server
+// confirms. A rejected save puts the previous menu back.
+// `patch` holds only the fields that change; the rest of the menu carries over.
+OSA.saveModelMenu = async function(patch, providerId, rerenderChecks) {
+    const previous = OSA.modelMenu();
+    const next = Object.assign({}, previous, patch);
+    const apply = function(menu) {
+        if (OSA.providerCatalog) OSA.providerCatalog.model_menu = menu;
+        const cached = OSA.getCachedConfig ? OSA.getCachedConfig() : null;
+        if (cached) OSA.setCachedConfig({ ...cached, model_menu: menu });
+        OSA.clearModelDropdownRenderCache();
+        OSA.syncModelMenuAgeSelect();
+    };
+    apply(next);
+    OSA.refreshProviderRow(providerId, rerenderChecks);
+    try {
+        const res = await OSA.fetchWithAuth('/api/providers/menu', {
+            method: 'PUT',
+            body: JSON.stringify(next)
+        });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    } catch (error) {
+        apply(previous);
+        OSA.renderConnectedProviders();
+        alert('Failed to update the model menu: ' + error.message);
     }
+};
 
-    const btn = connected
-        ? '<button class="btn-ghost" onclick="OSA.openAddProviderModal(' + OSA.jsArg(provider.id) + ', ' + OSA.jsArg(connectedEntry.model || '') + ')" style="padding:4px 12px;font-size:12px">Manage</button>'
-        : '<button class="btn-action" onclick="OSA.openAddProviderModal(' + OSA.jsArg(provider.id) + ')" style="padding:4px 12px;font-size:12px">Connect</button>';
+OSA.setProviderMenuVisible = function(providerId, visible) {
+    const menu = OSA.modelMenu();
+    const hidden = menu.hidden_providers.filter(function(id) { return id !== providerId; });
+    if (!visible) hidden.push(providerId);
+    OSA.saveModelMenu({ hidden_providers: hidden }, providerId, false);
+};
 
-    const meta = connectedEntry
-        ? '<div class="provider-catalog-meta" style="margin-top:2px">Route: <span style="color:var(--text-primary)">' + OSA.escapeHtml(connectedEntry.model || 'provider default') + '</span></div>'
-        : '<div class="provider-catalog-meta">' + OSA.escapeHtml(provider.description || '') + '</div>';
+OSA.setModelMenuVisible = function(providerId, modelId, visible) {
+    const menu = OSA.modelMenu();
+    const key = OSA.modelMenuKey(providerId, modelId);
+    const hidden = menu.hidden_models.filter(function(k) { return k !== key; });
+    if (!visible) hidden.push(key);
+    OSA.saveModelMenu({ hidden_models: hidden }, providerId, false);
+};
 
-    let modelSection = '';
-    if (models.length > 0) {
-        modelSection = '<div class="provider-models-toggle' + (expanded ? ' expanded' : '') + '" onclick="OSA.toggleProviderModels(' + OSA.jsArg(provider.id) + ')">'
-            + '<span>' + models.length + ' model' + (models.length !== 1 ? 's' : '') + ' ' + (expanded ? '&#9660;' : '&#9654;') + '</span>'
-            + '</div>'
-            + '<div class="provider-catalog-models' + (expanded ? ' expanded' : '') + '" id="models-' + OSA.escapeAttr(provider.id) + '"'
-            + (expanded ? ' data-rendered="1"' : '') + '>'
-            + (expanded ? OSA.modelsRowsHtml(provider, currentModel) : '')
-            + '</div>';
+// days: 0 or null turns the age filter off.
+OSA.setModelMenuAge = function(days) {
+    const value = parseInt(days, 10);
+    OSA.saveModelMenu({ hide_older_than_days: value > 0 ? value : null }, null, false);
+};
+
+// Bulk Show all / Hide all for one provider's catalog models.
+OSA.setProviderModelsVisible = function(providerId, visible) {
+    const menu = OSA.modelMenu();
+    const keys = new Set(menu.hidden_models);
+    const provider = OSA.findCatalogProvider(providerId);
+    for (const m of ((provider && provider.models) || [])) {
+        const key = OSA.modelMenuKey(providerId, m.id);
+        if (visible) keys.delete(key); else keys.add(key);
     }
+    OSA.saveModelMenu({ hidden_models: [...keys] }, providerId, true);
+};
 
-    return '<div class="provider-catalog-item">'
+// ── Connected provider rows ─────────────────────────────────
+
+OSA.providerAuthLabel = function(entry) {
+    if (entry.api_key_preview === '(oauth)') return 'OAuth sign-in';
+    if (entry.key_count > 1) return entry.key_count + ' API keys';
+    if (entry.key_count === 1) return 'API key saved';
+    return 'No API key';
+};
+
+OSA.providerModelsSummary = function(providerId) {
+    const provider = OSA.findCatalogProvider(providerId);
+    const models = (provider && provider.models) || [];
+    if (!models.length) return 'No model list';
+    const hidden = OSA.modelMenuFilter();
+    const shown = models.filter(function(m) { return OSA.modelShownInMenu(hidden, providerId, m); }).length;
+    return models.length + ' models · ' + shown + ' in menu';
+};
+
+OSA.providerRowHtml = function(provider, entry) {
+    const id = entry.id;
+    const menuOn = OSA.modelMenu().hidden_providers.indexOf(id) === -1;
+    return '<div class="provider-catalog-item provider-row" data-provider-id="' + OSA.escapeAttr(id) + '">'
         + '<div class="provider-catalog-header">'
-        + '<div class="provider-catalog-title">'
-        + '<span class="provider-catalog-name">' + OSA.escapeHtml(provider.name) + '</span> '
-        + badge
+        +   '<div class="provider-catalog-title">'
+        +     '<span class="provider-catalog-name">' + OSA.escapeHtml(provider.name || id) + '</span>'
+        +     (entry.is_default ? ' <span class="badge badge-apikey">Default</span>' : '')
+        +   '</div>'
+        +   '<button type="button" class="btn-ghost provider-row-btn" onclick="OSA.openAddProviderModal(' + OSA.jsArg(id) + ')">Edit</button>'
         + '</div>'
-        + btn
+        + '<div class="provider-catalog-meta">'
+        +   OSA.escapeHtml(OSA.providerAuthLabel(entry)) + ' · Model: ' + OSA.escapeHtml(entry.model || 'provider default')
         + '</div>'
-        + meta
-        + modelSection
+        + '<div class="provider-row-controls">'
+        +   '<label class="toggle-switch" title="Show this provider in the model menu">'
+        +     '<input type="checkbox" aria-label="Show ' + OSA.escapeAttr(provider.name || id) + ' in model menu"'
+        +       (menuOn ? ' checked' : '') + ' onchange="OSA.setProviderMenuVisible(' + OSA.jsArg(id) + ', this.checked)" />'
+        +     '<span class="toggle-slider"></span>'
+        +   '</label>'
+        +   '<span>Show in model menu</span>'
+        + '</div>'
+        + '<details class="provider-row-models" data-provider-id="' + OSA.escapeAttr(id) + '" ontoggle="OSA.onProviderModelsToggle(this)">'
+        +   '<summary><span class="provider-row-models-count">' + OSA.escapeHtml(OSA.providerModelsSummary(id)) + '</span></summary>'
+        +   '<div class="provider-row-models-tools">'
+        +     '<button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.setProviderModelsVisible(' + OSA.jsArg(id) + ', true)">Show all</button>'
+        +     '<button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.setProviderModelsVisible(' + OSA.jsArg(id) + ', false)">Hide all</button>'
+        +     '<div class="settings-field provider-row-models-filter"><input type="text" placeholder="Filter models..." autocomplete="off" oninput="OSA.applyProviderModelFilter(this.closest(\'details\'))" /></div>'
+        +   '</div>'
+        +   '<div class="provider-model-checks"></div>'
+        + '</details>'
         + '</div>';
 };
 
-OSA.modelsRowsHtml = function(provider, currentModel) {
-    const showAll = !!OSA.modelsShowAll[provider.id];
-    const isFav = function(m) { return OSA.isFavourite(m.id, m.provider_id || provider.id); };
-    const activeId = ((OSA.modelsConnectedMap[provider.id] || {}).model || '').toLowerCase();
-    // Favourites and the active model first, catalog order otherwise.
-    const favs = [];
-    const rest = [];
-    for (const m of (provider.models || [])) {
-        (isFav(m) ? favs : rest).push(m);
-    }
-    if (activeId) {
-        const idx = rest.findIndex(function(m) { return (m.id || '').toLowerCase() === activeId; });
-        if (idx > 0) rest.unshift(rest.splice(idx, 1)[0]);
-    }
-    const ordered = favs.concat(rest);
-
-    const cap = OSA.MODELS_BROWSE_CAP;
-    const shown = showAll ? ordered : ordered.slice(0, cap);
-    let html = '';
-    for (const m of shown) {
-        html += OSA.buildModelOptionHtml(m, provider.id, currentModel, { inSettings: true });
-    }
-    if (!showAll && ordered.length > cap) {
-        html += '<button class="btn-ghost" onclick="OSA.toggleModelsShowAll(' + OSA.jsArg(provider.id) + ')" style="margin:4px 0 2px">Show all ' + ordered.length + ' models</button>';
-    } else if (showAll && ordered.length > cap) {
-        html += '<button class="btn-ghost" onclick="OSA.toggleModelsShowAll(' + OSA.jsArg(provider.id) + ')" style="margin:4px 0 2px">Show less</button>';
-    }
-    return html || '<div class="model-empty">No models</div>';
+OSA.onProviderModelsToggle = function(details) {
+    if (!details.open || details.dataset.rendered) return;
+    OSA.renderProviderModelChecks(details);
 };
 
-OSA.toggleModelsShowAll = function(providerId) {
-    OSA.modelsShowAll[providerId] = !OSA.modelsShowAll[providerId];
-    const box = document.getElementById('models-' + providerId);
-    if (!box) return;
-    const provider = (OSA.providerCatalog.providers || []).find(function(p) { return p.id === providerId; });
-    if (!provider) return;
-    box.innerHTML = OSA.modelsRowsHtml(provider, OSA.modelsCurrentModelId());
+OSA.renderProviderModelChecks = function(details) {
+    const providerId = details.dataset.providerId;
+    const list = details.querySelector('.provider-model-checks');
+    if (!list) return;
+    details.dataset.rendered = '1';
+    const provider = OSA.findCatalogProvider(providerId);
+    const models = (provider && provider.models) || [];
+    if (!models.length) {
+        list.innerHTML = '<div class="model-empty">This provider has not listed any models yet.</div>';
+        return;
+    }
+    const hidden = OSA.modelMenuFilter();
+    const current = OSA.modelsCurrentModelId();
+    const currentProvider = OSA.currentModelProviderId || providerId;
+    list.innerHTML = models.map(function(m) {
+        const isCurrent = (m.id || '').toLowerCase() === current && currentProvider === providerId;
+        // A model hidden by the age threshold cannot be ticked back on here.
+        // Its box stays off and disabled, and the title says why.
+        const explicit = hidden(providerId, m.id, null);
+        const aged = !explicit && OSA.modelIsTooOld(m.release_date);
+        const checked = !explicit && !aged;
+        return '<div class="provider-model-check' + (aged ? ' is-aged' : '') + '" data-search="' + OSA.escapeAttr(((m.name || '') + ' ' + m.id).toLowerCase()) + '">'
+            + '<input type="checkbox"' + (checked ? ' checked' : '') + (aged ? ' disabled' : '')
+            +   ' title="' + (aged ? 'Older than the model menu age limit' : 'Show in model menu') + '"'
+            +   ' onchange="OSA.setModelMenuVisible(' + OSA.jsArg(providerId) + ', ' + OSA.jsArg(m.id) + ', this.checked)" />'
+            + '<button type="button" class="provider-model-use' + (isCurrent ? ' is-current' : '') + '" title="Use this model"'
+            +   ' onclick="OSA.useModelFromSettings(' + OSA.jsArg(providerId) + ', ' + OSA.jsArg(m.id) + ')">'
+            +   OSA.escapeHtml(m.name || m.id) + '</button>'
+            + '<code>' + OSA.escapeHtml(m.id) + '</code>'
+            + '</div>';
+    }).join('');
+    OSA.applyProviderModelFilter(details);
 };
 
-OSA.renderSettingsModelList = function(query) {
-    // Kept for existing callers (favourites toggle, benchmarks): the single
-    // unified list now owns settings model rendering.
-    OSA.renderModelsPane(query || '');
+OSA.applyProviderModelFilter = function(details) {
+    if (!details) return;
+    const input = details.querySelector('.provider-row-models-filter input');
+    const query = (input ? input.value : '').trim().toLowerCase();
+    details.querySelectorAll('.provider-model-check').forEach(function(row) {
+        row.classList.toggle('hidden', !!query && row.dataset.search.indexOf(query) === -1);
+    });
 };
+
+OSA.useModelFromSettings = function(providerId, modelId) {
+    OSA.closeSettings();
+    OSA.selectModel(modelId, providerId);
+};
+
+// Updates one row in place so an expanded list keeps its scroll position.
+OSA.refreshProviderRow = function(providerId, rerenderChecks) {
+    // No provider id means the change touched every row (the age threshold).
+    const rows = Array.from(document.querySelectorAll('.provider-row'));
+    if (providerId == null) {
+        rows.forEach(function(row) { OSA.refreshProviderRow(row.dataset.providerId, false); });
+        return;
+    }
+    const row = rows.find(function(node) { return node.dataset.providerId === providerId; });
+    if (!row) return;
+    const summary = row.querySelector('.provider-row-models-count');
+    if (summary) summary.textContent = OSA.providerModelsSummary(providerId);
+    const menuToggle = row.querySelector('.provider-row-controls input');
+    if (menuToggle) menuToggle.checked = OSA.modelMenu().hidden_providers.indexOf(providerId) === -1;
+    const details = row.querySelector('.provider-row-models');
+    if (rerenderChecks && details && details.dataset.rendered) OSA.renderProviderModelChecks(details);
+};
+
+OSA.connectedProviderListHtml = function(providers, connectedMap) {
+    const merged = Object.keys(connectedMap).map(function(id) {
+        const catalogProvider = providers.find(function(p) { return p.id === id; });
+        return Object.assign({ id: id, name: connectedMap[id].name || id, models: [] }, catalogProvider || {}, { connected: true });
+    });
+    return OSA.sortProvidersForDropdown(merged).map(function(provider) {
+        return OSA.providerRowHtml(provider, connectedMap[provider.id]);
+    }).join('');
+};
+
+OSA.renderConnectedProviders = function() {
+    const list = document.getElementById('connected-provider-list');
+    if (!list) return;
+    const connectedMap = OSA.modelsConnectedMap || {};
+    if (!Object.keys(connectedMap).length) {
+        list.innerHTML = '<div class="model-empty">No providers connected yet. Add one to start chatting.</div>';
+        return;
+    }
+    const providers = (OSA.providerCatalog && OSA.providerCatalog.providers) || [];
+    list.innerHTML = OSA.connectedProviderListHtml(providers, connectedMap);
+};
+
+// ── Add provider list ───────────────────────────────────────
+
+OSA.availableProviderListHtml = function(query) {
+    const providers = (OSA.providerCatalog && OSA.providerCatalog.providers) || [];
+    const connectedMap = OSA.modelsConnectedMap || {};
+    const q = (query || '').trim().toLowerCase();
+    const rows = OSA.sortProvidersForDropdown(providers.filter(function(p) { return !connectedMap[p.id]; }))
+        .filter(function(p) {
+            return !q || [p.id, p.name, p.description || ''].join(' ').toLowerCase().indexOf(q) !== -1;
+        });
+    if (!rows.length) {
+        return '<div class="model-empty">' + (q
+            ? 'No providers match "' + OSA.escapeHtml(query.trim()) + '"'
+            : 'Every available provider is connected') + '</div>';
+    }
+    return rows.map(function(p) {
+        return '<div class="provider-catalog-item provider-available-row">'
+            + '<div class="provider-catalog-header">'
+            +   '<div class="provider-catalog-title"><span class="provider-catalog-name">' + OSA.escapeHtml(p.name) + '</span></div>'
+            +   '<button type="button" class="btn-action provider-row-btn" onclick="OSA.openAddProviderModal(' + OSA.jsArg(p.id) + ')">Connect</button>'
+            + '</div>'
+            + '<div class="provider-catalog-meta">' + OSA.escapeHtml(p.description || '') + '</div>'
+            + '</div>';
+    }).join('');
+};
+
+OSA.filterAvailableProviders = function(query) {
+    const list = document.getElementById('available-provider-list');
+    if (list) list.innerHTML = OSA.availableProviderListHtml(query);
+};
+
+OSA.refreshAvailableProviders = function() {
+    const panel = document.getElementById('add-provider-panel');
+    if (!panel || panel.classList.contains('hidden')) return;
+    const search = document.getElementById('add-provider-search');
+    OSA.filterAvailableProviders(search ? search.value : '');
+};
+
+OSA.toggleAddProviderList = function() {
+    const panel = document.getElementById('add-provider-panel');
+    const toggle = document.getElementById('add-provider-toggle');
+    if (!panel) return;
+    const open = panel.classList.contains('hidden');
+    panel.classList.toggle('hidden', !open);
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+        const search = document.getElementById('add-provider-search');
+        OSA.filterAvailableProviders(search ? search.value : '');
+        if (search) search.focus();
+    }
+};
+
+// ── Current route and pane load ─────────────────────────────
 
 OSA.renderRoutingOverview = function(catalog, providersData) {
     const summaryEl = document.getElementById('provider-routing-summary');
@@ -1103,64 +1274,48 @@ OSA.renderRoutingOverview = function(catalog, providersData) {
     '</div>';
 };
 
-// ── Settings Providers (single unified list, cached catalog) ────────────
+// Reflects the saved age threshold. A value outside the offered presets gets
+// its own option, so the select never shows the wrong choice.
+OSA.syncModelMenuAgeSelect = function() {
+    const select = document.getElementById('model-menu-age');
+    if (!select) return;
+    const days = OSA.modelMenu().hide_older_than_days;
+    const value = days ? String(days) : '';
+    if (value && !Array.from(select.options).some(function(option) { return option.value === value; })) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = days + ' days';
+        select.appendChild(option);
+    }
+    select.value = value;
+};
 
 OSA.renderSettingsProviders = async function() {
-    const catalogList = document.getElementById('model-catalog-list');
-    if (!catalogList) return;
+    const list = document.getElementById('connected-provider-list');
+    if (!list) return;
 
-    catalogList.innerHTML = '<div class="model-empty">Loading...</div>';
+    list.innerHTML = '<div class="model-empty">Loading...</div>';
 
     try {
         // The catalog is cached process-wide after the first fetch; only the
-        // tiny connected-providers payload is re-read here.
+        // small connected-providers payload is re-read here.
         const [catalog, providersData] = await Promise.all([
             OSA.loadProviderCatalog(),
             OSA.getJson('/api/providers')
         ]);
         OSA.renderRoutingOverview(catalog, providersData);
+        OSA.syncModelMenuAgeSelect();
 
         const connectedMap = {};
         for (const p of (providersData.providers || [])) {
             connectedMap[p.id] = p;
         }
         OSA.modelsConnectedMap = connectedMap;
-
-        const filterInput = document.getElementById('model-catalog-search');
-        OSA.renderModelsPane(filterInput ? filterInput.value : '');
+        OSA.renderConnectedProviders();
+        OSA.refreshAvailableProviders();
     } catch (e) {
-        catalogList.innerHTML = '<div class="model-empty">Failed to load catalog</div>';
+        list.innerHTML = '<div class="model-empty">Failed to load providers</div>';
     }
-};
-
-OSA.toggleProviderModels = function(providerId) {
-    OSA.expandedModels[providerId] = !OSA.expandedModels[providerId];
-    const expanded = !!OSA.expandedModels[providerId];
-    const box = document.getElementById('models-' + providerId);
-    const card = box ? box.closest('.provider-catalog-item') : null;
-    const toggle = card ? card.querySelector('.provider-models-toggle') : null;
-    if (box && toggle) {
-        // In-place expand/collapse from the cached catalog: no refetch, no
-        // full re-render, scroll position untouched.
-        if (expanded && !box.dataset.rendered) {
-            const provider = (OSA.providerCatalog.providers || []).find(function(p) { return p.id === providerId; });
-            if (provider) {
-                box.innerHTML = OSA.modelsRowsHtml(provider, OSA.modelsCurrentModelId());
-                box.dataset.rendered = '1';
-            }
-        }
-        box.classList.toggle('expanded', expanded);
-        toggle.classList.toggle('expanded', expanded);
-        const label = toggle.querySelector('span');
-        if (label) {
-            const provider = (OSA.providerCatalog.providers || []).find(function(p) { return p.id === providerId; });
-            const count = provider ? (provider.models || []).length : 0;
-            label.innerHTML = count + ' model' + (count !== 1 ? 's' : '') + ' ' + (expanded ? '&#9660;' : '&#9654;');
-        }
-        return;
-    }
-    const filterInput = document.getElementById('model-catalog-search');
-    OSA.renderModelsPane(filterInput ? filterInput.value : '');
 };
 
 // ── Local Server Status (Ollama / Unsloth) ──────────────────
@@ -1284,6 +1439,7 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     const provider = OSA.providerCatalog.providers.find(p => p.id === providerId);
     if (!provider) return;
     const connectedEntry = (providersData.providers || []).find(function(item) { return item.id === providerId; }) || null;
+    OSA.currentProviderConnected = !!connectedEntry;
 
     OSA.currentProviderOAuthSupported = provider.oauth_supported;
     OSA.currentProviderApiKeyUrl = provider.api_key_url || null;
@@ -1309,18 +1465,28 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
         apiKeySection.classList.remove('hidden');
         divider.classList.remove('hidden');
         apiKeyTitle.classList.remove('hidden');
-        addBtn.textContent = 'Save Changes';
+        addBtn.textContent = OSA.providerSubmitLabel(!!connectedEntry);
         await OSA.updateOAuthUI(providerId);
     } else {
         oauthSection.classList.add('hidden');
         apiKeySection.classList.remove('hidden');
         divider.classList.add('hidden');
         apiKeyTitle.classList.add('hidden');
-        addBtn.textContent = 'Add Provider';
+        addBtn.textContent = OSA.providerSubmitLabel(!!connectedEntry);
     }
 
-    // Pre-fill base URL
+    // Pre-fill base URL. The endpoint stays folded for presets and opens for
+    // local servers, or when the saved endpoint differs from the preset's.
     document.getElementById('provider-base-url').value = (connectedEntry && connectedEntry.base_url) || provider.base_url || '';
+    const localServer = provider.id === 'ollama' || provider.id === 'unsloth';
+    const customEndpoint = !provider.base_url
+        || (!!connectedEntry && !!connectedEntry.base_url && connectedEntry.base_url !== provider.base_url);
+    document.getElementById('provider-advanced').open = localServer || customEndpoint;
+    const keyLabel = document.querySelector('label[for="provider-api-key"]');
+    if (keyLabel) keyLabel.textContent = localServer ? 'API Key (optional)' : 'API Key';
+    // OAuth providers already offer Disconnect in their OAuth view, so the
+    // footer Remove is reserved for key-based entries.
+    document.getElementById('provider-remove-btn').classList.toggle('hidden', !connectedEntry || !!provider.oauth_supported);
 
     // API key link
     const apiKeyLink = document.getElementById('api-key-link');
@@ -1339,6 +1505,9 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
 
     // Reset fields
     document.getElementById('provider-api-key').value = '';
+    document.getElementById('provider-api-key').placeholder = connectedEntry && connectedEntry.key_count
+        ? 'Saved. Leave blank to keep it'
+        : 'sk-...';
     document.getElementById('provider-default').checked = !!(connectedEntry && connectedEntry.is_default);
     document.getElementById('validation-badge').style.display = 'none';
     document.getElementById('modal-model-select-text').textContent = 'Use provider default (choose later)';
@@ -1835,13 +2004,17 @@ OSA.addProvider = async function() {
                 alert('Failed to add provider: ' + error.message);
             } finally {
                 addBtn.disabled = false;
-                addBtn.textContent = 'Save Changes';
+                addBtn.textContent = OSA.providerSubmitLabel(true);
             }
             return;
         }
     }
 
-    if (!apiKey && OSA.currentProviderId !== 'ollama' && OSA.currentProviderId !== 'unsloth') { alert('Please enter an API key'); return; }
+    // Editing a connected provider keeps its saved key, so the field may be left blank.
+    if (!apiKey && !OSA.currentProviderConnected && OSA.currentProviderId !== 'ollama' && OSA.currentProviderId !== 'unsloth') {
+        alert('Please enter an API key');
+        return;
+    }
 
     addBtn.disabled = true;
     addBtn.textContent = 'Adding...';
@@ -1866,7 +2039,37 @@ OSA.addProvider = async function() {
         alert('Failed to add provider: ' + error.message);
     } finally {
         addBtn.disabled = false;
-        addBtn.textContent = OSA.currentProviderOAuthSupported ? 'Save Changes' : 'Add Provider';
+        addBtn.textContent = OSA.providerSubmitLabel(OSA.currentProviderConnected);
+    }
+};
+
+OSA.providerSubmitLabel = function(isConnected) {
+    return isConnected ? 'Save' : 'Connect';
+};
+
+OSA.removeProvider = async function() {
+    const providerId = OSA.currentProviderId;
+    if (!providerId) return;
+    const provider = OSA.findCatalogProvider(providerId);
+    const name = provider ? provider.name : providerId;
+    if (!confirm('Remove ' + name + ' from OSAgent? Its saved API keys are deleted from this machine.')) return;
+
+    const removeBtn = document.getElementById('provider-remove-btn');
+    if (removeBtn) removeBtn.disabled = true;
+    try {
+        const res = await OSA.fetchWithAuth('/api/providers/' + encodeURIComponent(providerId), { method: 'DELETE' });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || 'Failed to remove provider');
+        OSA.closeAddProviderModal();
+        await OSA.loadProviderCatalog(true);
+        await OSA.renderSettingsProviders();
+        // Removing the active provider moves the route to another one, so the
+        // composer trigger has to be re-read.
+        if (typeof OSA.loadModel === 'function') await OSA.loadModel().catch(function() {});
+    } catch (error) {
+        alert('Failed to remove provider: ' + error.message);
+    } finally {
+        if (removeBtn) removeBtn.disabled = false;
     }
 };
 
@@ -1890,6 +2093,7 @@ OSA.closeAddProviderModal = function() {
     OSA.currentOAuthFlow = null;
     OSA.currentProviderId = null;
     OSA.currentProviderOAuthSupported = false;
+    OSA.currentProviderConnected = false;
     OSA.currentProviderApiKeyUrl = null;
     OSA.pendingProviderModel = null;
     OSA.modalProviderModels = [];
@@ -1919,8 +2123,19 @@ OSA.closeAddProviderModal = function() {
 
 // ── Document click handler ──────────────────────────────────
 
+// composedPath() is captured when the event is dispatched, so it still names
+// the dropdown after a click handler has re-rendered (and detached) its target.
+// A bare target.closest() would miss that and close the menu.
+OSA.eventIsInside = function(event, element) {
+    if (!element) return false;
+    if (event.composedPath && event.composedPath().includes(element)) return true;
+    return element.contains(event.target);
+};
+
 document.addEventListener('click', function(event) {
-    if (OSA.modelDropdownOpen && !event.target.closest('#model-dropdown') && !event.target.closest('.model-selector')) {
+    if (OSA.modelDropdownOpen
+        && !OSA.eventIsInside(event, document.getElementById('model-dropdown'))
+        && !event.target.closest('.model-selector')) {
         OSA.closeModelDropdown(false);
     }
     if (OSA.modalModelDropdownOpen && !event.target.closest('#modal-model-select-wrapper')) {

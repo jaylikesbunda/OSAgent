@@ -25,6 +25,111 @@ OSA.applyThinkingStateToSelect = function(selectId, state, selectedValue) {
 
     const fallback = state?.selected || 'auto';
     select.value = options.includes(selectedValue) ? selectedValue : fallback;
+    if (selectId === 'header-thinking-level') OSA.renderThinkingMenu();
+};
+
+// The composer's thinking control is a custom popover in the same style as the
+// model dropdown. The native select stays hidden as the source of truth, so
+// every existing read and write of its value keeps working.
+OSA.renderThinkingMenu = function() {
+    const select = document.getElementById('header-thinking-level');
+    const list = document.getElementById('header-thinking-list');
+    const label = document.getElementById('header-thinking-label');
+    if (!select || !list) return;
+    const current = select.value;
+    list.innerHTML = Array.from(select.options).map(function(option) {
+        const active = option.value === current;
+        return '<div class="model-option' + (active ? ' active' : '') + '" role="option" tabindex="-1" aria-selected="' + (active ? 'true' : 'false') + '"'
+            + ' data-value="' + OSA.escapeAttr(option.value) + '" onclick="OSA.selectThinkingOption(this.dataset.value)">'
+            + '<div class="model-option-info"><span class="model-option-name">' + OSA.escapeHtml(option.textContent) + '</span></div>'
+            + '</div>';
+    }).join('');
+    if (label) {
+        const selected = Array.from(select.options).find(function(option) { return option.value === current; });
+        label.textContent = selected ? selected.textContent : OSA.labelThinkingOption(current);
+    }
+};
+
+OSA.positionThinkingMenu = function() {
+    const menu = document.getElementById('header-thinking-menu');
+    const trigger = document.getElementById('header-thinking-trigger');
+    if (!menu || !trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.min(220, window.innerWidth - 16);
+    const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+    menu.style.width = width + 'px';
+    menu.style.left = left + 'px';
+    menu.style.right = 'auto';
+    menu.style.top = 'auto';
+    // The composer sits at the bottom of the window, so the menu opens upward.
+    menu.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+};
+
+OSA.openThinkingMenu = function() {
+    const menu = document.getElementById('header-thinking-menu');
+    const trigger = document.getElementById('header-thinking-trigger');
+    if (!menu || !trigger) return;
+    OSA.renderThinkingMenu();
+    menu.classList.remove('hidden');
+    trigger.setAttribute('aria-expanded', 'true');
+    OSA.positionThinkingMenu();
+    document.addEventListener('click', OSA._thinkingMenuOutside, true);
+    document.addEventListener('keydown', OSA._thinkingMenuKeydown, true);
+    window.addEventListener('resize', OSA.positionThinkingMenu);
+};
+
+OSA.closeThinkingMenu = function(restoreFocus) {
+    const menu = document.getElementById('header-thinking-menu');
+    const trigger = document.getElementById('header-thinking-trigger');
+    if (menu) menu.classList.add('hidden');
+    if (trigger) {
+        trigger.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) trigger.focus();
+    }
+    document.removeEventListener('click', OSA._thinkingMenuOutside, true);
+    document.removeEventListener('keydown', OSA._thinkingMenuKeydown, true);
+    window.removeEventListener('resize', OSA.positionThinkingMenu);
+};
+
+OSA.toggleThinkingMenu = function() {
+    const menu = document.getElementById('header-thinking-menu');
+    if (menu && !menu.classList.contains('hidden')) {
+        OSA.closeThinkingMenu(true);
+    } else {
+        OSA.openThinkingMenu();
+    }
+};
+
+OSA.selectThinkingOption = function(value) {
+    const select = document.getElementById('header-thinking-level');
+    OSA.closeThinkingMenu(true);
+    if (!select || select.value === value) return;
+    select.value = value;
+    // Fire the change so the existing save path (handleQuickThinkingChange) runs.
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    OSA.renderThinkingMenu();
+};
+
+OSA._thinkingMenuOutside = function(event) {
+    const menu = document.getElementById('header-thinking-menu');
+    const trigger = document.getElementById('header-thinking-trigger');
+    if (!menu || menu.classList.contains('hidden')) return;
+    if (menu.contains(event.target) || (trigger && trigger.contains(event.target))) return;
+    OSA.closeThinkingMenu(false);
+};
+
+OSA._thinkingMenuKeydown = function(event) {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        OSA.closeThinkingMenu(true);
+    }
+};
+
+OSA.handleThinkingTriggerKeydown = function(event) {
+    if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        OSA.openThinkingMenu();
+    }
 };
 
 OSA.updateThinkingHint = function(state) {
@@ -570,6 +675,165 @@ OSA.installVoiceModels = async function() {
     }
 };
 
+// Offline voice card: one button, progress while the server downloads and
+// unpacks the engine, and removal. The install runs on the server, so the card
+// polls for progress rather than holding a request open.
+OSA.updateSherpaCard = function(status) {
+    const stateEl = document.getElementById('sherpa-voice-state');
+    const progressEl = document.getElementById('sherpa-voice-progress');
+    const fillEl = document.getElementById('sherpa-voice-bar-fill');
+    const action = document.getElementById('sherpa-voice-action');
+    if (!stateEl || !progressEl || !fillEl || !action) return;
+
+    const progress = status.progress || {};
+    stateEl.dataset.tone = '';
+    progressEl.classList.toggle('hidden', !progress.running);
+
+    if (progress.running) {
+        fillEl.style.width = `${Math.max(2, Math.min(100, progress.percent || 0))}%`;
+        stateEl.textContent = progress.phase || 'Setting up offline voice…';
+        action.disabled = true;
+        action.textContent = 'Setting up…';
+        action.className = 'btn-primary';
+        action.dataset.mode = '';
+        return;
+    }
+
+    action.disabled = false;
+    if (progress.error) {
+        stateEl.dataset.tone = 'error';
+        stateEl.textContent = `Setup failed: ${progress.error}`;
+        action.textContent = 'Try again';
+        action.className = 'btn-primary';
+        action.dataset.mode = 'install';
+        return;
+    }
+    if (status.installed) {
+        stateEl.textContent = 'Installed. Speech input and output run on this computer.';
+        action.textContent = 'Remove';
+        action.className = 'btn-ghost';
+        action.dataset.mode = 'remove';
+        return;
+    }
+    stateEl.textContent = `Not installed. One download of about ${status.download_mb} MB.`;
+    action.textContent = 'Set up offline voice';
+    action.className = 'btn-primary';
+    action.dataset.mode = 'install';
+};
+
+OSA.renderSherpaCard = async function() {
+    try {
+        const res = await OSA.fetchWithAuth('/api/voice/sherpa/status');
+        const status = await res.json();
+        OSA.sherpaInstalled = !!status.installed;
+        OSA.updateSherpaCard(status);
+        if (status.progress?.running) OSA.pollSherpaInstall(0);
+    } catch (error) {
+        const stateEl = document.getElementById('sherpa-voice-state');
+        if (stateEl) {
+            stateEl.dataset.tone = 'error';
+            stateEl.textContent = 'Could not read the offline voice status.';
+        }
+    }
+};
+
+// The install starts a moment after its request returns, so a few idle reads
+// are allowed before the card treats the install as finished.
+OSA.pollSherpaInstall = async function(startingTicks = 3) {
+    clearTimeout(OSA._sherpaPollTimer);
+    let status = null;
+    try {
+        const res = await OSA.fetchWithAuth('/api/voice/sherpa/status');
+        status = await res.json();
+    } catch (error) {
+        status = null;
+    }
+    if (!status) {
+        if (startingTicks > 0) {
+            OSA._sherpaPollTimer = setTimeout(() => OSA.pollSherpaInstall(startingTicks - 1), 2000);
+        }
+        return;
+    }
+
+    const running = !!status.progress?.running;
+    const starting = !running && !status.installed && !status.progress?.error && startingTicks > 0;
+    if (running || starting) {
+        if (running) OSA.updateSherpaCard(status);
+        const next = starting ? startingTicks - 1 : startingTicks;
+        OSA._sherpaPollTimer = setTimeout(() => OSA.pollSherpaInstall(next), 1000);
+        return;
+    }
+
+    OSA.sherpaInstalled = !!status.installed;
+    if (status.installed) await OSA.syncSherpaVoiceSettings();
+    OSA.updateSherpaCard(status);
+};
+
+// The server points input and output at the offline voice when it installs
+// or moves them off it on removal. Mirror that into the open form and the
+// cached config so a later Save does not write the old values back.
+OSA.syncSherpaVoiceSettings = async function() {
+    try {
+        const res = await OSA.fetchWithAuth('/api/config');
+        const cfg = await res.json();
+        const voice = OSA.normalizeVoiceConfig(cfg.voice || {});
+        OSA.setVoiceConfig(voice);
+        OSA.setCachedConfig({ ...cfg, voice });
+        const enabled = document.getElementById('setting-voice-enabled');
+        const stt = document.getElementById('setting-stt-provider');
+        const tts = document.getElementById('setting-tts-provider');
+        if (enabled) enabled.checked = !!voice.enabled;
+        if (stt) stt.value = voice.stt_provider;
+        if (tts) tts.value = voice.tts_provider;
+        OSA.updateVoiceButtons?.();
+    } catch (error) {
+        console.warn('Could not refresh voice settings:', error);
+    }
+};
+
+OSA.onSherpaVoiceAction = async function() {
+    const action = document.getElementById('sherpa-voice-action');
+    const stateEl = document.getElementById('sherpa-voice-state');
+    const mode = action?.dataset.mode;
+
+    if (mode === 'install') {
+        OSA.updateSherpaCard({ installed: false, download_mb: 0, progress: { running: true, phase: 'Starting…', percent: 0 } });
+        try {
+            const res = await OSA.fetchWithAuth('/api/voice/sherpa/install', { method: 'POST' });
+            // 409 means an install is already running, so we just follow it.
+            if (!res.ok && res.status !== 409) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
+        } catch (error) {
+            OSA.updateSherpaCard({ installed: false, download_mb: 0, progress: { running: false, error: error.message } });
+            return;
+        }
+        OSA.pollSherpaInstall();
+        return;
+    }
+
+    if (mode === 'remove') {
+        if (!window.confirm('Remove the offline voice? Speech input and output will go back to the browser.')) return;
+        try {
+            const res = await OSA.fetchWithAuth('/api/voice/sherpa/remove', { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
+        } catch (error) {
+            if (stateEl) {
+                stateEl.dataset.tone = 'error';
+                stateEl.textContent = `Could not remove the offline voice: ${error.message}`;
+            }
+            return;
+        }
+        OSA.sherpaInstalled = false;
+        await OSA.syncSherpaVoiceSettings();
+        await OSA.renderSherpaCard();
+    }
+};
+
 OSA.switchSettingsTab = async function(tabId) {
     document.querySelectorAll('.settings-sidebar-item').forEach(item => {
         item.classList.toggle('active', item.dataset.tab === tabId);
@@ -580,9 +844,9 @@ OSA.switchSettingsTab = async function(tabId) {
     const sel = document.getElementById('settings-tab-select');
     if (sel) sel.value = tabId;
     if (tabId === 'models') {
-        const catalogList = document.getElementById('model-catalog-list');
-        if (catalogList) {
-            catalogList.innerHTML = '<div class="model-empty">Loading...</div>';
+        const connectedList = document.getElementById('connected-provider-list');
+        if (connectedList) {
+            connectedList.innerHTML = '<div class="model-empty">Loading...</div>';
         }
         OSA.renderLocalServers();
         requestAnimationFrame(function() {
@@ -594,6 +858,7 @@ OSA.switchSettingsTab = async function(tabId) {
             browser.innerHTML = '<div class="loading-placeholder">Loading models...</div>';
         }
         await OSA.populateSettingsDevicePickers();
+        OSA.renderSherpaCard();
         try {
             await OSA.loadVoiceModels();
             OSA.renderVoiceModelBrowser();
@@ -1074,10 +1339,6 @@ OSA.openDiscordModelPicker = function() {
     } else if (typeof switchSettingsTab === 'function') {
         switchSettingsTab('models');
     }
-    setTimeout(function() {
-        const search = document.getElementById('model-catalog-search');
-        if (search) search.focus();
-    }, 100);
 };
 
 OSA.startDiscordBot = async function() {
@@ -1334,17 +1595,17 @@ OSA.getPalette = function() {
     if (legacyTheme === 'blue') return 'ocean-blue';
     if (legacyTheme === 'dark') return 'midnight-purple';
 
-    return 'charcoal-red';
+    return 'midnight-purple';
 };
 
 OSA.setPalette = function(palette) {
-    const next = OSA.PALETTE_CHOICES.includes(palette) ? palette : 'charcoal-red';
+    const next = OSA.PALETTE_CHOICES.includes(palette) ? palette : 'midnight-purple';
     localStorage.setItem('osagent-palette', next);
     OSA.applyPalette(next);
 };
 
 OSA.applyPalette = function(palette) {
-    const next = OSA.PALETTE_CHOICES.includes(palette) ? palette : 'charcoal-red';
+    const next = OSA.PALETTE_CHOICES.includes(palette) ? palette : 'midnight-purple';
     document.documentElement.setAttribute('data-palette', next);
     document.querySelectorAll('.palette-swatch[data-palette]').forEach(function(el) {
         el.classList.toggle('active', el.dataset.palette === next);

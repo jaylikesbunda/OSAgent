@@ -852,3 +852,212 @@ body.resizing-sidebar .sidebar {
         display: none;
     }
 }
+
+/* ---- Workspace sections in the chat list ---- */
+.workspace-group {
+    margin-bottom: 6px;
+}
+
+.workspace-group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+
+.workspace-group-header:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.workspace-group-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-group-count {
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
+}
+
+.workspace-group-chevron {
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+}
+
+.workspace-group.collapsed .workspace-group-chevron {
+    transform: rotate(-90deg);
+}
+
+.workspace-group.collapsed .workspace-group-body {
+    display: none;
+}
+
+.workspace-group-body {
+    padding-left: 4px;
+}
+
+.workspace-show-more {
+    width: 100%;
+    padding: 5px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.workspace-show-more:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+/* ---- Right-click menu on a chat ---- */
+.session-context-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 220px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.session-context-menu button {
+    display: block;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.session-context-menu button:hover:not(:disabled) {
+    background: var(--bg-hover);
+}
+
+.session-context-menu button:disabled {
+    color: var(--text-muted);
+    cursor: default;
+}
+
+/* ---- Chats used as context, above the composer ---- */
+.chat-context-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px 0;
+}
+
+.chat-context-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.chat-context-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 260px;
+    padding: 2px 4px 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.chat-context-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-context-remove {
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.chat-context-remove:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+/* ---- Reordering workspace sections ---- */
+.workspace-group-header[draggable="true"] {
+    cursor: grab;
+}
+
+.workspace-group.dragging {
+    opacity: 0.45;
+}
+
+.workspace-group.drop-before {
+    box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.workspace-group.drop-after {
+    box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* ---- New chat in a workspace section ---- */
+.workspace-group-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.workspace-group-head .workspace-group-header {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+}
+
+.workspace-new-chat {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.workspace-new-chat:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}

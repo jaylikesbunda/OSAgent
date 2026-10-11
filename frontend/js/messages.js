@@ -1303,10 +1303,47 @@ OSA.retryFailedSend = function() {
     if (typeof retry === 'function') retry();
 };
 
+// Local files. A path written in a reply arrives entity-escaped, because the
+// text was escaped before formatting, so it is decoded first.
+OSA.decodeEntities = function(text) {
+    return String(text)
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&');
+};
+
+// Returns the local path a link or image source points at, or '' when it is
+// not a local file. Accepts file:// URLs and absolute Windows or UNC paths.
+OSA.localPathFromHref = function(href) {
+    const value = OSA.decodeEntities(String(href).trim());
+    if (/^file:\/\//i.test(value)) {
+        let path = value.replace(/^file:\/\//i, '');
+        if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1);
+        try { path = decodeURIComponent(path); } catch (_) { /* keep the raw path */ }
+        return path;
+    }
+    if (/^[A-Za-z]:[\\/]/.test(value) || value.slice(0, 2) === String.fromCharCode(92, 92)) return value;
+    return '';
+};
+
 OSA.formatInlineMarkdown = function(line) {
     let s = line
+        // ![caption](path) embeds a local image. Remote images stay plain text.
+        .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function(match, alt, src) {
+            const path = OSA.localPathFromHref(src);
+            if (!path) return match;
+            return '<img class="chat-local-image" data-local-path="' + OSA.escapeAttr(path)
+                + '" alt="' + OSA.escapeAttr(OSA.decodeEntities(alt)) + '" />';
+        })
         .replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(match, label, url) {
             const href = String(url).trim();
+            const localPath = OSA.localPathFromHref(href);
+            if (localPath) {
+                return '<a href="#" class="chat-local-file" data-local-path="' + OSA.escapeAttr(localPath)
+                    + '" title="' + OSA.escapeAttr(localPath) + '">' + label + '</a>';
+            }
             // Only http(s) links become anchors: a javascript:/data: URL here
             // would execute on click. Quotes are percent-encoded because the
             // surrounding text is already entity-escaped but quotes are not.
@@ -2099,10 +2136,50 @@ OSA.handleQueuedMessageDispatched = function(event) {
     OSA.renderQueuedMessages(queue);
 };
 
+// A sent message shows in the queue at once, as a local row, until the server
+// answers with its own row. Local rows have no actions: the server does not
+// know about them yet.
+OSA.addLocalQueueItem = function(clientMessageId, content) {
+    const queue = OSA.getSessionQueue() || [];
+    const position = queue.reduce(function(max, q) { return Math.max(max, (q && q.position) || 0); }, 0) + 1;
+    const next = queue.concat([{
+        id: `local-${clientMessageId}`,
+        client_message_id: clientMessageId,
+        content: content,
+        status: 'pending',
+        position: position,
+        local: true,
+        created_at: new Date().toISOString(),
+    }]);
+    OSA.setSessionQueue(next);
+    OSA.renderQueuedMessages(next);
+};
+
+OSA.removeLocalQueueItem = function(clientMessageId) {
+    const queue = OSA.getSessionQueue() || [];
+    const next = queue.filter(function(q) { return !(q && q.local && q.client_message_id === clientMessageId); });
+    if (next.length === queue.length) return;
+    OSA.setSessionQueue(next);
+    OSA.renderQueuedMessages(next);
+};
+
 OSA.renderQueuedMessages = function(queueItems) {
     OSA.removeQueuedMessageElements();
 
     const items = Array.isArray(queueItems) ? queueItems : [];
+    // An edit whose message has left the queue (it was dispatched or removed)
+    // can no longer be saved. Leave edit mode so Enter sends again, and give
+    // the composer back the draft it held before the edit started.
+    if (OSA.queueEditingId && !items.some(q => q && q.id === OSA.queueEditingId)) {
+        const stash = OSA.queueEditStash;
+        OSA.queueEditingId = null;
+        OSA.queueEditStash = null;
+        const input = document.getElementById('message-input');
+        if (input && stash) {
+            input.value = stash.text || '';
+            OSA.resizeMessageInput(input);
+        }
+    }
     OSA.updateFollowUpToggle(items);
 
     // A queued turn still owns the composer: drop the empty-state hint so the
@@ -2133,23 +2210,37 @@ OSA.renderQueuedMessages = function(queueItems) {
     html += '<div class="queue-list">';
     items.forEach(function(item, index) {
         const id = item.id || '';
+        const isLocal = !!item.local;
         const isDispatching = item.status === 'dispatching';
+        const isInterrupting = !!item.interrupting;
+        const locked = isLocal || isDispatching || isInterrupting;
         const isEditing = !!OSA.queueEditingId && OSA.queueEditingId === id;
         const text = item.content || '';
         const preview = text.length > 140 ? text.slice(0, 140) + '…' : text;
         const attCount = (Array.isArray(item.images) ? item.images.length : 0)
             + (Array.isArray(item.attachments) ? item.attachments.length : 0);
-        const parked = !working && index === 0;
-        const disabled = (isDispatching || OSA.queueBusy) ? ' disabled' : '';
-        html += `<div class="queue-row${isEditing ? ' editing' : ''}${isDispatching ? ' dispatching' : ''}" data-queue-id="${OSA.escapeAttr(id)}">`
+        const parked = !working && index === 0 && !isLocal;
+        const busy = OSA.queueBusy ? ' disabled' : '';
+        const canUp = index > 0 && !locked && !(items[index - 1] && items[index - 1].local);
+        const canDown = index < items.length - 1 && !locked && !(items[index + 1] && items[index + 1].local);
+        const rowClass = ['queue-row',
+            isEditing ? 'editing' : '',
+            isDispatching ? 'dispatching' : '',
+            isLocal ? 'local' : '',
+            isInterrupting ? 'interrupting' : ''].filter(Boolean).join(' ');
+        let status = '';
+        if (isLocal) status = '<span class="queue-status">Sending…</span>';
+        else if (isInterrupting) status = '<span class="queue-status">Interrupting…</span>';
+        html += `<div class="${rowClass}" data-queue-id="${OSA.escapeAttr(id)}">`
             + `<span class="queue-order" title="Position ${index + 1} of ${items.length}">${index + 1}</span>`
-            + `<button type="button" class="queue-text" data-action="edit" title="${isEditing ? 'Editing — press Enter to confirm, Esc to cancel' : 'Edit queued message'}"${disabled}>${OSA.escapeHtml(preview) || '(empty)'}</button>`
+            + `<button type="button" class="queue-text" data-action="edit" title="${isEditing ? 'Editing — press Enter to confirm, Esc to cancel' : 'Edit queued message'}"${locked ? ' disabled' : ''}>${OSA.escapeHtml(preview) || '(empty)'}</button>`
+            + status
             + (attCount ? `<span class="queue-atts" title="${attCount} attachment${attCount === 1 ? '' : 's'}">${attCount} file${attCount === 1 ? '' : 's'}</span>` : '')
             + `<span class="queue-actions${parked ? ' always' : ''}">`
-            + (index > 0 && !isDispatching ? `<button type="button" class="queue-btn" data-action="up" title="Move up" aria-label="Move queued message up"${OSA.queueBusy ? ' disabled' : ''}>↑</button>` : '')
-            + (index < items.length - 1 && !isDispatching ? `<button type="button" class="queue-btn" data-action="down" title="Move down" aria-label="Move queued message down"${OSA.queueBusy ? ' disabled' : ''}>↓</button>` : '')
-            + (!isDispatching ? `<button type="button" class="queue-btn queue-steer" data-action="steer" title="Stop the current turn and send this now"${OSA.queueBusy ? ' disabled' : ''}>${parked ? 'Send' : 'Steer'}</button>` : '')
-            + (!isDispatching ? `<button type="button" class="queue-btn queue-remove" data-action="remove" title="Remove from queue" aria-label="Remove queued message"${OSA.queueBusy ? ' disabled' : ''}>×</button>` : '')
+            + (canUp ? `<button type="button" class="queue-btn" data-action="up" title="Move up" aria-label="Move queued message up"${busy}>↑</button>` : '')
+            + (canDown ? `<button type="button" class="queue-btn" data-action="down" title="Move down" aria-label="Move queued message down"${busy}>↓</button>` : '')
+            + (!locked ? `<button type="button" class="queue-btn queue-steer" data-action="steer" title="Stop the current turn and send this now"${busy}>${parked ? 'Send' : 'Steer'}</button>` : '')
+            + (!locked ? `<button type="button" class="queue-btn queue-remove" data-action="remove" title="Remove from queue" aria-label="Remove queued message"${busy}>×</button>` : '')
             + `</span>`
             + `</div>`;
     });
@@ -2188,37 +2279,51 @@ OSA.steerQueuedMessage = function(queueId) {
 
 OSA.removeQueuedMessage = async function(queueId) {
     const currentSession = OSA.getCurrentSession();
-    if (!currentSession || !queueId || OSA.queueBusy) return;
+    const queue = OSA.getSessionQueue() || [];
+    if (!currentSession || !queueId) return;
+    const target = queue.find(function(q) { return q && q.id === queueId; });
+    if (!target || target.local) return;
     if (OSA.queueEditingId === queueId) OSA.cancelQueueEdit();
-    OSA.queueBusy = true;
+    // The row leaves at once. A row the server has already dispatched is gone
+    // either way, so a 404 is not treated as a failure.
+    OSA.setSessionQueue((OSA.getSessionQueue() || []).filter(function(q) { return q && q.id !== queueId; }));
     OSA.renderQueuedMessages(OSA.getSessionQueue());
     try {
         const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(currentSession.id)}/queue/${encodeURIComponent(queueId)}`, {
             method: 'DELETE',
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (!res.ok && res.status !== 404) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
     } catch (error) {
         console.error('Failed to remove queued message:', error);
         OSA.showErrorCard?.(error.message || 'Failed to remove queued message');
-    } finally {
-        OSA.queueBusy = false;
     }
+    // Either way, reconcile with the server. After a failed removal this also
+    // brings back the row that should not have been taken away.
     OSA.refreshCurrentSessionQueue?.();
 };
 
+// Moves apply to the panel at once. Requests are chained, so a quick second
+// click cannot reach the server before the first. Each request sends the order
+// as it stands when it runs.
 OSA.moveQueuedMessage = async function(queueId, direction) {
     const currentSession = OSA.getCurrentSession();
     const queue = OSA.getSessionQueue() || [];
-    if (!currentSession || !queueId || OSA.queueBusy) return;
+    if (!currentSession || !queueId) return;
     const index = queue.findIndex(function(q) { return q && q.id === queueId; });
     const target = index + direction;
     if (index < 0 || target < 0 || target >= queue.length) return;
-    const ids = queue.map(function(q) { return q.id; });
-    const moved = ids.splice(index, 1)[0];
-    ids.splice(target, 0, moved);
-    OSA.queueBusy = true;
-    try {
+    if (queue[index].local || queue[target].local) return;
+
+    const next = queue.slice();
+    [next[index], next[target]] = [next[target], next[index]];
+    OSA.setSessionQueue(next.map(function(q, i) { return { ...q, position: i + 1 }; }));
+    OSA.renderQueuedMessages(OSA.getSessionQueue());
+
+    OSA._queueWriteChain = (OSA._queueWriteChain || Promise.resolve()).then(async function() {
+        const ids = (OSA.getSessionQueue() || []).filter(function(q) { return q && !q.local; }).map(function(q) { return q.id; });
         const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(currentSession.id)}/queue/reorder`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2226,13 +2331,12 @@ OSA.moveQueuedMessage = async function(queueId, direction) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    } catch (error) {
+    }).catch(function(error) {
         console.error('Failed to reorder queue:', error);
         OSA.showErrorCard?.(error.message || 'Failed to reorder queue');
-    } finally {
-        OSA.queueBusy = false;
-    }
-    OSA.refreshCurrentSessionQueue?.();
+    }).then(function() {
+        OSA.refreshCurrentSessionQueue?.();
+    });
 };
 
 // Edit: load the queued text into the composer, stashing the current draft.
@@ -2240,7 +2344,7 @@ OSA.moveQueuedMessage = async function(queueId, direction) {
 OSA.editQueuedMessage = function(queueId) {
     if (OSA.queueBusy) return;
     const item = OSA.findQueuedItem(queueId);
-    if (!item || item.status === 'dispatching') return;
+    if (!item || item.status === 'dispatching' || item.local || item.interrupting) return;
     const input = document.getElementById('message-input');
     if (!input) return;
     if (OSA.queueEditingId === queueId) {
@@ -2292,7 +2396,11 @@ OSA.confirmQueueEdit = async function() {
             body: JSON.stringify({ content: text }),
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (!res.ok) {
+            const failure = new Error(data.error || `HTTP ${res.status}`);
+            failure.status = res.status;
+            throw failure;
+        }
         const stash = OSA.queueEditStash;
         OSA.queueEditingId = null;
         OSA.queueEditStash = null;
@@ -2301,7 +2409,17 @@ OSA.confirmQueueEdit = async function() {
         input.focus();
     } catch (error) {
         console.error('Failed to edit queued message:', error);
-        OSA.showErrorCard?.(error.message || 'Failed to edit queued message');
+        if (error.status === 404) {
+            // The message already started or was removed, so the edit cannot
+            // apply. Leave edit mode: the text stays in the composer and Enter
+            // sends it as a new message again. Staying in edit mode here was
+            // what made every later Enter fail.
+            OSA.queueEditingId = null;
+            OSA.queueEditStash = null;
+            OSA.showErrorCard?.('That queued message already started, so the edit was not saved. Send your text as a new message.');
+        } else {
+            OSA.showErrorCard?.(error.message || 'Failed to edit queued message');
+        }
     } finally {
         OSA.queueBusy = false;
     }
@@ -2312,15 +2430,30 @@ OSA.confirmQueueEdit = async function() {
 OSA.sendQueuedMessageNow = async function(item) {
     const currentSession = OSA.getCurrentSession();
     if (!currentSession || !item || !item.id) return;
+    if (item.local || item.interrupting) return;
     if (OSA._sendNowInFlight) return;
     OSA._sendNowInFlight = true;
+
+    // Show the interrupt on the row straight away. The current turn can take a
+    // moment to stop, and until then the row must not look ignored.
+    const markInterrupting = function(on) {
+        OSA.setSessionQueue((OSA.getSessionQueue() || []).map(function(q) {
+            return q && q.id === item.id ? { ...q, interrupting: on } : q;
+        }));
+        OSA.renderQueuedMessages(OSA.getSessionQueue());
+    };
+    markInterrupting(true);
+    OSA.setThinkingStatus('Interrupting', 'Stopping the current turn');
+
     try {
         const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(currentSession.id)}/queue/${encodeURIComponent(item.id)}/send-now`, {
             method: 'POST',
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            throw new Error(data.error || `HTTP ${res.status}`);
+            const failure = new Error(data.error || `HTTP ${res.status}`);
+            failure.status = res.status;
+            throw failure;
         }
         // The promoted item stays in the queue until the server dispatches it
         // (and emits queued_message_dispatched). Mirror the promotion locally
@@ -2341,9 +2474,20 @@ OSA.sendQueuedMessageNow = async function(item) {
         if (currentSession) currentSession.task_status = 'running';
         OSA.showThinkingIndicator();
         OSA.renderQueuedMessages(OSA.getSessionQueue());
+        // If the dispatch event never arrives, drop the marker rather than
+        // leaving the row stuck on "Interrupting…".
+        setTimeout(function() {
+            const still = (OSA.getSessionQueue() || []).some(function(q) { return q && q.id === item.id && q.interrupting; });
+            if (still) OSA.refreshCurrentSessionQueue?.();
+        }, 15000);
     } catch (error) {
         console.error('Failed to send queued message now:', error);
-        OSA.showErrorCard?.(error.message || 'Failed to send queued message');
+        markInterrupting(false);
+        // 404: the message was already dispatched or removed, which is the
+        // outcome the user asked for, so there is nothing to report.
+        if (error.status !== 404) {
+            OSA.showErrorCard?.(error.message || 'Failed to send queued message');
+        }
         OSA.refreshCurrentSessionQueue?.();
     } finally {
         OSA._sendNowInFlight = false;
@@ -2421,3 +2565,178 @@ OSA.renderTodoDockList = function(dock, todos) {
 };
 
 window.copyAssistantMessage = OSA.copyAssistantMessage;
+
+// ── Local images and files in chat ─────────────────────────
+// An <img> cannot send the Authorization header, so local images are fetched
+// through the API and shown as blob URLs. The observer covers every render
+// path: streaming, history and reloads.
+
+OSA._localImageUrls = new Map();
+
+OSA.loadLocalImage = async function(img) {
+    const path = img.dataset.localPath;
+    if (!path || img.dataset.loading) return;
+    img.dataset.loading = '1';
+    try {
+        let url = OSA._localImageUrls.get(path);
+        if (!url) {
+            const res = await OSA.fetchWithAuth('/api/files/raw?path=' + encodeURIComponent(path));
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || 'HTTP ' + res.status);
+            }
+            url = URL.createObjectURL(await res.blob());
+            OSA._localImageUrls.set(path, url);
+        }
+        img.src = url;
+        img.dataset.imageSrc = url;
+        img.classList.add('expandable-image');
+    } catch (error) {
+        const note = document.createElement('span');
+        note.className = 'chat-local-image-error';
+        note.textContent = 'Could not show ' + path + ': ' + error.message;
+        img.replaceWith(note);
+    }
+};
+
+OSA.watchLocalImages = function() {
+    if (OSA._localImageWatch || typeof MutationObserver === 'undefined' || !document.body) return;
+    const hydrate = function(node) {
+        if (node.nodeType !== 1) return;
+        if (node.matches && node.matches('img.chat-local-image')) OSA.loadLocalImage(node);
+        if (node.querySelectorAll) {
+            node.querySelectorAll('img.chat-local-image').forEach(function(img) { OSA.loadLocalImage(img); });
+        }
+    };
+    OSA._localImageWatch = new MutationObserver(function(records) {
+        records.forEach(function(record) { record.addedNodes.forEach(hydrate); });
+    });
+    OSA._localImageWatch.observe(document.body, { childList: true, subtree: true });
+    document.querySelectorAll('img.chat-local-image').forEach(function(img) { OSA.loadLocalImage(img); });
+};
+
+// Selects a file in Windows Explorer. The server never opens or runs it.
+OSA.revealLocalPath = async function(path) {
+    try {
+        const res = await OSA.fetchWithAuth('/api/files/reveal', {
+            method: 'POST',
+            body: JSON.stringify({ path: path })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+    } catch (error) {
+        OSA.showToast?.(error.message || 'Could not open File Explorer', 'error');
+    }
+};
+
+OSA.closeLocalFileMenu = function() {
+    document.getElementById('local-file-menu')?.remove();
+    document.removeEventListener('click', OSA._localFileOutside, true);
+    document.removeEventListener('keydown', OSA._localFileEscape, true);
+};
+
+OSA._localFileOutside = function(event) {
+    const menu = document.getElementById('local-file-menu');
+    if (menu && !menu.contains(event.target)) OSA.closeLocalFileMenu();
+};
+
+OSA._localFileEscape = function(event) {
+    if (event.key === 'Escape') OSA.closeLocalFileMenu();
+};
+
+// A small menu of [label, run] items, shown at the cursor. File links, web
+// links and images all use it, so the menu styling lives in one place.
+OSA.showChatMenu = function(event, items) {
+    event.preventDefault();
+    event.stopPropagation();
+    OSA.closeLocalFileMenu();
+    const menu = document.createElement('div');
+    menu.id = 'local-file-menu';
+    menu.className = 'session-context-menu';
+    menu.setAttribute('role', 'menu');
+    menu.innerHTML = items.map(function(item, index) {
+        return '<button type="button" role="menuitem" data-index="' + index + '">' + OSA.escapeHtml(item.label) + '</button>';
+    }).join('');
+    document.body.appendChild(menu);
+
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8)) + 'px';
+
+    menu.addEventListener('click', function(e) {
+        const button = e.target.closest('button');
+        const item = button ? items[Number(button.dataset.index)] : null;
+        OSA.closeLocalFileMenu();
+        if (item) item.run();
+    });
+    setTimeout(function() {
+        document.addEventListener('click', OSA._localFileOutside, true);
+        document.addEventListener('keydown', OSA._localFileEscape, true);
+    }, 0);
+};
+
+OSA.openLocalFileMenu = function(event, path) {
+    OSA.showChatMenu(event, [
+        { label: 'Show in File Explorer', run: function() { OSA.revealLocalPath(path); } },
+        { label: 'Copy path', run: function() { navigator.clipboard?.writeText(path).catch(function() {}); } }
+    ]);
+};
+
+OSA.openWebLinkMenu = function(event, url) {
+    OSA.showChatMenu(event, [
+        { label: 'Open link', run: function() { OSA.openExternalUrl(url); } },
+        { label: 'Copy link', run: function() { navigator.clipboard?.writeText(url).catch(function() {}); } }
+    ]);
+};
+
+// The native window opens web links on the machine running OSA through the
+// core, because WebView2 does not reliably open new windows for target=_blank.
+// A browser opens them itself, so a LAN browser never opens links on the server.
+OSA.openExternalUrl = async function(url) {
+    if (!OSA.isTauriWebview()) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+        return;
+    }
+    try {
+        const res = await OSA.fetchWithAuth('/api/system/open-url', {
+            method: 'POST',
+            body: JSON.stringify({ url: url })
+        });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+    } catch (error) {
+        OSA.showToast?.(error.message || 'Could not open the link', 'error');
+    }
+};
+
+// Clicks and right clicks on links and images inside the chat.
+if (typeof document !== 'undefined') {
+document.addEventListener('click', function(event) {
+    const link = event.target.closest ? event.target.closest('#messages a[href]') : null;
+    if (!link) return;
+    if (link.classList.contains('chat-local-file')) {
+        event.preventDefault();
+        OSA.revealLocalPath(link.dataset.localPath);
+        return;
+    }
+    const href = link.getAttribute('href') || '';
+    if (/^https?:\/\//i.test(href) && OSA.isTauriWebview()) {
+        event.preventDefault();
+        OSA.openExternalUrl(href);
+    }
+});
+
+document.addEventListener('contextmenu', function(event) {
+    if (!event.target.closest) return;
+    const local = event.target.closest('#messages a.chat-local-file, #messages img.chat-local-image');
+    if (local && local.dataset.localPath) {
+        OSA.openLocalFileMenu(event, local.dataset.localPath);
+        return;
+    }
+    const web = event.target.closest('#messages a[href]');
+    const href = web ? (web.getAttribute('href') || '') : '';
+    if (/^https?:\/\//i.test(href)) OSA.openWebLinkMenu(event, href);
+});
+
+OSA.watchLocalImages();
+}

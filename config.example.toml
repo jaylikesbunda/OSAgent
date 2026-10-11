@@ -400,3 +400,10 @@ allowed_hosts = []              # empty = all public hosts; e.g. ["docs.rs", "*.
 blocked_hosts = []
 no_sandbox = false              # only for containers / root where Chromium cannot sandbox itself
 import_cookies = true           # use sessions imported in Settings -> Browser
+
+[model_menu]
+# Which providers and models the composer model dropdown lists. Managed from
+# Settings > Models; the active model and favourites always show.
+hidden_providers = []          # provider ids, e.g. ["openrouter"]
+hidden_models = []             # "provider_id:model_id", e.g. ["openai:gpt-4o-mini"]
+# hide_older_than_days = 365       # hide models released longer ago than this; omit to show all

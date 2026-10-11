@@ -365,7 +365,7 @@ function installModelPickerDom(catalog) {
             <input id="model-search" />
             <div class="model-dropdown-list"></div>
         </div>
-        <div id="model-catalog-list"></div>
+        <div id="connected-provider-list"></div>
     `;
     OSA.providerCatalog = catalog;
     OSA.modelsConnectedMap = {};
@@ -414,10 +414,13 @@ test('model dropdown and remote search benchmarks keep results complete', async 
 test('settings model and session sidebar searches benchmark local filtering', async () => {
     const catalog = makeCatalog();
     installModelPickerDom(catalog);
-    const modelResult = await benchmark('settings model catalog filter', () => {
-        OSA.filterSettingsModels('model-1');
+    OSA.modelsConnectedMap = Object.fromEntries(catalog.providers
+        .filter(provider => provider.connected)
+        .map(provider => [provider.id, { id: provider.id, name: provider.name, model: '', key_count: 1 }]));
+    const modelResult = await benchmark('settings connected provider list render', () => {
+        OSA.renderConnectedProviders();
     }, 10);
-    assert.ok(document.querySelectorAll('#model-catalog-list .model-option').length > 0);
+    assert.equal(document.querySelectorAll('#connected-provider-list .provider-row').length, 3);
 
     const sessions = [];
     for (let i = 0; i < 1200; i++) {

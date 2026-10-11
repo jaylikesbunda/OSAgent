@@ -80,6 +80,22 @@ provider):
 "explore" = "openrouter:deepseek/deepseek-r1"
 ```
 
+## Model menu
+
+The composer's model dropdown lists connected providers' models. To trim it,
+open **Settings → Models** and switch off a provider's **Show in model menu**,
+or expand a provider and untick individual models. Hidden entries stay
+connected and still work for subagents and the Discord bot. The active model
+and your favourites always appear in the dropdown.
+
+The choices are saved to config as:
+
+```toml
+[model_menu]
+hidden_providers = ["openrouter"]
+hidden_models = ["openai:gpt-4o-mini"]
+```
+
 ## Related tasks
 
 - [OAuth login]({{< relref "oauth.md" >}})

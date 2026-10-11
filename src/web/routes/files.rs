@@ -1,7 +1,9 @@
 use crate::agent::runtime::AgentRuntime;
 use axum::{
+    body::Body,
     extract::{Extension, Path, Query},
-    http::StatusCode,
+    http::{header, StatusCode},
+    response::Response,
     Json,
 };
 use serde::Deserialize;
@@ -163,5 +165,234 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert!(confined_path(&root, "missing.txt").await.is_err());
+    }
+}
+
+// ── Showing images and revealing files from chat ───────────────────
+// A chat can embed an image from disk or link a file. Both stay inside the
+// workspaces and OSA's own data folder, the places the agent may already read.
+
+const MAX_SHARED_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Canonical folders a chat may show or reveal files from.
+async fn shareable_roots(agent: &AgentRuntime) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for workspace in agent.get_workspaces().await {
+        let paths: Vec<String> = if workspace.paths.is_empty() {
+            vec![workspace.resolved_path()]
+        } else {
+            workspace.paths.iter().map(|p| p.path.clone()).collect()
+        };
+        for path in paths {
+            if let Ok(root) = tokio::fs::canonicalize(shellexpand::tilde(&path).to_string()).await {
+                roots.push(root);
+            }
+        }
+    }
+    let config_dir = agent.get_config().await.config_dir();
+    if let Ok(root) = tokio::fs::canonicalize(&config_dir).await {
+        roots.push(root);
+    }
+    roots
+}
+
+/// Resolves a requested path to an existing file inside a shareable root.
+async fn shareable_file(agent: &AgentRuntime, requested: &str) -> Result<PathBuf, BrowseError> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err(failure(StatusCode::BAD_REQUEST, "No path given"));
+    }
+    let target = tokio::fs::canonicalize(shellexpand::tilde(requested).to_string())
+        .await
+        .map_err(|e| failure(StatusCode::NOT_FOUND, e))?;
+    let metadata = tokio::fs::metadata(&target)
+        .await
+        .map_err(|e| failure(StatusCode::NOT_FOUND, e))?;
+    if !metadata.is_file() {
+        return Err(failure(StatusCode::BAD_REQUEST, "Not a file"));
+    }
+    let roots = shareable_roots(agent).await;
+    if !roots.iter().any(|root| target.starts_with(root)) {
+        return Err(failure(
+            StatusCode::FORBIDDEN,
+            "This file is outside the workspaces and OSA's data folder",
+        ));
+    }
+    Ok(target)
+}
+
+/// Raster image types only. SVG is left out because it can carry script.
+fn image_content_type(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SharedFileQuery {
+    path: String,
+}
+
+/// Serves an image so the chat can embed it. Requires the normal API token.
+pub async fn raw(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Query(query): Query<SharedFileQuery>,
+) -> Result<Response, BrowseError> {
+    let target = shareable_file(&agent, &query.path).await?;
+    let content_type = image_content_type(&target).ok_or_else(|| {
+        failure(
+            StatusCode::BAD_REQUEST,
+            "Only image files can be shown in chat",
+        )
+    })?;
+    let metadata = tokio::fs::metadata(&target)
+        .await
+        .map_err(|e| failure(StatusCode::NOT_FOUND, e))?;
+    if metadata.len() > MAX_SHARED_IMAGE_BYTES {
+        return Err(failure(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Image is larger than 25 MB",
+        ));
+    }
+    let bytes = tokio::fs::read(&target)
+        .await
+        .map_err(|e| failure(StatusCode::NOT_FOUND, e))?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(Body::from(bytes))
+        .map_err(|e| failure(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+#[derive(Deserialize)]
+pub struct RevealRequest {
+    path: String,
+}
+
+/// Selects the file in Explorer. It never opens or runs the file.
+pub async fn reveal(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Json(payload): Json<RevealRequest>,
+) -> Result<Json<Value>, BrowseError> {
+    let target = shareable_file(&agent, &payload.path).await?;
+    reveal_in_file_manager(&target).map_err(|e| failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "success": true })))
+}
+
+fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let shown = path.display().to_string();
+        // canonicalize adds the \\?\ verbatim prefix, which Explorer does not understand.
+        let shown = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string();
+        // Explorer wants the path quoted exactly as /select,"path". Explorer also
+        // exits non-zero even on success, so the status is not checked.
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{shown}\""))
+            .spawn()?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let folder = path.parent().unwrap_or(path);
+        std::process::Command::new("xdg-open").arg(folder).spawn()?;
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+pub struct OpenUrlRequest {
+    url: String,
+}
+
+/// Only plain web links, with no whitespace or control characters, may be opened.
+fn validated_web_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.len() > 2048 {
+        return Err("Link is too long".to_string());
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http and https links can be opened".to_string());
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("Link contains characters that cannot be opened".to_string());
+    }
+    Ok(url.to_string())
+}
+
+/// Opens a web link in the default browser of the machine running OSA.
+pub async fn open_url(Json(payload): Json<OpenUrlRequest>) -> Result<Json<Value>, BrowseError> {
+    let url = validated_web_url(&payload.url).map_err(|e| failure(StatusCode::BAD_REQUEST, e))?;
+    open_with_system(&url).map_err(|e| failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "success": true })))
+}
+
+fn open_with_system(url: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // explorer.exe hands the link to the default browser. It exits non-zero
+        // even on success, so the status is not checked.
+        std::process::Command::new("explorer.exe")
+            .arg(url)
+            .spawn()?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    use super::validated_web_url;
+
+    #[test]
+    fn only_plain_web_links_are_accepted() {
+        assert!(validated_web_url("https://example.com/a?b=c").is_ok());
+        assert!(validated_web_url("  http://localhost:8765/x  ").is_ok());
+        assert!(validated_web_url("file:///C:/Windows/notepad.exe").is_err());
+        assert!(validated_web_url("javascript:alert(1)").is_err());
+        assert!(validated_web_url("https://example.com/a b").is_err());
+        assert!(validated_web_url("https://example.com/\nx").is_err());
+        assert!(validated_web_url(&format!("https://e.com/{}", "a".repeat(2100))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shared_file_tests {
+    use super::image_content_type;
+    use std::path::Path;
+
+    #[test]
+    fn only_raster_images_are_served() {
+        assert_eq!(image_content_type(Path::new("shot.PNG")), Some("image/png"));
+        assert_eq!(
+            image_content_type(Path::new("photo.jpeg")),
+            Some("image/jpeg")
+        );
+        assert_eq!(image_content_type(Path::new("icon.svg")), None);
+        assert_eq!(image_content_type(Path::new("notes.txt")), None);
+        assert_eq!(image_content_type(Path::new("no_extension")), None);
     }
 }

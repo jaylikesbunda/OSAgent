@@ -602,6 +602,7 @@ OSA.loadSessions = async function() {
             }
         }
 
+        OSA.sessionSummaryById = new Map(sessions.map(function(session) { return [session.id, session]; }));
         const sessionIds = new Set(sessions.map(function(session) { return session.id; }));
         OSA.pruneUnreadMap(Array.from(sessionIds));
 
@@ -624,6 +625,12 @@ OSA.loadSessions = async function() {
                 rootSessions.push(s);
             }
         });
+
+        // Most recent activity first, in every subagent dropdown too. The server
+        // returns children by creation time, which buries active subagents.
+        const byActivity = (a, b) => new Date(b.updated_at) - new Date(a.updated_at);
+        childMap.forEach(children => children.sort(byActivity));
+        orphanChildren.sort(byActivity);
 
         // Prune stored collapse state for parents that no longer have children.
         if (OSA._collapsedGroups.size > 0) {
@@ -666,12 +673,11 @@ OSA.loadSessions = async function() {
                     </button>`
                 : '';
             return `
-            <div class="session-item${childClass} ${isActive ? 'active' : ''}${unread ? ' has-unread' : ''}" data-session-id="${OSA.escapeAttr(s.id)}" data-session-source="${OSA.escapeAttr(sourceKey)}" onclick="OSA.selectSession(${OSA.jsArg(s.id)})" style="${indent}">
+            <div class="session-item${childClass} ${isActive ? 'active' : ''}${unread ? ' has-unread' : ''}" data-session-id="${OSA.escapeAttr(s.id)}" data-session-source="${OSA.escapeAttr(sourceKey)}" onclick="OSA.selectSession(${OSA.jsArg(s.id)})" oncontextmenu="OSA.openSessionContextMenu(event, ${OSA.jsArg(s.id)})" style="${indent}">
                 <div class="session-icon${iconClass}" ${iconStyle}>${iconHtml}${unread ? '<span class="session-unread-dot" aria-label="Unread response"></span>' : ''}</div>
                 <div class="session-info">
                     <div class="session-name">${OSA.escapeHtml(displayName)}</div>
                     <div class="session-meta">
-                        ${workspaceLabel ? `<span class="session-workspace" title="${OSA.escapeHtml(workspaceLabel)}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="session-workspace-name">${OSA.escapeHtml(workspaceLabel)}</span></span><span class="session-meta-sep">&middot;</span>` : ''}
                         <span class="session-date" title="${new Date(s.created_at).toLocaleString()}">${OSA.escapeHtml(dateLabel)}</span>
                         ${badgeHtml}
                     </div>
@@ -709,7 +715,12 @@ OSA.loadSessions = async function() {
         };
 
         const list = document.getElementById('sessions-list');
-        let sessionsHtml = rootSessions.map(s => renderSessionGroup(s)).join('');
+        // A root chat counts as active when it, or one of its subagents, is open.
+        // Such a chat is never tucked behind "Show more".
+        const activeId = currentSession ? currentSession.id : null;
+        const containsActive = (root) => !!activeId
+            && (root.id === activeId || (childMap.get(root.id) || []).some(child => child.id === activeId));
+        let sessionsHtml = OSA.renderWorkspaceGroups(rootSessions, renderSessionGroup, containsActive);
 
         if (orphanChildren.length > 0) {
             sessionsHtml += '<div class="session-children" style="margin-left:0;border-left:none;padding-left:0;">';
@@ -740,6 +751,8 @@ OSA.loadSessions = async function() {
 
         OSA.filterSessions(document.getElementById('session-search-input')?.value || '');
 
+        OSA.bindWorkspaceDrag(list);
+
         const activeEl = list.querySelector('.session-item.active');
         if (activeEl) {
             activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -750,9 +763,11 @@ OSA.loadSessions = async function() {
     }
 };
 
-OSA.createSession = async function() {
+// Creates a chat in the given workspace, or in the active one when none is given.
+OSA.createSession = async function(requestedWorkspaceId) {
     const ws = OSA.getWorkspaceState();
-    const workspaceId = ws.activeWorkspace || 'default';
+    const workspaceId = (typeof requestedWorkspaceId === 'string' && requestedWorkspaceId)
+        || ws.activeWorkspace || 'default';
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     
@@ -803,13 +818,29 @@ OSA.createSession = async function() {
     }
 };
 
+// The "+" on a workspace section header starts a chat in that workspace.
+OSA.createSessionInWorkspace = function(workspaceId, event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    return OSA.createSession(workspaceId);
+};
+
 OSA.refreshSessionQueue = async function(sessionId) {
     const res = await OSA.fetchWithAuth(`/api/sessions/${sessionId}/queue`);
     if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
     }
 
-    const queue = await res.json();
+    const served = await res.json();
+    const serverQueue = Array.isArray(served) ? served : [];
+    // A message still being sent exists only in the browser until the server
+    // answers. Keep its placeholder so a refresh does not make it vanish.
+    const sending = (OSA.getSessionQueueFor(sessionId) || []).filter(function(item) {
+        return item && item.local && !serverQueue.some(function(q) { return q.client_message_id === item.client_message_id; });
+    });
+    const queue = serverQueue.concat(sending);
     const currentSession = OSA.getCurrentSession();
     if (currentSession && currentSession.id === sessionId) {
         OSA.setSessionQueue(queue);
@@ -1330,6 +1361,7 @@ OSA.shouldShowThinkingIndicatorForRunningSession = function(session, tools = [])
 };
 
 OSA.markSessionListSelection = function(sessionId) {
+    if (OSA.refreshChatContext) OSA.refreshChatContext();
     document.querySelectorAll('.session-item.active').forEach(item => {
         item.classList.remove('active');
     });
@@ -1509,6 +1541,9 @@ OSA.sendMessage = async function() {
 
     const clientMessageId = OSA.generateClientMessageId();
     const shouldQueueLocally = OSA.isAgentProcessing() || (OSA.getSessionQueue() || []).length > 0;
+    // A message sent while busy shows in the queue at once, as a local row.
+    // The server's row, or a failure, replaces it below.
+    if (shouldQueueLocally) OSA.addLocalQueueItem(clientMessageId, message);
     let optimisticDomId = '';
 
     input.value = '';
@@ -1566,6 +1601,8 @@ OSA.sendMessage = async function() {
             transport: useWs ? 'websocket' : (hasAttachments ? 'multipart' : 'http'),
             sessionId: currentSession.id,
         });
+
+        OSA.markSessionMessaged(currentSession.id);
 
         let data;
         if (useWs) {
@@ -1630,21 +1667,22 @@ OSA.sendMessage = async function() {
                 OSA.tmodelRemove('client:' + clientMessageId);
             }
 
-            const nextQueue = Array.isArray(OSA.getSessionQueue()) ? [...OSA.getSessionQueue()] : [];
-            if (!nextQueue.some(item => item.client_message_id === clientMessageId)) {
-                nextQueue.push(data.queue_item || {
-                    id: clientMessageId,
-                    client_message_id: clientMessageId,
-                    content: message,
-                    status: 'pending',
-                    position: data.queue_position || (nextQueue.length + 1),
-                    created_at: new Date().toISOString(),
-                });
-            }
+            // The server's row replaces this message's local placeholder.
+            const nextQueue = (OSA.getSessionQueue() || []).filter(item => item.client_message_id !== clientMessageId);
+            nextQueue.push(data.queue_item || {
+                id: clientMessageId,
+                client_message_id: clientMessageId,
+                content: message,
+                status: 'pending',
+                position: data.queue_position || (nextQueue.length + 1),
+                created_at: new Date().toISOString(),
+            });
             nextQueue.sort((a, b) => (a.position || 0) - (b.position || 0));
             OSA.setSessionQueue(nextQueue);
             OSA.renderQueuedMessages(nextQueue);
         } else {
+            // Started at once, so it never waited in the queue.
+            OSA.removeLocalQueueItem(clientMessageId);
             OSA.refreshCurrentSessionQueue();
         }
         OSA.debug?.log('send.accepted', {
@@ -1683,6 +1721,7 @@ OSA.sendMessage = async function() {
         if (clientMessageId && OSA.tmodelRemove) {
             OSA.tmodelRemove('client:' + clientMessageId);
         }
+        OSA.removeLocalQueueItem(clientMessageId);
         // Keep the message: restore it into the composer and offer a retry so a
         // dropped request does not silently discard what the user typed.
         const failedInput = document.getElementById('message-input');
@@ -2209,6 +2248,215 @@ OSA.filterSessionsWithContent = async function(query) {
     OSA.filterSessions(query);
 };
 
+// ── Workspace sections in the sidebar ───────────────────────
+// Chats are grouped under their workspace. Each section shows its most recent
+// chats; the rest sit behind "Show more" in the same DOM so search still
+// reaches them. filterSessions owns visibility for both.
+
+OSA.WORKSPACE_PREVIEW_COUNT = 3;
+
+OSA._collapsedWorkspaces = new Set();
+try {
+    OSA._collapsedWorkspaces = new Set(JSON.parse(localStorage.getItem('osa.sidebar.collapsedWorkspaces') || '[]'));
+} catch (_) {
+    OSA._collapsedWorkspaces = new Set();
+}
+
+OSA._workspaceShowAll = new Set();
+
+OSA.persistCollapsedWorkspaces = function() {
+    try {
+        localStorage.setItem('osa.sidebar.collapsedWorkspaces', JSON.stringify([...OSA._collapsedWorkspaces]));
+    } catch (_) { /* storage unavailable */ }
+};
+
+OSA.sessionWorkspaceId = function(session) {
+    return (session && session.metadata && session.metadata.workspace_id) || 'default';
+};
+
+OSA.workspaceDisplayName = function(workspaceId) {
+    const ws = OSA.getWorkspaceState();
+    const match = (ws.workspaces || []).find(w => w.id === workspaceId);
+    return match ? (match.name || match.id) : workspaceId;
+};
+
+OSA.renderWorkspaceGroups = function(rootSessions, renderBlock, containsActive) {
+    const byWorkspace = new Map();
+    for (const session of rootSessions) {
+        const id = OSA.sessionWorkspaceId(session);
+        if (!byWorkspace.has(id)) byWorkspace.set(id, []);
+        byWorkspace.get(id).push(session);
+    }
+    const activeWorkspace = OSA.selectedWorkspaceId();
+    const groups = [...byWorkspace.entries()].map(([id, items]) => {
+        items.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+        const latest = new Date(items[0].updated_at).getTime();
+        return { id, items, latest };
+    });
+    // Workspaces the user dragged into place keep that order. Any others follow:
+    // the active workspace first, then the ones with the newest chats.
+    const savedOrder = OSA.getWorkspaceOrder();
+    groups.sort((a, b) => {
+        const ai = savedOrder.indexOf(a.id);
+        const bi = savedOrder.indexOf(b.id);
+        if (ai !== -1 || bi !== -1) {
+            if (ai === -1) return 1;
+            if (bi === -1) return -1;
+            return ai - bi;
+        }
+        return (b.id === activeWorkspace) - (a.id === activeWorkspace) || b.latest - a.latest;
+    });
+    return groups.map(group => OSA.workspaceGroupHtml(group, renderBlock, containsActive)).join('');
+};
+
+// ── Reordering workspace sections ───────────────────────────
+// Drag a section by its header to move it. The order is kept per browser so
+// the sidebar stays put across reloads. Event listeners sit on the list
+// element, which survives the innerHTML re-renders.
+
+OSA.WORKSPACE_ORDER_KEY = 'osa.sidebar.workspaceOrder';
+
+OSA.getWorkspaceOrder = function() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(OSA.WORKSPACE_ORDER_KEY) || '[]');
+        return Array.isArray(saved) ? saved : [];
+    } catch (_) {
+        return [];
+    }
+};
+
+OSA.saveWorkspaceOrder = function(ids) {
+    try {
+        localStorage.setItem(OSA.WORKSPACE_ORDER_KEY, JSON.stringify(ids));
+    } catch (_) { /* storage unavailable */ }
+};
+
+OSA._clearWorkspaceDropMarks = function(list) {
+    list.querySelectorAll('.workspace-group.drop-before, .workspace-group.drop-after')
+        .forEach(node => node.classList.remove('drop-before', 'drop-after'));
+};
+
+OSA.bindWorkspaceDrag = function(list) {
+    if (!list || list._osaWorkspaceDragBound) return;
+    list._osaWorkspaceDragBound = true;
+    let draggingId = null;
+
+    const sectionAt = (event) => event.target && event.target.closest
+        ? event.target.closest('.workspace-group')
+        : null;
+
+    list.addEventListener('dragstart', (event) => {
+        const header = event.target && event.target.closest ? event.target.closest('.workspace-group-header') : null;
+        const section = header ? header.closest('.workspace-group') : null;
+        if (!section) return;
+        draggingId = section.dataset.workspaceId;
+        section.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        // Firefox will not start a drag without some data on the transfer.
+        event.dataTransfer.setData('text/plain', draggingId);
+    });
+
+    list.addEventListener('dragover', (event) => {
+        if (draggingId === null) return;
+        const target = sectionAt(event);
+        if (!target) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        OSA._clearWorkspaceDropMarks(list);
+        if (target.dataset.workspaceId === draggingId) return;
+        const rect = target.getBoundingClientRect();
+        const before = event.clientY < rect.top + rect.height / 2;
+        target.classList.add(before ? 'drop-before' : 'drop-after');
+    });
+
+    list.addEventListener('drop', (event) => {
+        if (draggingId === null) return;
+        const target = sectionAt(event);
+        event.preventDefault();
+        const dragged = list.querySelector(`.workspace-group[data-workspace-id="${CSS.escape(draggingId)}"]`);
+        OSA._clearWorkspaceDropMarks(list);
+        if (!target || !dragged || target === dragged) return;
+        const rect = target.getBoundingClientRect();
+        const before = event.clientY < rect.top + rect.height / 2;
+        target.parentNode.insertBefore(dragged, before ? target : target.nextSibling);
+        const order = Array.from(list.querySelectorAll(':scope > .workspace-group'))
+            .map(node => node.dataset.workspaceId);
+        OSA.saveWorkspaceOrder(order);
+    });
+
+    const finish = () => {
+        draggingId = null;
+        list.querySelectorAll('.workspace-group.dragging').forEach(node => node.classList.remove('dragging'));
+        OSA._clearWorkspaceDropMarks(list);
+    };
+    list.addEventListener('dragend', finish);
+    list.addEventListener('drop', finish);
+};
+
+OSA.workspaceGroupHtml = function(group, renderBlock, containsActive) {
+    const cap = OSA.WORKSPACE_PREVIEW_COUNT;
+    const showAll = OSA._workspaceShowAll.has(group.id);
+    const collapsed = OSA._collapsedWorkspaces.has(group.id);
+    let overflowCount = 0;
+    const blocks = group.items.map((session, index) => {
+        const candidate = index >= cap && !containsActive(session);
+        if (candidate) overflowCount++;
+        const hidden = candidate && !showAll;
+        return `<div class="session-root-block${hidden ? ' session-overflow' : ''}" data-root-id="${OSA.escapeAttr(session.id)}"${candidate ? ' data-overflow-candidate="1"' : ''}>${renderBlock(session)}</div>`;
+    }).join('');
+    let moreButton = '';
+    if (overflowCount > 0 || (showAll && group.items.length > cap)) {
+        const label = showAll ? 'Show less' : `Show ${overflowCount} more`;
+        moreButton = `<button type="button" class="workspace-show-more" onclick="OSA.toggleWorkspaceShowAll(${OSA.jsArg(group.id)})">${OSA.escapeHtml(label)}</button>`;
+    }
+    const name = OSA.workspaceDisplayName(group.id);
+    return `
+        <section class="workspace-group${collapsed ? ' collapsed' : ''}" data-workspace-id="${OSA.escapeAttr(group.id)}">
+            <div class="workspace-group-head">
+                <button type="button" class="workspace-group-header" draggable="true" title="Drag to reorder" onclick="OSA.toggleWorkspaceGroup(${OSA.jsArg(group.id)})" aria-expanded="${collapsed ? 'false' : 'true'}">
+                    <svg class="workspace-group-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                    <span class="workspace-group-name" title="${OSA.escapeAttr(name)}">${OSA.escapeHtml(name)}</span>
+                    <span class="workspace-group-count">${group.items.length}</span>
+                </button>
+                <button type="button" class="workspace-new-chat" title="New chat in ${OSA.escapeAttr(name)}" aria-label="New chat in ${OSA.escapeAttr(name)}" onclick="OSA.createSessionInWorkspace(${OSA.jsArg(group.id)}, event)">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                </button>
+            </div>
+            <div class="workspace-group-body">${blocks}${moreButton}</div>
+        </section>
+    `;
+};
+
+OSA.toggleWorkspaceGroup = function(workspaceId) {
+    const set = OSA._collapsedWorkspaces;
+    if (set.has(workspaceId)) set.delete(workspaceId); else set.add(workspaceId);
+    OSA.persistCollapsedWorkspaces();
+    const section = document.querySelector(`.workspace-group[data-workspace-id="${CSS.escape(workspaceId)}"]`);
+    if (!section) return;
+    const collapsed = set.has(workspaceId);
+    section.classList.toggle('collapsed', collapsed);
+    section.querySelector('.workspace-group-header')?.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+};
+
+OSA.toggleWorkspaceShowAll = function(workspaceId) {
+    const set = OSA._workspaceShowAll;
+    if (set.has(workspaceId)) set.delete(workspaceId); else set.add(workspaceId);
+    const showAll = set.has(workspaceId);
+    const section = document.querySelector(`.workspace-group[data-workspace-id="${CSS.escape(workspaceId)}"]`);
+    if (!section) return;
+    section.querySelectorAll('.session-root-block[data-overflow-candidate="1"]').forEach(block => {
+        block.classList.toggle('session-overflow', !showAll);
+    });
+    const more = section.querySelector('.workspace-show-more');
+    if (more) more.textContent = showAll ? 'Show less' : `Show ${section.querySelectorAll('.session-root-block.session-overflow').length} more`;
+    OSA.refilterSessions();
+};
+
+OSA.refilterSessions = function() {
+    const search = document.getElementById('session-search-input');
+    OSA.filterSessions(search ? search.value : '');
+};
+
 OSA.filterSessions = function(query) {
     const items = document.querySelectorAll('.session-item');
     const childrenGroups = document.querySelectorAll('.session-children');
@@ -2227,6 +2475,23 @@ OSA.filterSessions = function(query) {
         item.style.display = ((matchesTitle || matchesContent) && matchesSource) ? '' : 'none';
     });
 
+    // Chats past the preview cap stay hidden until "Show more", but a search
+    // or source filter reaches every chat.
+    document.querySelectorAll('.session-root-block').forEach(block => {
+        const capped = !filtering && block.classList.contains('session-overflow');
+        block.style.display = capped ? 'none' : '';
+    });
+
+    document.querySelectorAll('.workspace-group').forEach(section => {
+        const anyVisible = Array.from(section.querySelectorAll('.session-root-block')).some(block => {
+            const root = block.querySelector(':scope > .session-item');
+            return block.style.display !== 'none' && (!root || root.style.display !== 'none');
+        });
+        section.style.display = anyVisible ? '' : 'none';
+        const more = section.querySelector('.workspace-show-more');
+        if (more) more.style.display = filtering ? 'none' : '';
+    });
+
     childrenGroups.forEach(group => {
         if (!group.dataset.parent) return; // orphan group: no toggle state
         const visibleChildren = group.querySelectorAll('.session-item:not([style*="display: none"])');
@@ -2243,6 +2508,145 @@ OSA.filterSessions = function(query) {
         const toggle = document.querySelector(`.session-item[data-session-id="${group.dataset.parent}"] .session-group-toggle`);
         if (toggle) toggle.classList.toggle('open', !group.classList.contains('collapsed'));
     });
+};
+
+// ── Chats as context ────────────────────────────────────────
+// A chat can reference other chats. The server reads their recent turns at the
+// start of each turn, so the reference never enters this chat's history.
+
+OSA._chatContextById = new Map();
+
+OSA.loadChatContext = async function(chatId) {
+    if (!chatId) return [];
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(chatId)}/context`);
+        const entries = res.ok ? await res.json() : [];
+        OSA._chatContextById.set(chatId, Array.isArray(entries) ? entries : []);
+    } catch (_) {
+        /* keep whatever was loaded last */
+    }
+    return OSA._chatContextById.get(chatId) || [];
+};
+
+OSA.currentChatContext = function() {
+    const id = OSA.getCurrentSession()?.id;
+    return id ? (OSA._chatContextById.get(id) || []) : [];
+};
+
+OSA.renderChatContextChips = function() {
+    const box = document.getElementById('chat-context-chips');
+    if (!box) return;
+    const entries = OSA.currentChatContext();
+    if (!entries.length) {
+        box.classList.add('hidden');
+        box.innerHTML = '';
+        return;
+    }
+    box.classList.remove('hidden');
+    box.innerHTML = '<span class="chat-context-label">Context</span>' + entries.map(entry => {
+        const name = OSA.escapeHtml(entry.name || 'Untitled chat');
+        return `<span class="chat-context-chip" title="${OSA.escapeAttr(entry.name || '')}">
+            <span class="chat-context-name">${name}</span>
+            <button type="button" class="chat-context-remove" aria-label="Remove ${OSA.escapeAttr(entry.name || 'chat')} from context" onclick="OSA.removeChatContext(${OSA.jsArg(entry.id)})">&times;</button>
+        </span>`;
+    }).join('');
+};
+
+OSA.refreshChatContext = async function() {
+    const id = OSA.getCurrentSession()?.id;
+    if (!id) {
+        OSA.renderChatContextChips();
+        return;
+    }
+    await OSA.loadChatContext(id);
+    if (OSA.getCurrentSession()?.id === id) OSA.renderChatContextChips();
+};
+
+OSA.addChatContext = async function(sourceId) {
+    const id = OSA.getCurrentSession()?.id;
+    if (!id) return;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(id)}/context`, {
+            method: 'POST',
+            body: JSON.stringify({ session_id: sourceId })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await OSA.refreshChatContext();
+        OSA.showToast?.(`Added "${data.name || 'chat'}" as context`);
+    } catch (error) {
+        OSA.showToast?.(error.message || 'Could not add context', 'error');
+    }
+};
+
+OSA.removeChatContext = async function(sourceId) {
+    const id = OSA.getCurrentSession()?.id;
+    if (!id) return;
+    try {
+        const res = await OSA.fetchWithAuth(`/api/sessions/${encodeURIComponent(id)}/context/${encodeURIComponent(sourceId)}`, {
+            method: 'DELETE'
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        await OSA.refreshChatContext();
+    } catch (error) {
+        OSA.showToast?.(error.message || 'Could not remove context', 'error');
+    }
+};
+
+OSA.closeSessionContextMenu = function() {
+    document.getElementById('session-context-menu')?.remove();
+    document.removeEventListener('click', OSA._sessionContextOutside, true);
+    document.removeEventListener('keydown', OSA._sessionContextEscape, true);
+};
+
+OSA._sessionContextOutside = function(event) {
+    const menu = document.getElementById('session-context-menu');
+    if (menu && !menu.contains(event.target)) OSA.closeSessionContextMenu();
+};
+
+OSA._sessionContextEscape = function(event) {
+    if (event.key === 'Escape') OSA.closeSessionContextMenu();
+};
+
+OSA.openSessionContextMenu = function(event, sourceId) {
+    event.preventDefault();
+    event.stopPropagation();
+    OSA.closeSessionContextMenu();
+
+    const currentId = OSA.getCurrentSession()?.id || null;
+    const isSelf = !currentId || currentId === sourceId;
+    const added = OSA.currentChatContext().some(entry => entry.id === sourceId);
+    const label = isSelf
+        ? 'Open another chat to add this as context'
+        : (added ? 'Remove from this chat’s context' : 'Add to current chat as context');
+
+    const menu = document.createElement('div');
+    menu.id = 'session-context-menu';
+    menu.className = 'session-context-menu';
+    menu.setAttribute('role', 'menu');
+    menu.innerHTML = `<button type="button" role="menuitem"${isSelf ? ' disabled' : ''}>${OSA.escapeHtml(label)}</button>`;
+    document.body.appendChild(menu);
+
+    const rect = menu.getBoundingClientRect();
+    const left = Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8));
+    const top = Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+
+    menu.querySelector('button').addEventListener('click', () => {
+        OSA.closeSessionContextMenu();
+        if (added) OSA.removeChatContext(sourceId);
+        else OSA.addChatContext(sourceId);
+    });
+    // Attach dismiss handlers after this click finishes, or the opening
+    // right-click would close the menu it just opened.
+    setTimeout(() => {
+        document.addEventListener('click', OSA._sessionContextOutside, true);
+        document.addEventListener('keydown', OSA._sessionContextEscape, true);
+    }, 0);
 };
 
 OSA.loadSessionBreadcrumb = async function(sessionId) {

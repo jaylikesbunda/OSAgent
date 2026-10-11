@@ -469,6 +469,8 @@ fn build_communication_section(mode: PromptMode) -> Vec<String> {
             "- Only use emojis if the user explicitly requests it".to_string(),
             "- Avoid overusing em dashes. Use commas, periods, or parentheses instead; keep a dash for the rare break that genuinely needs one".to_string(),
             "- Reference code as filepath:line_number".to_string(),
+            "- To show the user an image (a screenshot you took, or a picture you read), put it on its own line as ![caption](C:/full/path/image.png). It appears inline in the chat. Only images inside a workspace or OSA's data folder can be shown".to_string(),
+            "- To point the user at a file, link it as [file name](file:///C:/full/path/file.ext). Right-clicking the link offers Show in File Explorer".to_string(),
         ],
         PromptMode::Minimal | PromptMode::Explore | PromptMode::Verify => vec![
             "# Communication".to_string(),

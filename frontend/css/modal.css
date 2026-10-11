@@ -796,6 +796,38 @@
     cursor: not-allowed;
 }
 
+/* Offline voice card in Settings → Voice. */
+.sherpa-voice-state {
+    font-size: 13px;
+    color: var(--text-muted, #8a8a8a);
+    margin: 8px 0 12px;
+}
+
+.sherpa-voice-state[data-tone="error"] {
+    color: var(--error, #c0392b);
+}
+
+.sherpa-voice-progress {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-hover, rgba(255, 255, 255, 0.08));
+    overflow: hidden;
+    margin-bottom: 12px;
+}
+
+.sherpa-voice-bar-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--p-accent, #7c7cff);
+    transition: width 0.3s ease;
+}
+
+.sherpa-voice-actions {
+    display: flex;
+    gap: 8px;
+}
+
 .btn-primary {
     padding: 8px 18px;
     background: linear-gradient(135deg, var(--accent), var(--accent-dark));
@@ -2826,4 +2858,169 @@
 .local-server-key-row input {
     flex: 1;
     min-width: 0;
+}
+
+/* ---- Settings > Models: connected rows, model menu, add-provider list ---- */
+
+.provider-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.provider-row-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+.provider-row-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.provider-row-models {
+    margin-top: 8px;
+}
+
+.provider-row-models > summary {
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    padding: 4px 0;
+}
+
+.provider-row-models > summary:hover,
+.provider-row-models[open] > summary {
+    color: var(--text-secondary);
+}
+
+.provider-row-models-tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0;
+    flex-wrap: wrap;
+}
+
+.provider-row-models-filter {
+    flex: 1 1 160px;
+    min-width: 0;
+    margin: 0;
+}
+
+.provider-model-checks {
+    max-height: 320px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+}
+
+.provider-model-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 2px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    min-width: 0;
+}
+
+.provider-model-check.hidden {
+    display: none;
+}
+
+.provider-model-check input {
+    flex-shrink: 0;
+    margin: 0;
+}
+
+.provider-model-use {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.provider-model-use:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+.provider-model-use.is-current {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.provider-model-check code {
+    flex-shrink: 1;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: none;
+    padding: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.provider-add-toggle {
+    margin-top: 10px;
+}
+
+.provider-add-panel {
+    margin-top: 10px;
+}
+
+.provider-add-panel .settings-field {
+    margin-bottom: 10px;
+}
+
+.provider-available-row {
+    margin-bottom: 8px;
+}
+
+/* Endpoint is folded for presets, so it reads as optional detail. */
+.provider-advanced {
+    margin-bottom: 20px;
+}
+
+.provider-advanced > summary {
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    margin-bottom: 10px;
+}
+
+.provider-advanced[open] > summary {
+    color: var(--text-secondary);
+}
+
+.provider-modal-footer .provider-remove-btn {
+    margin-right: auto;
+}
+
+/* Workspace lock: a chat with messages keeps its workspace. */
+.workspace-lock-note {
+    padding: 10px 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+}
+
+.menu-row.is-locked .menu-row-main {
+    opacity: 0.55;
+    cursor: default;
 }

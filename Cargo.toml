@@ -104,6 +104,7 @@ zip = "0.6"
 
 # TAR/GZ handling
 tar = "0.4"
+bzip2 = "0.4"
 flate2 = "1.0"
 
 # Directory paths
@@ -120,6 +121,9 @@ local-ip-address = "0.6.11"
 
 [build-dependencies]
 serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 rfd = "0.15"

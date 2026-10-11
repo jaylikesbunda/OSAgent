@@ -1891,6 +1891,18 @@
     opacity: 0.6;
 }
 
+.queue-row.local,
+.queue-row.interrupting {
+    opacity: 0.6;
+}
+
+.queue-status {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
 .queue-order {
     flex-shrink: 0;
     min-width: 14px;

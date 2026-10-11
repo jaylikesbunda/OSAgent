@@ -15,8 +15,18 @@ Changed:
 * Long turns no longer stop cold at the configured tool budget: the agent is nudged to continue in budget-sized chunks up to a hard ceiling, then summarizes if it still has not finished
 * Compaction shows a persistent animated indicator for the whole summarization pass instead of a toast that disappears
 * Replies avoid overusing em dashes, using ordinary punctuation instead
-* Provider cards in Settings → Models now start collapsed, including connected ones, so the list opens as a scannable summary; expand a card to browse its models
-* The model picker and Settings → Models search now list connected providers' models first, so an available provider is not buried under unconfigured ones
+* Settings → Models now lists only your connected providers, one row each with Edit, and an "Add provider" list that stays closed until you open it. Model search lives in the model picker, which lists connected providers' models first
+* Adding or editing a provider is a shorter form: the endpoint is folded away unless the provider is a custom or local server, and connected providers can be removed from the same form
+* The chat list groups chats under their workspace, showing the three most recent with a Show more button
+* A chat's workspace locks once it has a message. Start a new chat to use a different workspace
+
+Added:
+* Choose which providers and models appear in the composer model dropdown from Settings → Models. Hidden entries stay connected; the active model and favourites always show
+* Add another chat as context from its right-click menu in the sidebar. Referenced chats appear above the composer and are read at the start of each turn, without being copied into the chat
+
+Fixed:
+* Editing a connected provider without re-entering its API key keeps the saved key for the running session instead of dropping it until restart
+* Starring a model in the dropdown keeps the dropdown open, and reopening it shows the list instead of "Loading models..."
 
 Fixed:
 * Consecutive tools stay together in one group, including in subagent chats. Empty “OSA” rows no longer split groups, and expanded groups stay open as new tools arrive

@@ -1543,7 +1543,7 @@ impl SqliteStorage {
     pub fn list_session_summaries(&self) -> Result<Vec<SessionSummary>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, title FROM sessions ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, created_at, updated_at, model, provider, metadata, parent_id, agent_type, task_status, title, (SELECT COUNT(*) FROM session_transcript t WHERE t.session_id = sessions.id) FROM sessions ORDER BY created_at DESC")
                 .map_err(OSAgentError::Storage)?;
             let summaries = stmt
                 .query_map([], |row| {
@@ -1563,6 +1563,7 @@ impl SqliteStorage {
                         parent_id: row.get(6)?,
                         agent_type: row.get(7)?,
                         task_status: row.get(8)?,
+                        message_count: row.get(10)?,
                     })
                 })
                 .map_err(OSAgentError::Storage)?

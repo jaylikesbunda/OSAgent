@@ -22,6 +22,10 @@ pub struct ModelInfo {
     pub input_cost_per_1m: f64,
     #[serde(default)]
     pub output_cost_per_1m: f64,
+    /// Publication date (YYYY-MM-DD) from models.dev. None when unknown, which
+    /// keeps the model visible under an age filter.
+    #[serde(default)]
+    pub release_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,6 +457,7 @@ impl ModelCatalog {
                     available,
                     input_cost_per_1m: m.cost.input,
                     output_cost_per_1m: m.cost.output,
+                    release_date: (!m.release_date.is_empty()).then(|| m.release_date.clone()),
                 }
             })
             .collect()
@@ -570,6 +575,7 @@ impl ModelCatalog {
                 available: connected,
                 input_cost_per_1m: 0.0,
                 output_cost_per_1m: 0.0,
+                release_date: None,
             });
         }
 
@@ -624,6 +630,7 @@ impl ModelCatalog {
                     available: true,
                     input_cost_per_1m: 0.0,
                     output_cost_per_1m: 0.0,
+                    release_date: None,
                 });
             }
         }

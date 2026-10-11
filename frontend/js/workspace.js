@@ -170,10 +170,32 @@ OSA.selectedWorkspaceId = function() {
     return ws.activeWorkspace || 'default';
 };
 
+// A chat's workspace locks once it has a message. The server's message_count
+// covers earlier turns; a send from this page locks it before the next refresh.
+OSA._messagedSessionIds = new Set();
+
+OSA.markSessionMessaged = function(sessionId) {
+    if (sessionId) OSA._messagedSessionIds.add(sessionId);
+};
+
+OSA.sessionWorkspaceLocked = function(sessionId) {
+    const id = sessionId || OSA.getCurrentSession()?.id;
+    if (!id) return false;
+    if (OSA._messagedSessionIds.has(id)) return true;
+    const summary = OSA.sessionSummaryById && OSA.sessionSummaryById.get(id);
+    return !!(summary && summary.message_count > 0);
+};
+
+OSA.WORKSPACE_LOCKED_MESSAGE = 'This chat already has messages, so its workspace is locked. Start a new chat to use a different workspace.';
+
 OSA.renderWorkspaceMenu = function() {
     const list = document.getElementById('workspace-menu-list');
     if (!list) return;
     const ws = OSA.getWorkspaceState();
+    const locked = OSA.sessionWorkspaceLocked();
+    const lockNote = locked
+        ? `<div class="menu-empty-text workspace-lock-note">${OSA.escapeHtml(OSA.WORKSPACE_LOCKED_MESSAGE)}</div>`
+        : '';
     if (!ws.workspaces.length) {
         list.innerHTML = `
             <div class="menu-empty">
@@ -185,7 +207,7 @@ OSA.renderWorkspaceMenu = function() {
         return;
     }
     const activeId = OSA.selectedWorkspaceId();
-    list.innerHTML = ws.workspaces.map(w => {
+    list.innerHTML = lockNote + ws.workspaces.map(w => {
         const isActive = activeId === w.id;
         const paths = OSA.workspacePaths(w);
         const primaryPath = paths[0]?.path || w.id;
@@ -193,8 +215,8 @@ OSA.renderWorkspaceMenu = function() {
         const perm = paths[0]?.permission === 'read_only' ? 'ro' : 'rw';
         const permClass = paths[0]?.permission === 'read_only' ? 'ro' : 'rw';
         return `
-            <div class="menu-row ${isActive ? 'active' : ''}">
-                <button class="menu-row-main" type="button" onclick="OSA.selectWorkspaceFromMenu(${OSA.jsArg(w.id)})">
+            <div class="menu-row ${isActive ? 'active' : ''}${locked && !isActive ? ' is-locked' : ''}">
+                <button class="menu-row-main" type="button"${locked && !isActive ? ' disabled' : ''} onclick="OSA.selectWorkspaceFromMenu(${OSA.jsArg(w.id)})">
                     <span class="menu-row-check" aria-hidden="true">${isActive ? '&#10003;' : ''}</span>
                     <span class="menu-row-copy">
                         <span class="menu-row-title">${OSA.escapeHtml(w.name || w.id)}</span>
@@ -214,6 +236,14 @@ OSA.selectWorkspaceFromMenu = async function(workspaceId) {
     const currentSession = OSA.getCurrentSession();
     if (currentSession?.id && OSA.isAgentProcessing()) {
         OSA.setWorkspaceInlineStatus('Stop or wait for the current turn before switching workspace.', true);
+        OSA.closeWorkspaceMenu();
+        return;
+    }
+    if (OSA.sessionWorkspaceLocked(currentSession?.id)) {
+        // Re-picking the workspace already in use is a no-op, not an error.
+        if (workspaceId !== OSA.selectedWorkspaceId()) {
+            OSA.setWorkspaceInlineStatus(OSA.WORKSPACE_LOCKED_MESSAGE, true);
+        }
         OSA.closeWorkspaceMenu();
         return;
     }
@@ -337,6 +367,10 @@ OSA.applySessionWorkspace = async function(requestedWorkspaceId) {
         return null;
     }
     const workspaceId = requestedWorkspaceId || OSA.selectedWorkspaceId();
+    if (OSA.sessionWorkspaceLocked(currentSession.id)) {
+        OSA.setWorkspaceInlineStatus(OSA.WORKSPACE_LOCKED_MESSAGE, true);
+        return null;
+    }
     try {
         const url = '/api/sessions/' + encodeURIComponent(currentSession.id) + '/workspace';
         const res = await OSA.fetchWithAuth(url, {

@@ -1,0 +1,494 @@
+/* Settings: one restrained design.
+   Each group is a single soft surface with hairline dividers between its
+   rows. Nothing sits in a card inside a card. One accent colour, slim
+   controls, and quiet secondary text. Every rule is scoped to the settings
+   modal, so the jobs, MCP and skills forms keep their own look. */
+
+#settings-modal {
+    --st-surface: color-mix(in srgb, var(--text-primary) 4%, transparent);
+    --st-control: color-mix(in srgb, var(--text-primary) 7%, transparent);
+    --st-hairline: color-mix(in srgb, var(--text-primary) 9%, transparent);
+    --st-field-border: color-mix(in srgb, var(--text-primary) 14%, transparent);
+    --st-radius: 12px;
+}
+
+/* ---- Shell ---- */
+
+#settings-modal .settings-modal-content {
+    background: var(--bg-elevated, var(--bg-primary));
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: 1px solid var(--st-hairline);
+    border-radius: 16px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    max-width: 880px;
+    height: min(80vh, 720px);
+    max-height: 80vh;
+}
+
+#settings-modal .settings-modal-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--st-hairline);
+}
+
+#settings-modal .settings-modal-header h2 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+/* ---- Sidebar ---- */
+
+#settings-modal .settings-sidebar {
+    width: 192px;
+    background: transparent;
+    border-right: 1px solid var(--st-hairline);
+    padding: 10px 8px;
+}
+
+#settings-modal .settings-sidebar-section {
+    padding: 6px 0 10px;
+}
+
+#settings-modal .settings-sidebar-section-title {
+    padding: 6px 10px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+#settings-modal .settings-sidebar-item {
+    gap: 8px;
+    padding: 6px 10px;
+    margin: 1px 0;
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+#settings-modal .settings-sidebar-item:hover {
+    background: var(--st-control);
+    color: var(--text-primary);
+}
+
+#settings-modal .settings-sidebar-item.active {
+    background: var(--st-control);
+    color: var(--text-primary);
+    font-weight: 600;
+    border-right: 0;
+}
+
+/* ---- Pane heading ---- */
+
+#settings-modal .settings-main {
+    padding: 28px 36px 40px;
+}
+
+#settings-modal .settings-pane-header {
+    margin-bottom: 22px;
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+
+#settings-modal .settings-pane-header h2 {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 4px;
+}
+
+#settings-modal .settings-pane-desc {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+
+/* ---- Groups: one surface, rows divided by hairlines ---- */
+
+#settings-modal .settings-group {
+    margin-bottom: 22px;
+    padding: 0;
+    background: var(--st-surface);
+    border-radius: var(--st-radius);
+}
+
+#settings-modal .settings-group:last-child {
+    margin-bottom: 0;
+}
+
+#settings-modal .settings-group-title {
+    margin: 0;
+    padding: 12px 16px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+#settings-modal .settings-group > * + * {
+    border-top: 1px solid var(--st-hairline);
+}
+
+#settings-modal .settings-group > :not(.settings-group-title):not(.discord-settings-card):not(.settings-advanced) {
+    margin: 0;
+    padding: 12px 16px;
+    background: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#settings-modal .settings-group .settings-group-title + * {
+    border-top: 1px solid var(--st-hairline);
+}
+
+#settings-modal .settings-group-title-inline {
+    padding-right: 12px;
+}
+
+/* ---- Fields ---- */
+
+#settings-modal .settings-field {
+    margin: 0;
+}
+
+#settings-modal .settings-field > label,
+#settings-modal .settings-field label {
+    margin-bottom: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+#settings-modal .settings-field input,
+#settings-modal .settings-field select {
+    height: 32px;
+    padding: 0 10px;
+    font-size: 13px;
+    border: 1px solid var(--st-hairline);
+    border-radius: 8px;
+    background-color: color-mix(in srgb, var(--text-primary) 8%, transparent);
+    box-sizing: border-box;
+}
+
+#settings-modal .settings-field textarea {
+    padding: 8px 10px;
+    font-size: 13px;
+    border: 1px solid var(--st-hairline);
+    border-radius: 8px;
+    background-color: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+#settings-modal .settings-field select {
+    padding-right: 28px;
+}
+
+#settings-modal .settings-field input:focus,
+#settings-modal .settings-field select:focus,
+#settings-modal .settings-field textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+#settings-modal .settings-field-row {
+    gap: 12px;
+    margin: 0;
+}
+
+#settings-modal .settings-field-row > .settings-field {
+    padding: 0;
+    border: 0;
+}
+
+#settings-modal .settings-field-hint {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+
+/* ---- Toggle rows ---- */
+
+#settings-modal .toggle-field {
+    margin: 0;
+    padding: 12px 16px;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    gap: 16px;
+}
+
+#settings-modal .toggle-field:hover {
+    border: 0;
+}
+
+#settings-modal .toggle-label {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 0;
+}
+
+#settings-modal .toggle-desc {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+
+#settings-modal .toggle-switch {
+    width: 40px;
+    height: 24px;
+}
+
+#settings-modal .toggle-slider {
+    background-color: color-mix(in srgb, var(--text-primary) 22%, transparent);
+    border-radius: 24px;
+    box-shadow: none;
+}
+
+#settings-modal .toggle-slider:before {
+    width: 20px;
+    height: 20px;
+    left: 2px;
+    bottom: 2px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+#settings-modal .toggle-switch input:checked + .toggle-slider {
+    background: var(--accent);
+    box-shadow: none;
+}
+
+#settings-modal .toggle-switch input:checked + .toggle-slider:before {
+    transform: translateX(16px);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+#settings-modal .toggle-switch input:focus-visible + .toggle-slider {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ---- Buttons ---- */
+
+#settings-modal .btn-primary {
+    padding: 7px 14px;
+    background: var(--accent);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+#settings-modal .btn-primary:hover:not(:disabled) {
+    opacity: 0.92;
+    transform: none;
+    box-shadow: none;
+}
+
+#settings-modal .btn-ghost {
+    padding: 7px 14px;
+    background: var(--st-control);
+    border: 1px solid var(--st-hairline);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+#settings-modal .btn-ghost:hover {
+    background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+    border-color: var(--st-field-border);
+}
+
+/* ---- Advanced disclosures: a quiet row, not a box ---- */
+
+#settings-modal .settings-advanced {
+    margin: 0 0 22px;
+    border: 0;
+}
+
+#settings-modal .settings-advanced > summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 4px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+#settings-modal .settings-advanced > summary:hover {
+    color: var(--text-primary);
+}
+
+#settings-modal .settings-advanced-body {
+    padding-top: 4px;
+}
+
+/* ---- Card wrappers inside panes: flatten to plain rows ---- */
+
+#settings-modal .discord-settings-card,
+#settings-modal .discord-runtime-card,
+#settings-modal .memory-control-card,
+#settings-modal .provider-route-card,
+#settings-modal .lan-address-card,
+#settings-modal .update-info-row,
+#settings-modal .update-version-row {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+/* Doctor: one list of checks, not a grid of boxes. */
+#settings-modal .doctor-status-grid {
+    display: block;
+    background: var(--st-surface);
+    border-radius: var(--st-radius);
+    overflow: hidden;
+}
+
+#settings-modal .doctor-status-card {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#settings-modal .doctor-status-card + .doctor-status-card {
+    border-top: 1px solid var(--st-hairline);
+}
+
+/* Nested surfaces: a group inside a group, and the Memory and MCP boxes.
+   They sit inside a page that is already a surface, so they drop their own. */
+#settings-modal .settings-group .settings-group {
+    background: none;
+    border-radius: 0;
+}
+
+#settings-modal .memory-section,
+#settings-modal .memory-list,
+#settings-modal .decision-list,
+#settings-modal .memory-review-list,
+#settings-modal .mcp-summary {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+/* Voice: runtime status and model choices become rows, not boxes. The
+   selected model keeps a thin accent bar instead of a filled card. */
+#settings-modal .voice-runtime-card,
+#settings-modal .voice-selection-summary,
+#settings-modal .model-card,
+#settings-modal .model-requirements {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#settings-modal .model-card + .model-card {
+    border-top: 1px solid var(--st-hairline);
+}
+
+#settings-modal .model-card.selected {
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+
+#settings-modal .installed-model-row {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#settings-modal .installed-model-row + .installed-model-row {
+    border-top: 1px solid var(--st-hairline);
+}
+
+/* One inset for every row, at any depth: 16px from the group edge, the same
+   as its title. Fields inside a two-column row or a grid keep their cell. */
+#settings-modal :is(.settings-group, .settings-advanced-body) .settings-field:not(.settings-field-row > .settings-field):not(.discord-settings-grid .settings-field) {
+    padding: 12px 16px;
+}
+
+#settings-modal :is(.settings-group, .settings-advanced-body) > .settings-field-hint {
+    padding: 0 16px 12px;
+    margin: 0;
+}
+
+/* Discord: each section is a block inside the surface, not a box inside it.
+   Its title, rows and actions share the same 16px inset. */
+#settings-modal .discord-settings-card {
+    padding: 0;
+    margin: 0;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#settings-modal .discord-settings-card > :not(.settings-group-title):not(.discord-settings-grid):not(.settings-field):not(.discord-bot-status) {
+    margin: 0;
+    padding: 12px 16px;
+}
+
+#settings-modal .discord-settings-card > .settings-group-title + * {
+    border-top: 1px solid var(--st-hairline);
+}
+
+#settings-modal .discord-settings-card > * + * {
+    border-top: 1px solid var(--st-hairline);
+}
+
+#settings-modal .discord-settings-card > .settings-group-title {
+    border-top: 0;
+}
+
+#settings-modal .discord-settings-grid {
+    padding: 12px 16px;
+    gap: 12px;
+}
+
+#settings-modal .settings-advanced-body .discord-settings-card + .discord-settings-card {
+    margin-top: 12px;
+}
+
+/* Disclosures sit flush in their group: their rows bring the 16px inset. */
+#settings-modal .settings-advanced {
+    padding: 0;
+}
+
+#settings-modal .settings-advanced > summary {
+    padding: 10px 16px;
+}
+
+#settings-modal .settings-advanced-body > .settings-field,
+#settings-modal .settings-advanced-body > .settings-field-row,
+#settings-modal .settings-advanced-body > p {
+    margin: 0;
+    padding: 12px 16px;
+}
+
+#settings-modal .settings-advanced-body > .settings-field-hint {
+    margin: 0;
+    padding: 0 16px 12px;
+}
+
+#settings-modal .settings-advanced-body > .settings-field-row > .settings-field {
+    padding: 0;
+}
+
+#settings-modal .discord-settings-card > .discord-bot-status {
+    margin: 12px 16px;
+}
+
+/* ---- Footer ---- */
+
+#settings-modal .settings-modal-footer {
+    padding: 12px 20px;
+    border-top: 1px solid var(--st-hairline);
+    background: none;
+}

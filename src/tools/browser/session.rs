@@ -3,6 +3,7 @@
 //! tool arguments and formats results.
 
 use super::cdp::{CdpClient, CdpError, CdpEvent};
+use super::fingerprint;
 use super::input::{self, KeySpec};
 use super::policy::EgressPolicy;
 use super::sandbox::BrowserProcess;
@@ -43,6 +44,12 @@ pub struct SessionShared {
     policy: EgressPolicy,
     viewport: (u32, u32),
     timeout: Duration,
+    /// Fingerprint scrubbing is on; setup_target applies the overrides.
+    stealth: bool,
+    headless: bool,
+    /// Effective user agent (config override wins), headless markers
+    /// already scrubbed when `stealth`. Empty disables the UA override.
+    user_agent: String,
 }
 
 impl SessionShared {
@@ -91,13 +98,42 @@ impl BrowserSession {
             .await
             .map_err(|error| error.to_string())?;
 
+        let timeout = Duration::from_millis(config.action_timeout_ms.max(1000));
+
+        // Learn the browser's real user agent so the stealth override can
+        // stay consistent with the actual binary instead of inventing one.
+        let real_user_agent = if config.stealth && config.user_agent.trim().is_empty() {
+            match client
+                .send("Browser.getVersion", json!({}), None, timeout)
+                .await
+            {
+                Ok(value) => value["userAgent"].as_str().unwrap_or("").to_string(),
+                Err(_) => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        let effective_ua = if config.user_agent.trim().is_empty() {
+            real_user_agent
+        } else {
+            config.user_agent.trim().to_string()
+        };
+        let user_agent = if config.stealth {
+            fingerprint::scrub_user_agent(&effective_ua)
+        } else {
+            effective_ua
+        };
+
         let shared = Arc::new(SessionShared {
             targets: Mutex::new(HashMap::new()),
             notes: Mutex::new(Vec::new()),
             attached: Notify::new(),
             policy: EgressPolicy::from_config(config),
             viewport: (config.viewport_width, config.viewport_height),
-            timeout: Duration::from_millis(config.action_timeout_ms.max(1000)),
+            timeout,
+            stealth: config.stealth,
+            headless: config.headless,
+            user_agent,
         });
 
         // Subscribe before enabling auto-attach so the first page's
@@ -105,7 +141,6 @@ impl BrowserSession {
         let events = client.subscribe();
         let event_task = tokio::spawn(run_event_loop(client.clone(), shared.clone(), events));
 
-        let timeout = shared.timeout;
         client
             .send(
                 "Target.setAutoAttach",
@@ -194,11 +229,9 @@ impl BrowserSession {
                 }
                 return self.create_target("about:blank").await;
             }
-            let _ = tokio::time::timeout(
-                Duration::from_millis(100),
-                self.shared.attached.notified(),
-            )
-            .await;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(100), self.shared.attached.notified())
+                    .await;
         }
     }
 
@@ -214,9 +247,7 @@ impl BrowserSession {
                 infos
                     .iter()
                     .filter(|info| info["type"] == "page")
-                    .filter_map(|info| {
-                        Some((info["targetId"].as_str()?.to_string(), info.clone()))
-                    })
+                    .filter_map(|info| Some((info["targetId"].as_str()?.to_string(), info.clone())))
                     .collect()
             })
             .unwrap_or_default())
@@ -264,11 +295,9 @@ impl BrowserSession {
             if Instant::now() >= deadline {
                 return self.attach(target_id).await;
             }
-            let _ = tokio::time::timeout(
-                Duration::from_millis(100),
-                self.shared.attached.notified(),
-            )
-            .await;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(100), self.shared.attached.notified())
+                    .await;
         }
     }
 
@@ -416,8 +445,9 @@ impl BrowserSession {
         };
         let loaded = tokio::time::timeout(deadline, wait).await.unwrap_or(false);
         if !loaded {
-            self.shared
-                .note("page did not finish loading before the timeout; showing what is there".to_string());
+            self.shared.note(
+                "page did not finish loading before the timeout; showing what is there".to_string(),
+            );
         }
         // Let late scripts render before the caller reads the page.
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -481,9 +511,10 @@ impl BrowserSession {
 
     /// One page of the last snapshot's outline and the total page count.
     pub fn snapshot_page(&self, page: usize) -> Option<(String, usize)> {
-        self.snapshot_target
-            .as_ref()
-            .map(|_| self.snapshot.page(page, self.config.max_snapshot_chars.max(500)))
+        self.snapshot_target.as_ref().map(|_| {
+            self.snapshot
+                .page(page, self.config.max_snapshot_chars.max(500))
+        })
     }
 
     pub fn last_fingerprint(&self) -> Option<u64> {
@@ -534,7 +565,11 @@ impl BrowserSession {
 
     // ---------------------------------------------------------- screenshot
 
-    pub async fn screenshot(&mut self, full_page: bool, annotate: bool) -> SessionResult<(Screenshot, Option<String>)> {
+    pub async fn screenshot(
+        &mut self,
+        full_page: bool,
+        annotate: bool,
+    ) -> SessionResult<(Screenshot, Option<String>)> {
         let mut legend = None;
         if annotate {
             let (text, boxes) = self.annotation_boxes().await?;
@@ -550,7 +585,9 @@ impl BrowserSession {
         Ok((result?, legend))
     }
 
-    async fn annotation_boxes(&mut self) -> SessionResult<(String, Vec<(String, f64, f64, f64, f64)>)> {
+    async fn annotation_boxes(
+        &mut self,
+    ) -> SessionResult<(String, Vec<(String, f64, f64, f64, f64)>)> {
         let refs: Vec<(String, RefEntry)> = self.snapshot(true).await?.refs.clone();
         let (width, height) = (
             f64::from(self.shared.viewport.0),
@@ -563,12 +600,16 @@ impl BrowserSession {
                 break;
             }
             let Ok(response) = self
-                .page_cmd("DOM.getBoxModel", json!({"backendNodeId": entry.backend_node_id}))
+                .page_cmd(
+                    "DOM.getBoxModel",
+                    json!({"backendNodeId": entry.backend_node_id}),
+                )
                 .await
             else {
                 continue;
             };
-            let Some(rect) = input::box_model_quad(&response).and_then(|q| input::quad_rect(&q)) else {
+            let Some(rect) = input::box_model_quad(&response).and_then(|q| input::quad_rect(&q))
+            else {
                 continue;
             };
             let (x, y, w, h) = rect;
@@ -651,7 +692,10 @@ impl BrowserSession {
         text: Option<&str>,
     ) -> SessionResult<i64> {
         if let Some(reference) = reference {
-            let reference = reference.trim().trim_start_matches("ref=").trim_start_matches('@');
+            let reference = reference
+                .trim()
+                .trim_start_matches("ref=")
+                .trim_start_matches('@');
             if self.snapshot_target.as_deref() != Some(self.active.as_str()) {
                 return Err(format!(
                     "ref `{reference}` is from an older page; call `snapshot` first"
@@ -663,7 +707,9 @@ impl BrowserSession {
                 .iter()
                 .find(|(id, _)| id == reference)
                 .map(|(_, entry)| entry.backend_node_id)
-                .ok_or_else(|| format!("unknown ref `{reference}`; call `snapshot` for current refs"));
+                .ok_or_else(|| {
+                    format!("unknown ref `{reference}`; call `snapshot` for current refs")
+                });
         }
         if let Some(selector) = selector {
             let expression = format!(
@@ -722,7 +768,9 @@ impl BrowserSession {
                 target.insert(key.clone(), value.clone());
             }
         }
-        self.page_cmd("Input.dispatchMouseEvent", params).await.map(|_| ())
+        self.page_cmd("Input.dispatchMouseEvent", params)
+            .await
+            .map(|_| ())
     }
 
     pub async fn click(&mut self, backend_node_id: i64, double: bool) -> SessionResult<()> {
@@ -756,6 +804,61 @@ impl BrowserSession {
         self.mouse("mouseMoved", x, y, json!({})).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         Ok(())
+    }
+
+    /// Clicks at a point in CSS pixels of the visible viewport, the way a person
+    /// does with the mouse. Used when there is no ref or selector to target.
+    pub async fn click_at(
+        &mut self,
+        x: f64,
+        y: f64,
+        button: &str,
+        double: bool,
+    ) -> SessionResult<()> {
+        let sid = self.sid()?;
+        let events = self.client.subscribe();
+        let (name, mask) = match button {
+            "right" => ("right", 2),
+            "middle" => ("middle", 4),
+            _ => ("left", 1),
+        };
+        self.mouse("mouseMoved", x, y, json!({})).await?;
+        let clicks = if double { 2 } else { 1 };
+        for count in 1..=clicks {
+            self.mouse(
+                "mousePressed",
+                x,
+                y,
+                json!({"button": name, "buttons": mask, "clickCount": count}),
+            )
+            .await?;
+            self.mouse(
+                "mouseReleased",
+                x,
+                y,
+                json!({"button": name, "buttons": 0, "clickCount": count}),
+            )
+            .await?;
+        }
+        self.settle(&sid, events).await;
+        Ok(())
+    }
+
+    /// Size of the visible viewport in CSS pixels, so screenshot positions can be
+    /// mapped to the coordinates `click_at` expects.
+    pub async fn viewport_size(&self) -> SessionResult<(f64, f64)> {
+        let response = self
+            .page_cmd(
+                "Runtime.evaluate",
+                json!({"expression": "[window.innerWidth, window.innerHeight]", "returnByValue": true}),
+            )
+            .await?;
+        let values = response["result"]["value"]
+            .as_array()
+            .ok_or("could not read the viewport size")?;
+        let width = values.first().and_then(Value::as_f64).unwrap_or(0.0);
+        let height = values.get(1).and_then(Value::as_f64).unwrap_or(0.0);
+        Ok((width, height))
     }
 
     async fn call_on_node(
@@ -816,7 +919,8 @@ impl BrowserSession {
                 self.press_key(&input::parse_key("Delete")?).await?;
             }
         } else {
-            self.page_cmd("Input.insertText", json!({"text": text})).await?;
+            self.page_cmd("Input.insertText", json!({"text": text}))
+                .await?;
         }
         if submit {
             self.press_key(&input::parse_key("Enter")?).await?;
@@ -911,14 +1015,24 @@ impl BrowserSession {
                 let at_bottom = y + view >= *total - 2;
                 format!(
                     "scrolled to y={y} of {total}px{}",
-                    if at_bottom { " (bottom of page)" } else if *y == 0 { " (top of page)" } else { "" }
+                    if at_bottom {
+                        " (bottom of page)"
+                    } else if *y == 0 {
+                        " (top of page)"
+                    } else {
+                        ""
+                    }
                 )
             }
             _ => "scrolled".to_string(),
         })
     }
 
-    pub async fn select_option(&mut self, backend_node_id: i64, value: &str) -> SessionResult<String> {
+    pub async fn select_option(
+        &mut self,
+        backend_node_id: i64,
+        value: &str,
+    ) -> SessionResult<String> {
         let result = self
             .call_on_node(
                 backend_node_id,
@@ -952,7 +1066,8 @@ impl BrowserSession {
         let sid = self.sid()?;
         let events = self.client.subscribe();
         if !text.is_empty() {
-            self.page_cmd("Input.insertText", json!({"text": text})).await?;
+            self.page_cmd("Input.insertText", json!({"text": text}))
+                .await?;
         }
         if submit {
             self.press_key(&input::parse_key("Enter")?).await?;
@@ -964,7 +1079,11 @@ impl BrowserSession {
     /// Set one form control from a loosely typed value: text inputs are
     /// replaced, `<select>` picks by value or label, checkboxes and radios
     /// are toggled to match.
-    pub async fn fill_field(&mut self, backend_node_id: i64, value: &Value) -> SessionResult<String> {
+    pub async fn fill_field(
+        &mut self,
+        backend_node_id: i64,
+        value: &Value,
+    ) -> SessionResult<String> {
         let kind = self
             .call_on_node(
                 backend_node_id,
@@ -1163,7 +1282,12 @@ fn collect_child_frames(node: &Value, out: &mut Vec<(String, String)>, depth: us
         let frame = &child["frame"];
         if let Some(id) = frame["id"].as_str() {
             let name = frame["name"].as_str().filter(|n| !n.is_empty());
-            let url: String = frame["url"].as_str().unwrap_or("").chars().take(80).collect();
+            let url: String = frame["url"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
             let label = match name {
                 Some(name) => format!("\"{name}\""),
                 None => format!("\"{url}\""),
@@ -1192,9 +1316,15 @@ fn normalize_url(raw: &str) -> SessionResult<String> {
         return Err("`url` is required".to_string());
     }
     let lowered = trimmed.to_ascii_lowercase();
-    if ["javascript:", "file:", "chrome:", "view-source:", "devtools:"]
-        .iter()
-        .any(|scheme| lowered.starts_with(scheme))
+    if [
+        "javascript:",
+        "file:",
+        "chrome:",
+        "view-source:",
+        "devtools:",
+    ]
+    .iter()
+    .any(|scheme| lowered.starts_with(scheme))
     {
         return Err("only http(s) URLs can be opened".to_string());
     }
@@ -1216,7 +1346,9 @@ async fn setup_target(
         let session_id = session_id.to_string();
         let timeout = shared.timeout;
         async move {
-            let _ = client.send(method, params, Some(&session_id), timeout).await;
+            let _ = client
+                .send(method, params, Some(&session_id), timeout)
+                .await;
         }
     };
 
@@ -1230,18 +1362,45 @@ async fn setup_target(
     if shared.policy.is_active() {
         send("Fetch.enable", json!({"patterns": [{"urlPattern": "*"}]})).await;
     }
-    if target_type == "page" {
-        send("Page.enable", json!({})).await;
-        send(
-            "Emulation.setDeviceMetricsOverride",
-            json!({
-                "width": shared.viewport.0,
-                "height": shared.viewport.1,
-                "deviceScaleFactor": 1,
-                "mobile": false,
-            }),
-        )
-        .await;
+    if matches!(target_type, "page" | "iframe") {
+        if target_type == "page" {
+            send("Page.enable", json!({})).await;
+            // Only force the viewport in headless mode. In a headed window
+            // it would pin inner size to the window size, and
+            // `outerHeight == innerHeight` is itself an automation tell.
+            if shared.headless {
+                send(
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({
+                        "width": shared.viewport.0,
+                        "height": shared.viewport.1,
+                        "deviceScaleFactor": 1,
+                        "mobile": false,
+                    }),
+                )
+                .await;
+            }
+        }
+        if shared.stealth {
+            if target_type != "page" {
+                send("Page.enable", json!({})).await;
+            }
+            send(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source": fingerprint::STEALTH_INIT_SCRIPT}),
+            )
+            .await;
+            if !shared.user_agent.is_empty() {
+                send(
+                    "Emulation.setUserAgentOverride",
+                    json!({
+                        "userAgent": shared.user_agent,
+                        "userAgentMetadata": fingerprint::user_agent_metadata(&shared.user_agent),
+                    }),
+                )
+                .await;
+            }
+        }
     }
     if waiting_for_debugger {
         send("Runtime.runIfWaitingForDebugger", json!({})).await;
@@ -1361,7 +1520,10 @@ mod tests {
 
     #[test]
     fn normalize_adds_https_and_rejects_script_urls() {
-        assert_eq!(normalize_url("example.com/a").unwrap(), "https://example.com/a");
+        assert_eq!(
+            normalize_url("example.com/a").unwrap(),
+            "https://example.com/a"
+        );
         assert_eq!(normalize_url("http://x.test").unwrap(), "http://x.test");
         assert_eq!(normalize_url("about:blank").unwrap(), "about:blank");
         assert!(normalize_url("javascript:alert(1)").is_err());

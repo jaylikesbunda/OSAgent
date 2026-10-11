@@ -29,6 +29,43 @@ OSA.normalizeVoiceConfig = function(voiceConfig) {
     };
 };
 
+// Offline voice (sherpa-onnx) runs on this computer with no network service.
+// Its install state is cached so routing decisions stay synchronous.
+OSA.sherpaInstalled = false;
+OSA.refreshSherpaStatus = async function() {
+    try {
+        const res = await OSA.fetchWithAuth('/api/voice/sherpa/status');
+        const status = await res.json();
+        OSA.sherpaInstalled = !!status.installed;
+    } catch (err) {
+        OSA.sherpaInstalled = false;
+    }
+    return OSA.sherpaInstalled;
+};
+
+OSA.localSttName = function(engine) {
+    return engine === 'sherpa-local' ? 'Offline Voice' : 'Local Whisper';
+};
+
+OSA.isLocalSttProvider = function(provider) {
+    return provider === 'whisper-local' || provider === 'sherpa-local';
+};
+
+// The desktop window cannot reach the browser's speech services, so once the
+// offline voice is installed it takes over browser input and output there.
+// Every other window keeps the browser's own voices.
+OSA.effectiveSttProvider = function(voiceConfig) {
+    const provider = OSA.normalizeSttProvider(voiceConfig?.stt_provider);
+    if (provider === 'browser' && OSA.isTauriWebview?.() && OSA.sherpaInstalled) return 'sherpa-local';
+    return provider;
+};
+
+OSA.effectiveTtsProvider = function(voiceConfig) {
+    const provider = OSA.normalizeTtsProvider(voiceConfig?.tts_provider);
+    if (provider === 'browser' && OSA.isTauriWebview?.() && OSA.sherpaInstalled) return 'sherpa-local';
+    return provider;
+};
+
 // Microphone selection.
 //
 // Kept in localStorage rather than the server config: device ids are scoped to
@@ -286,14 +323,14 @@ OSA.updateVoiceStatus = function(message, tone = 'idle') {
     }
 
     if (OSA.getIsTranscribing()) {
-        OSA.setVoiceStatus('Transcribing with Local Whisper...', 'busy');
+        OSA.setVoiceStatus(`Transcribing with ${OSA.localSttName(OSA._localSttEngine)}...`, 'busy');
         return;
     }
 
     if (OSA.getIsRecording()) {
-        const sttProvider = OSA.normalizeSttProvider(voiceConfig.stt_provider);
-        if (sttProvider === 'whisper-local') {
-            OSA.setVoiceStatus('Listening for Local Whisper... click the mic again to stop.', 'recording');
+        const sttProvider = OSA.effectiveSttProvider(voiceConfig);
+        if (OSA.isLocalSttProvider(sttProvider)) {
+            OSA.setVoiceStatus(`Listening for ${OSA.localSttName(sttProvider)}... click the mic again to stop.`, 'recording');
         } else {
             OSA.setVoiceStatus('Listening in the browser... click the mic again to stop.', 'recording');
         }
@@ -304,6 +341,7 @@ OSA.updateVoiceStatus = function(message, tone = 'idle') {
 };
 
 OSA.initVoice = function() {
+    OSA.refreshSherpaStatus();
     const config = OSA.getCachedConfig();
     if (!config?.voice) {
         OSA.fetchWithAuth('/api/config')
@@ -384,10 +422,37 @@ OSA.initSpeechRecognition = function() {
         console.error('Speech recognition error:', event.error);
         OSA.setIsRecording(false);
         OSA.updateMicButton();
-        OSA.setVoiceStatus(`Browser speech recognition error: ${event.error}`, 'error');
+        // The browser's service is unreachable here, but the offline voice is
+        // installed: take this request over with it instead of failing.
+        if (event.error === 'network' && OSA.sherpaInstalled) {
+            OSA.startLocalWhisperRecording('sherpa-local');
+            return;
+        }
+        OSA.setVoiceStatus(OSA.browserSpeechErrorMessage(event.error), 'error');
     };
 
     OSA.setRecognition(recognition);
+};
+
+// Chromium's recognizer sends audio to Google's speech service. The desktop
+// WebView has no route to it, so 'network' is the usual failure there, and the
+// fix is a local engine rather than retrying the browser one.
+OSA.browserSpeechErrorMessage = function(code) {
+    if (code === 'network' || code === 'service-not-allowed') {
+        return "Browser speech recognition can't reach its speech service from this window. Set up Offline Voice or choose Local Whisper for Input in Settings → Voice.";
+    }
+    if (code === 'not-allowed') return 'Microphone access was blocked for this window.';
+    if (code === 'audio-capture') return 'No microphone was found.';
+    return `Browser speech recognition error: ${code}`;
+};
+
+// Browser voice output depends on the voices the OS provides, which the desktop
+// WebView often lacks. Piper runs on the server and does not.
+OSA.browserSpeechSynthesisErrorMessage = function(code) {
+    if (code === 'network' || code === 'synthesis-unavailable' || code === 'synthesis-failed') {
+        return "Browser voice output failed in this window. Set up Offline Voice or choose Piper for Output in Settings → Voice.";
+    }
+    return `Browser voice output error: ${code}`;
 };
 
 // Whether a finished transcript should go straight to the agent.
@@ -575,7 +640,7 @@ OSA.processLocalWhisperRecording = async function(blob) {
         const transcript = OSA.normalizeVoiceTranscript(data.text);
         if (!transcript) {
             finalStatus = {
-                message: 'Local Whisper did not hear any text. Try again and speak a little closer to the mic.',
+                message: `${OSA.localSttName(OSA._localSttEngine)} did not hear any text. Try again and speak a little closer to the mic.`,
                 tone: 'error'
             };
             return;
@@ -596,9 +661,9 @@ OSA.processLocalWhisperRecording = async function(blob) {
             };
         }
     } catch (error) {
-        console.error('Local Whisper transcription failed:', error);
+        console.error('Local transcription failed:', error);
         finalStatus = {
-            message: `Local Whisper failed: ${error.message}`,
+            message: `${OSA.localSttName(OSA._localSttEngine)} failed: ${error.message}`,
             tone: 'error'
         };
     } finally {
@@ -610,7 +675,14 @@ OSA.processLocalWhisperRecording = async function(blob) {
     }
 };
 
-OSA.ensureLocalWhisperReady = async function() {
+OSA.ensureLocalWhisperReady = async function(engine) {
+    if (engine === 'sherpa-local') {
+        if (!(await OSA.refreshSherpaStatus())) {
+            throw new Error('Offline voice is not set up yet. Open Settings > Voice and click Set up offline voice.');
+        }
+        return;
+    }
+
     const voiceConfig = OSA.normalizeVoiceConfig(OSA.getVoiceConfig());
     const selectedModel = voiceConfig?.whisper_model || null;
     const [statusResponse, installedResponse] = await Promise.all([
@@ -876,14 +948,15 @@ OSA.renderPartialTranscript = function(text) {
     }
 };
 
-OSA.startLocalWhisperRecording = async function() {
+OSA.startLocalWhisperRecording = async function(engine = 'whisper-local') {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-        OSA.setVoiceStatus('Local Whisper needs browser microphone recording support before it can start.', 'error');
+        OSA.setVoiceStatus(`${OSA.localSttName(engine)} needs browser microphone recording support before it can start.`, 'error');
         return;
     }
 
     try {
-        await OSA.ensureLocalWhisperReady();
+        OSA._localSttEngine = engine;
+        await OSA.ensureLocalWhisperReady(engine);
         const stream = await navigator.mediaDevices.getUserMedia(OSA.buildAudioConstraints());
         const mimeType = [
             'audio/webm;codecs=opus',
@@ -976,12 +1049,12 @@ OSA.toggleRecording = function() {
         OSA.cancelSpeechOutput();
     }
 
-    const sttProvider = OSA.normalizeSttProvider(voiceConfig.stt_provider);
-    if (sttProvider === 'whisper-local') {
+    const sttProvider = OSA.effectiveSttProvider(voiceConfig);
+    if (OSA.isLocalSttProvider(sttProvider)) {
         if (OSA.getIsRecording()) {
             OSA.stopLocalWhisperRecording();
         } else {
-            OSA.startLocalWhisperRecording();
+            OSA.startLocalWhisperRecording(sttProvider);
         }
         return;
     }
@@ -1431,7 +1504,8 @@ OSA.pumpSpeechQueue = function() {
         OSA.pumpSpeechQueue();
     };
 
-    if (voiceConfig?.tts_provider === 'piper-local') {
+    const ttsProvider = OSA.effectiveTtsProvider(voiceConfig);
+    if (ttsProvider === 'piper-local' || ttsProvider === 'sherpa-local') {
         // A wedged Piper process must not stall the queue forever: a timeout
         // guarantees finish runs and the next utterance gets its turn.
         const controller = new AbortController();
@@ -1502,7 +1576,13 @@ OSA.pumpSpeechQueue = function() {
         utterance.lang = voiceConfig?.language || 'en';
         utterance.rate = voiceConfig?.voice_speed || 1.0;
         utterance.onend = finish;
-        utterance.onerror = finish;
+        utterance.onerror = (event) => {
+            // 'interrupted' and 'canceled' are our own barge-in, not a failure.
+            if (event.error && event.error !== 'interrupted' && event.error !== 'canceled') {
+                OSA.setVoiceStatus(OSA.browserSpeechSynthesisErrorMessage(event.error), 'error');
+            }
+            finish();
+        };
         window.speechSynthesis.speak(utterance);
         OSA.updateGlobalPlaybackBar();
     }

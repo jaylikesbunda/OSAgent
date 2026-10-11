@@ -1,6 +1,7 @@
 //! Chromium discovery, isolated launch and teardown.
 //!
-//! Every browser gets a throwaway profile directory, a loopback-only
+//! Every browser gets an isolated profile directory (throwaway by default,
+//! persistent per OSA session with `persistent_profile`), a loopback-only
 //! debugging port chosen by the OS (read back from `DevToolsActivePort`,
 //! never guessed) and is killed as a process tree on close or drop.
 
@@ -79,7 +80,13 @@ fn well_known_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Launch flags for an isolated, headless, automation-only browser.
+/// Launch flags for an isolated, automation-only browser.
+///
+/// With `stealth` on, the flags stay free of anything that changes the
+/// fingerprint sites can see: `--enable-automation` is never passed (so
+/// `navigator.webdriver` stays false), `--disable-gpu` is opt-in (SwiftShader
+/// WebGL strings are a bot signal), and headless mode uses `--headless=new`,
+/// whose user agent string no longer contains "HeadlessChrome".
 pub fn launch_args(config: &BrowserConfig, profile_dir: &Path) -> Vec<String> {
     let mut args = vec![
         format!("--user-data-dir={}", profile_dir.display()),
@@ -102,9 +109,19 @@ pub fn launch_args(config: &BrowserConfig, profile_dir: &Path) -> Vec<String> {
             config.viewport_width, config.viewport_height
         ),
     ];
+    if config.stealth {
+        args.push("--disable-blink-features=AutomationControlled".to_string());
+    }
+    if config.persistent_profile {
+        // A previous unclean shutdown would otherwise raise a blocking
+        // "Restore pages?" bubble on the next launch.
+        args.push("--hide-crash-restore-bubble".to_string());
+    }
     if config.headless {
         args.push("--headless=new".to_string());
-        args.push("--disable-gpu".to_string());
+        if config.disable_gpu {
+            args.push("--disable-gpu".to_string());
+        }
     }
     if config.no_sandbox {
         args.push("--no-sandbox".to_string());
@@ -116,10 +133,26 @@ pub fn launch_args(config: &BrowserConfig, profile_dir: &Path) -> Vec<String> {
     args
 }
 
+/// Stable profile-directory name for a persistent profile (one per OSA
+/// session id). The `keep-` prefix marks it so stale-profile cleanup
+/// never deletes it while the agent is idle.
+pub fn persistent_profile_name(session_id: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    format!("keep-{:016x}", hasher.finish())
+}
+
+/// Directory names owned by persistent profiles; cleanup must skip them.
+pub fn is_persistent_profile(name: &str) -> bool {
+    name.starts_with("keep-")
+}
+
 pub struct BrowserProcess {
     child: Option<Child>,
     pid: Option<u32>,
     profile_dir: PathBuf,
+    keep_profile: bool,
     /// `ws://127.0.0.1:<port>/devtools/browser/<id>`
     pub ws_url: String,
 }
@@ -152,10 +185,15 @@ impl BrowserProcess {
             .spawn()
             .map_err(|error| format!("could not start {}: {error}", executable.display()))?;
         let pid = child.id();
+        if let Some(pid) = pid {
+            // Tie the browser tree to OSA's lifetime, even if OSA crashes.
+            super::job::contain(pid);
+        }
         let mut process = Self {
             child: Some(child),
             pid,
             profile_dir: profile_dir.clone(),
+            keep_profile: config.persistent_profile,
             ws_url: String::new(),
         };
 
@@ -201,6 +239,9 @@ impl BrowserProcess {
     }
 
     fn remove_profile(&self) {
+        if self.keep_profile {
+            return;
+        }
         // Chromium can hold files for a moment after exit.
         for _ in 0..5 {
             if std::fs::remove_dir_all(&self.profile_dir).is_ok() || !self.profile_dir.exists() {
@@ -246,14 +287,20 @@ fn kill_tree(pid: Option<u32>) {
     }
 }
 
-/// Remove profile directories left behind by a crashed run. Only entries
-/// untouched for over an hour are removed, so a second live OSA process
-/// sharing this directory is left alone.
+/// Remove profile directories left behind by a crashed run. Persistent
+/// profiles (`keep-*`) are never removed here, no matter how long they
+/// sat idle. Only entries untouched for over an hour are removed, so a
+/// second live OSA process sharing this directory is left alone.
 pub fn cleanup_stale_profiles(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if is_persistent_profile(&name) {
+            continue;
+        }
         let stale = entry
             .metadata()
             .and_then(|meta| meta.modified())
@@ -280,6 +327,9 @@ mod tests {
         assert!(args.contains(&"--remote-debugging-port=0".to_string()));
         assert!(args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--disable-extensions".to_string()));
+        // Stealth defaults: no automation blink feature, no SwiftShader GPU.
+        assert!(args.contains(&"--disable-blink-features=AutomationControlled".to_string()));
+        assert!(!args.contains(&"--disable-gpu".to_string()));
         assert!(!args.contains(&"--no-sandbox".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("about:blank"));
     }
@@ -297,6 +347,31 @@ mod tests {
         assert!(!args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--no-sandbox".to_string()));
         assert!(args.contains(&"--user-agent=OSA-Test/1.0".to_string()));
+    }
+
+    #[test]
+    fn launch_args_honor_stealth_switches() {
+        let config = BrowserConfig {
+            stealth: false,
+            disable_gpu: true,
+            persistent_profile: true,
+            ..BrowserConfig::default()
+        };
+        let args = launch_args(&config, Path::new("p"));
+
+        assert!(!args.contains(&"--disable-blink-features=AutomationControlled".to_string()));
+        assert!(args.contains(&"--disable-gpu".to_string()));
+        assert!(args.contains(&"--hide-crash-restore-bubble".to_string()));
+    }
+
+    #[test]
+    fn persistent_profile_name_is_stable_and_protected() {
+        let first = persistent_profile_name("default");
+        assert_eq!(first, persistent_profile_name("default"));
+        assert_ne!(first, persistent_profile_name("other-session"));
+        assert!(first.starts_with("keep-"));
+        assert!(is_persistent_profile(&first));
+        assert!(!is_persistent_profile("0123abcd"));
     }
 
     #[test]
