@@ -175,7 +175,9 @@ impl BrowserManager {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(15)).await;
-                let Some(manager) = weak.upgrade() else { return };
+                let Some(manager) = weak.upgrade() else {
+                    return;
+                };
                 let expired: Vec<String> = {
                     let sessions = manager.sessions.lock().await;
                     sessions
@@ -611,14 +613,18 @@ Page snapshot, part {shown} of {total} (all refs work, even from parts not shown
 "
                         ));
                     } else {
-                        out.push_str("
+                        out.push_str(
+                            "
 Page snapshot (refs are valid until the page changes):
-");
+",
+                        );
                     }
                     out.push_str(&outline);
                 }
-                _ => out.push_str("
-Page snapshot: (empty page)"),
+                _ => out.push_str(
+                    "
+Page snapshot: (empty page)",
+                ),
             }
         }
         Ok(ToolResult::new(out))
@@ -729,7 +735,15 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        for expected in ["open", "click", "type", "screenshot", "tabs", "close", "eval"] {
+        for expected in [
+            "open",
+            "click",
+            "type",
+            "screenshot",
+            "tabs",
+            "close",
+            "eval",
+        ] {
             assert!(actions.contains(&expected), "{expected} missing");
         }
     }
@@ -761,25 +775,45 @@ mod tests {
             v
         };
 
-        let out = tool.execute(call(json!({"action":"open","url":page}))).await.unwrap();
+        let out = tool
+            .execute(call(json!({"action":"open","url":page})))
+            .await
+            .unwrap();
         println!("{out}");
         assert!(out.contains("Title: Live"));
         assert!(out.contains("button \"Go\""));
 
-        let out = tool.execute(call(json!({"action":"type","text":"Name","value":"x","ref":"e1"}))).await;
+        let out = tool
+            .execute(call(
+                json!({"action":"type","text":"Name","value":"x","ref":"e1"}),
+            ))
+            .await;
         println!("{out:?}");
-        let out = tool.execute(call(json!({"action":"type","ref":"e1","text":"osa"}))).await.unwrap();
+        let out = tool
+            .execute(call(json!({"action":"type","ref":"e1","text":"osa"})))
+            .await
+            .unwrap();
         println!("{out}");
-        let out = tool.execute(call(json!({"action":"click","text":"Go"}))).await.unwrap();
+        let out = tool
+            .execute(call(json!({"action":"click","text":"Go"})))
+            .await
+            .unwrap();
         println!("{out}");
         assert!(out.contains("Title: clicked osa"), "{out}");
 
-        let shot = tool.execute_result(call(json!({"action":"screenshot","annotate":true}))).await.unwrap();
+        let shot = tool
+            .execute_result(call(json!({"action":"screenshot","annotate":true})))
+            .await
+            .unwrap();
         assert_eq!(shot.attachments.len(), 1);
-        assert!(shot.attachments[0].data_url.starts_with("data:image/jpeg;base64,"));
+        assert!(shot.attachments[0]
+            .data_url
+            .starts_with("data:image/jpeg;base64,"));
 
         let blocked = tool
-            .execute(call(json!({"action":"navigate","url":"http://127.0.0.1:9/"})))
+            .execute(call(
+                json!({"action":"navigate","url":"http://127.0.0.1:9/"}),
+            ))
             .await
             .unwrap_err();
         println!("{blocked}");
@@ -802,27 +836,37 @@ mod tests {
         let html = "<title>Form</title>            <label>Email <input id=em></label>            <select aria-label=Color><option value=r>Red</option><option value=b>Blue</option></select>            <label><input type=checkbox id=ck> Agree</label>            <button onclick=\"setTimeout(()=>{document.body.append('Saved OK')},700)\">Save</button>            <iframe srcdoc='<input aria-label=Inner id=in>'></iframe>";
         let page = format!("data:text/html,{}", html.replace('#', "%23"));
 
-        let out = tool.execute(call(json!({"action":"open","url":page}))).await.unwrap();
+        let out = tool
+            .execute(call(json!({"action":"open","url":page})))
+            .await
+            .unwrap();
         println!("{out}");
         assert!(out.contains("iframe"), "iframe content is listed");
         assert!(out.contains("textbox \"Inner\""));
 
-        let out = tool.execute(call(json!({"action":"fill","fields":[
-            {"text":"Email","value":"a@b.co"},
-            {"text":"Color","value":"Blue"},
-            {"text":"Agree","value":true},
-            {"text":"Inner","value":"in-frame"}
-        ]}))).await.unwrap();
+        let out = tool
+            .execute(call(json!({"action":"fill","fields":[
+                {"text":"Email","value":"a@b.co"},
+                {"text":"Color","value":"Blue"},
+                {"text":"Agree","value":true},
+                {"text":"Inner","value":"in-frame"}
+            ]})))
+            .await
+            .unwrap();
         println!("{out}");
 
-        let out = tool.execute(call(json!({"action":"click","text":"Save"}))).await.unwrap();
+        let out = tool
+            .execute(call(json!({"action":"click","text":"Save"})))
+            .await
+            .unwrap();
         println!("{out}");
-        let out = tool.execute(call(json!({"action":"wait","text":"Saved OK","seconds":5}))).await.unwrap();
+        let out = tool
+            .execute(call(json!({"action":"wait","text":"Saved OK","seconds":5})))
+            .await
+            .unwrap();
         assert!(out.contains("wait condition met"), "{out}");
 
-        let state = tool
-            .execute(call(json!({"action":"eval","js":"1"})))
-            .await;
+        let state = tool.execute(call(json!({"action":"eval","js":"1"}))).await;
         assert!(state.is_err(), "eval stays gated");
 
         // Long real page: outline is paged, refs from later parts still work.
@@ -831,15 +875,28 @@ mod tests {
             .await;
         match out {
             Ok(out) => {
-                println!("{}", &out.chars().take(1500).collect::<String>());
+                println!("{}", out.chars().take(1500).collect::<String>());
                 assert!(out.contains("part 1 of"), "long pages are paged");
-                let found = tool.execute(call(json!({"action":"find","text":"Cargo"}))).await.unwrap();
+                let found = tool
+                    .execute(call(json!({"action":"find","text":"Cargo"})))
+                    .await
+                    .unwrap();
                 println!("{found}");
-                let page2 = tool.execute(call(json!({"action":"snapshot","page":2}))).await.unwrap();
+                let page2 = tool
+                    .execute(call(json!({"action":"snapshot","page":2})))
+                    .await
+                    .unwrap();
                 assert!(page2.contains("part 2 of"));
-                if let Some(reference) = found.split("[ref=").nth(1).and_then(|r| r.split(']').next()) {
-                    let clicked = tool.execute(call(json!({"action":"click","ref":reference}))).await.unwrap();
-                    println!("{}", &clicked.chars().take(300).collect::<String>());
+                if let Some(reference) = found
+                    .split("[ref=")
+                    .nth(1)
+                    .and_then(|r| r.split(']').next())
+                {
+                    let clicked = tool
+                        .execute(call(json!({"action":"click","ref":reference})))
+                        .await
+                        .unwrap();
+                    println!("{}", clicked.chars().take(300).collect::<String>());
                 }
             }
             Err(error) => println!("network test skipped: {error}"),
@@ -859,13 +916,18 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             loop {
-                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
                 let mut buf = vec![0u8; 8192];
                 let n = socket.read(&mut buf).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..n]).to_string();
                 let cookie_header = request
                     .lines()
-                    .find_map(|l| l.strip_prefix("Cookie: ").or_else(|| l.strip_prefix("cookie: ")))
+                    .find_map(|l| {
+                        l.strip_prefix("Cookie: ")
+                            .or_else(|| l.strip_prefix("cookie: "))
+                    })
                     .unwrap_or("NONE")
                     .to_string();
                 let body = format!("<title>cookies</title><p>{cookie_header}</p>");
@@ -888,7 +950,8 @@ Connection: close
             ..BrowserConfig::default()
         };
         let exe = sandbox::find_browser("").expect("a Chromium browser is installed");
-        let profile = std::env::temp_dir().join(format!("osa-cookie-test-{}", uuid::Uuid::new_v4()));
+        let profile =
+            std::env::temp_dir().join(format!("osa-cookie-test-{}", uuid::Uuid::new_v4()));
         let cookie = Cookie {
             name: "osa_test".into(),
             value: "signed-in".into(),
@@ -909,7 +972,10 @@ Connection: close
         let text = session.read_text(500).await.unwrap();
         println!("page says: {text}");
         println!("notes: {:?}", session.take_notes());
-        assert!(text.contains("osa_test=signed-in"), "cookie was not sent: {text}");
+        assert!(
+            text.contains("osa_test=signed-in"),
+            "cookie was not sent: {text}"
+        );
         session.close().await;
     }
 }

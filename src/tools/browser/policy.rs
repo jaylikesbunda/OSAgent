@@ -60,7 +60,8 @@ impl EgressPolicy {
         if self.blocked_hosts.iter().any(|p| host_matches(p, &host)) {
             return Err(format!("host {host} is blocked by [browser] blocked_hosts"));
         }
-        if !self.allowed_hosts.is_empty() && !self.allowed_hosts.iter().any(|p| host_matches(p, &host))
+        if !self.allowed_hosts.is_empty()
+            && !self.allowed_hosts.iter().any(|p| host_matches(p, &host))
         {
             return Err(format!("host {host} is not in [browser] allowed_hosts"));
         }

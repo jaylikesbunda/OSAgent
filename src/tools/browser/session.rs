@@ -1104,7 +1104,7 @@ impl BrowserSession {
             if want != (current == "true") {
                 self.click(backend_node_id, false).await?;
             }
-            Ok(format!("{}", if want { "checked" } else { "unchecked" }))
+            Ok(if want { "checked" } else { "unchecked" }.to_string())
         } else {
             self.type_text(backend_node_id, &text, true, false).await?;
             Ok("filled".to_string())

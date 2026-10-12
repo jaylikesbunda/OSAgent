@@ -107,7 +107,10 @@ fn gecko_roots() -> Vec<(BrowserKind, PathBuf)> {
     let mut roots = Vec::new();
     if cfg!(windows) {
         if let Some(appdata) = env_path("APPDATA") {
-            roots.push((BrowserKind::Firefox, appdata.join("Mozilla/Firefox/Profiles")));
+            roots.push((
+                BrowserKind::Firefox,
+                appdata.join("Mozilla/Firefox/Profiles"),
+            ));
             roots.push((BrowserKind::Librewolf, appdata.join("librewolf/Profiles")));
         }
     } else if cfg!(target_os = "macos") {
@@ -135,21 +138,33 @@ fn chromium_roots() -> Vec<(BrowserKind, PathBuf)> {
             roots.push((BrowserKind::Edge, local.join("Microsoft/Edge/User Data")));
         }
         if let Some(appdata) = env_path("APPDATA") {
-            roots.push((BrowserKind::Opera, appdata.join("Opera Software/Opera Stable")));
-            roots.push((BrowserKind::Opera, appdata.join("Opera Software/Opera GX Stable")));
+            roots.push((
+                BrowserKind::Opera,
+                appdata.join("Opera Software/Opera Stable"),
+            ));
+            roots.push((
+                BrowserKind::Opera,
+                appdata.join("Opera Software/Opera GX Stable"),
+            ));
         }
     } else if cfg!(target_os = "macos") {
         if let Some(home) = home() {
             let support = home.join("Library/Application Support");
             roots.push((BrowserKind::Chrome, support.join("Google/Chrome")));
-            roots.push((BrowserKind::Brave, support.join("BraveSoftware/Brave-Browser")));
+            roots.push((
+                BrowserKind::Brave,
+                support.join("BraveSoftware/Brave-Browser"),
+            ));
             roots.push((BrowserKind::Edge, support.join("Microsoft Edge")));
             roots.push((BrowserKind::Opera, support.join("com.operasoftware.Opera")));
         }
     } else if let Some(home) = home() {
         let config = home.join(".config");
         roots.push((BrowserKind::Chrome, config.join("google-chrome")));
-        roots.push((BrowserKind::Brave, config.join("BraveSoftware/Brave-Browser")));
+        roots.push((
+            BrowserKind::Brave,
+            config.join("BraveSoftware/Brave-Browser"),
+        ));
         roots.push((BrowserKind::Edge, config.join("microsoft-edge")));
         roots.push((BrowserKind::Opera, config.join("opera")));
     }
@@ -166,7 +181,9 @@ pub fn detect_profiles() -> Vec<ProfileInfo> {
     let mut profiles = Vec::new();
 
     for (kind, root) in gecko_roots() {
-        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.join("cookies.sqlite").is_file() {
@@ -199,7 +216,9 @@ pub fn detect_profiles() -> Vec<ProfileInfo> {
             let name = if path == root {
                 "Default".to_string()
             } else {
-                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
             };
             let id = format!("{}:{}:{}", slug(kind), name, root.display());
             profiles.push(ProfileInfo {
@@ -227,7 +246,9 @@ fn slug(kind: BrowserKind) -> &'static str {
 }
 
 pub fn find_profile(id: &str) -> Option<ProfileInfo> {
-    detect_profiles().into_iter().find(|profile| profile.id == id)
+    detect_profiles()
+        .into_iter()
+        .find(|profile| profile.id == id)
 }
 
 // ------------------------------------------------------------------ reading
@@ -285,7 +306,11 @@ fn read_gecko(profile: &Path) -> Result<ReadOutcome, String> {
         .query_map([], |row| {
             let expiry: i64 = row.get(4)?;
             // Newer Firefox builds store milliseconds.
-            let expiry_secs = if expiry > 100_000_000_000 { expiry / 1000 } else { expiry };
+            let expiry_secs = if expiry > 100_000_000_000 {
+                expiry / 1000
+            } else {
+                expiry
+            };
             let same_site: i64 = row.get(7).unwrap_or(0);
             Ok(Cookie {
                 name: row.get(0)?,
@@ -310,7 +335,8 @@ fn read_gecko(profile: &Path) -> Result<ReadOutcome, String> {
 }
 
 fn read_chromium(profile: &ProfileInfo) -> Result<ReadOutcome, String> {
-    let cookie_file = chromium_cookie_file(&profile.path).ok_or("no cookie database in this profile")?;
+    let cookie_file =
+        chromium_cookie_file(&profile.path).ok_or("no cookie database in this profile")?;
     let label = profile.browser.label();
     let (_guard, db) = snapshot_db(&cookie_file, label)?;
     let key = chromium_key(&profile.root);
@@ -381,7 +407,9 @@ fn chromium_key(root: &Path) -> Result<Vec<u8>, String> {
     let wrapped = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|e| e.to_string())?;
-    let blob = wrapped.strip_prefix(b"DPAPI").ok_or("unrecognised key format")?;
+    let blob = wrapped
+        .strip_prefix(b"DPAPI")
+        .ok_or("unrecognised key format")?;
     dpapi_unprotect(blob)
 }
 
@@ -527,7 +555,9 @@ impl CookieJar {
 pub fn domain_counts(cookies: &[Cookie]) -> Vec<DomainCount> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for cookie in cookies {
-        *counts.entry(cookie.bare_domain().to_ascii_lowercase()).or_insert(0) += 1;
+        *counts
+            .entry(cookie.bare_domain().to_ascii_lowercase())
+            .or_insert(0) += 1;
     }
     let mut list: Vec<DomainCount> = counts
         .into_iter()
@@ -641,7 +671,11 @@ mod tests {
         plain.extend_from_slice(b"secret-token");
         let mut blob = b"v10".to_vec();
         blob.extend_from_slice(&nonce);
-        blob.extend(cipher.encrypt(Nonce::from_slice(&nonce), plain.as_slice()).unwrap());
+        blob.extend(
+            cipher
+                .encrypt(Nonce::from_slice(&nonce), plain.as_slice())
+                .unwrap(),
+        );
 
         let key_vec = key.to_vec();
         let value = decrypt_chromium_value(Ok(&key_vec), &blob, ".example.com").unwrap();
@@ -651,7 +685,8 @@ mod tests {
     #[test]
     fn app_bound_cookies_are_skipped_not_bypassed() {
         let key = vec![0u8; 32];
-        let error = decrypt_chromium_value(Ok(&key), b"v20xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "h").unwrap_err();
+        let error = decrypt_chromium_value(Ok(&key), b"v20xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "h")
+            .unwrap_err();
         assert!(error.contains("app-bound"));
     }
 
@@ -662,7 +697,11 @@ mod tests {
         let nonce = [2u8; 12];
         let mut blob = b"v10".to_vec();
         blob.extend_from_slice(&nonce);
-        blob.extend(cipher.encrypt(Nonce::from_slice(&nonce), b"x".as_slice()).unwrap());
+        blob.extend(
+            cipher
+                .encrypt(Nonce::from_slice(&nonce), b"x".as_slice())
+                .unwrap(),
+        );
 
         let wrong = vec![9u8; 32];
         assert!(decrypt_chromium_value(Ok(&wrong), &blob, "h").is_err());
@@ -683,7 +722,11 @@ mod tests {
 
     #[test]
     fn counts_group_by_bare_domain() {
-        let counts = domain_counts(&[cookie(".a.com", "1"), cookie("a.com", "2"), cookie(".b.com", "3")]);
+        let counts = domain_counts(&[
+            cookie(".a.com", "1"),
+            cookie("a.com", "2"),
+            cookie(".b.com", "3"),
+        ]);
         assert_eq!((counts[0].domain.as_str(), counts[0].count), ("a.com", 2));
     }
 
@@ -691,7 +734,10 @@ mod tests {
     fn jar_roundtrip_merge_and_remove() {
         let dir = tempfile::tempdir().unwrap();
         let mut jar = CookieJar::load(dir.path());
-        jar.merge("Firefox (x)".into(), vec![cookie(".a.com", "s"), cookie(".b.com", "t")]);
+        jar.merge(
+            "Firefox (x)".into(),
+            vec![cookie(".a.com", "s"), cookie(".b.com", "t")],
+        );
         let mut updated = cookie(".a.com", "s");
         updated.value = "new".into();
         jar.merge("Firefox (x)".into(), vec![updated]);

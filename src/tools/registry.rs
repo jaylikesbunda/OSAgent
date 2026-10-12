@@ -10,8 +10,8 @@ use crate::mcp::{McpHandle, McpManager, MCP_TOOL_PREFIX};
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory, diagram, files, lsp,
-    memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process,
+    bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory, diagram, files,
+    lsp, memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process,
     question, scheduler, search, sessions, skill, skill_authoring, subagent, system_status, task,
     todo, tool_script, tool_search, weather, web,
 };

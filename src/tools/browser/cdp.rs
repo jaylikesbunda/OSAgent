@@ -26,7 +26,10 @@ pub struct CdpEvent {
 #[derive(Debug, Clone)]
 pub enum CdpError {
     /// The browser answered with a protocol error.
-    Protocol { code: i64, message: String },
+    Protocol {
+        code: i64,
+        message: String,
+    },
     Timeout(String),
     Closed,
     Transport(String),
@@ -171,7 +174,10 @@ impl CdpClient {
             message["sessionId"] = json!(session_id);
         }
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().expect("cdp pending lock").insert(id, tx);
+        self.pending
+            .lock()
+            .expect("cdp pending lock")
+            .insert(id, tx);
         if self.outgoing.send(message.to_string()).is_err() {
             self.pending.lock().expect("cdp pending lock").remove(&id);
             return Err(CdpError::Closed);

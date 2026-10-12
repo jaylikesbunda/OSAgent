@@ -12,6 +12,7 @@ Added:
 * Settings → Browser configures the browser tool and can import signed-in sessions from Firefox, LibreWolf, Chrome, Brave, Edge and Opera, one site at a time
 
 Changed:
+* Split the 9,300-line agent runtime into focused modules under src/agent/runtime/ — lifecycle, turn pipeline, compaction, tool execution, permissions, workspaces, providers, and more — as a behavior-preserving refactor that leaves runtime/mod.rs as a thin composition root
 * Long turns no longer stop cold at the configured tool budget: the agent is nudged to continue in budget-sized chunks up to a hard ceiling, then summarizes if it still has not finished
 * Compaction shows a persistent animated indicator for the whole summarization pass instead of a toast that disappears
 * Replies avoid overusing em dashes, using ordinary punctuation instead

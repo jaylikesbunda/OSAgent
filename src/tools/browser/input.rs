@@ -162,7 +162,10 @@ mod tests {
         assert_eq!((enter.vk, enter.text.as_deref()), (13, Some("\r")));
 
         let a = parse_key("a").unwrap();
-        assert_eq!((a.code.as_str(), a.vk, a.text.as_deref()), ("KeyA", 65, Some("a")));
+        assert_eq!(
+            (a.code.as_str(), a.vk, a.text.as_deref()),
+            ("KeyA", 65, Some("a"))
+        );
 
         let digit = parse_key("7").unwrap();
         assert_eq!(digit.code, "Digit7");

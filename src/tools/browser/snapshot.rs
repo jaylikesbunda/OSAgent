@@ -6,8 +6,8 @@
 //! back to a DOM node, so the model does not need to guess selectors.
 
 use serde_json::Value;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 const MAX_NAME_CHARS: usize = 160;
@@ -33,8 +33,10 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn text(&self) -> String {
-        self.lines.join("
-")
+        self.lines.join(
+            "
+",
+        )
     }
 
     pub fn fingerprint(&self) -> u64 {
@@ -49,7 +51,8 @@ impl Snapshot {
             return;
         }
         self.lines.push(heading);
-        self.lines.extend(other.lines.into_iter().map(|line| format!("  {line}")));
+        self.lines
+            .extend(other.lines.into_iter().map(|line| format!("  {line}")));
         self.refs.extend(other.refs);
     }
 
@@ -70,8 +73,13 @@ impl Snapshot {
         }
         let total = pages.len();
         let index = page.clamp(1, total) - 1;
-        (pages[index].join("
-"), total)
+        (
+            pages[index].join(
+                "
+",
+            ),
+            total,
+        )
     }
 }
 
@@ -194,7 +202,10 @@ impl<'a> Renderer<'a> {
         }
         let nodes = self.nodes;
         let node = &nodes[index];
-        let ignored = node.get("ignored").and_then(Value::as_bool).unwrap_or(false);
+        let ignored = node
+            .get("ignored")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let role = field(node, "role");
         let name = tidy(&field(node, "name"), MAX_NAME_CHARS);
         let value = tidy(&field(node, "value"), MAX_NAME_CHARS);
@@ -253,11 +264,7 @@ impl<'a> Renderer<'a> {
         }
 
         let node_id = node.get("nodeId").and_then(Value::as_str).unwrap_or("");
-        let kids = self
-            .children
-            .get(node_id)
-            .cloned()
-            .unwrap_or_default();
+        let kids = self.children.get(node_id).cloned().unwrap_or_default();
         for child in kids {
             self.walk(child, child_depth, &child_ancestor_text);
         }
@@ -306,8 +313,8 @@ pub fn render(nodes: &[Value], interactive_only: bool, ref_start: usize) -> Snap
         lines: Vec::new(),
         refs: Vec::new(),
     };
-    for index in 0..nodes.len() {
-        if !has_parent[index] {
+    for (index, has_parent) in has_parent.iter().enumerate() {
+        if !has_parent {
             renderer.walk(index, 0, "");
         }
     }
@@ -373,8 +380,12 @@ mod tests {
         assert_eq!(ids, ["e1", "e2", "e3"]);
         assert_eq!(snap.refs[0].1.backend_node_id, 21);
         assert_eq!(snap.refs[1].1.role, "textbox");
-        assert!(snap.text().contains("link \"Docs\" [href=https://example.com/docs] [ref=e1]"));
-        assert!(snap.text().contains("textbox \"Search\" value=\"rust\" [ref=e2]"));
+        assert!(snap
+            .text()
+            .contains("link \"Docs\" [href=https://example.com/docs] [ref=e1]"));
+        assert!(snap
+            .text()
+            .contains("textbox \"Search\" value=\"rust\" [ref=e2]"));
         assert!(snap.text().contains("button \"Go\" [disabled] [ref=e3]"));
     }
 
