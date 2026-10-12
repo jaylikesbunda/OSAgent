@@ -3,6 +3,20 @@
 use super::*;
 
 impl AgentRuntime {
+    /// Resolve a full id or a short hex prefix (as printed by the sessions
+    /// tool) to the underlying session, so permission gates cannot be
+    /// sidestepped by the abbreviated form.
+    pub async fn resolve_session_by_prefix(&self, id: &str) -> Result<Option<Session>> {
+        let summaries = self.list_session_summaries().await?;
+        let mut matches = summaries
+            .into_iter()
+            .filter(|summary| summary.id.starts_with(id));
+        match matches.next() {
+            Some(summary) => self.storage.get_session(&summary.id),
+            None => Ok(None),
+        }
+    }
+
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.session_manager.get_session(id).await
     }

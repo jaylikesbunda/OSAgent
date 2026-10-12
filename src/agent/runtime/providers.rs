@@ -49,10 +49,23 @@ impl AgentRuntime {
 
     pub async fn get_catalog_state(&self) -> crate::agent::model_catalog::CatalogState {
         let cfg = self.config.read().await;
-        let catalog = self.catalog.clone();
-        tokio::spawn(async move {
-            catalog.refresh_catalog().await;
-        });
+        // The UI polls this endpoint; without a floor each poll fires a
+        // fresh network fetch. Refresh at most once a minute.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = self
+            .catalog_refresh_at
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 60 {
+            self.catalog_refresh_at
+                .store(now, std::sync::atomic::Ordering::Relaxed);
+            let catalog = self.catalog.clone();
+            tokio::spawn(async move {
+                catalog.refresh_catalog().await;
+            });
+        }
         self.catalog.get_state(&cfg.providers)
     }
 
@@ -134,24 +147,24 @@ impl AgentRuntime {
     pub async fn remove_provider(&self, provider_id: String) -> Result<()> {
         let mut providers = self.providers.write().await;
         let was_active = providers.iter().any(|(id, _)| id == &provider_id);
-        providers.retain(|(id, _)| id != &provider_id);
-        if providers.is_empty() {
+        if providers.len() <= 1 && was_active {
             drop(providers);
             return Err(OSAgentError::Config(
                 "Cannot remove the last provider".to_string(),
             ));
         }
+        providers.retain(|(id, _)| id != &provider_id);
         let first_provider_id = providers.first().map(|(id, _)| id.clone());
         drop(providers);
 
         let mut cfg = self.config.write().await;
         cfg.providers.retain(|p| p.effective_id() != provider_id);
         if cfg.default_provider == provider_id {
-            if let Some(ref first_id) = first_provider_id {
-                cfg.default_provider = first_id.clone();
-            }
             if let Some(first) = cfg.providers.first() {
-                cfg.default_model = first.model.clone();
+                let first_id = first.effective_id().to_string();
+                let first_model = first.model.clone();
+                cfg.default_provider = first_id;
+                cfg.default_model = first_model;
             }
         }
         drop(cfg);

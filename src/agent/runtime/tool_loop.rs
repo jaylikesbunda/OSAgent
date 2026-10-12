@@ -318,7 +318,7 @@ impl AgentRuntime {
             }
             let msg_tokens = Self::message_tokens(message);
             if total + msg_tokens > budget {
-                continue;
+                break;
             }
             total += msg_tokens;
             remaining.push(message.clone());

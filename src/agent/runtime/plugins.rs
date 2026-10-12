@@ -3,10 +3,6 @@
 use super::*;
 
 impl AgentRuntime {
-    pub async fn get_plugins(&self) -> Vec<crate::plugin::LoadedPlugin> {
-        self.plugin_manager.list_plugins().await
-    }
-
     pub async fn list_plugins(&self) -> Vec<crate::plugin::LoadedPlugin> {
         self.plugin_manager.list_plugins().await
     }

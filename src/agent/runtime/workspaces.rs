@@ -188,6 +188,20 @@ impl AgentRuntime {
             .await?
             .ok_or_else(|| OSAgentError::Session("Session not found".to_string()))?;
 
+        // Referencing a chat must not bypass the session-read policy: a
+        // context reference feeds the source transcript into this chat's
+        // prompt every turn, so it requires the same visibility a direct
+        // session read would.
+        let source_owner = source.metadata.get("owner").and_then(|v| v.as_str());
+        let session_owner = session.metadata.get("owner").and_then(|v| v.as_str());
+        if let (Some(source_owner), Some(session_owner)) = (source_owner, session_owner) {
+            if source_owner != session_owner {
+                return Err(OSAgentError::Session(
+                    "That chat belongs to another user.".to_string(),
+                ));
+            }
+        }
+
         let mut ids = Self::context_session_ids(&session);
         if !ids.iter().any(|id| id == source_id) {
             if ids.len() >= MAX_CONTEXT_SESSIONS {

@@ -79,6 +79,27 @@ mod cancellation_signal_tests {
     }
 
     #[tokio::test]
+    async fn cancellation_wakes_a_registered_waiter() {
+        // The flag starts clear, so the waiter can only return via the
+        // Notify: this pins the wake path the flag-only check above cannot.
+        let notify = Arc::new(Notify::new());
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notify_task = notify.clone();
+        let flag_task = flag.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            flag_task.store(true, std::sync::atomic::Ordering::Release);
+            notify_task.notify_waiters();
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            wait_for_cancel_signal(&notify, &flag),
+        )
+        .await
+        .expect("registered waiter woke by cancellation");
+    }
+
+    #[tokio::test]
     async fn cancellation_releases_all_registered_tool_waiters() {
         let notify = Arc::new(Notify::new());
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -203,6 +224,7 @@ pub struct AgentRuntime {
     provider: Arc<tokio::sync::RwLock<Arc<dyn Provider>>>,
     providers: Arc<tokio::sync::RwLock<Vec<(String, Arc<dyn Provider>)>>>,
     catalog: Arc<ModelCatalog>,
+    catalog_refresh_at: std::sync::atomic::AtomicU64,
     session_manager: Arc<SessionManager>,
     checkpoint_manager: Arc<CheckpointManager>,
     tool_registry: Arc<ToolRegistry>,
@@ -382,17 +404,16 @@ impl AgentRuntime {
         else {
             return active;
         };
+        let database = cfg.storage.database.clone();
         drop(cfg);
         let mut entry = entry;
         if !wanted_model.is_empty() {
             entry.model = wanted_model;
         }
-        let oauth_dir = PathBuf::from(
-            shellexpand::tilde(&self.config.read().await.storage.database).to_string(),
-        )
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        let oauth_dir = PathBuf::from(shellexpand::tilde(&database).to_string())
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
         match OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
             entry,
             Some(self.catalog.clone()),
@@ -441,10 +462,6 @@ impl AgentRuntime {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let storage = Arc::new(SqliteStorage::new(&config.storage.database)?);
-        storage
-            .clear_all_tasks()
-            .map_err(|e| warn!("Failed to clear tasks on startup: {}", e))
-            .ok();
         log_phase("storage_init", &mut phase_start);
 
         let event_bus = EventBus::new_with_storage(storage.clone());
@@ -712,6 +729,7 @@ impl AgentRuntime {
             provider: Arc::new(tokio::sync::RwLock::new(provider)),
             providers: Arc::new(tokio::sync::RwLock::new(provider_instances)),
             catalog,
+            catalog_refresh_at: std::sync::atomic::AtomicU64::new(0),
             session_manager,
             checkpoint_manager,
             tool_registry,
@@ -753,6 +771,15 @@ impl AgentRuntime {
             ),
             Err(e) => warn!("Startup recovery sweep failed: {}", e),
         }
+
+        // Task state is wiped only after the runtime is fully built: a
+        // provider or registry failure during construction must abort
+        // startup cleanly instead of leaving tasks already deleted.
+        runtime
+            .storage
+            .clear_all_tasks()
+            .map_err(|e| warn!("Failed to clear tasks on startup: {}", e))
+            .ok();
 
         // Background subagent completions wake the parent for a continuation
         // turn instead of waiting for the user's next message.

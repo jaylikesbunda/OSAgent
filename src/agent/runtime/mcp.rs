@@ -7,15 +7,14 @@ impl AgentRuntime {
     /// the settings UI. Servers that failed to start appear here with
     /// their error rather than silently missing.
     pub async fn mcp_status(&self) -> serde_json::Value {
-        let config = self.config.read().await.clone();
+        let mcp_config = self.config.read().await.mcp.clone();
         let manager = self.tool_registry.mcp_manager();
         let summaries = manager
             .as_ref()
             .map(|manager| manager.server_summaries())
             .unwrap_or_default();
 
-        let servers: Vec<serde_json::Value> = config
-            .mcp
+        let servers: Vec<serde_json::Value> = mcp_config
             .servers
             .iter()
             .map(|server| {
@@ -45,11 +44,11 @@ impl AgentRuntime {
             .collect();
 
         serde_json::json!({
-            "enabled": config.mcp.enabled,
-            "connecting": manager.is_none() && !config.mcp.servers.is_empty(),
+            "enabled": mcp_config.enabled,
+            "connecting": manager.is_none() && !mcp_config.servers.is_empty(),
             "catalog_size": manager.as_ref().map(|m| m.catalog_size()).unwrap_or(0),
             "activated": manager.as_ref().map(|m| m.all_activated_names()).unwrap_or_default(),
-            "max_activated_tools": config.mcp.max_activated_tools,
+            "max_activated_tools": mcp_config.max_activated_tools,
             "servers": servers,
         })
     }

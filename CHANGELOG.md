@@ -1,5 +1,12 @@
 v0.7.0 changes (unreleased):
 
+TL;DR:
+* **Workspace becomes a surface** — browse workspace files beside chat, open them in tabs, preview Markdown, and review the agent's edits combined or side-by-side
+* **Sandboxed browser** — the agent can drive a real headless Chromium for JavaScript-heavy or interactive pages, with signed-in sessions importable from Firefox, LibreWolf, Chrome, Brave, Edge and Opera
+* **Goals and long turns** — set a goal with `/goal` and the agent keeps working across turns; long turns continue in budget-sized chunks up to a hard ceiling instead of stopping cold
+* **Provider settings rebuilt** — the model list shows only connected providers, with controls for what appears in the composer dropdown and a shorter add/edit form
+* **Hardened internals** — the 9,300-line agent runtime split into focused modules, then a pass fixing workspace containment, provider retries, tool execution, and crash- and corruption-on-error paths
+
 Added:
 * Browse workspace files beside chat, open files in tabs, preview Markdown, and review the agent's edits in a combined or side-by-side view
 * Collapse tool activity into compact groups, now with defaults in Settings → Appearance for how many tools appear and separate controls for expanding shell output and file edits
@@ -10,6 +17,8 @@ Added:
 * Run a goal with no round limit: the goal editor and the goal's options both offer a "No limit" toggle, and the panel shows rounds started instead of a budget
 * Let the agent drive a real, sandboxed browser (headless Chromium) for JavaScript-heavy or interactive pages, seeing pages through accessibility snapshots with element refs and optional annotated screenshots. It runs in a throwaway profile, blocks local and private network addresses, and is found through tool search
 * Settings → Browser configures the browser tool and can import signed-in sessions from Firefox, LibreWolf, Chrome, Brave, Edge and Opera, one site at a time
+* Choose which providers and models appear in the composer model dropdown from Settings → Models. Hidden entries stay connected; the active model and favourites always show
+* Add another chat as context from its right-click menu in the sidebar. Referenced chats appear above the composer and are read at the start of each turn, without being copied into the chat
 
 Changed:
 * Split the 9,300-line agent runtime into focused modules under src/agent/runtime/ — lifecycle, turn pipeline, compaction, tool execution, permissions, workspaces, providers, and more — as a behavior-preserving refactor that leaves runtime/mod.rs as a thin composition root
@@ -21,15 +30,9 @@ Changed:
 * The chat list groups chats under their workspace, showing the three most recent with a Show more button
 * A chat's workspace locks once it has a message. Start a new chat to use a different workspace
 
-Added:
-* Choose which providers and models appear in the composer model dropdown from Settings → Models. Hidden entries stay connected; the active model and favourites always show
-* Add another chat as context from its right-click menu in the sidebar. Referenced chats appear above the composer and are read at the start of each turn, without being copied into the chat
-
 Fixed:
 * Editing a connected provider without re-entering its API key keeps the saved key for the running session instead of dropping it until restart
 * Starring a model in the dropdown keeps the dropdown open, and reopening it shows the list instead of "Loading models..."
-
-Fixed:
 * Consecutive tools stay together in one group, including in subagent chats. Empty “OSA” rows no longer split groups, and expanded groups stay open as new tools arrive
 * "Always allow" for access outside the workspace now covers the whole folder, including all of its subdirectories
 * Renaming a chat while it is still replying no longer reverts the name or disturbs the running turn, and an in-flight auto-generated title can no longer overwrite a rename
@@ -52,6 +55,16 @@ Fixed:
 * An open model picker or context dropdown no longer stays above the composer after you switch chats
 * More provider failures are retried, including truncated or undecodable streaming responses (`error decoding response body`); a mid-response stream failure restarts the request when nothing has been written yet
 * Opening a long chat is much faster: tool cards are placed in one pass instead of rescanning and splicing the whole transcript per card, and the backend indexes tool calls once instead of rescanning every message for each one
+* Removing the last provider no longer leaves the in-memory provider list empty and the active model pointing at the deleted entry, and the default provider/model are reassigned from the same surviving entry
+* Parallel tool calls are counted once each and emit a single completion event; batch tool calls now honor the session's tool profile (previously only the registry check applied) and cancel cleanly with a terminal event when the turn is stopped mid-batch
+* Provider stream failures no longer immediately re-send the request non-streaming: retryable errors (429/503) use the backoff retry first, and context-length rejections now reach the shrink-history-and-retry path instead of the fallback that failed identically
+* Tool output summaries no longer panic on multi-byte characters (CJK, emoji, accented text) at truncation boundaries, which could abort the agent mid-turn
+* Workspace containment now resolves paths (lexical `..` collapsing, symlink resolution, longest-existing-ancestor canonicalization, component-wise case-aware comparison) instead of comparing path prefixes, so `workspace\..\outside`, symlinks inside the workspace pointing out, and shell commands that `cd` outside are checked correctly
+* Reading another chat by its shortened session id now goes through the same permission gate as the full id, and adding a chat as reference context checks that both chats belong to the same owner
+* Provider compaction no longer splices history that orphans tool call/result pairs (which the provider would reject), and startup no longer wipes task state before the runtime finishes building
+* Tool-loop context retention stops at the first message that does not fit instead of skipping it, so a retained tool result can no longer lose its call
+* The model catalog refreshes at most once a minute instead of firing a network fetch on every settings poll, MCP status no longer clones the entire config to render, and turn summaries clone only the last three tool outputs instead of the whole transcript
+* Dead code removed from the runtime module tree (uncalled replay-anchor and summary-framing helpers, duplicate plugin listing)
 
 v0.6.2 changes:
 

@@ -106,29 +106,6 @@ impl AgentRuntime {
             && !Self::looks_like_internal_tool_dump(&message.content)
     }
 
-    /// Last real (non-synthetic) user message, else last user message, else
-    /// a conservative tail offset. Retained for callers that need a replay
-    /// anchor; the compaction split itself is token-budget based.
-    pub(super) fn replay_start_index(messages: &[Message]) -> usize {
-        Self::compaction_replay_start(messages)
-    }
-
-    pub(super) fn compaction_replay_start(messages: &[Message]) -> usize {
-        for (index, message) in messages.iter().enumerate().rev() {
-            if Self::is_real_user_message(message) {
-                return index;
-            }
-        }
-
-        for (index, message) in messages.iter().enumerate().rev() {
-            if message.role == "user" {
-                return index;
-            }
-        }
-
-        messages.len().saturating_sub(6)
-    }
-
     /// Remove model-emitted `<tool_call>...</tool_call>` text blocks (and a
     /// dangling unclosed opener) from text fed to the summarizer. The client
     /// never parses this Qwen/GLM-style convention into structured calls, so
@@ -502,6 +479,35 @@ impl AgentRuntime {
             return None;
         }
         let dropped = session.messages[keep_head..original_len - keep_tail].to_vec();
+        // Fail closed if the cut would orphan a tool call/result pair: the
+        // provider rejects histories whose results lost their calls (or
+        // vice versa), so decline the splice instead of persisting one.
+        let cut = original_len - keep_tail;
+        let head_call_dropped_result = session.messages[..cut].iter().any(|message| {
+            message.tool_calls.as_ref().is_some_and(|calls| {
+                calls.iter().any(|call| {
+                    session.messages[cut..]
+                        .iter()
+                        .any(|dropped| dropped.tool_call_id.as_deref() == Some(call.id.as_str()))
+                })
+            })
+        });
+        let tail_starts_orphaned_result = session
+            .messages
+            .get(cut)
+            .filter(|first| first.role == "tool")
+            .is_some_and(|first| {
+                !session.messages[..cut].iter().any(|kept| {
+                    kept.tool_calls.as_ref().is_some_and(|calls| {
+                        calls
+                            .iter()
+                            .any(|call| first.tool_call_id.as_deref() == Some(call.id.as_str()))
+                    })
+                })
+            });
+        if head_call_dropped_result || tail_starts_orphaned_result {
+            return None;
+        }
         let framed = Self::frame_compacted_summary(summary);
         Some((keep_head, keep_tail, dropped, framed))
     }
@@ -515,13 +521,6 @@ impl AgentRuntime {
             "<compacted-summary>\n{}\n</compacted-summary>\n\nDo not acknowledge the compacted summary explicitly in your reply.",
             summary.trim()
         )
-    }
-
-    /// Deduplicated framing helper used by the summary path below; kept as
-    /// a separate name because `frame_compacted_summary` is referenced by
-    /// older call sites and tests.
-    pub(super) fn frame_summary_block(summary: &str) -> String {
-        Self::frame_compacted_summary(summary)
     }
 
     pub(super) fn valid_checkpoint_summary(summary: &str, max_tokens: usize) -> bool {

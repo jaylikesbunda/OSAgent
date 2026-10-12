@@ -902,7 +902,11 @@ impl AgentRuntime {
                                     response.retry_count.saturating_add(stream_retries);
                                 break (response, true);
                             }
-                            Err(e) if Self::is_streaming_fallback_error(&e) => {
+                            Err(e)
+                                if !e.is_context_limit()
+                                    && Self::is_streaming_fallback_error(&e)
+                                    && !(e.is_retryable() && stream_retries + 1 < MAX_RETRIES) =>
+                            {
                                 warn!(
                                     "Stream consumption failed with fallback-eligible error in session {}: {}. Falling back to non-streaming.",
                                     session_id, e
@@ -1435,7 +1439,7 @@ impl AgentRuntime {
                         "process_message: Executing {} tools in parallel",
                         tool_calls.len()
                     );
-                    let message_index = (session.messages.len() as i32) - 1;
+                    let message_index = session.messages.len().saturating_sub(1) as i32;
                     let parallel_results = match self
                         .execute_parallel_tool_calls(
                             session_id,
@@ -1604,7 +1608,7 @@ impl AgentRuntime {
                             tool_call.name
                         );
                         if tool_call.name != "batch" {
-                            let message_index = (session.messages.len() as i32) - 1;
+                            let message_index = session.messages.len().saturating_sub(1) as i32;
                             self.event_bus.emit(AgentEvent::ToolStart {
                                 session_id: session_id.to_string(),
                                 sequence: 0,
@@ -1902,12 +1906,14 @@ impl AgentRuntime {
                                 self.handle_persona_tool_call(&mut session, &tool_call.arguments)
                                     .map(ToolResult::new)
                             } else if tool_call.name == "batch" {
-                                let batch_message_index = (session.messages.len() as i32) - 1;
+                                let batch_message_index =
+                                    session.messages.len().saturating_sub(1) as i32;
                                 self.handle_batch_tool_call(
                                     &mut session,
                                     &active_workspace,
                                     &tool_call.arguments,
                                     batch_message_index,
+                                    &tool_profile,
                                 )
                                 .await
                                 .map(ToolResult::new)
@@ -2424,9 +2430,9 @@ impl AgentRuntime {
             let last_tool = recent_tool_outcomes
                 .last()
                 .map(|(name, success, line)| {
-                    let mut snippet = line.replace(['\n', '\r'], " ");
-                    if snippet.len() > 180 {
-                        snippet.truncate(180);
+                    let cleaned = line.replace(['\n', '\r'], " ");
+                    let mut snippet: String = cleaned.chars().take(180).collect();
+                    if cleaned.chars().count() > 180 {
                         snippet.push_str("...");
                     }
                     format!(
@@ -2449,22 +2455,26 @@ impl AgentRuntime {
                 .to_string();
         }
 
-        let tool_messages: Vec<String> = session
-            .messages
-            .iter()
-            .filter(|m| m.role == "tool")
-            .map(|m| m.content.clone())
-            .collect();
+        let has_tool_messages = session.messages.iter().any(|m| m.role == "tool");
 
-        if !tool_messages.is_empty() && result.trim().is_empty() {
+        if has_tool_messages && result.trim().is_empty() {
             let mut tool_summary = String::from("Tool Results:\n");
-            let mut recent: Vec<String> = tool_messages.into_iter().rev().take(3).collect();
+            // Only the last three tool results render below; clone just
+            // those instead of every tool output in the transcript.
+            let mut recent: Vec<String> = session
+                .messages
+                .iter()
+                .rev()
+                .filter(|m| m.role == "tool")
+                .take(3)
+                .map(|m| m.content.clone())
+                .collect();
             recent.reverse();
 
             for message in recent {
-                let mut snippet = message;
-                if snippet.len() > 1500 {
-                    snippet.truncate(1500);
+                let char_count = message.chars().count();
+                let mut snippet: String = message.chars().take(1500).collect();
+                if char_count > 1500 {
                     snippet.push_str("\n...[truncated]");
                 }
                 tool_summary.push_str("```tool\n");

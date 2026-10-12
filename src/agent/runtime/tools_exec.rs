@@ -30,6 +30,7 @@ impl AgentRuntime {
         active_workspace: &WorkspaceConfig,
         args: &serde_json::Value,
         message_index: i32,
+        tool_profile: &ToolProfile,
     ) -> Result<String> {
         let tool_calls = args["tool_calls"]
             .as_array()
@@ -144,6 +145,13 @@ impl AgentRuntime {
                             Err(OSAgentError::ToolExecution(
                                 "Tool is not allowed in this session".to_string(),
                             ))
+                        } else if !tool_profile.allows(&tool_name) {
+                            // The top-level gate checks the batch call itself;
+                            // each entry must clear the same profile so a batch
+                            // cannot reach tools the session's profile denies.
+                            Err(OSAgentError::ToolExecution(
+                                "Tool is not allowed by the active tool profile".to_string(),
+                            ))
                         } else {
                             registry
                                 .execute_in_workspace_result(
@@ -177,7 +185,27 @@ impl AgentRuntime {
                     }
                 });
 
-        let results: Vec<(bool, ToolResult)> = join_all(futures).await;
+        let cancel_fut = self.wait_for_cancellation(&session_id);
+        let results: Vec<(bool, ToolResult)> = tokio::select! {
+            _ = cancel_fut => {
+                for internal_id in &batch_internal_ids {
+                    event_bus.emit(AgentEvent::ToolComplete {
+                        session_id: session_id.clone(),
+                        sequence: 0,
+                        tool_call_id: internal_id.clone(),
+                        tool_name: "batch".to_string(),
+                        success: false,
+                        output: "Cancelled by user".to_string(),
+                        title: None,
+                        metadata: None,
+                        duration_ms: 0,
+                        timestamp: SystemTime::now(),
+                    });
+                }
+                return Err(OSAgentError::Session("Operation cancelled".to_string()));
+            }
+            results = join_all(futures) => results,
+        };
         let mut lines = Vec::new();
         let mut success_count = 0usize;
 
@@ -312,15 +340,6 @@ impl AgentRuntime {
                 let cancel_fut = self.wait_for_cancellation(&session_id);
                 tokio::select! {
                     _ = cancel_fut => {
-                        Self::emit_tool_complete(
-                            &event_bus,
-                            &session_id,
-                            &tool_id,
-                            &tool_name,
-                            false,
-                            ToolResult::failure("Cancelled by user"),
-                            0,
-                        );
                         return (
                             ToolResult::failure("Cancelled by user"),
                             false,
@@ -330,7 +349,7 @@ impl AgentRuntime {
                             None,
                         );
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
+                    _ = tokio::task::yield_now() => {}
                 }
 
                 let result = tokio::select! {
@@ -354,15 +373,6 @@ impl AgentRuntime {
                 match result {
                     Ok(output) => {
                         let success = output.outcome.is_success();
-                        Self::emit_tool_complete(
-                            &event_bus,
-                            &session_id,
-                            &tool_id,
-                            &tool_name,
-                            success,
-                            output.clone(),
-                            duration_ms,
-                        );
                         (
                             output,
                             success,
@@ -374,18 +384,8 @@ impl AgentRuntime {
                     }
                     Err(e) => {
                         let error_msg = format!("Error: {}", e);
-                        let error_result = ToolResult::failure(error_msg.clone());
-                        Self::emit_tool_complete(
-                            &event_bus,
-                            &session_id,
-                            &tool_id,
-                            &tool_name,
-                            false,
-                            error_result.clone(),
-                            duration_ms,
-                        );
                         (
-                            error_result,
+                            ToolResult::failure(error_msg),
                             false,
                             duration_ms,
                             String::new(),
@@ -405,12 +405,6 @@ impl AgentRuntime {
 
             let tool_signature = Self::tool_call_signature(&tool_call.name, &tool_call.arguments);
             let tool_intent = Self::tool_intent_signature(&tool_call.name, &tool_call.arguments);
-
-            if success {
-                *tool_success_count += 1;
-            } else {
-                *tool_failure_count += 1;
-            }
 
             outputs.push((
                 tool_result,

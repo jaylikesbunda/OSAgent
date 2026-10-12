@@ -18,7 +18,7 @@ impl AgentRuntime {
             let command = args.get("command").and_then(|value| value.as_str())?;
             for token in Self::extract_command_absolute_paths(command) {
                 let is_inside = workspace_root
-                    .map(|root| Path::new(&token).starts_with(root))
+                    .map(|root| Self::is_within_workspace_path(Path::new(&token), root))
                     .unwrap_or(false);
                 if !is_inside {
                     return Some(token);
@@ -66,7 +66,7 @@ impl AgentRuntime {
             // Absolute but inside the workspace is fine for parallel fan-out
             // (Codex-style: gate on outside-workspace, not on absolute).
             if let Some(root) = workspace_root {
-                if Path::new(&expanded).starts_with(root) {
+                if Self::is_within_workspace_path(Path::new(&expanded), root) {
                     return None;
                 }
             }
@@ -192,11 +192,92 @@ impl AgentRuntime {
     pub(super) fn path_is_inside_workspace(path: &Path, workspace: &WorkspaceConfig) -> bool {
         workspace.paths.iter().any(|entry| {
             let root = PathBuf::from(shellexpand::tilde(&entry.path).to_string());
-            match (path.canonicalize(), root.canonicalize()) {
-                (Ok(path), Ok(root)) => path.starts_with(root),
-                _ => path.starts_with(root),
-            }
+            Self::is_within_workspace_path(path, &root)
         })
+    }
+
+    /// Collapse `.` and `..` components without touching the filesystem.
+    fn lexically_normalized(path: &Path) -> PathBuf {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    let last = out.components().next_back();
+                    if matches!(last, Some(Component::Normal(_))) {
+                        out.pop();
+                    } else {
+                        out.push("..");
+                    }
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    /// Resolve the longest existing ancestor so symlinks are followed and
+    /// not-yet-existing write targets still compare against the real root.
+    fn resolve_for_containment(path: &Path) -> PathBuf {
+        let normalized = Self::lexically_normalized(path);
+        let mut probe = normalized.clone();
+        let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            if probe.exists() {
+                if let Ok(canonical) = probe.canonicalize() {
+                    let mut resolved = Self::lexically_normalized(&canonical);
+                    for part in suffix.iter().rev() {
+                        resolved.push(part);
+                    }
+                    return resolved;
+                }
+            }
+            match probe.file_name() {
+                Some(name) => {
+                    suffix.push(name.to_os_string());
+                    if !probe.pop() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        normalized
+    }
+
+    #[cfg(windows)]
+    fn components_equal(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+
+    #[cfg(not(windows))]
+    fn components_equal(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+        left == right
+    }
+
+    /// Containment on resolved paths, component-wise, with the platform's
+    /// case rules. Never falls back to raw lexical comparison: a path that
+    /// cannot be resolved is treated as outside the workspace.
+    pub(super) fn is_within_workspace_path(path: &Path, root: &Path) -> bool {
+        let resolved_path = Self::resolve_for_containment(path);
+        let resolved_root = Self::resolve_for_containment(root);
+        let mut path_components = resolved_path.components();
+        for root_component in resolved_root.components() {
+            match path_components.next() {
+                Some(path_component)
+                    if Self::components_equal(
+                        path_component.as_os_str(),
+                        root_component.as_os_str(),
+                    ) =>
+                {
+                    continue;
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     pub(super) fn external_execution_root(tool_name: &str, path: &str) -> String {
@@ -241,7 +322,14 @@ impl AgentRuntime {
         // tool answers with a clean not-found error instead of a popup.
         if let Some(id) = resource.strip_prefix("session://") {
             if id != "*" {
-                match self.storage.get_session(id)? {
+                let other = match self.storage.get_session(id)? {
+                    Some(session) => Some(session),
+                    // Short hex prefixes (as printed by `action=list` and
+                    // accepted by the sessions tool) resolve to the same
+                    // session; gate the resolved session, not the literal id.
+                    None => self.resolve_session_by_prefix(id).await?,
+                };
+                match other {
                     None => return Ok(()),
                     Some(other) => {
                         // The caller's own subagent children are part of
