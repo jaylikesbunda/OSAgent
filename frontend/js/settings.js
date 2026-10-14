@@ -359,6 +359,7 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-voice-speed').value = voice.voice_speed || 1.0;
         
         document.getElementById('setting-password-enabled').checked = config.server?.password_enabled || false;
+        OSA._remotePasswordReady = !!config.server?.password_enabled;
         
         const bind = config.server?.bind || '127.0.0.1';
         const port = config.server?.port || 8765;
@@ -881,6 +882,9 @@ OSA.switchSettingsTab = async function(tabId) {
         // sure the pane initializes every time it is selected, including a
         // pane selected before the first config request has completed.
         await OSA.initUpdatesPane();
+    } else if (tabId === 'pairing') {
+        if (OSA.Remote) await OSA.Remote.load();
+        if (OSA.Devices) await OSA.Devices.load();
     }
 };
 
@@ -1153,6 +1157,10 @@ OSA.onLanToggleChange = function() {
 
 OSA.onPasswordToggleChange = function() {
     // Just needs the toggle state which is automatically updated
+    const enabled = document.getElementById('setting-password-enabled');
+    OSA._remotePasswordReady = !!(enabled && enabled.checked);
+    const warning = document.getElementById('remote-access-warning');
+    if (warning) warning.classList.toggle('hidden', OSA._remotePasswordReady);
 };
 
 OSA.onPortChange = function() {

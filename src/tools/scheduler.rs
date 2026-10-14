@@ -56,6 +56,10 @@ impl Tool for ScheduleTool {
                             "type": "array",
                             "items": { "type": "string", "enum": ["web", "discord"] },
                             "description": "Which channels to notify on. Options: 'web' (browser), 'discord'. Defaults to ['web']. Example: ['web', 'discord'] to notify on all channels."
+        },
+                        "workspace_id": {
+                            "type": "string",
+                            "description": "Optional workspace id the job's prompt should run in. Defaults to the session's workspace, or the active workspace for a new session. Use list_workspaces to discover ids."
         }
                     },
                     "required": ["when", "message"]
@@ -112,7 +116,8 @@ impl Tool for ScheduleTool {
 
         let job = ScheduledJob::new(when.to_string(), message.to_string(), job_type, session_id)
             .with_schedule_type(schedule_type)
-            .with_channels(notify_via);
+            .with_channels(notify_via)
+            .with_workspace(args["workspace_id"].as_str().map(String::from));
 
         match self.scheduler.add_job(job) {
             Ok(job) => {

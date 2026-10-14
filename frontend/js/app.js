@@ -348,8 +348,44 @@ OSA.toggleSessionGroup = function(parentId, ev) {
     OSA.setGroupCollapsed(parentId, !OSA._collapsedGroups.has(parentId));
 };
 
+OSA.tryPairFromUrl = async function() {
+    let code = null;
+    try {
+        code = new URLSearchParams(window.location.search).get('pair');
+    } catch (e) {
+        return false;
+    }
+    if (!code) return false;
+
+    // Strip the one-time code from the address bar first, so it is not
+    // bookmarked, shared, or replayed from history after it is consumed.
+    try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('pair');
+        window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+    } catch (e) {}
+
+    try {
+        const res = await fetch('/api/auth/pair', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: code })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.token) {
+            OSA.setToken(data.token);
+            return true;
+        }
+        OSA._pairError = data.error || 'Pairing code is invalid or expired.';
+    } catch (e) {
+        OSA._pairError = 'Could not reach the server to pair this device.';
+    }
+    return false;
+};
+
 OSA.checkAuthAndInit = async function() {
     try {
+        await OSA.tryPairFromUrl();
         const res = await fetch('/api/auth/status');
         const data = await res.json();
         
@@ -493,6 +529,16 @@ OSA.showLogin = function() {
     document.getElementById('app-view').classList.add('hidden');
     OSA._startupDeferredQueued = false;
     OSA.prefetchedSessions = null;
+
+    // Surface a failed QR pairing so the user knows why they must log in.
+    if (OSA._pairError) {
+        const errorDiv = document.getElementById('login-error');
+        if (errorDiv) {
+            errorDiv.textContent = OSA._pairError;
+            errorDiv.classList.remove('hidden');
+        }
+        OSA._pairError = null;
+    }
 };
 
 OSA.showApp = function() {
@@ -768,6 +814,14 @@ OSA.createSession = async function(requestedWorkspaceId) {
     const ws = OSA.getWorkspaceState();
     const workspaceId = (typeof requestedWorkspaceId === 'string' && requestedWorkspaceId)
         || ws.activeWorkspace || 'default';
+
+    // On mobile the sidebar is an overlay drawer. Starting a chat from it (the
+    // "New chat" button, a workspace's "+", etc.) should dismiss the drawer so
+    // the fresh conversation is visible instead of hidden behind it.
+    if (window.innerWidth <= 900 && typeof OSA.closeSidebar === 'function') {
+        OSA.closeSidebar();
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     
@@ -981,6 +1035,11 @@ OSA.syncRunningSessionSnapshot = async function(sessionId) {
 };
 
 OSA.selectSession = async function(sessionId) {
+    // On mobile the sidebar is an overlay drawer; choosing a chat should
+    // dismiss it so the conversation is visible.
+    if (window.innerWidth <= 900 && typeof OSA.closeSidebar === 'function') {
+        OSA.closeSidebar();
+    }
     const perfStart = OSA.perfNow ? OSA.perfNow() : Date.now();
     const requestId = OSA.beginSessionSelection ? OSA.beginSessionSelection() : 0;
     const previousController = OSA.getSessionSelectionAbortController ? OSA.getSessionSelectionAbortController() : null;
@@ -1038,7 +1097,7 @@ OSA.selectSession = async function(sessionId) {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
             signal,
         }).catch(() => null);
-        const pendingHistoryRequest = fetch(`/api/sessions/${sessionId}/history`, {
+        const pendingHistoryRequest = fetch(`/api/sessions/${sessionId}/history/sequence`, {
             headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
             signal,
         }).catch(() => null);
@@ -1142,7 +1201,7 @@ OSA.selectSession = async function(sessionId) {
         if (!isCurrentSelection()) return;
         const subagentsData = (subagentsRes && subagentsRes.ok) ? await subagentsRes.json() : { subagents: [], has_running: false };
         if (!isCurrentSelection()) return;
-        let historyData = (historyRes && historyRes.ok) ? await historyRes.json() : [];
+        let historyData = (historyRes && historyRes.ok) ? await historyRes.json() : {};
         if (!isCurrentSelection()) return;
         const queueItems = (queueRes && queueRes.ok) ? await queueRes.json() : [];
         if (!isCurrentSelection()) return;
@@ -1164,7 +1223,7 @@ OSA.selectSession = async function(sessionId) {
                     // A final snapshot can contain chunks newer than the
                     // first history read. Advance the cursor with a history
                     // read taken after that snapshot to avoid replaying them.
-                    const refreshedHistoryRes = await fetch(`/api/sessions/${sessionId}/history`, {
+                    const refreshedHistoryRes = await fetch(`/api/sessions/${sessionId}/history/sequence`, {
                         headers: { 'Authorization': `Bearer ${OSA.getToken()}` },
                         signal,
                     }).catch(() => null);
@@ -1181,8 +1240,8 @@ OSA.selectSession = async function(sessionId) {
             }
         }
 
-        const latestEventSequence = Array.isArray(historyData) && historyData.length > 0
-            ? Number(historyData[historyData.length - 1]?.sequence || 0)
+        const latestEventSequence = historyData && Number.isFinite(Number(historyData.sequence))
+            ? Number(historyData.sequence)
             : 0;
         const chain = OSA.getMessageChain();
         // Never move the counter backwards: live events may have arrived while
@@ -1698,7 +1757,12 @@ OSA.sendMessage = async function() {
                 OSA.connectEventSource(currentSession.id);
             }
         }
-        // Returned so follow-up steer can promote the queued item.
+        // Returned so follow-up steer can promote the queued item. Some
+        // transports (older servers) omit `queue_item`, so the caller also gets
+        // the client id it can match against the queue as a fallback.
+        if (data && typeof data === 'object') {
+            data.client_message_id = clientMessageId;
+        }
         return data;
     } catch (error) {
         console.error('Failed to send message:', error);
@@ -1993,6 +2057,18 @@ OSA.initSidebarResize = function() {
     });
 };
 
+OSA.openSidebar = function() {
+    const sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+    sidebar.classList.add('open');
+    sidebar.classList.remove('collapsed');
+    const backdrop = document.getElementById('sidebar-backdrop');
+    if (backdrop) backdrop.classList.add('visible');
+    const toggleBtn = document.getElementById('sidebar-toggle');
+    if (toggleBtn) toggleBtn.classList.add('sidebar-open');
+    OSA.sidebarOpen = true;
+};
+
 OSA.closeSidebar = function() {
     const sidebar = document.querySelector('.sidebar');
     const backdrop = document.getElementById('sidebar-backdrop');
@@ -2011,6 +2087,7 @@ OSA.initSidebarState = function() {
     if (!sidebar) return;
 
     OSA.initSidebarResize();
+    OSA.initSidebarSwipe();
 
     const isMobile = window.innerWidth <= 900;
     const collapsed = OSA.getSidebarCollapsed();
@@ -2026,6 +2103,63 @@ OSA.initSidebarState = function() {
             if (toggleBtn) toggleBtn.classList.add('sidebar-open');
         }
     }
+};
+
+// Edge-swipe: drag in from the left edge to open the drawer, or swipe the open
+// drawer back to the left to close it. Mobile only.
+OSA.initSidebarSwipe = function() {
+    if (OSA._sidebarSwipeBound) return;
+    OSA._sidebarSwipeBound = true;
+    const EDGE_PX = 28;
+    const TRIGGER_PX = 48;
+    let tracking = false;
+    let mode = null; // 'open' | 'close'
+    let startX = 0;
+    let startY = 0;
+
+    document.addEventListener('touchstart', (event) => {
+        if (window.innerWidth > 900 || event.touches.length !== 1) {
+            tracking = false;
+            return;
+        }
+        const touch = event.touches[0];
+        startX = touch.clientX;
+        startY = touch.clientY;
+        const sidebar = document.querySelector('.sidebar');
+        const isOpen = !!(sidebar && sidebar.classList.contains('open'));
+        if (isOpen) {
+            mode = 'close';
+            tracking = true;
+        } else if (touch.clientX <= EDGE_PX) {
+            mode = 'open';
+            tracking = true;
+        } else {
+            tracking = false;
+        }
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (event) => {
+        if (!tracking || event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        const dx = touch.clientX - startX;
+        const dy = touch.clientY - startY;
+        // Give up if the gesture is really a vertical scroll.
+        if (Math.abs(dy) > Math.abs(dx) + 8) {
+            tracking = false;
+            return;
+        }
+        if (mode === 'open' && dx > TRIGGER_PX) {
+            tracking = false;
+            OSA.openSidebar();
+        } else if (mode === 'close' && dx < -TRIGGER_PX) {
+            tracking = false;
+            OSA.closeSidebar();
+        }
+    }, { passive: true });
+
+    const reset = () => { tracking = false; mode = null; };
+    document.addEventListener('touchend', reset, { passive: true });
+    document.addEventListener('touchcancel', reset, { passive: true });
 };
 
 document.addEventListener('click', (event) => {
@@ -2391,6 +2525,44 @@ OSA.bindWorkspaceDrag = function(list) {
     };
     list.addEventListener('dragend', finish);
     list.addEventListener('drop', finish);
+
+    // Touch taps activate on pointerup rather than waiting for the synthesized
+    // click. Live updates can rebuild the list between touchstart and click,
+    // which made the first tap on a chat do nothing (needing a second tap).
+    let tapStart = null;
+    list.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse') return;
+        tapStart = { x: event.clientX, y: event.clientY };
+    });
+    list.addEventListener('pointerup', (event) => {
+        if (event.pointerType === 'mouse') return;
+        const start = tapStart;
+        tapStart = null;
+        if (!start) return;
+        // Treat only small movements as a tap so scrolling the list does not
+        // open whatever chat was under the finger.
+        if (Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 12) return;
+        if (!event.target || !event.target.closest) return;
+        // Let the row's own buttons handle their taps.
+        if (event.target.closest('.session-action-btn') || event.target.closest('.session-group-toggle')) return;
+        const item = event.target.closest('.session-item');
+        const id = item ? item.dataset.sessionId : '';
+        if (!id) return;
+        // The browser will still fire a click after this; swallow it once.
+        OSA._suppressSessionClickUntil = Date.now() + 800;
+        OSA.selectSession(id);
+    });
+    list.addEventListener('click', (event) => {
+        if (!OSA._suppressSessionClickUntil || Date.now() >= OSA._suppressSessionClickUntil) return;
+        const target = event.target;
+        if (!target || !target.closest) return;
+        // Only swallow the synthesized click on a row, never on its buttons.
+        if (target.closest('.session-action-btn') || target.closest('.session-group-toggle')) return;
+        if (!target.closest('.session-item')) return;
+        OSA._suppressSessionClickUntil = 0;
+        event.stopPropagation();
+        event.preventDefault();
+    }, true);
 };
 
 OSA.workspaceGroupHtml = function(group, renderBlock, containsActive) {

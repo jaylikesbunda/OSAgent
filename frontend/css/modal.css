@@ -1634,6 +1634,7 @@
 
 .lan-address-value {
     flex: 1;
+    min-width: 0;
     font-size: 14px;
     font-weight: 600;
     font-family: 'JetBrains Mono', monospace;
@@ -1641,6 +1642,10 @@
     background: var(--bg-tertiary);
     padding: 6px 12px;
     border-radius: var(--radius-sm);
+    /* Public tunnel URLs are long and monospaced; wrap them instead of
+       overflowing the settings card on a phone. */
+    overflow-wrap: anywhere;
+    word-break: break-all;
 }
 
 .btn-copy {

@@ -15,6 +15,24 @@ jwt_secret = "replace-with-a-long-random-secret"
 # Changes require a server restart.
 cors_allowed_origins = []
 
+# Opt-in public tunnel so this instance can be reached from a phone away from
+# home. Enabling requires a web UI password: remote devices are admitted by
+# scanning a QR pairing code, not by sharing the password. Manage it from
+# Settings > Security > Remote Access; these keys mirror that state.
+[remote_access]
+enabled = false
+# Only "cloudflared" is supported. Empty `binary` auto-downloads cloudflared
+# into ~/.osagent/bin on first use (or uses a copy already on PATH).
+provider = "cloudflared"
+binary = ""
+# A named tunnel (set tunnel_name) gives a stable URL; leave empty for an
+# ephemeral *.trycloudflare.com quick tunnel. For a named tunnel,
+# public_hostname is the hostname mapped to this origin (e.g. "osa.example.com").
+tunnel_name = ""
+public_hostname = ""
+# Seconds a pairing code stays valid before it must be regenerated.
+pairing_ttl_secs = 600
+
 [scheduler]
 # Scheduled jobs run inside the OSA process. One-time and recurring jobs are
 # persisted in SQLite; retries use exponential backoff.

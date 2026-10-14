@@ -14,6 +14,7 @@ use crate::skills::SkillService;
 use crate::storage::{
     FileSnapshotSummary, QueuedMessage, Session, SessionSummary, StoredSessionEvent,
 };
+use crate::web::remote_access::RemoteAccessManager;
 use crate::web::{auth, middleware::AuthLayer};
 use crate::workflow::api::WorkflowState;
 use crate::workflow::artifact_store::ArtifactStore;
@@ -501,7 +502,12 @@ pub struct SessionPersonaResponse {
     pub active: Option<ActivePersona>,
 }
 
-pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: PathBuf) -> Router {
+pub fn create_router(
+    config: Config,
+    agent: Arc<AgentRuntime>,
+    config_path: PathBuf,
+    remote_access: Arc<RemoteAccessManager>,
+) -> Router {
     let secret = config.server.jwt_secret.clone();
 
     let db_path = PathBuf::from(std::env::var("OSAGENT_DATA_DIR").unwrap_or_else(|_| {
@@ -553,12 +559,14 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
 
     let public_routes = Router::new()
         .route("/api/auth/login", post(login))
-        .route("/api/auth/status", get(auth_status));
+        .route("/api/auth/status", get(auth_status))
+        .merge(crate::web::routes::remote::public_router());
 
     let protected_routes = Router::new()
         .merge(workflow_router)
         .merge(skills_router)
         .merge(super::browser::create_browser_router())
+        .merge(crate::web::routes::remote::protected_router())
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
@@ -680,6 +688,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .route("/api/sessions/:id/events", get(session_events))
         .route("/ws", get(ws::ws_upgrade))
         .route("/api/sessions/:id/history", get(session_history))
+        .route(
+            "/api/sessions/:id/history/sequence",
+            get(session_history_sequence),
+        )
         .route("/api/sessions/:id/todos", get(session_todos))
         .route(
             "/api/sessions/:id/feedback",
@@ -799,9 +811,10 @@ pub fn create_router(config: Config, agent: Arc<AgentRuntime>, config_path: Path
         .merge(scheduler::create_scheduler_router());
 
     public_routes
-        .merge(protected_routes.layer(AuthLayer::new(secret.clone())))
+        .merge(protected_routes.layer(AuthLayer::new(secret.clone(), agent.storage().clone())))
         .layer(Extension(agent))
         .layer(Extension(Arc::new(secret)))
+        .layer(Extension(remote_access))
         .layer(Extension(config_path))
         .layer(Extension(update_manager))
 }
@@ -2487,7 +2500,7 @@ async fn get_session_tools(
             }),
         )
     })?;
-    let history = agent.list_session_history(&id).await.map_err(|e| {
+    let history = agent.list_tool_session_events(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -3125,6 +3138,28 @@ async fn session_history(
     })?;
 
     Ok(Json(history))
+}
+
+/// Just the newest event sequence for a session. The session-switch flow only
+/// needs this as its live-replay cursor, so this avoids shipping every event
+/// (which for a long chat can be many `response_chunk` rows).
+async fn session_history_sequence(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let sequence = agent
+        .storage()
+        .latest_session_event_sequence(&session_id)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({ "sequence": sequence })))
 }
 
 async fn session_todos(

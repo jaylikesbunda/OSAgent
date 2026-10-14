@@ -929,7 +929,7 @@ impl AgentRuntime {
                                             self.event_bus.emit(AgentEvent::Error {
                                                 session_id: session_id.to_string(),
                                                 sequence: 0,
-                                                error: e.to_string(),
+                                                error: e.user_facing_message(),
                                                 recoverable: e.is_recoverable(),
                                                 timestamp: SystemTime::now(),
                                             });
@@ -995,7 +995,7 @@ impl AgentRuntime {
                                         self.event_bus.emit(AgentEvent::Error {
                                             session_id: session_id.to_string(),
                                             sequence: 0,
-                                            error: setup_error.to_string(),
+                                            error: setup_error.user_facing_message(),
                                             recoverable: setup_error.is_recoverable(),
                                             timestamp: SystemTime::now(),
                                         });
@@ -1016,7 +1016,7 @@ impl AgentRuntime {
                                 self.event_bus.emit(AgentEvent::Error {
                                     session_id: session_id.to_string(),
                                     sequence: 0,
-                                    error: e.to_string(),
+                                    error: e.user_facing_message(),
                                     recoverable: e.is_recoverable(),
                                     timestamp: SystemTime::now(),
                                 });
@@ -1042,7 +1042,7 @@ impl AgentRuntime {
                                 self.event_bus.emit(AgentEvent::Error {
                                     session_id: session_id.to_string(),
                                     sequence: 0,
-                                    error: e.to_string(),
+                                    error: e.user_facing_message(),
                                     recoverable: e.is_recoverable(),
                                     timestamp: SystemTime::now(),
                                 });
@@ -1080,7 +1080,7 @@ impl AgentRuntime {
                     self.event_bus.emit(AgentEvent::Error {
                         session_id: session_id.to_string(),
                         sequence: 0,
-                        error: error.to_string(),
+                        error: error.user_facing_message(),
                         recoverable: error.is_recoverable(),
                         timestamp: SystemTime::now(),
                     });
@@ -1114,7 +1114,7 @@ impl AgentRuntime {
                             self.event_bus.emit(AgentEvent::Error {
                                 session_id: session_id.to_string(),
                                 sequence: 0,
-                                error: e.to_string(),
+                                error: e.user_facing_message(),
                                 recoverable: e.is_recoverable(),
                                 timestamp: SystemTime::now(),
                             });

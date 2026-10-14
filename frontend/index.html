@@ -4,6 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>OSA</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/images/favicon-32.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/images/pwa-192.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" content="#0a0a0a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="OSA">
+    <meta name="application-name" content="OSA">
     <link rel="stylesheet" href="/static/css/variables.css">
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/sidebar.css">
@@ -470,6 +480,7 @@
                     <optgroup label="Integrations">
                         <option value="discord">Discord</option>
                         <option value="voice">Voice</option>
+                        <option value="pairing">Pairing</option>
                     </optgroup>
                     <optgroup label="Advanced">
                         <option value="doctor">Doctor</option>
@@ -503,6 +514,9 @@
                         </button>
                         <button class="settings-sidebar-item" data-tab="voice" onclick="switchSettingsTab('voice')">
                             Voice
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="pairing" onclick="switchSettingsTab('pairing')">
+                            Pairing
                         </button>
                     </div>
                     <div class="settings-sidebar-section">
@@ -1372,6 +1386,52 @@
                             </div>
                         </details>
                     </div>
+
+                </div>
+                <div class="settings-pane" id="pane-pairing">
+                    <div class="settings-pane-header">
+                        <h2>Pairing</h2>
+                        <p class="settings-pane-desc">Reach OSA from your phone, and manage the devices allowed in</p>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title">Remote Access (Public Tunnel)</div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Enable Public Tunnel</label>
+                                <span class="toggle-desc">Expose this instance through cloudflared so you can use it from your phone away from home. Requires a web UI password.</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="setting-remote-enabled" onchange="OSA.Remote.onToggle()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div id="remote-access-warning" class="settings-warning hidden">
+                            Set a password in Security first. Anyone with the link could run tools on this machine.
+                        </div>
+                        <div id="remote-access-status" class="settings-help">Disabled.</div>
+                        <div id="remote-access-details" class="hidden">
+                            <div class="lan-address-card">
+                                <div class="lan-address-label">Public URL</div>
+                                <div class="lan-address-value" id="remote-public-url">-</div>
+                            </div>
+                            <div class="remote-pairing">
+                                <div class="lan-address-label">Scan to pair a device</div>
+                                <div id="remote-qr" class="remote-qr"></div>
+                                <div class="settings-help" id="remote-pairing-expiry"></div>
+                            </div>
+                            <button type="button" class="btn-secondary" onclick="OSA.Remote.rotate()">New pairing code</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title">Paired Devices</div>
+                        <div id="paired-devices-list" class="paired-devices-list">
+                            <div class="settings-help">Loading…</div>
+                        </div>
+                        <button type="button" class="btn-danger" id="revoke-all-devices" onclick="OSA.Devices.revokeAll()">Revoke all devices</button>
+                        <div class="settings-help">Paired devices stay signed in without a password. Revoke any you no longer trust.</div>
+                    </div>
                 </div>
                 <div class="settings-pane" id="pane-updates">
                     <div class="settings-pane-header">
@@ -1621,6 +1681,13 @@
                     <textarea id="job-message" placeholder="What should the agent do?" rows="3"></textarea>
                 </div>
                 <div class="settings-field">
+                    <label for="job-workspace">Workspace</label>
+                    <select id="job-workspace">
+                        <option value="">Active workspace (default)</option>
+                    </select>
+                    <span class="settings-field-hint">Which workspace the job's prompt runs in. An existing chat keeps its own workspace.</span>
+                </div>
+                <div class="settings-field">
                     <label>Notify via</label>
                     <div class="jobs-notify-options">
                         <label class="jobs-notify-option">
@@ -1719,6 +1786,9 @@
     <script defer src="/static/js/mcp.js"></script>
     <script defer src="/static/js/browser.js"></script>
     <script defer src="/static/js/jobs.js"></script>
+    <script defer src="/static/js/remote.js"></script>
+    <script defer src="/static/js/devices.js"></script>
+    <script defer src="/static/js/pwa.js"></script>
     <script defer src="/static/js/app.js"></script>
 </body>
 </html>

@@ -184,6 +184,7 @@ OSA.Jobs = {
                         ${this.escapeHtml(job.cron_expr)}
                     </span>
                     <span class="job-repetition-tag">${job.schedule_type === 'one_shot' ? 'One time' : 'Recurring'}</span>
+                    ${job.workspace_id ? `<span class="job-workspace-tag" title="Workspace: ${this.escapeHtml(job.workspace_id)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>${this.escapeHtml(job.workspace_id)}</span>` : ''}
                     ${channels}
                 </div>
                 <div class="job-card-times">
@@ -231,6 +232,32 @@ OSA.Jobs = {
     showCreateForm() {
         const modal = document.getElementById('jobs-create-modal');
         if (modal) modal.classList.remove('hidden');
+        this.populateWorkspaceOptions();
+    },
+
+    // Fill the job's workspace picker from the same workspace state the rest of
+    // the UI uses. Rebuilt on every open so newly added workspaces show up.
+    populateWorkspaceOptions() {
+        const select = document.getElementById('job-workspace');
+        if (!select) return;
+        const ws = OSA.getWorkspaceState ? OSA.getWorkspaceState() : null;
+        const workspaces = (ws && ws.workspaces) || [];
+        const options = ['<option value="">Active workspace (default)</option>'];
+        workspaces.forEach(function(w) {
+            if (!w || !w.id) return;
+            options.push(
+                `<option value="${OSA.escapeHtml(w.id)}">${OSA.escapeHtml(w.name || w.id)}</option>`
+            );
+        });
+        select.innerHTML = options.join('');
+        if (ws && ws.activeWorkspace) {
+            // Surface which concrete workspace the default resolves to today.
+            const active = workspaces.find(w => w && w.id === ws.activeWorkspace);
+            if (active) {
+                select.options[0].textContent =
+                    `Active workspace (${active.name || active.id})`;
+            }
+        }
     },
 
     hideCreateForm() {
@@ -252,6 +279,11 @@ OSA.Jobs = {
         if (notify_via.length === 0) notify_via.push('web');
 
         const payload = { when, message, job_type: type, schedule_type: scheduleType, notify_via };
+
+        const workspaceSelect = document.getElementById('job-workspace');
+        if (workspaceSelect && workspaceSelect.value) {
+            payload.workspace_id = workspaceSelect.value;
+        }
 
         const discordChannel = document.getElementById('discord-channel-id');
         if (discordChannel && discordChannel.value.trim()) {

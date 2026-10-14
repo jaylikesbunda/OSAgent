@@ -175,7 +175,18 @@ async fn handle_socket(socket: WebSocket, agent: Arc<AgentRuntime>) {
                                         "session_id": session_id,
                                         "status": if started_this_message { "started" } else if created { "queued" } else { "duplicate" },
                                         "queued": !started_this_message,
-                                        "queue_position": if started_this_message { serde_json::Value::Null } else { serde_json::json!(queue_item.position) }
+                                        "queue_position": if started_this_message { serde_json::Value::Null } else { serde_json::json!(queue_item.position) },
+                                        // Mirror the HTTP /send response. The composer's
+                                        // steer path promotes the just-queued row with
+                                        // its id, so a missing queue_item silently
+                                        // downgraded "steer" to a plain queue over the
+                                        // default websocket transport.
+                                        "queue_item": if started_this_message {
+                                            serde_json::Value::Null
+                                        } else {
+                                            serde_json::to_value(&queue_item)
+                                                .unwrap_or(serde_json::Value::Null)
+                                        }
                                     }),
                                 });
                             }

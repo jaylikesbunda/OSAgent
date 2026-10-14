@@ -37,6 +37,9 @@ const JS_LOAD_ORDER = [
   "js/mcp.js",
   "js/browser.js",
   "js/jobs.js",
+  "js/remote.js",
+  "js/devices.js",
+  "js/pwa.js",
   "js/app.js",
 ];
 

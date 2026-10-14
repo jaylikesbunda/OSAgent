@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// single writer, so this mostly buys read parallelism: before this, every
 /// query in the process — including a sidebar refresh deserialising history —
 /// serialised through one `Mutex<Connection>` and could stall an active turn.
-const POOL_SIZE: usize = 4;
+const POOL_SIZE: usize = 8;
 
 /// A fixed-size connection pool.
 ///
@@ -625,7 +625,8 @@ impl SqliteStorage {
                      schedule_type TEXT NOT NULL DEFAULT 'recurring',
                      run_state TEXT NOT NULL DEFAULT 'scheduled',
                      last_error TEXT,
-                     attempt_count INTEGER NOT NULL DEFAULT 0
+                     attempt_count INTEGER NOT NULL DEFAULT 0,
+                     workspace_id TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_enabled ON scheduled_jobs(enabled, next_run_at);
@@ -676,6 +677,16 @@ impl SqliteStorage {
                     updated_at INTEGER NOT NULL,
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
+
+                -- Devices that joined by QR pairing. A token is valid while its
+                -- row exists, so deleting the row revokes that device.
+                CREATE TABLE IF NOT EXISTS paired_devices (
+                    id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    user_agent TEXT,
+                    created_at INTEGER NOT NULL,
+                    last_seen_at INTEGER
+                );
                 "#,
             )
             .map_err(OSAgentError::Storage)?;
@@ -710,6 +721,20 @@ impl SqliteStorage {
                     "UPDATE scheduled_jobs SET schedule_type = 'one_shot'
                      WHERE lower(trim(cron_expr)) LIKE 'in %'
                         OR lower(trim(cron_expr)) LIKE 'at %'",
+                    [],
+                )?;
+            }
+
+            let has_job_workspace_id: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM PRAGMA_table_info('scheduled_jobs') WHERE name='workspace_id'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !has_job_workspace_id {
+                conn.execute(
+                    "ALTER TABLE scheduled_jobs ADD COLUMN workspace_id TEXT",
                     [],
                 )?;
             }
@@ -1721,8 +1746,14 @@ impl SqliteStorage {
 
     pub fn list_checkpoints(&self, session_id: &str) -> Result<Vec<Checkpoint>> {
         self.with_conn(|conn| {
+            // The `state` column is a full serialized copy of the session at
+            // each checkpoint. Listing it shipped megabytes for a long chat and
+            // was the single largest cost when opening a large session. The UI
+            // only needs metadata (id / created_at / tool_name); the full state
+            // is loaded on demand by `get_checkpoint` for a restore. Select an
+            // empty blob and bound the list.
             let mut stmt = conn
-                .prepare_cached("SELECT id, session_id, created_at, state, tool_name, tool_input, git_commit, workspace_path FROM checkpoints WHERE session_id = ?1 ORDER BY created_at DESC")
+                .prepare_cached("SELECT id, session_id, created_at, x'', tool_name, tool_input, git_commit, workspace_path FROM checkpoints WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 1000")
                 .map_err(OSAgentError::Storage)?;
             let checkpoints = stmt
                 .query_map(params![session_id], |row| {
@@ -2191,6 +2222,38 @@ impl SqliteStorage {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT id, session_id, event_type, sequence, timestamp, data FROM session_events WHERE session_id = ?1 ORDER BY sequence ASC, timestamp ASC",
+                )
+                .map_err(OSAgentError::Storage)?;
+
+            let items = stmt
+                .query_map(params![session_id], |row| {
+                    Ok(StoredSessionEvent {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        event_type: row.get(2)?,
+                        sequence: row.get(3)?,
+                        timestamp: chrono::DateTime::from_timestamp(row.get::<_, i64>(4)?, 0)
+                            .unwrap_or_else(Utc::now),
+                        data: serde_json::from_slice(&row.get::<_, Vec<u8>>(5)?)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(items)
+        })
+    }
+
+    /// Only the tool lifecycle events for a session. The transcript rebuild
+    /// does not need the high-volume `response_chunk` rows (one per ~180 chars
+    /// of every reply), so filtering them out in SQL avoids parsing megabytes
+    /// of JSON when opening a large session.
+    pub fn list_tool_session_events(&self, session_id: &str) -> Result<Vec<StoredSessionEvent>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, session_id, event_type, sequence, timestamp, data FROM session_events WHERE session_id = ?1 AND event_type IN ('tool_start', 'tool_complete') ORDER BY sequence ASC, timestamp ASC",
                 )
                 .map_err(OSAgentError::Storage)?;
 
@@ -3214,14 +3277,15 @@ impl SqliteStorage {
             run_state: row.get(13)?,
             last_error: row.get(14)?,
             attempt_count: row.get::<_, i64>(15)?.try_into().unwrap_or(0),
+            workspace_id: row.get(16)?,
         })
     }
 
     pub fn create_scheduled_job(&self, job: &ScheduledJob) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO scheduled_jobs (id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                "INSERT INTO scheduled_jobs (id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count, workspace_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     job.id,
                     job.cron_expr,
@@ -3239,6 +3303,7 @@ impl SqliteStorage {
                     job.run_state,
                     job.last_error,
                     job.attempt_count as i64,
+                    job.workspace_id,
                 ],
             )
             .map_err(OSAgentError::Storage)?;
@@ -3249,7 +3314,7 @@ impl SqliteStorage {
     pub fn get_scheduled_job(&self, id: &str) -> Result<Option<ScheduledJob>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count FROM scheduled_jobs WHERE id = ?1")
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count, workspace_id FROM scheduled_jobs WHERE id = ?1")
                 .map_err(OSAgentError::Storage)?;
 
             let result = stmt.query_row(params![id], Self::scheduled_job_from_row);
@@ -3264,7 +3329,7 @@ impl SqliteStorage {
     pub fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count FROM scheduled_jobs ORDER BY next_run_at ASC")
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count, workspace_id FROM scheduled_jobs ORDER BY next_run_at ASC")
                 .map_err(OSAgentError::Storage)?;
 
             let jobs = stmt
@@ -3279,7 +3344,7 @@ impl SqliteStorage {
     pub fn list_enabled_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count FROM scheduled_jobs WHERE enabled = 1 AND run_state = 'scheduled' ORDER BY next_run_at ASC")
+                .prepare_cached("SELECT id, cron_expr, message, job_type, session_id, enabled, metadata, created_at, last_run_at, next_run_at, failure_count, notify_channels, schedule_type, run_state, last_error, attempt_count, workspace_id FROM scheduled_jobs WHERE enabled = 1 AND run_state = 'scheduled' ORDER BY next_run_at ASC")
                 .map_err(OSAgentError::Storage)?;
 
             let jobs = stmt
@@ -3294,7 +3359,7 @@ impl SqliteStorage {
     pub fn update_scheduled_job(&self, job: &ScheduledJob) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "UPDATE scheduled_jobs SET cron_expr = ?1, message = ?2, job_type = ?3, session_id = ?4, enabled = ?5, metadata = ?6, last_run_at = ?7, next_run_at = ?8, failure_count = ?9, notify_channels = ?10, schedule_type = ?11, run_state = ?12, last_error = ?13, attempt_count = ?14 WHERE id = ?15",
+                "UPDATE scheduled_jobs SET cron_expr = ?1, message = ?2, job_type = ?3, session_id = ?4, enabled = ?5, metadata = ?6, last_run_at = ?7, next_run_at = ?8, failure_count = ?9, notify_channels = ?10, schedule_type = ?11, run_state = ?12, last_error = ?13, attempt_count = ?14, workspace_id = ?15 WHERE id = ?16",
                 params![
                     job.cron_expr,
                     job.message,
@@ -3310,6 +3375,7 @@ impl SqliteStorage {
                     job.run_state,
                     job.last_error,
                     job.attempt_count as i64,
+                    job.workspace_id,
                     job.id,
                 ],
             )
@@ -3334,6 +3400,87 @@ impl SqliteStorage {
             )
             .map_err(OSAgentError::Storage)?;
             Ok(())
+        })
+    }
+
+    pub fn create_paired_device(&self, device: &PairedDevice) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO paired_devices (id, label, user_agent, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    device.id,
+                    device.label,
+                    device.user_agent,
+                    device.created_at.timestamp(),
+                    device.last_seen_at.map(|dt| dt.timestamp()),
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    pub fn list_paired_devices(&self) -> Result<Vec<PairedDevice>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT id, label, user_agent, created_at, last_seen_at FROM paired_devices ORDER BY created_at DESC")
+                .map_err(OSAgentError::Storage)?;
+            let devices = stmt
+                .query_map([], |row| {
+                    let last_seen: Option<i64> = row.get(4)?;
+                    Ok(PairedDevice {
+                        id: row.get(0)?,
+                        label: row.get(1)?,
+                        user_agent: row.get(2)?,
+                        created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
+                            .unwrap_or_else(Utc::now),
+                        last_seen_at: last_seen
+                            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                    })
+                })
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(devices)
+        })
+    }
+
+    /// Delete a paired device, revoking its token. Returns false when it was
+    /// already gone.
+    pub fn delete_paired_device(&self, id: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let changed = conn
+                .execute("DELETE FROM paired_devices WHERE id = ?1", params![id])
+                .map_err(OSAgentError::Storage)?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// Is this device still paired? Refreshes `last_seen_at` when it is older
+    /// than `min_interval_secs`, so activity is tracked without writing on
+    /// every request.
+    pub fn check_paired_device(&self, id: &str, min_interval_secs: i64) -> Result<bool> {
+        self.with_conn(|conn| {
+            let last_seen: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT last_seen_at FROM paired_devices WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+            let Some(last_seen) = last_seen else {
+                return Ok(false);
+            };
+            let now = Utc::now().timestamp();
+            let stale = last_seen.map_or(true, |ts| now - ts >= min_interval_secs);
+            if stale {
+                let _ = conn.execute(
+                    "UPDATE paired_devices SET last_seen_at = ?1 WHERE id = ?2",
+                    params![now, id],
+                );
+            }
+            Ok(true)
         })
     }
 

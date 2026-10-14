@@ -94,6 +94,25 @@ impl AgentRuntime {
                     }
 
                     info!("Scheduler job executing in session {}", session_id);
+
+                    // Pin the job's workspace before the run so prompt jobs act
+                    // in the workspace the user chose instead of the session's
+                    // (or the active one). A chat that already has messages is
+                    // workspace-locked; log and fall back rather than fail the
+                    // whole job.
+                    if req.run_agent {
+                        if let Some(workspace_id) = req.workspace_id.as_deref() {
+                            if let Err(e) =
+                                this.set_session_workspace(&session_id, workspace_id).await
+                            {
+                                warn!(
+                                    "Scheduler job {}: could not apply workspace '{}' to session {}: {}",
+                                    req.job_id, workspace_id, session_id, e
+                                );
+                            }
+                        }
+                    }
+
                     let result: std::result::Result<String, String> = if req.run_agent {
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(290),

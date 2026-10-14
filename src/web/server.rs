@@ -23,6 +23,54 @@ struct FrontendAssets;
 
 static INDEX_HTML: &str = "index.html";
 
+/// Web app manifest so iOS/Android can install the UI as a standalone app.
+/// Served with an explicit content type (`mime_guess` does not map
+/// `.webmanifest`) and as a Rust constant so it is identical in dev and
+/// bundled builds.
+const PWA_MANIFEST: &str = r##"{
+  "name": "OSAgent",
+  "short_name": "OSA",
+  "description": "Secure local AI agent with a web UI.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    { "src": "/images/pwa-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/images/pwa-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/images/pwa-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}"##;
+
+/// Minimal service worker. Its presence is what lets Chrome/Android offer
+/// "Install app"; it deliberately caches nothing so a self-updating local
+/// server can never serve a stale UI from the cache.
+const PWA_SERVICE_WORKER: &str = r##"// OSA service worker: network-only. Present so the UI is installable as a
+// standalone web app; no caching, so updates are always picked up.
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', () => { /* network-only, intentionally */ });
+"##;
+
+async fn pwa_manifest() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/manifest+json")],
+        PWA_MANIFEST,
+    )
+}
+
+async fn pwa_service_worker() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        PWA_SERVICE_WORKER,
+    )
+}
+
 fn build_etag(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -179,7 +227,16 @@ pub async fn run_with_agent(
     );
 
     let router_start = Instant::now();
-    let api_routes = create_router(config.clone(), agent.clone(), config_path);
+    let remote_access = crate::web::remote_access::RemoteAccessManager::new(
+        config.remote_access.clone(),
+        config.server.port,
+    );
+    let api_routes = create_router(
+        config.clone(),
+        agent.clone(),
+        config_path,
+        remote_access.clone(),
+    );
     info!(
         target: "osagent::startup",
         "phase=web_router_create elapsed_ms={:.2}",
@@ -188,6 +245,8 @@ pub async fn run_with_agent(
 
     let app_build_start = Instant::now();
     let app = api_routes
+        .route("/manifest.webmanifest", axum::routing::get(pwa_manifest))
+        .route("/sw.js", axum::routing::get(pwa_service_worker))
         .fallback(serve_static_handler)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -235,6 +294,26 @@ pub async fn run_with_agent(
             }
         })?;
 
+    // Windows creates sockets as inheritable. Child processes (cloudflared, MCP
+    // servers, the browser tool, background `process` jobs) are spawned with
+    // handle inheritance enabled, so they would inherit this listening socket.
+    // If osagent then dies abruptly, an orphaned child keeps the port bound and
+    // the next start fails with "port already in use". Clear the inherit flag
+    // so the listener can never leak into a child.
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+        // SAFETY: `raw` is a live socket handle owned by `listener`.
+        let _ = unsafe {
+            SetHandleInformation(
+                listener.as_raw_socket() as _,
+                HANDLE_FLAG_INHERIT,
+                0,
+            )
+        };
+    }
+
     info!("OSA web server listening on http://{}", bind_addr);
     info!(
         target: "osagent::startup",
@@ -248,6 +327,25 @@ pub async fn run_with_agent(
     );
 
     let graceful = axum::serve(listener, app);
+
+    // Auto-start the opt-in tunnel once the server is actually listening, so
+    // cloudflared's first connection attempt succeeds instead of racing the
+    // bind. Enabling without a password is refused: the public URL would
+    // otherwise expose an unauthenticated UI.
+    if config.remote_access.enabled {
+        let password_ready =
+            config.server.password_enabled && !config.server.password.is_empty();
+        if password_ready {
+            let manager = remote_access.clone();
+            tokio::spawn(async move {
+                manager.ensure_started().await;
+            });
+        } else {
+            tracing::warn!(
+                "Remote access is enabled in config but no web UI password is set; tunnel not started."
+            );
+        }
+    }
 
     if let Some(mut rx) = shutdown_rx {
         let _restart_tx = agent.get_restart_sender();

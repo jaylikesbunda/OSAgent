@@ -860,6 +860,13 @@
     transform: translateY(2px);
     transition: opacity var(--transition-fast), transform var(--transition-fast);
     align-items: center;
+    /* The action row has six buttons plus duration/token readouts. Without
+       wrapping it is wider than a phone viewport, and because it stays in
+       layout while faded (opacity 0), it stretched the transcript into a
+       horizontal scroll with dead space on the right. */
+    flex-wrap: wrap;
+    row-gap: 6px;
+    max-width: 100%;
 }
 
 .message-actions .turn-duration,

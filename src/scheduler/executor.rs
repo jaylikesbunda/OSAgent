@@ -12,6 +12,9 @@ pub struct RunPromptRequest {
     pub job_id: String,
     pub job_type: String,
     pub run_agent: bool,
+    /// Workspace the job's prompt should run in. `None` keeps the session's
+    /// existing workspace (or the active one for a fresh session).
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +85,7 @@ impl JobExecutor {
             job_id: job.id.clone(),
             job_type: job.job_type.clone(),
             run_agent,
+            workspace_id: job.workspace_id.clone(),
         })
         .map_err(|e| OSAgentError::Config(format!("Failed to dispatch prompt: {}", e)))?;
 

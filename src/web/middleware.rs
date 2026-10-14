@@ -1,11 +1,17 @@
+use crate::storage::SqliteStorage;
 use axum::{
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
 };
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tower::{Layer, Service};
+
+/// How stale a device's `last_seen_at` must be before an authenticated request
+/// refreshes it. Keeps the pairing list current without a write per request.
+const DEVICE_TOUCH_INTERVAL_SECS: i64 = 300;
 
 fn token_from_query(query: &str) -> Option<String> {
     for part in query.split('&') {
@@ -29,11 +35,28 @@ fn token_from_query(query: &str) -> Option<String> {
 #[derive(Clone)]
 pub struct AuthLayer {
     pub secret: String,
+    pub storage: Arc<SqliteStorage>,
 }
 
 impl AuthLayer {
-    pub fn new(secret: String) -> Self {
-        Self { secret }
+    pub fn new(secret: String, storage: Arc<SqliteStorage>) -> Self {
+        Self { secret, storage }
+    }
+
+    /// Is this token valid, and (when it is a paired-device token) is the
+    /// device still paired?
+    fn token_is_authorized(&self, token: &str) -> bool {
+        match crate::web::auth::verify_token(token, &self.secret) {
+            Ok(claims) => match claims.device_id.as_deref() {
+                Some(device_id) => self
+                    .storage
+                    .check_paired_device(device_id, DEVICE_TOUCH_INTERVAL_SECS)
+                    .unwrap_or(false),
+                // Password-issued tokens are stateless.
+                None => true,
+            },
+            Err(_) => false,
+        }
     }
 }
 
@@ -44,6 +67,7 @@ impl<S> Layer<S> for AuthLayer {
         AuthMiddleware {
             inner,
             secret: self.secret.clone(),
+            storage: self.storage.clone(),
         }
     }
 }
@@ -52,6 +76,7 @@ impl<S> Layer<S> for AuthLayer {
 pub struct AuthMiddleware<S> {
     inner: S,
     secret: String,
+    storage: Arc<SqliteStorage>,
 }
 
 impl<S, B> Service<Request<B>> for AuthMiddleware<S>
@@ -70,12 +95,15 @@ where
 
     fn call(&mut self, request: Request<B>) -> Self::Future {
         let secret = self.secret.clone();
+        let storage = self.storage.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
             if request.method() == axum::http::Method::OPTIONS {
                 return inner.call(request).await;
             }
+
+            let layer = AuthLayer { secret, storage };
 
             let auth_header = request
                 .headers()
@@ -84,7 +112,7 @@ where
 
             if let Some(auth) = auth_header {
                 if let Some(token) = auth.strip_prefix("Bearer ") {
-                    if crate::web::auth::verify_token(token, &secret).is_ok() {
+                    if layer.token_is_authorized(token) {
                         return inner.call(request).await;
                     }
                 }
@@ -92,7 +120,7 @@ where
 
             if let Some(query) = request.uri().query() {
                 if let Some(token) = token_from_query(query) {
-                    if crate::web::auth::verify_token(&token, &secret).is_ok() {
+                    if layer.token_is_authorized(&token) {
                         return inner.call(request).await;
                     }
                 }
@@ -113,6 +141,7 @@ mod tests {
         response::{IntoResponse, Response},
     };
     use std::convert::Infallible;
+    use std::sync::Arc;
     use std::task::{Context, Poll};
     use tower::{Layer, Service};
 
@@ -135,7 +164,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_missing_bearer_token() {
-        let mut service = AuthLayer::new("test-secret".to_string()).layer(OkService);
+        let mut service = AuthLayer::new(
+            "test-secret".to_string(),
+            Arc::new(crate::storage::SqliteStorage::new_in_memory().unwrap()),
+        )
+        .layer(OkService);
 
         let response = service
             .call(
@@ -154,7 +187,11 @@ mod tests {
     async fn accepts_valid_bearer_token() {
         let secret = "test-secret".to_string();
         let token = auth::generate_token("user", &secret).unwrap();
-        let mut service = AuthLayer::new(secret).layer(OkService);
+        let mut service = AuthLayer::new(
+            secret,
+            Arc::new(crate::storage::SqliteStorage::new_in_memory().unwrap()),
+        )
+        .layer(OkService);
 
         let response = service
             .call(
@@ -172,7 +209,11 @@ mod tests {
 
     #[tokio::test]
     async fn allows_options_without_token() {
-        let mut service = AuthLayer::new("test-secret".to_string()).layer(OkService);
+        let mut service = AuthLayer::new(
+            "test-secret".to_string(),
+            Arc::new(crate::storage::SqliteStorage::new_in_memory().unwrap()),
+        )
+        .layer(OkService);
 
         let response = service
             .call(
@@ -192,7 +233,11 @@ mod tests {
     async fn accepts_valid_query_token() {
         let secret = "test-secret".to_string();
         let token = auth::generate_token("user", &secret).unwrap();
-        let mut service = AuthLayer::new(secret).layer(OkService);
+        let mut service = AuthLayer::new(
+            secret,
+            Arc::new(crate::storage::SqliteStorage::new_in_memory().unwrap()),
+        )
+        .layer(OkService);
 
         let response = service
             .call(
@@ -205,5 +250,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn device_token_requires_an_active_paired_device() {
+        let storage = Arc::new(crate::storage::SqliteStorage::new_in_memory().unwrap());
+        let secret = "test-secret".to_string();
+        let device = crate::storage::PairedDevice {
+            id: "dev-1".to_string(),
+            label: "Phone".to_string(),
+            user_agent: None,
+            created_at: chrono::Utc::now(),
+            last_seen_at: None,
+        };
+        let token = auth::generate_device_token(&device.id, &secret, 3600).unwrap();
+
+        let call = |service: &mut crate::web::middleware::AuthMiddleware<OkService>| {
+            service.call(
+                Request::builder()
+                    .uri("/api/config")
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+
+        // A device token with no matching device row is rejected.
+        let mut service = AuthLayer::new(secret.clone(), storage.clone()).layer(OkService);
+        assert_eq!(call(&mut service).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+
+        // Once paired, the same token is accepted.
+        storage.create_paired_device(&device).unwrap();
+        let mut service = AuthLayer::new(secret.clone(), storage.clone()).layer(OkService);
+        assert_eq!(call(&mut service).await.unwrap().status(), StatusCode::OK);
+
+        // Revoking the device invalidates the still-signed token.
+        storage.delete_paired_device(&device.id).unwrap();
+        let mut service = AuthLayer::new(secret.clone(), storage.clone()).layer(OkService);
+        assert_eq!(call(&mut service).await.unwrap().status(), StatusCode::UNAUTHORIZED);
     }
 }

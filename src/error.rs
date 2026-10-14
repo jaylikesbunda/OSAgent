@@ -294,15 +294,33 @@ impl OSAgentError {
             Self::Timeout => true,
             Self::Http(error) => error.is_timeout() || error.is_connect() || error.is_request(),
             Self::ProviderStructured(info) => {
+                // A rate limit stays retryable even when the provider reports it
+                // with a 403 (some do), so check that first.
+                if self.is_rate_limited() {
+                    return true;
+                }
+                // A permanent 4xx (auth, billing, not-found, validation) must
+                // not be retried just because the text also says "stream error".
+                if info.status_code.is_some_and(is_permanent_http_status) {
+                    return false;
+                }
                 // 5xx are transient server failures and should always be retried,
                 // even when the error text doesn't say so explicitly.
                 info.status_code.is_some_and(|status| status >= 500)
-                    || self.is_rate_limited()
                     || contains_any(&info.message.to_lowercase(), TRANSIENT_PROVIDER_MARKERS)
             }
             Self::Provider(message) => {
-                self.is_rate_limited()
-                    || contains_any(&message.to_lowercase(), TRANSIENT_PROVIDER_MARKERS)
+                if self.is_rate_limited() {
+                    return true;
+                }
+                // "stream error: Invalid status code: 403 Forbidden" is an auth
+                // failure, not a transient stream drop; retrying only delays the
+                // error and spams the log. Check the status before the markers,
+                // because the marker list intentionally contains "stream error".
+                if http_status_from_text(message).is_some_and(is_permanent_http_status) {
+                    return false;
+                }
+                contains_any(&message.to_lowercase(), TRANSIENT_PROVIDER_MARKERS)
             }
             _ => false,
         }
@@ -334,6 +352,83 @@ impl OSAgentError {
     pub fn is_recoverable(&self) -> bool {
         self.is_retryable() || self.is_rate_limited()
     }
+
+    /// The HTTP status and message text, regardless of which provider-error
+    /// shape carries them.
+    fn status_and_message(&self) -> (Option<u16>, String) {
+        match self {
+            Self::ProviderStructured(info) => (info.status_code, info.message.clone()),
+            Self::Provider(message) => (http_status_from_text(message), message.clone()),
+            _ => (None, self.to_string()),
+        }
+    }
+
+    /// The provider account is out of credits or has a billing problem. This is
+    /// permanent: retrying cannot help and the user needs to act.
+    pub fn is_payment_required(&self) -> bool {
+        let (status, message) = self.status_and_message();
+        if status == Some(402) {
+            return true;
+        }
+        let lower = message.to_lowercase();
+        contains_any(
+            &lower,
+            &[
+                "payment required",
+                "insufficient credits",
+                "insufficient credit",
+                "insufficient balance",
+                "insufficient funds",
+                "not enough credits",
+                "no credits",
+                "credit balance is too low",
+                "exceeded your current quota",
+                "billing",
+                "purchase credits",
+                "add credits",
+                "out of credits",
+            ],
+        )
+    }
+
+    /// The provider rejected our credentials (missing/invalid key or no access).
+    pub fn is_auth_error(&self) -> bool {
+        let (status, message) = self.status_and_message();
+        if matches!(status, Some(401) | Some(403)) && !self.is_rate_limited() {
+            return true;
+        }
+        let lower = message.to_lowercase();
+        contains_any(
+            &lower,
+            &[
+                "invalid api key",
+                "incorrect api key",
+                "api key not valid",
+                "invalid_api_key",
+                "authentication failed",
+                "unauthorized",
+                "no auth credentials",
+                "missing api key",
+            ],
+        )
+    }
+
+    /// A message written for the person using the app, with actionable guidance
+    /// for the failures they can actually fix (billing, credentials). Falls back
+    /// to the raw error for everything else.
+    pub fn user_facing_message(&self) -> String {
+        if self.is_payment_required() {
+            return "Payment required: this provider's account is out of credits or has a billing problem. \
+                    Add credits, or switch to another provider in Settings."
+                .to_string();
+        }
+        if self.is_auth_error() {
+            return "Authentication failed: this provider rejected the API key. \
+                    Check the key in Settings, or switch to another provider."
+                .to_string();
+        }
+        self.to_string()
+    }
 }
 
 /// Upper bound for honoring a provider's `Retry-After` hint.
@@ -341,6 +436,27 @@ pub const MAX_RETRY_AFTER_DELAY_SECS: u64 = 300;
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+/// Permanent HTTP statuses that must not be retried: auth (401/403), billing
+/// (402), not-found (404) and validation (4xx) failures. Timeout (408),
+/// conflict (409), too-early (425) and rate-limit (429) stay retryable.
+fn is_permanent_http_status(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 408 | 409 | 425 | 429)
+}
+
+/// Pull an HTTP status code out of free-form provider text such as
+/// "stream error: Invalid status code: 403 Forbidden".
+fn http_status_from_text(text: &str) -> Option<u16> {
+    let lower = text.to_lowercase();
+    let start = lower.find("status code")? + "status code".len();
+    lower[start..]
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -374,6 +490,82 @@ mod tests {
     fn rate_limited_by_message_text() {
         let err = structured(Some(403), None, "Rate limit reached for tokens per min");
         assert!(err.is_rate_limited());
+    }
+
+    #[test]
+    fn permanent_auth_error_is_not_retryable() {
+        let err = OSAgentError::Provider(
+            "stream error: Invalid status code: 403 Forbidden (status code 403)".to_string(),
+        );
+        assert!(!err.is_retryable());
+        assert!(!err.is_recoverable());
+    }
+
+    #[test]
+    fn payment_required_is_not_retryable() {
+        let err = OSAgentError::Provider(
+            "stream error: Invalid status code: 402 Payment Required (status code 402)".to_string(),
+        );
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn transient_stream_error_without_status_is_retryable() {
+        let err = OSAgentError::Provider("stream error: connection reset by peer".to_string());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn server_error_status_is_retryable() {
+        let err = OSAgentError::Provider(
+            "stream error: Invalid status code: 503 Service Unavailable (status code 503)"
+                .to_string(),
+        );
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limit_reported_as_403_stays_retryable() {
+        let err = OSAgentError::Provider(
+            "stream error: Invalid status code: 403 (status code 403) rate limit reached"
+                .to_string(),
+        );
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn payment_required_is_surfaced_to_the_user() {
+        let err = OSAgentError::Provider(
+            "stream error: Invalid status code: 402 Payment Required (status code 402)".to_string(),
+        );
+        assert!(err.is_payment_required());
+        assert!(err
+            .user_facing_message()
+            .to_lowercase()
+            .contains("payment required"));
+
+        let err = OSAgentError::Provider("insufficient credits remaining".to_string());
+        assert!(err.is_payment_required());
+    }
+
+    #[test]
+    fn auth_failure_is_surfaced_to_the_user() {
+        let err = OSAgentError::Provider(
+            "stream error: Invalid status code: 401 Unauthorized (status code 401)".to_string(),
+        );
+        assert!(err.is_auth_error());
+        assert!(err
+            .user_facing_message()
+            .to_lowercase()
+            .contains("authentication failed"));
+    }
+
+    #[test]
+    fn generic_error_message_is_left_alone() {
+        let err = OSAgentError::Provider("stream error: connection reset".to_string());
+        assert!(!err.is_payment_required());
+        assert!(!err.is_auth_error());
+        assert_eq!(err.user_facing_message(), err.to_string());
     }
 
     #[test]

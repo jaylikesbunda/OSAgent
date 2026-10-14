@@ -73,6 +73,15 @@ impl AgentRuntime {
         self.storage.list_session_events(session_id)
     }
 
+    /// Tool-only event history, used by the transcript rebuild. Excludes the
+    /// high-volume `response_chunk` rows.
+    pub async fn list_tool_session_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::storage::StoredSessionEvent>> {
+        self.storage.list_tool_session_events(session_id)
+    }
+
     /// Pre-compaction messages archived by context compaction, oldest first.
     /// The web UI merges these back into the transcript so a compacted chat
     /// still looks the way it did, with the summary card at the boundary.

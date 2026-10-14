@@ -1,3 +1,23 @@
+v0.8.0 changes (unreleased):
+
+Added:
+* Opt-in remote access: publish the web UI through a cloudflared tunnel and pair a phone by scanning a QR code. Needs a web UI password, and cloudflared is downloaded automatically on first use (nothing to install yourself)
+* A Pairing settings tab: pair by QR and manage every paired device. Each paired device gets its own long-lived, revocable token, so it stays signed in without the password, and revoking it cuts the device off immediately (there's a revoke-all too)
+* Mobile: swipe in from the left edge to open the chat drawer, and swipe it back to the left to close
+* Install the web UI as an app: a web app manifest and icons let iOS and Android add OSA to the home screen as a standalone app, using the same logo as the desktop app
+* Pin a scheduled job to a workspace, set from the job dialog, the `schedule` tool, or the API
+
+Fixed:
+* "Steer" follow-ups sent over the websocket now interrupt the running turn instead of silently queueing
+* The web server's listening socket is no longer inheritable on Windows, so an abruptly-killed instance can't leave an orphaned child (cloudflared, MCP server, browser, background job) holding port 8765 and blocking the next start with "port already in use"
+* Provider auth and billing failures (401/402/403/404) now fail immediately with the real error instead of being retried four times as if they were transient stream drops; rate limits reported as 403 and 5xx/network stream errors still retry
+* "New chat" now closes the mobile sidebar drawer so the new conversation is visible
+* The sidebar no longer shows a thin strip of chats above the search box; the sticky search covers the top of the list
+* Mobile: the reply action row (Copy/Restore/Retry/Good/Bad) now wraps instead of stretching the chat into a horizontal scroll with dead space on the right
+* Mobile: the pairing public URL wraps inside its card instead of overflowing the settings panel
+* Mobile: a single tap opens a chat and dismisses the drawer (previously it could take two taps, and the drawer stayed open over the conversation)
+* Opening a large chat is much faster: checkpoints no longer ship a full copy of the session, tool events are read without the per-chunk noise, and switching sessions no longer downloads the entire event history
+
 v0.7.0 changes (unreleased):
 
 TL;DR:

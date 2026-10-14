@@ -1918,7 +1918,15 @@ OSA.sendFollowUp = async function(delivery) {
     }
     try {
         const data = await OSA.sendMessage();
-        const item = data && data.queue_item;
+        // Prefer the server row. If a transport omitted it, fall back to the
+        // local queue row for this send so steer still promotes the message
+        // instead of silently degrading to a plain queue.
+        let item = data && data.queue_item;
+        if (data && data.queued && !(item && item.id) && data.client_message_id) {
+            item = (OSA.getSessionQueue() || []).find(function(q) {
+                return q && q.client_message_id === data.client_message_id;
+            }) || null;
+        }
         if (data && data.queued && item && item.id) {
             await OSA.sendQueuedMessageNow(item);
         } else if (!data) {

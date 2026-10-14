@@ -19,6 +19,9 @@ pub struct CreateJobRequest {
     pub notify_via: Option<Vec<String>>,
     pub schedule_type: Option<String>,
     pub discord_channel_id: Option<String>,
+    /// Optional workspace the job runs in. Unset falls back to the session's
+    /// workspace, or the active workspace for a fresh session.
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,6 +41,7 @@ pub struct JobResponse {
     pub run_state: String,
     pub last_error: Option<String>,
     pub attempt_count: u32,
+    pub workspace_id: Option<String>,
 }
 
 impl From<&ScheduledJob> for JobResponse {
@@ -58,6 +62,7 @@ impl From<&ScheduledJob> for JobResponse {
             run_state: job.run_state.clone(),
             last_error: job.last_error.clone(),
             attempt_count: job.attempt_count,
+            workspace_id: job.workspace_id.clone(),
         }
     }
 }
@@ -136,7 +141,8 @@ pub async fn create_job(
         } else {
             valid_channels
         })
-        .with_discord_channel_id(req.discord_channel_id);
+        .with_discord_channel_id(req.discord_channel_id)
+        .with_workspace(req.workspace_id);
 
     let job = runtime
         .scheduler()

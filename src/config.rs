@@ -60,6 +60,9 @@ pub struct Config {
     /// catalog: the active model and favourites always show.
     #[serde(default)]
     pub model_menu: ModelMenuConfig,
+    /// Opt-in public tunnel for phone/remote access. Disabled by default.
+    #[serde(default)]
+    pub remote_access: RemoteAccessConfig,
 }
 
 /// Visibility filter for the composer model dropdown. Empty lists mean
@@ -87,6 +90,45 @@ pub struct ServerConfig {
     pub jwt_secret: String,
     #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
+}
+
+/// Opt-in exposure of the local web UI through a tunnel so the same instance
+/// can be driven from a phone away from home. Disabled by default: the UI can
+/// run tools and edit files, so enabling it requires the web password and
+/// pairs devices with a short-lived QR code rather than sharing the password.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteAccessConfig {
+    pub enabled: bool,
+    /// Tunnel provider. Only "cloudflared" is implemented today.
+    pub provider: String,
+    /// Path to the cloudflared binary. Empty means "look on PATH".
+    pub binary: String,
+    /// For named tunnels: the tunnel name passed to `cloudflared tunnel run`.
+    /// Empty uses an ephemeral quick tunnel (random *.trycloudflare.com URL).
+    pub tunnel_name: String,
+    /// For named tunnels: the public hostname mapped to this origin. Needed to
+    /// build the pairing URL because cloudflared does not print it.
+    pub public_hostname: String,
+    /// How long a pairing code stays redeemable, in seconds.
+    pub pairing_ttl_secs: u64,
+    /// How long a paired device's token stays valid, in days. Revoking the
+    /// device in the UI ends it sooner.
+    pub device_token_ttl_days: u64,
+}
+
+impl Default for RemoteAccessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "cloudflared".to_string(),
+            binary: String::new(),
+            tunnel_name: String::new(),
+            public_hostname: String::new(),
+            pairing_ttl_secs: 600,
+            device_token_ttl_days: 90,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1382,6 +1424,7 @@ impl Config {
             spill: SpillConfig::default(),
             compaction: CompactionConfig::default(),
             browser: BrowserConfig::default(),
+            remote_access: RemoteAccessConfig::default(),
         };
         cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();

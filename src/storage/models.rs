@@ -479,6 +479,11 @@ pub struct ScheduledJob {
     pub run_state: String,
     pub last_error: Option<String>,
     pub attempt_count: u32,
+    /// Workspace the job's prompt runs in. `None` keeps the legacy behavior:
+    /// reuse the bound session's workspace, or the active workspace for a
+    /// freshly created session.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 impl ScheduledJob {
@@ -507,6 +512,7 @@ impl ScheduledJob {
             run_state: "scheduled".to_string(),
             last_error: None,
             attempt_count: 0,
+            workspace_id: None,
         }
     }
 
@@ -537,6 +543,13 @@ impl ScheduledJob {
         self
     }
 
+    /// Pin the workspace the job runs in. Empty/blank ids are treated as
+    /// "unset" so a UI select left on the default does not store junk.
+    pub fn with_workspace(mut self, workspace_id: Option<String>) -> Self {
+        self.workspace_id = workspace_id.filter(|id| !id.trim().is_empty());
+        self
+    }
+
     pub fn with_discord_channel_id(mut self, channel_id: Option<String>) -> Self {
         if let Some(id) = channel_id {
             if !id.is_empty() {
@@ -562,6 +575,17 @@ pub struct JobNotification {
     pub message: String,
     pub session_id: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// A device that joined by scanning a QR pairing code. Its token carries the
+/// device id and stays valid until the device is revoked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairedDevice {
+    pub id: String,
+    pub label: String,
+    pub user_agent: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 /// A message that matched a search, with enough context to render a result row.

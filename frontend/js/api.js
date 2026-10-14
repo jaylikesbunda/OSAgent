@@ -13,7 +13,27 @@ OSA.fetchWithAuth = async function(url, options = {}) {
     if (!headers['Content-Type'] && !headers['content-type'] && options.body && typeof options.body === 'string') {
         headers['Content-Type'] = 'application/json';
     }
-    return fetch(url, { ...options, headers });
+    const res = await fetch(url, { ...options, headers });
+    // A paired device can be revoked and tokens can expire. When the server
+    // rejects the token, drop it once and return to the login screen.
+    if (res.status === 401 && OSA.getToken && OSA.getToken()) {
+        OSA.handleUnauthorized?.();
+    }
+    return res;
+};
+
+OSA.handleUnauthorized = function() {
+    if (OSA._handlingUnauthorized) return;
+    OSA._handlingUnauthorized = true;
+    try {
+        OSA.showToast?.('This device was signed out. Sign in again to continue.', 'error');
+    } catch (e) {}
+    if (typeof OSA.logout === 'function') {
+        OSA.logout();
+    } else {
+        OSA.clearToken?.();
+    }
+    setTimeout(function() { OSA._handlingUnauthorized = false; }, 3000);
 };
 
 // Global toast used by chat actions (e.g. /compact). Delegates to the
