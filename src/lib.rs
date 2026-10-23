@@ -22,6 +22,7 @@ pub mod config;
 pub mod discord;
 pub mod error;
 pub mod external;
+pub mod github;
 pub mod lsp;
 pub mod mcp;
 pub mod oauth;

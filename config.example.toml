@@ -40,6 +40,42 @@ enabled = true
 max_concurrent = 3
 max_retries = 3
 
+# GitHub integration: the `github` tool plus the CodeRabbit-style PR
+# auto-reviewer. Configured from Settings > GitHub; these keys mirror that
+# state. The token is a personal access token (classic: repo scope) and is
+# redacted from the settings API like other secrets.
+[github]
+# Personal access token. Empty falls back to GITHUB_TOKEN / GH_TOKEN env vars.
+token = ""
+# OAuth app client id with device flow enabled ("Sign in with GitHub").
+# Only needed when not using a token; no client secret is involved.
+oauth_client_id = ""
+# Automatically review open PRs in watch_repos when they get new commits.
+auto_review = false
+# Review a PR when someone tags the handle in a PR comment ("@osagent-review
+# take a look"). Conversation comments and inline review threads count.
+# Comment flags: --dry-run (post nothing), --approve / --request-changes
+# (override the review event for that run). The handle is matched as plain
+# text; pick one that is not a real GitHub user so nobody gets notified.
+trigger_mentions = false
+mention_handle = "osagent-review"
+# Repositories the auto-reviewer watches, as "owner/repo".
+watch_repos = []
+# Seconds between auto-review sweeps (clamped to 30-3600).
+poll_seconds = 120
+# Review draft PRs too (default: skip them).
+include_drafts = false
+# PR authors skipped by the auto-reviewer.
+ignore_authors = ["dependabot[bot]", "renovate[bot]", "github-actions[bot]"]
+# Maximum inline comments per review; overflow is folded into the summary.
+max_inline_comments = 15
+# Review event: COMMENT, REQUEST_CHANGES, or APPROVE.
+review_event = "COMMENT"
+# Model for review generation ("provider:model" or bare id; empty = current).
+review_model = ""
+# Extra standing instructions injected into every review prompt.
+review_instructions = ""
+
 # --- Provider Configuration ---
 # OSA supports multiple providers simultaneously.
 # API keys live in auth.toml (0600, next to config.toml) — NOT here.
@@ -220,6 +256,9 @@ subagent_task_max_retries = 2
 # [discord]
 # enabled = true
 # token = "your-discord-bot-token"
+# The bot's model, independent of the web UI's active model.
+# "provider_id:model" or a bare model id; empty uses the active model.
+# model = ""
 # Turn this on to separate public support access from trusted full OSAgent access.
 # Existing installations retain their original behavior while this is false.
 # community_mode = true

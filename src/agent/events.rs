@@ -1231,7 +1231,9 @@ impl EventBus {
             // session message when the reply completes.
             let persist_event = !matches!(
                 &sequenced_event,
-                AgentEvent::ThinkingDelta { .. } | AgentEvent::ToolProgress { .. }
+                AgentEvent::ThinkingDelta { .. }
+                    | AgentEvent::ResponseChunk { .. }
+                    | AgentEvent::ToolProgress { .. }
             );
             if persist_event {
                 if let Some(storage) = &self.storage {

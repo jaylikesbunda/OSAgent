@@ -687,6 +687,46 @@ impl SqliteStorage {
                     created_at INTEGER NOT NULL,
                     last_seen_at INTEGER
                 );
+
+                -- One row per OSA review of a pull request commit. The
+                -- auto-reviewer skips commits with a `posted` row; the
+                -- settings pane renders this table as review history.
+                CREATE TABLE IF NOT EXISTS github_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo TEXT NOT NULL,
+                    pr_number INTEGER NOT NULL,
+                    head_sha TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    summary TEXT,
+                    comments_count INTEGER NOT NULL DEFAULT 0,
+                    review_url TEXT,
+                    error TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE (repo, pr_number, head_sha)
+                );
+                CREATE INDEX IF NOT EXISTS idx_github_reviews_pr
+                    ON github_reviews(repo, pr_number, id);
+
+                -- Mention-trigger bookkeeping: the highest conversation
+                -- comment id already consumed per pull request, so each
+                -- "@handle" comment is acted on exactly once.
+                CREATE TABLE IF NOT EXISTS github_trigger_state (
+                    repo TEXT NOT NULL,
+                    pr_number INTEGER NOT NULL,
+                    last_comment_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (repo, pr_number)
+                );
+
+                -- The provider each model was last run with. A model asked for
+                -- by name ("use sonnet") resolves to the provider it was last
+                -- used on instead of guessing between providers that offer it.
+                CREATE TABLE IF NOT EXISTS model_usage (
+                    model_id TEXT PRIMARY KEY,
+                    provider_id TEXT NOT NULL,
+                    used_at INTEGER NOT NULL
+                );
                 "#,
             )
             .map_err(OSAgentError::Storage)?;
@@ -3054,6 +3094,50 @@ impl SqliteStorage {
         })
     }
 
+    /// Remember that `model_id` was last run on `provider_id`. The row is
+    /// overwritten rather than appended: only the most recent provider for a
+    /// model matters when a model is requested by name.
+    pub fn record_model_usage(&self, model_id: &str, provider_id: &str) -> Result<()> {
+        let model_id = model_id.trim();
+        let provider_id = provider_id.trim();
+        if model_id.is_empty() || provider_id.is_empty() {
+            return Ok(());
+        }
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO model_usage (model_id, provider_id, used_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(model_id) DO UPDATE SET
+                     provider_id = excluded.provider_id,
+                     used_at = excluded.used_at",
+                params![model_id, provider_id, Utc::now().timestamp()],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    /// Every remembered model -> provider pair, with when it was last used.
+    pub fn model_usage(&self) -> Result<Vec<(String, String, i64)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT model_id, provider_id, used_at FROM model_usage ORDER BY used_at DESC",
+                )
+                .map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(OSAgentError::Storage)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)
+        })
+    }
+
     /// Startup crash recovery: any task still marked `running` belongs to a
     /// process that no longer exists. Mark it `interrupted` (not `failed`:
     /// nothing actually failed, the host went away) leaving `notified_at`
@@ -3632,6 +3716,190 @@ impl SqliteStorage {
             Ok((rows, latest_id))
         })
     }
+
+    // ── GitHub reviews ──────────────────────────────────────────────────
+
+    /// Insert or update the row for (repo, PR, head SHA). Re-running a
+    /// review for the same commit updates the existing row.
+    pub fn upsert_github_review(&self, review: &GithubReview) -> Result<i64> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO github_reviews
+                     (repo, pr_number, head_sha, status, summary, comments_count, review_url, error, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(repo, pr_number, head_sha) DO UPDATE SET
+                     status = excluded.status,
+                     summary = excluded.summary,
+                     comments_count = excluded.comments_count,
+                     review_url = excluded.review_url,
+                     error = excluded.error,
+                     updated_at = excluded.updated_at",
+                params![
+                    review.repo,
+                    review.pr_number as i64,
+                    review.head_sha,
+                    review.status,
+                    review.summary,
+                    review.comments_count as i64,
+                    review.review_url,
+                    review.error,
+                    review.created_at.timestamp(),
+                    review.updated_at.timestamp(),
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Newest review row for a pull request (any commit).
+    pub fn latest_github_review(
+        &self,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Option<GithubReview>> {
+        self.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT id, repo, pr_number, head_sha, status, summary, comments_count,
+                            review_url, error, created_at, updated_at
+                     FROM github_reviews
+                     WHERE repo = ?1 AND pr_number = ?2
+                     ORDER BY id DESC LIMIT 1",
+                    params![repo, pr_number as i64],
+                    map_github_review,
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+            Ok(row)
+        })
+    }
+
+    /// Review row for one specific commit, when it exists.
+    pub fn github_review_for_sha(
+        &self,
+        repo: &str,
+        pr_number: u64,
+        head_sha: &str,
+    ) -> Result<Option<GithubReview>> {
+        self.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT id, repo, pr_number, head_sha, status, summary, comments_count,
+                            review_url, error, created_at, updated_at
+                     FROM github_reviews
+                     WHERE repo = ?1 AND pr_number = ?2 AND head_sha = ?3
+                     ORDER BY id DESC LIMIT 1",
+                    params![repo, pr_number as i64, head_sha],
+                    map_github_review,
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+            Ok(row)
+        })
+    }
+
+    /// Review history, newest first; optionally filtered to one repo.
+    pub fn list_github_reviews(
+        &self,
+        repo: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<GithubReview>> {
+        self.with_conn(|conn| {
+            let limit = limit.clamp(1, 500) as i64;
+            let mut reviews = Vec::new();
+            match repo {
+                Some(repo) => {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT id, repo, pr_number, head_sha, status, summary, comments_count,
+                                    review_url, error, created_at, updated_at
+                             FROM github_reviews WHERE repo = ?1
+                             ORDER BY id DESC LIMIT ?2",
+                        )
+                        .map_err(OSAgentError::Storage)?;
+                    let rows = stmt
+                        .query_map(params![repo, limit], map_github_review)
+                        .map_err(OSAgentError::Storage)?;
+                    for row in rows {
+                        reviews.push(row.map_err(OSAgentError::Storage)?);
+                    }
+                }
+                None => {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT id, repo, pr_number, head_sha, status, summary, comments_count,
+                                    review_url, error, created_at, updated_at
+                             FROM github_reviews
+                             ORDER BY id DESC LIMIT ?1",
+                        )
+                        .map_err(OSAgentError::Storage)?;
+                    let rows = stmt
+                        .query_map(params![limit], map_github_review)
+                        .map_err(OSAgentError::Storage)?;
+                    for row in rows {
+                        reviews.push(row.map_err(OSAgentError::Storage)?);
+                    }
+                }
+            }
+            Ok(reviews)
+        })
+    }
+
+    /// Highest mention-comment id already consumed for a PR, if any.
+    pub fn github_trigger_state(&self, repo: &str, pr_number: u64) -> Result<Option<i64>> {
+        self.with_conn(|conn| {
+            let value = conn
+                .query_row(
+                    "SELECT last_comment_id FROM github_trigger_state
+                     WHERE repo = ?1 AND pr_number = ?2",
+                    params![repo, pr_number as i64],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(OSAgentError::Storage)?;
+            Ok(value)
+        })
+    }
+
+    /// Advance the mention-trigger baseline for a PR.
+    pub fn upsert_github_trigger_state(
+        &self,
+        repo: &str,
+        pr_number: u64,
+        last_comment_id: i64,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO github_trigger_state (repo, pr_number, last_comment_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(repo, pr_number) DO UPDATE SET
+                     last_comment_id = excluded.last_comment_id,
+                     updated_at = excluded.updated_at",
+                params![repo, pr_number as i64, last_comment_id, Utc::now().timestamp()],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+}
+
+fn map_github_review(row: &rusqlite::Row<'_>) -> rusqlite::Result<GithubReview> {
+    Ok(GithubReview {
+        id: row.get(0)?,
+        repo: row.get(1)?,
+        pr_number: row.get::<_, i64>(2)? as u64,
+        head_sha: row.get(3)?,
+        status: row.get(4)?,
+        summary: row.get(5)?,
+        comments_count: row.get::<_, i64>(6)? as u64,
+        review_url: row.get(7)?,
+        error: row.get(8)?,
+        created_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(9)?, 0)
+            .unwrap_or_else(Utc::now),
+        updated_at: chrono::DateTime::from_timestamp(row.get::<_, i64>(10)?, 0)
+            .unwrap_or_else(Utc::now),
+    })
 }
 
 #[cfg(test)]
@@ -3808,6 +4076,114 @@ mod pool_tests {
             POOL_SIZE,
             "pool did not recover every connection"
         );
+        cleanup(&path);
+    }
+}
+
+#[cfg(test)]
+mod github_review_tests {
+    use super::*;
+
+    fn temp_storage() -> (SqliteStorage, PathBuf) {
+        let path = std::env::temp_dir().join(format!("osagent-ghreview-{}.db", Uuid::new_v4()));
+        let storage = SqliteStorage::new(path.to_str().expect("utf8 path")).expect("open");
+        (storage, path)
+    }
+
+    fn cleanup(path: &PathBuf) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    fn row(repo: &str, pr: u64, sha: &str, status: &str) -> GithubReview {
+        GithubReview::new(
+            repo.to_string(),
+            pr,
+            sha.to_string(),
+            status,
+            Some("summary".to_string()),
+            2,
+            Some("https://github.com/review/1".to_string()),
+            None,
+        )
+    }
+
+    #[test]
+    fn upsert_latest_and_lookup_round_trip() {
+        let (storage, path) = temp_storage();
+        storage
+            .upsert_github_review(&row("o/r", 7, "sha-1", "posted"))
+            .expect("insert");
+        storage
+            .upsert_github_review(&row("o/r", 7, "sha-2", "failed"))
+            .expect("insert");
+        storage
+            .upsert_github_review(&row("o/other", 3, "sha-1", "posted"))
+            .expect("insert");
+
+        let latest = storage
+            .latest_github_review("o/r", 7)
+            .expect("latest")
+            .expect("row");
+        assert_eq!(latest.head_sha, "sha-2");
+        assert_eq!(latest.status, "failed");
+
+        let exact = storage
+            .github_review_for_sha("o/r", 7, "sha-1")
+            .expect("lookup")
+            .expect("row");
+        assert_eq!(exact.status, "posted");
+
+        let all = storage.list_github_reviews(None, 10).expect("list");
+        assert_eq!(all.len(), 3);
+
+        let filtered = storage
+            .list_github_reviews(Some("o/r"), 10)
+            .expect("list repo");
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|r| r.repo == "o/r"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn upsert_same_commit_updates_in_place() {
+        let (storage, path) = temp_storage();
+        storage
+            .upsert_github_review(&row("o/r", 7, "sha-1", "failed"))
+            .expect("insert");
+        let mut retry = row("o/r", 7, "sha-1", "posted");
+        retry.comments_count = 5;
+        storage.upsert_github_review(&retry).expect("update");
+
+        let all = storage.list_github_reviews(None, 10).expect("list");
+        assert_eq!(all.len(), 1, "same commit must update, not duplicate");
+        assert_eq!(all[0].status, "posted");
+        assert_eq!(all[0].comments_count, 5);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn mention_trigger_state_round_trips() {
+        let (storage, path) = temp_storage();
+        assert_eq!(storage.github_trigger_state("o/r", 7).expect("get"), None);
+        storage
+            .upsert_github_trigger_state("o/r", 7, 42)
+            .expect("set");
+        assert_eq!(
+            storage.github_trigger_state("o/r", 7).expect("get"),
+            Some(42)
+        );
+        storage
+            .upsert_github_trigger_state("o/r", 7, 55)
+            .expect("advance");
+        assert_eq!(
+            storage.github_trigger_state("o/r", 7).expect("get"),
+            Some(55)
+        );
+        // Other pull requests are isolated.
+        assert_eq!(storage.github_trigger_state("o/r", 8).expect("get"), None);
+        assert_eq!(storage.github_trigger_state("o/other", 7).expect("get"), None);
         cleanup(&path);
     }
 }

@@ -581,7 +581,6 @@
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(3px);
 }
 
 .workflow-run-dialog {

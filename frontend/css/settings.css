@@ -184,6 +184,39 @@
     padding-right: 28px;
 }
 
+/* Model pickers (per-surface model defaults) use the same dropdown as the
+   chat bar, so the trigger has to match the other settings fields. */
+#settings-modal .model-picker-mount {
+    position: relative;
+}
+
+#settings-modal .model-picker-mount .model-trigger {
+    width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    font-size: 13px;
+    border: 1px solid var(--st-hairline);
+    border-radius: 8px;
+    background-color: color-mix(in srgb, var(--text-primary) 8%, transparent);
+    color: var(--text-primary);
+}
+
+#settings-modal .model-picker-mount .model-trigger:hover,
+#settings-modal .model-picker-mount .model-trigger[aria-expanded="true"] {
+    border-color: var(--border-hover);
+}
+
+#settings-modal .model-picker-mount .model-trigger:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+#settings-modal .model-picker-mount .model-trigger-label {
+    font-size: 13px;
+    font-weight: 400;
+}
+
 #settings-modal .settings-field input:focus,
 #settings-modal .settings-field select:focus,
 #settings-modal .settings-field textarea:focus {
@@ -553,3 +586,48 @@
     color: var(--text-muted);
     margin-top: 2px;
 }
+
+/* Subtle destructive actions: muted until hovered. */
+#settings-modal .device-revoke-btn,
+#settings-modal .settings-link-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+
+#settings-modal .device-revoke-btn:hover,
+#settings-modal .settings-link-btn:hover {
+    color: var(--error);
+    background: var(--error-dim);
+}
+
+#settings-modal .remote-pairing-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+/* Streamlined Memory / GitHub / Pairing panes */
+#settings-modal .memory-content-grid { display: block; }
+#settings-modal .memory-section { padding: 8px 0; }
+#settings-modal .memory-add-form { margin-top: 10px; }
+#settings-modal .memory-add-form .settings-form-actions {
+    justify-content: flex-end;
+    padding: 4px 16px 12px;
+    margin: 0;
+}
+#settings-modal .memory-review { margin-top: 10px; }
+#settings-modal .memory-side-stack .memory-section + .memory-section { margin-top: 8px; }
+#settings-modal .memory-advanced { margin-top: 10px; }
+.github-collapse > summary { cursor: pointer; list-style: none; }
+.github-collapse > summary h3 { display: inline; margin: 0; font-size: 14px; }
+.github-collapse[open] > summary { margin-bottom: 10px; }
+.github-card-desc { display: none; }

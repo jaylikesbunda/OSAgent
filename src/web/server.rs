@@ -347,6 +347,11 @@ pub async fn run_with_agent(
         }
     }
 
+    // GitHub auto-reviewer: polls watched repos for PRs with new commits.
+    // The loop re-reads config every cycle and exits on shutdown, so it
+    // follows settings changes without a restart.
+    crate::github::spawn_auto_reviewer(agent.clone());
+
     if let Some(mut rx) = shutdown_rx {
         let _restart_tx = agent.get_restart_sender();
         if _restart_tx.is_some() {

@@ -14,9 +14,9 @@ Everything else loads on demand (see below).
 
 Low-frequency tools (code execution, LSP, weather, calendar, news, codesearch,
 system status, process, persona, task, memory/decision management, goals,
-coordinator, schedule, skill actions) are **not** loaded into every request.
-The agent sees a one-line manifest and calls `tool_search` to load a schema on
-demand — the same deferred-catalog pattern MCP servers use.
+coordinator, schedule, skill actions, GitHub) are **not** loaded into every
+request. The agent sees a one-line manifest and calls `tool_search` to load a
+schema on demand — the same deferred-catalog pattern MCP servers use.
 
 ```toml
 [tools]

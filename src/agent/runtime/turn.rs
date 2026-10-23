@@ -27,6 +27,34 @@ impl AgentRuntime {
         result
     }
 
+    /// `process_message` with image attachments (a Discord message or reply
+    /// that carries pictures). Images ride the user message so the model can
+    /// see them directly.
+    pub async fn process_message_with_images(
+        &self,
+        session_id: &str,
+        user_message: String,
+        user: String,
+        images: Vec<MessageImage>,
+    ) -> Result<String> {
+        let run_guard = self.try_start_run(session_id, &user)?;
+        let result = self
+            .process_message_internal(
+                session_id,
+                user_message,
+                user.clone(),
+                None,
+                None,
+                if images.is_empty() { None } else { Some(images) },
+                None,
+                None,
+            )
+            .await;
+        drop(run_guard);
+        self.dispatch_queued_messages(session_id, &user);
+        result
+    }
+
     pub(super) async fn process_message_internal(
         &self,
         session_id: &str,
@@ -239,7 +267,12 @@ impl AgentRuntime {
             None
         };
         let native_manifest_prompt = self.tool_registry.native_manifest_prompt();
-        let context_provider = self.active_provider().await;
+        // Surface defaults (Discord) win over the active model; the web
+        // UI's composer model stays scoped to the web UI.
+        let context_provider = match self.surface_model_for_session(&session).await {
+            Some(reference) => self.provider_for_ref(&reference).await,
+            None => self.active_provider().await,
+        };
         let context_provider_type = context_provider.provider_type().to_string();
         let context_model = context_provider.current_model().await;
 

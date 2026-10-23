@@ -63,6 +63,10 @@ pub struct Config {
     /// Opt-in public tunnel for phone/remote access. Disabled by default.
     #[serde(default)]
     pub remote_access: RemoteAccessConfig,
+    /// GitHub integration: REST tooling plus the CodeRabbit-style PR
+    /// auto-reviewer. Configured in Settings -> GitHub.
+    #[serde(default)]
+    pub github: GithubConfig,
 }
 
 /// Visibility filter for the composer model dropdown. Empty lists mean
@@ -463,6 +467,9 @@ fn default_yt_dlp_path() -> String {
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
+    /// Model for Discord turns, as "provider_id:model" or a bare model id.
+    /// Empty uses the active model. Independent of the web UI's model.
+    pub model: String,
     /// Enables separate restricted community and full-access trusted policies.
     /// Off preserves the original allowed_users behavior for existing installs.
     pub community_mode: bool,
@@ -525,6 +532,7 @@ impl Default for DiscordConfig {
         Self {
             enabled: false,
             token: String::new(),
+            model: String::new(),
             community_mode: false,
             allow_community_members: false,
             community_context: String::new(),
@@ -550,6 +558,152 @@ impl Default for DiscordConfig {
             yt_dlp_path: default_yt_dlp_path(),
             yt_dlp_extra_args: String::new(),
             piped_instances: Vec::new(),
+        }
+    }
+}
+
+fn default_github_ignore_authors() -> Vec<String> {
+    vec![
+        "dependabot[bot]".to_string(),
+        "renovate[bot]".to_string(),
+        "github-actions[bot]".to_string(),
+    ]
+}
+
+fn default_github_poll_seconds() -> u64 {
+    120
+}
+
+fn default_github_mention_handle() -> String {
+    // Deliberately not a real GitHub username: the handle is matched as
+    // plain text, so tagging it triggers OSA without notifying a stranger
+    // or linking to an unrelated profile.
+    "osagent-review".to_string()
+}
+
+fn default_github_max_inline_comments() -> usize {
+    15
+}
+
+fn default_github_review_event() -> String {
+    "COMMENT".to_string()
+}
+
+/// GitHub integration: authenticated REST access (`github` tool) plus the
+/// CodeRabbit-style pull request auto-reviewer. The token is a personal
+/// access token (or OAuth device-flow token) and is redacted from the
+/// settings API like every other secret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// Personal access token, or the access token from GitHub sign-in.
+    /// Empty falls back to GITHUB_TOKEN/GH_TOKEN.
+    pub token: String,
+    /// Refresh token for sign-in tokens issued with expiry enabled
+    /// (GitHub's "Expire user access tokens" default). Managed
+    /// automatically; never exposed.
+    pub token_refresh: String,
+    /// Unix timestamp when `token` expires; 0 means it never does.
+    /// Managed automatically.
+    pub token_expires_at: i64,
+    /// OAuth client id that issued the stored sign-in token, so refreshes
+    /// keep working even if the configured client id changes.
+    pub token_client_id: String,
+    /// OAuth app client id with device flow enabled. When set, the
+    /// settings UI can sign in with GitHub instead of pasting a token.
+    pub oauth_client_id: String,
+    /// Automatically review open PRs in `watch_repos` when new commits land.
+    pub auto_review: bool,
+    /// Review a PR when someone mentions `mention_handle` in a conversation
+    /// comment (CodeRabbit-style tagging).
+    pub trigger_mentions: bool,
+    /// Handle to watch for in comments, without the leading '@'.
+    #[serde(default = "default_github_mention_handle")]
+    pub mention_handle: String,
+    /// Repositories watched by the auto-reviewer, as "owner/repo".
+    pub watch_repos: Vec<String>,
+    /// Seconds between auto-review sweeps (clamped to >= 30).
+    #[serde(default = "default_github_poll_seconds")]
+    pub poll_seconds: u64,
+    /// Review draft PRs too.
+    pub include_drafts: bool,
+    /// PR authors skipped by the auto-reviewer.
+    #[serde(default = "default_github_ignore_authors")]
+    pub ignore_authors: Vec<String>,
+    /// Maximum inline comments per posted review; overflow is folded into
+    /// the review summary instead.
+    #[serde(default = "default_github_max_inline_comments")]
+    pub max_inline_comments: usize,
+    /// Review event: COMMENT, REQUEST_CHANGES, or APPROVE.
+    #[serde(default = "default_github_review_event")]
+    pub review_event: String,
+    /// Model used to generate reviews: "provider:model" or a bare model
+    /// id. Empty uses the active model.
+    pub review_model: String,
+    /// Extra standing instructions injected into the review prompt
+    /// (team conventions, things to always check, tone).
+    pub review_instructions: String,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            token_refresh: String::new(),
+            token_expires_at: 0,
+            token_client_id: String::new(),
+            oauth_client_id: String::new(),
+            auto_review: false,
+            trigger_mentions: false,
+            mention_handle: default_github_mention_handle(),
+            watch_repos: Vec::new(),
+            poll_seconds: default_github_poll_seconds(),
+            include_drafts: false,
+            ignore_authors: default_github_ignore_authors(),
+            max_inline_comments: default_github_max_inline_comments(),
+            review_event: default_github_review_event(),
+            review_model: String::new(),
+            review_instructions: String::new(),
+        }
+    }
+}
+
+impl GithubConfig {
+    /// Normalized polling interval in seconds.
+    pub fn poll_interval_secs(&self) -> u64 {
+        self.poll_seconds.clamp(30, 3600)
+    }
+
+    /// Mention handle normalized for matching: no leading '@', lowercase.
+    pub fn normalized_mention_handle(&self) -> String {
+        self.mention_handle
+            .trim()
+            .trim_start_matches('@')
+            .to_ascii_lowercase()
+    }
+
+    /// Whether the mention trigger is usable (enabled + handle set).
+    pub fn mentions_enabled(&self) -> bool {
+        self.trigger_mentions && !self.normalized_mention_handle().is_empty()
+    }
+
+    /// Whether any trigger is enabled for the watched repos.
+    pub fn any_trigger_enabled(&self) -> bool {
+        self.auto_review || self.mentions_enabled()
+    }
+
+    /// Whether the stored sign-in token is expired or about to expire
+    /// (refresh a little early to avoid a race with the first request).
+    pub fn token_needs_refresh(&self, now_unix: i64) -> bool {
+        self.token_expires_at > 0 && now_unix + 300 >= self.token_expires_at
+    }
+
+    /// Review event normalized to the GitHub API's accepted values.
+    pub fn normalized_review_event(&self) -> &'static str {
+        match self.review_event.trim().to_ascii_uppercase().as_str() {
+            "REQUEST_CHANGES" => "REQUEST_CHANGES",
+            "APPROVE" => "APPROVE",
+            _ => "COMMENT",
         }
     }
 }
@@ -1425,6 +1579,7 @@ impl Config {
             compaction: CompactionConfig::default(),
             browser: BrowserConfig::default(),
             remote_access: RemoteAccessConfig::default(),
+            github: GithubConfig::default(),
         };
         cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();
@@ -1450,6 +1605,8 @@ impl Config {
             discord.token.clear();
             discord.github_token.clear();
         }
+        redacted.github.token.clear();
+        redacted.github.token_refresh.clear();
         for server in &mut redacted.mcp.servers {
             server.env.clear();
             server.headers.clear();
@@ -1493,6 +1650,18 @@ impl Config {
             if discord.github_token.trim().is_empty() {
                 discord.github_token = existing.github_token.clone();
             }
+        }
+        if self.github.token.trim().is_empty() {
+            self.github.token = current.github.token.clone();
+        }
+        if self.github.token_refresh.trim().is_empty() {
+            self.github.token_refresh = current.github.token_refresh.clone();
+        }
+        if self.github.token_expires_at == 0 {
+            self.github.token_expires_at = current.github.token_expires_at;
+        }
+        if self.github.token_client_id.trim().is_empty() {
+            self.github.token_client_id = current.github.token_client_id.clone();
         }
         for server in &mut self.mcp.servers {
             if let Some(existing) = current
@@ -2464,6 +2633,7 @@ last_channel_id = 1478327393205882900
         let discord = DiscordConfig {
             enabled: true,
             token: "t".to_string(),
+            model: String::new(),
             community_mode: false,
             allow_community_members: false,
             community_context: String::new(),

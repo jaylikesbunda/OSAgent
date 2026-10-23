@@ -26,6 +26,7 @@ mod auth_store;
 mod config;
 mod error;
 mod external;
+mod github;
 mod lsp;
 mod mcp;
 mod oauth;

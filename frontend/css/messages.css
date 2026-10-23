@@ -12,8 +12,9 @@
        was another source of small vertical jumps. */
     overflow-anchor: none;
     min-height: 0;
-    mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent 100%);
-    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent 100%);
+    /* No mask-image on this element: a gradient mask on the whole scroll
+       container forced per-frame compositing of the entire transcript layer.
+       The soft edge was not worth the scroll cost. */
 }
 
 .messages-virtual-spacer {
@@ -121,7 +122,6 @@
 .message.task {
     border: 1px solid var(--border);
     background: var(--glass-bg);
-    backdrop-filter: blur(8px);
     padding: 12px 16px;
     border-radius: var(--radius-md);
 }

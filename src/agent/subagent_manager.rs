@@ -3,6 +3,8 @@ use crate::agent::instruction::{
     format_system_reminder, git_workspace_context, global_instruction_blocks,
     workspace_instruction_blocks,
 };
+use crate::agent::model_catalog::ModelCatalog;
+use crate::agent::model_resolution::{self, ModelResolution, ModelUsage};
 use crate::agent::prompt::{self, PromptMode};
 use crate::agent::provider::{OpenAICompatibleProvider, Provider};
 use crate::agent::session::SessionManager;
@@ -52,6 +54,9 @@ pub struct SubagentManager {
     /// not have to be discovered by polling and re-read from storage.
     pending_results: Arc<DashMap<String, oneshot::Receiver<SubagentOutcome>>>,
     config: Arc<tokio::sync::RwLock<Config>>,
+    /// Model catalog, used to turn a loose model request ("sonnet") into a
+    /// concrete provider + model. Set by the runtime after construction.
+    catalog: Option<Arc<ModelCatalog>>,
     shared_provider: Option<Arc<dyn Provider>>,
     workspace_root: PathBuf,
     /// Invoked with the parent session id whenever a *background* subagent
@@ -83,6 +88,7 @@ impl SubagentManager {
             active_subagents: Arc::new(DashMap::new()),
             pending_results: Arc::new(DashMap::new()),
             config,
+            catalog: None,
             shared_provider: None,
             workspace_root,
             wake_callback: std::sync::OnceLock::new(),
@@ -91,6 +97,35 @@ impl SubagentManager {
 
     pub fn set_shared_provider(&mut self, provider: Arc<dyn Provider>) {
         self.shared_provider = Some(provider);
+    }
+
+    /// Give the manager the model catalog so a model requested by name can be
+    /// resolved to a provider. Called by the runtime once the catalog exists.
+    pub fn set_catalog(&mut self, catalog: Arc<ModelCatalog>) {
+        self.catalog = Some(catalog);
+    }
+
+    /// Resolve a loosely phrased model request ("sonnet", "claude-sonnet-4-5",
+    /// "anthropic:claude-sonnet-4-5") to a concrete provider + model.
+    ///
+    /// Preference goes to the provider the model was last used on, so the
+    /// common "use sonnet again" case resolves without another question.
+    pub async fn resolve_model_request(&self, query: &str) -> ModelResolution {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return ModelResolution::NotFound {
+                query: query.trim().to_string(),
+            };
+        };
+        let cfg = self.config.read().await.clone();
+        let state = catalog.get_state(&cfg.providers);
+        let usage: ModelUsage = self
+            .storage
+            .model_usage()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(model_id, provider_id, used_at)| (model_id, (provider_id, used_at)))
+            .collect();
+        model_resolution::resolve_model_request(query, &state, &usage)
     }
 
     /// Register the callback fired when a background subagent reaches a
@@ -256,6 +291,10 @@ impl SubagentManager {
     /// synthetic message when it finishes, so the parent can react on its
     /// next turn. Otherwise the caller is expected to follow up with
     /// [`Self::wait_for_subagent`].
+    ///
+    /// `model_override` is an already-resolved `provider_id:model_id` pair
+    /// requested for this run; it takes precedence over the agent-type
+    /// default in `agent.subagent_models`.
     pub async fn spawn_subagent(
         &self,
         parent_session_id: String,
@@ -263,6 +302,7 @@ impl SubagentManager {
         prompt: String,
         agent_type: String,
         background: bool,
+        model_override: Option<String>,
     ) -> Result<String> {
         self.check_depth_limit(&parent_session_id).await?;
 
@@ -297,6 +337,11 @@ impl SubagentManager {
         );
         subagent_session.metadata["name"] = serde_json::json!(display_name);
         subagent_session.metadata["workspace_id"] = serde_json::json!(parent_workspace.id.clone());
+        if let Some(model) = model_override.as_deref() {
+            // Persisted so a resume keeps running on the model the user asked
+            // for, even though the request itself is long gone.
+            subagent_session.metadata["model_override"] = serde_json::json!(model);
+        }
         let _ = self.storage.update_session(&subagent_session);
 
         let task = SubagentTask {
@@ -338,6 +383,7 @@ impl SubagentManager {
             background,
             true,
             parent_workspace,
+            model_override,
         )?;
 
         Ok(subagent_session.id)
@@ -354,6 +400,7 @@ impl SubagentManager {
         prompt: String,
         agent_type: String,
         background: bool,
+        model_override: Option<String>,
     ) -> Result<String> {
         self.check_depth_limit(&parent_session_id).await?;
 
@@ -431,6 +478,7 @@ impl SubagentManager {
             background,
             false,
             parent_workspace,
+            model_override,
         )?;
 
         Ok(session_id)
@@ -462,6 +510,7 @@ impl SubagentManager {
         background: bool,
         fresh_session: bool,
         parent_workspace: WorkspaceConfig,
+        model_override: Option<String>,
     ) -> Result<String> {
         let task_id = task.id.clone();
 
@@ -479,6 +528,7 @@ impl SubagentManager {
         let shared_provider = self.shared_provider.clone();
         let workspace_root = self.workspace_root.clone();
         let parent_workspace_for_async = parent_workspace.clone();
+        let model_override_for_async = model_override.clone();
 
         // Background runs have no waiter, so no oneshot channel is needed.
         let (result_tx, result_rx) = if background {
@@ -589,6 +639,7 @@ impl SubagentManager {
                     workspace_root.clone(),
                     fresh_session,
                     resumed_run,
+                    model_override_for_async.clone(),
                     &mut cancel_rx,
                 )
                 .await;
@@ -757,6 +808,7 @@ impl SubagentManager {
         workspace_root: PathBuf,
         fresh_session: bool,
         resumed_run: bool,
+        model_override: Option<String>,
         cancel_rx: &mut mpsc::Receiver<()>,
     ) -> Result<(String, String, i32)> {
         let mut cfg = config.read().await.clone();
@@ -782,11 +834,12 @@ impl SubagentManager {
             cfg.ensure_workspace_defaults();
         }
 
-        // Subagents can pin their own model per agent type via
-        // `agent.subagent_models` (e.g. "explore" => "openrouter:deepseek/deepseek-r1").
-        // Overrides always use a dedicated provider instance so the shared
-        // provider used by the main agent is never mutated.
-        let model_override = cfg.agent.subagent_models.get(&agent_type).cloned();
+        // A model requested for this run wins over the per-agent-type default
+        // in `agent.subagent_models` (e.g. "explore" =>
+        // "openrouter:deepseek/deepseek-r1"). Overrides always use a dedicated
+        // provider instance so the shared provider used by the main agent is
+        // never mutated.
+        let model_override = model_override.or_else(|| cfg.agent.subagent_models.get(&agent_type).cloned());
         let provider = if let Some(override_spec) = model_override {
             Self::create_provider_with_override(&cfg, storage.clone(), override_spec).await?
         } else if let Some(shared) = shared_provider {
@@ -989,40 +1042,47 @@ impl SubagentManager {
     /// the shared provider used by the main agent is never mutated.
     async fn create_provider_with_override(
         cfg: &Config,
-        storage: Arc<SqliteStorage>,
+        _storage: Arc<SqliteStorage>,
         spec: String,
     ) -> Result<Arc<dyn Provider>> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Err(crate::error::OSAgentError::ToolExecution(
+                "subagent model override is empty".to_string(),
+            ));
+        }
+
+        // Provider ids never contain ':' but model ids can ("llama3:8b"), so
+        // the prefix only counts as a provider when it names a configured one.
         let (provider_id, model) = match spec.split_once(':') {
-            Some((id, model)) => {
-                let id = id.trim();
-                let model = model.trim();
-                if id.is_empty() {
-                    (None, model.to_string())
-                } else if model.is_empty() {
-                    return Err(crate::error::OSAgentError::ToolExecution(
-                        "subagent_models entry with a provider id must also specify a model: \"provider_id:model\"".to_string(),
-                    ));
-                } else {
-                    (Some(id.to_string()), model.to_string())
-                }
+            Some((id, model))
+                if !id.trim().is_empty()
+                    && !model.trim().is_empty()
+                    && Self::find_provider_config(cfg, id.trim()).is_some() =>
+            {
+                (Some(id.trim().to_string()), model.trim().to_string())
             }
-            None => (None, spec.trim().to_string()),
+            _ => (None, spec.to_string()),
         };
 
         let selected = if let Some(id) = &provider_id {
-            cfg.providers
-                .iter()
-                .find(|p| p.provider_type == *id)
-                .cloned()
+            Self::find_provider_config(cfg, id).cloned().ok_or_else(|| {
+                crate::error::OSAgentError::ToolExecution(format!(
+                    "Provider '{}' from the subagent model override is not configured",
+                    id
+                ))
+            })?
         } else if !cfg.default_provider.is_empty() {
-            cfg.providers
-                .iter()
-                .find(|p| p.provider_type == cfg.default_provider)
+            Self::find_provider_config(cfg, &cfg.default_provider)
                 .cloned()
+                .or_else(|| cfg.providers.first().cloned())
+                .unwrap_or_else(|| cfg.provider.clone())
         } else {
-            cfg.providers.first().cloned()
+            cfg.providers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| cfg.provider.clone())
         };
-        let selected = selected.unwrap_or_else(|| cfg.provider.clone());
 
         let mut config = selected.clone();
         if model.is_empty() {
@@ -1054,15 +1114,26 @@ impl SubagentManager {
         ))
     }
 
+    /// The configured provider entry a catalog/provider id refers to. Entries
+    /// may be addressed by their stable id (custom endpoints) or by their
+    /// provider type (stock presets).
+    fn find_provider_config<'a>(cfg: &'a Config, provider_id: &str) -> Option<&'a crate::config::ProviderConfig> {
+        cfg.providers
+            .iter()
+            .find(|provider| provider.effective_id() == provider_id)
+            .or_else(|| {
+                cfg.providers
+                    .iter()
+                    .find(|provider| provider.provider_type == provider_id)
+            })
+    }
+
     async fn create_provider(
         cfg: &Config,
         _storage: Arc<SqliteStorage>,
     ) -> Result<Arc<dyn Provider>> {
         let provider_config = if !cfg.default_provider.is_empty() {
-            cfg.providers
-                .iter()
-                .find(|p| p.provider_type == cfg.default_provider)
-                .cloned()
+            Self::find_provider_config(cfg, &cfg.default_provider).cloned()
         } else {
             cfg.providers.first().cloned()
         };

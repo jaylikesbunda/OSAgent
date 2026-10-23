@@ -18,8 +18,12 @@ OSA.Devices = {
     render(devices) {
         const host = document.getElementById('paired-devices-list');
         if (!host) return;
+        const revokeAll = document.getElementById('revoke-all-devices');
+        const hint = document.getElementById('paired-devices-hint');
+        if (revokeAll) revokeAll.classList.toggle('hidden', !devices.length);
+        if (hint) hint.classList.toggle('hidden', !devices.length);
         if (!devices.length) {
-            host.innerHTML = '<div class="settings-help">No devices paired yet. Enable the tunnel and scan the QR code to pair one.</div>';
+            host.innerHTML = '<div class="settings-help">No devices paired yet. Pair one by scanning a code above.</div>';
             return;
         }
         host.innerHTML = devices.map(d => {
@@ -31,7 +35,7 @@ OSA.Devices = {
                 + `<div class="paired-device-label">${OSA.escapeHtml(label)}</div>`
                 + `<div class="paired-device-meta">Paired ${OSA.escapeHtml(created)} &middot; Last seen ${OSA.escapeHtml(seen)}</div>`
                 + `</div>`
-                + `<button type="button" class="btn-danger" onclick="OSA.Devices.revoke(${OSA.jsArg(d.id)})">Revoke</button>`
+                + `<button type="button" class="device-revoke-btn" onclick="OSA.Devices.revoke(${OSA.jsArg(d.id)})">Revoke</button>`
                 + `</div>`;
         }).join('');
     },

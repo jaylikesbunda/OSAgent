@@ -1295,7 +1295,13 @@ impl EventHandler for Handler {
                 .as_deref()
                 .map(|r| r.attachments.iter().any(is_audio_attachment))
                 .unwrap_or(false);
-        if (content.is_empty() && !has_audio)
+        let has_images = msg.attachments.iter().any(is_image_attachment)
+            || msg
+                .referenced_message
+                .as_deref()
+                .map(|r| r.attachments.iter().any(is_image_attachment))
+                .unwrap_or(false);
+        if (content.is_empty() && !has_audio && !has_images)
             || content.starts_with('!')
             || content.starts_with('/')
         {
@@ -1340,24 +1346,37 @@ impl EventHandler for Handler {
             None => return,
         };
 
-        let referenced_audio_count = msg
+        let referenced_image_count = msg
             .referenced_message
             .as_deref()
             .map(|r| {
                 r.attachments
                     .iter()
-                    .filter(|attachment| is_audio_attachment(attachment))
+                    .filter(|attachment| is_image_attachment(attachment))
                     .count()
             })
             .unwrap_or(0);
         info!(
-            "Discord: message from {user_id} ({} chars, {} audio attachments + {} referenced)",
+            "Discord: message from {user_id} ({} chars, {} images + {} referenced images, {} audio attachments + {} referenced audio)",
             content.len(),
+            msg.attachments
+                .iter()
+                .filter(|attachment| is_image_attachment(attachment))
+                .count(),
+            referenced_image_count,
             msg.attachments
                 .iter()
                 .filter(|attachment| is_audio_attachment(attachment))
                 .count(),
-            referenced_audio_count
+            msg.referenced_message
+                .as_deref()
+                .map(|r| {
+                    r.attachments
+                        .iter()
+                        .filter(|attachment| is_audio_attachment(attachment))
+                        .count()
+                })
+                .unwrap_or(0)
         );
 
         self.run_turn(
@@ -1366,50 +1385,93 @@ impl EventHandler for Handler {
                 channel_id: msg.channel_id,
                 session_id,
                 user_id,
-                prompt,
+                prompt: prompt.text,
                 community: access == AccessLevel::Community,
+                images: prompt.images,
             },
         )
         .await;
     }
 }
 
+/// What the agent should receive for one Discord message: the rendered prompt
+/// text plus any images that came with it.
+struct DiscordPrompt {
+    text: String,
+    images: Vec<crate::storage::MessageImage>,
+}
+
 impl Handler {
-    /// Assemble the agent prompt from a Discord message: the message you are
-    /// replying to (when there is one), any transcribed audio attachments, and
-    /// the message's own text.
-    async fn build_discord_prompt(&self, msg: &Message) -> Option<String> {
+    /// Assemble the agent prompt from a Discord message: who wrote it, the
+    /// message it is replying to (when there is one), and any images or
+    /// transcribed voice messages that came with either. Images are returned
+    /// alongside the text so the model sees them directly.
+    async fn build_discord_prompt(&self, msg: &Message) -> Option<DiscordPrompt> {
         let bot_id = BOT_USER_ID.load(Ordering::Relaxed);
         let text = strip_mention(&msg.content, bot_id);
+        let author = author_display_name(msg);
         let audio_attachments = msg
             .attachments
             .iter()
             .filter(|attachment| is_audio_attachment(attachment))
             .collect::<Vec<_>>();
-        let has_referenced_audio = msg
-            .referenced_message
-            .as_deref()
+        let image_attachments = msg
+            .attachments
+            .iter()
+            .filter(|attachment| is_image_attachment(attachment))
+            .collect::<Vec<_>>();
+        let referenced = msg.referenced_message.as_deref();
+        let has_referenced_audio = referenced
             .is_some_and(|referenced| referenced.attachments.iter().any(is_audio_attachment));
-        if text.trim().is_empty() && audio_attachments.is_empty() && !has_referenced_audio {
+        let has_referenced_images = referenced
+            .is_some_and(|referenced| referenced.attachments.iter().any(is_image_attachment));
+        if text.trim().is_empty()
+            && audio_attachments.is_empty()
+            && image_attachments.is_empty()
+            && !has_referenced_audio
+            && !has_referenced_images
+        {
             return None;
         }
 
         let mut parts: Vec<String> = Vec::new();
+        let mut images: Vec<crate::storage::MessageImage> = Vec::new();
 
         // Context of the message this one replies to, so "reply to that message
         // and fix the thing in it" actually carries the referenced content.
-        // Also transcribe any audio attachments on the referenced message (e.g.
-        // user replies to a voice message tagging the bot).
-        if let Some(referenced) = msg.referenced_message.as_deref() {
+        // Images on the referenced message are part of the question too: a
+        // reply that tags the bot is usually about the picture it answers.
+        if let Some(referenced) = referenced {
+            let referenced_author = author_display_name(referenced);
             let referenced_text = strip_mention(&referenced.content, bot_id)
                 .trim()
                 .to_string();
             if !referenced_text.is_empty() {
                 parts.push(format!(
-                    "Replying to {}, who said:\n> {referenced_text}",
-                    referenced.author.name
+                    "Replying to {referenced_author}, who said:\n> {referenced_text}"
                 ));
             }
+
+            for attachment in referenced
+                .attachments
+                .iter()
+                .filter(|a| is_image_attachment(a))
+            {
+                match self.download_image_attachment(attachment).await {
+                    Ok(image) => {
+                        parts.push(format!(
+                            "[Image from {referenced_author}'s message: `{}`]",
+                            image.filename
+                        ));
+                        images.push(image);
+                    }
+                    Err(e) => parts.push(format!(
+                        "[Could not fetch image `{}` from {referenced_author}'s message: {e}]",
+                        attachment.filename
+                    )),
+                }
+            }
+
             for attachment in referenced
                 .attachments
                 .iter()
@@ -1418,47 +1480,113 @@ impl Handler {
                 match self.transcribe_attachment(attachment).await {
                     Ok(transcript) if !transcript.trim().is_empty() => parts.push(format!(
                         "Referenced voice message from {} (transcribed): \"{}\"",
-                        referenced.author.name,
+                        referenced_author,
                         transcript.trim()
                     )),
                     Ok(_) => parts.push(format!(
                         "[Referenced audio attachment `{}` from {} produced no transcript]",
-                        attachment.filename, referenced.author.name
+                        attachment.filename, referenced_author
                     )),
                     Err(e) => parts.push(format!(
                         "[Could not transcribe referenced audio attachment `{}` from {}: {e}]",
-                        attachment.filename, referenced.author.name
+                        attachment.filename, referenced_author
                     )),
                 }
+            }
+        }
+
+        for attachment in image_attachments {
+            match self.download_image_attachment(attachment).await {
+                Ok(image) => {
+                    parts.push(format!("[Image attached by {author}: `{}`]", image.filename));
+                    images.push(image);
+                }
+                Err(e) => parts.push(format!(
+                    "[Could not fetch image `{}` attached by {author}: {e}]",
+                    attachment.filename
+                )),
             }
         }
 
         for attachment in audio_attachments {
             match self.transcribe_attachment(attachment).await {
                 Ok(transcript) if !transcript.trim().is_empty() => parts.push(format!(
-                    "Voice message (transcribed): \"{}\"",
+                    "Voice message from {author} (transcribed): \"{}\"",
                     transcript.trim()
                 )),
                 Ok(_) => parts.push(format!(
-                    "[Audio attachment `{}` produced no transcript]",
+                    "[Audio attachment `{}` from {author} produced no transcript]",
                     attachment.filename
                 )),
                 Err(e) => parts.push(format!(
-                    "[Could not transcribe audio attachment `{}`: {e}]",
+                    "[Could not transcribe audio attachment `{}` from {author}: {e}]",
                     attachment.filename
                 )),
             }
         }
 
         if !text.trim().is_empty() {
-            parts.push(text.trim().to_string());
+            // Naming the author matters in a shared server: several people talk
+            // to the same session, and "I" is not enough to tell them apart.
+            parts.push(format!("{author} wrote:\n{}", text.trim()));
         }
 
         if parts.is_empty() {
             None
         } else {
-            Some(parts.join("\n\n"))
+            Some(DiscordPrompt {
+                text: parts.join("\n\n"),
+                images,
+            })
         }
+    }
+
+    /// Download an image attachment and wrap it as a data URL the agent can see.
+    async fn download_image_attachment(
+        &self,
+        attachment: &Attachment,
+    ) -> Result<crate::storage::MessageImage, String> {
+        /// Matches the web UI's attachment ceiling so a Discord image and a
+        /// pasted image behave the same.
+        const MAX_IMAGE_BYTES: u32 = 12 * 1024 * 1024;
+        if attachment.size > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "image is larger than {} MB",
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+
+        let bytes = reqwest::Client::new()
+            .get(&attachment.url)
+            .send()
+            .await
+            .map_err(|e| format!("Could not download image: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Image download failed: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| format!("Could not read downloaded image: {e}"))?;
+        if bytes.is_empty() {
+            return Err("image was empty".to_string());
+        }
+
+        let mime = attachment
+            .content_type
+            .as_deref()
+            .filter(|value| value.starts_with("image/"))
+            .unwrap_or_else(|| image_mime_from_filename(&attachment.filename))
+            .to_string();
+        use base64::Engine as _;
+        let data_url = format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
+
+        Ok(crate::storage::MessageImage {
+            filename: attachment.filename.clone(),
+            mime,
+            data_url,
+        })
     }
 
     /// Download a Discord audio attachment, decode it to WAV, and transcribe it
@@ -1514,6 +1642,57 @@ fn strip_mention(content: &str, bot_id: u64) -> String {
         .replace(&format!("<@!{bot_id}>"), " ")
         .trim()
         .to_string()
+}
+
+/// How a Discord author should be named in the prompt: their server nickname
+/// when they have one, otherwise their display name.
+fn author_display_name(message: &Message) -> String {
+    message
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.clone())
+        .unwrap_or_else(|| message.author.display_name().to_string())
+}
+
+/// Whether a Discord attachment carries an image, by content type or by file
+/// extension. Images are handed to the model directly instead of being
+/// described by filename.
+fn is_image_attachment(attachment: &Attachment) -> bool {
+    attachment_is_image(attachment.content_type.as_deref(), &attachment.filename)
+}
+
+fn attachment_is_image(content_type: Option<&str>, filename: &str) -> bool {
+    if let Some(content_type) = content_type {
+        if content_type.starts_with("image/") {
+            return true;
+        }
+    }
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "heif"
+    )
+}
+
+fn image_mime_from_filename(filename: &str) -> &'static str {
+    match filename
+        .rsplit('.')
+        .next()
+        .map(str::to_lowercase)
+        .unwrap_or_default()
+        .as_str()
+    {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "heic" | "heif" => "image/heic",
+        _ => "image/jpeg",
+    }
 }
 
 /// Whether a Discord attachment carries audio, by content type (Discord voice
@@ -1831,5 +2010,28 @@ mod tests {
         assert!(attachment_is_audio(None, "recording.webm"));
         assert!(!attachment_is_audio(Some("image/png"), "photo.png"));
         assert!(!attachment_is_audio(None, "notes.pdf"));
+    }
+
+    #[test]
+    fn image_attachments_are_detected() {
+        assert!(attachment_is_image(Some("image/png"), "screenshot"));
+        assert!(attachment_is_image(None, "photo.JPG"));
+        assert!(attachment_is_image(None, "shot.jpeg"));
+        assert!(attachment_is_image(None, "anim.gif"));
+        assert!(attachment_is_image(None, "modern.webp"));
+        assert!(!attachment_is_image(Some("audio/ogg"), "voice-message.ogg"));
+        assert!(!attachment_is_image(None, "notes.pdf"));
+        assert!(!attachment_is_image(None, "archive.zip"));
+    }
+
+    #[test]
+    fn image_mime_falls_back_to_the_extension() {
+        assert_eq!(image_mime_from_filename("a.PNG"), "image/png");
+        assert_eq!(image_mime_from_filename("a.gif"), "image/gif");
+        assert_eq!(image_mime_from_filename("a.webp"), "image/webp");
+        assert_eq!(image_mime_from_filename("a.heic"), "image/heic");
+        // Unknown extensions are treated as JPEG, the format Discord re-encodes
+        // camera uploads to most often.
+        assert_eq!(image_mime_from_filename("a.unknown"), "image/jpeg");
     }
 }

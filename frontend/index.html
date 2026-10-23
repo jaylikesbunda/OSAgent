@@ -34,6 +34,7 @@
     <link rel="stylesheet" href="/static/css/responsive.css">
     <link rel="stylesheet" href="/static/css/skills.css">
     <link rel="stylesheet" href="/static/css/mcp.css">
+    <link rel="stylesheet" href="/static/css/github.css">
     <link rel="stylesheet" href="/static/css/jobs.css">
     <link rel="stylesheet" href="/static/css/settings.css">
 </head>
@@ -291,12 +292,25 @@
                                         <select id="header-thinking-level" class="hidden" onchange="OSA.handleQuickThinkingChange(event)" tabindex="-1" aria-hidden="true">
                                             <option value="auto">Auto</option>
                                         </select>
-                                        <button class="model-trigger header-thinking-trigger" id="header-thinking-trigger" type="button" onclick="OSA.toggleThinkingMenu()" onkeydown="OSA.handleThinkingTriggerKeydown(event)" title="Thinking level" aria-haspopup="listbox" aria-expanded="false" aria-controls="header-thinking-menu">
+                                        <button class="model-trigger header-thinking-trigger" id="header-thinking-trigger" type="button" onclick="OSA.toggleThinkingMenu()" onkeydown="OSA.handleThinkingTriggerKeydown(event)" title="Thinking level" aria-haspopup="dialog" aria-expanded="false" aria-controls="header-thinking-menu">
                                             <span class="model-trigger-label" id="header-thinking-label">Auto</span>
                                             <span class="model-trigger-chevron" aria-hidden="true">&#9662;</span>
                                         </button>
-                                        <div id="header-thinking-menu" class="model-picker-popover header-thinking-menu hidden" role="listbox" aria-label="Thinking level">
-                                            <div class="model-dropdown-list" id="header-thinking-list"></div>
+                                        <div id="header-thinking-menu" class="model-picker-popover header-thinking-menu hidden" role="dialog" aria-label="Thinking level">
+                                            <div class="thinking-slider-panel">
+                                                <div class="thinking-slider-head">
+                                                    <span class="thinking-slider-level" id="header-thinking-level-name">Auto</span>
+                                                    <span class="thinking-slider-model" id="header-thinking-model-name"></span>
+                                                </div>
+                                                <div class="thinking-slider" id="header-thinking-slider" role="slider" tabindex="0"
+                                                     aria-label="Thinking level" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+                                                    <div class="thinking-slider-track">
+                                                        <div class="thinking-slider-fill" id="header-thinking-fill"></div>
+                                                        <div class="thinking-slider-stops" id="header-thinking-stops"></div>
+                                                        <div class="thinking-slider-thumb" id="header-thinking-thumb"></div>
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                     <button id="mic-btn" class="input-icon-btn" onclick="toggleRecording()" title="Voice input" aria-pressed="false">
@@ -478,6 +492,7 @@
                         <option value="theme">Appearance</option>
                     </optgroup>
                     <optgroup label="Integrations">
+                        <option value="github">GitHub</option>
                         <option value="discord">Discord</option>
                         <option value="voice">Voice</option>
                         <option value="pairing">Pairing</option>
@@ -509,6 +524,9 @@
                     </div>
                     <div class="settings-sidebar-section">
                         <div class="settings-sidebar-section-title">Integrations</div>
+                        <button class="settings-sidebar-item" data-tab="github" onclick="switchSettingsTab('github')">
+                            GitHub
+                        </button>
                         <button class="settings-sidebar-item" data-tab="discord" onclick="switchSettingsTab('discord')">
                             Discord
                         </button>
@@ -619,6 +637,31 @@
                     <div class="settings-group">
                         <div class="settings-group-title">Current Route</div>
                         <div id="provider-routing-summary" class="provider-routing-summary">Loading...</div>
+                    </div>
+                    <div class="settings-group">
+                        <div class="settings-group-title">Default Models</div>
+                        <div class="settings-field">
+                            <label for="setting-discord-model-trigger">Discord</label>
+                            <div class="model-picker-mount" data-model-picker="setting-discord-model" data-model-empty-label="Same as current model"></div>
+                            <span class="settings-field-hint">The model the Discord bot runs on. Independent of the chat model.</span>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-subagent-model-general-trigger">Subagents: general</label>
+                            <div class="model-picker-mount" data-model-picker="setting-subagent-model-general" data-model-empty-label="Same as current model"></div>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-subagent-model-explore-trigger">Subagents: explore</label>
+                            <div class="model-picker-mount" data-model-picker="setting-subagent-model-explore" data-model-empty-label="Same as current model"></div>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-subagent-model-verify-trigger">Subagents: verify</label>
+                            <div class="model-picker-mount" data-model-picker="setting-subagent-model-verify" data-model-empty-label="Same as current model"></div>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-small-model-trigger">Background chores</label>
+                            <div class="model-picker-mount" data-model-picker="setting-small-model" data-model-empty-label="Same as current model"></div>
+                            <span class="settings-field-hint">Titles, summaries, and compaction.</span>
+                        </div>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Model Menu</div>
@@ -1128,70 +1171,135 @@
                     </div>
                 </div>
                 <div class="settings-pane memory-pane" id="pane-memory">
-                    <div class="settings-pane-header memory-pane-header">
+                    <div class="settings-pane-header">
                         <div>
                             <h2>Memory</h2>
-                            <p class="settings-pane-desc">Keep the context that should follow you across sessions.</p>
+                            <p class="settings-pane-desc">What OSA remembers across sessions.</p>
                         </div>
-                        <div class="memory-header-status" id="memory-header-status">Checking memory…</div>
                     </div>
 
-                    <div class="memory-overview-grid">
-                        <section class="memory-control-card" id="memory-control-card">
-                            <div class="memory-card-heading">
-                                <div class="memory-card-icon">✦</div>
-                                <div class="memory-card-copy">
-                                    <span class="memory-card-eyebrow">Personal context</span>
-                                    <h3>Memory</h3>
-                                    <p>Facts, preferences, and project notes the agent can recall later.</p>
-                                </div>
-                                <label class="toggle-switch" aria-label="Enable memory">
-                                    <input type="checkbox" id="setting-memory-enabled" onchange="OSA.onMemoryToggleChange()" />
-                                    <span class="toggle-slider"></span>
-                                </label>
+                    <div class="settings-group">
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Memory</label>
+                                <span class="toggle-desc">Facts and preferences OSA can recall.</span>
                             </div>
-                            <div class="memory-card-control">
-                                <label for="setting-memory-capture-mode">Automatic capture</label>
+                            <label class="toggle-switch" aria-label="Enable memory">
+                                <input type="checkbox" id="setting-memory-enabled" onchange="OSA.onMemoryToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="toggle-field">
+                            <div class="toggle-info">
+                                <label class="toggle-label">Decisions</label>
+                                <span class="toggle-desc">Rules and conventions OSA follows.</span>
+                            </div>
+                            <label class="toggle-switch" aria-label="Enable decision memory">
+                                <input type="checkbox" id="setting-decision-memory-enabled" onchange="OSA.onDecisionMemoryToggleChange()" />
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="memory-content-grid">
+                        <section class="memory-section memory-section-main" id="memory-list-group">
+                            <div class="memory-section-header">
+                                <h3>Memories</h3>
+                                <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.loadMemories()">Refresh</button>
+                            </div>
+                            <div id="memory-list" class="decision-list memory-list">Enable memory to view and manage memories.</div>
+                            <details class="settings-advanced memory-add-form hidden" id="memory-add-form">
+                                <summary>Add a memory</summary>
+                                <div class="settings-advanced-body">
+                                    <div class="settings-field">
+                                        <label for="memory-title">Title</label>
+                                        <input type="text" id="memory-title" placeholder="e.g. Preferred code style" />
+                                    </div>
+                                    <div class="settings-field-row">
+                                        <div class="settings-field">
+                                            <label for="memory-scope">Scope</label>
+                                            <select id="memory-scope">
+                                                <option value="workspace">Current workspace</option>
+                                                <option value="global">Global</option>
+                                            </select>
+                                        </div>
+                                        <div class="settings-field">
+                                            <label for="memory-tags">Tags</label>
+                                            <input type="text" id="memory-tags" placeholder="comma, separated" />
+                                        </div>
+                                    </div>
+                                    <div class="settings-field">
+                                        <label for="memory-content">Content</label>
+                                        <textarea id="memory-content" class="memory-inline-textarea" placeholder="What should OSA remember?" rows="3"></textarea>
+                                    </div>
+                                    <div class="settings-form-actions">
+                                        <button type="button" class="btn-action" onclick="OSA.addMemory()">Save memory</button>
+                                    </div>
+                                </div>
+                            </details>
+                        </section>
+
+                        <details class="settings-advanced memory-review"><summary>Review queue &amp; decisions</summary><div class="settings-advanced-body memory-side-stack">
+                            <section class="memory-section" id="memory-suggestions-group">
+                                <div class="memory-section-header">
+                                    <h3>Suggestions</h3>
+                                    <div class="memory-section-actions">
+                                        <select id="memory-suggestions-filter" class="settings-filter-select" onchange="OSA.loadMemorySuggestions()" aria-label="Memory suggestion filter">
+                                            <option value="pending">Pending</option>
+                                            <option value="approved">Approved</option>
+                                            <option value="rejected">Rejected</option>
+                                            <option value="all">All</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div id="memory-suggestions-list" class="decision-list memory-list memory-review-list">No pending memory suggestions.</div>
+                            </section>
+
+                            <section class="memory-section" id="decision-list-group">
+                                <div class="memory-section-header">
+                                    <h3>Approved decisions</h3>
+                                </div>
+                                <div id="decision-list" class="decision-list memory-list">No approved decisions.</div>
+                            </section>
+
+                            <section class="memory-section" id="decision-suggestions-group">
+                                <div class="memory-section-header">
+                                    <h3>Decision suggestions</h3>
+                                    <div class="memory-section-actions">
+                                        <select id="decision-suggestions-filter" class="settings-filter-select" onchange="OSA.loadDecisionSuggestions()" aria-label="Decision suggestion filter">
+                                            <option value="pending">Pending</option>
+                                            <option value="approved">Approved</option>
+                                            <option value="rejected">Rejected</option>
+                                            <option value="all">All</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div id="decision-suggestions-list" class="decision-list memory-list memory-review-list">No pending decision suggestions.</div>
+                            </section>
+                        </div></details>
+                    </div>
+
+                    <details class="settings-advanced memory-advanced">
+                        <summary>Advanced</summary>
+                        <div class="settings-advanced-body memory-storage-grid">
+                            <div class="settings-field">
+                                <label for="setting-memory-capture-mode">Memory capture</label>
                                 <select id="setting-memory-capture-mode">
                                     <option value="off">Off</option>
                                     <option value="review">Review first</option>
                                     <option value="auto">Save automatically</option>
                                 </select>
+                                <span class="settings-field-hint">How new memory candidates are handled.</span>
                             </div>
-                        </section>
-
-                        <section class="memory-control-card" id="decision-control-card">
-                            <div class="memory-card-heading">
-                                <div class="memory-card-icon memory-card-icon-decision">✓</div>
-                                <div class="memory-card-copy">
-                                    <span class="memory-card-eyebrow">Durable choices</span>
-                                    <h3>Decisions</h3>
-                                    <p>Approved conventions and rules the agent should follow consistently.</p>
-                                </div>
-                                <label class="toggle-switch" aria-label="Enable decision memory">
-                                    <input type="checkbox" id="setting-decision-memory-enabled" onchange="OSA.onDecisionMemoryToggleChange()" />
-                                    <span class="toggle-slider"></span>
-                                </label>
-                            </div>
-                            <div class="memory-card-control">
-                                <label for="setting-decision-capture-mode">Automatic capture</label>
+                            <div class="settings-field">
+                                <label for="setting-decision-capture-mode">Decision capture</label>
                                 <select id="setting-decision-capture-mode">
                                     <option value="off">Off</option>
                                     <option value="review">Review first</option>
                                     <option value="auto">Save automatically</option>
                                 </select>
+                                <span class="settings-field-hint">How new decision candidates are handled.</span>
                             </div>
-                        </section>
-                    </div>
-
-                    <div class="memory-scope-note">
-                        <span class="memory-scope-note-icon">◎</span>
-                        <div><strong>Choose the right scope.</strong> Workspace memories stay with the current project; global memories follow you everywhere.</div>
-                    </div>
-
-                    <details class="settings-advanced memory-advanced">
-                        <summary>Storage &amp; advanced</summary>
-                        <div class="settings-advanced-body memory-storage-grid">
                             <div class="settings-field hidden" id="memory-file-field">
                                 <label for="setting-memory-file">Memory file</label>
                                 <input type="text" id="setting-memory-file" placeholder="~/.osagent/memories.json" />
@@ -1204,84 +1312,6 @@
                             </div>
                         </div>
                     </details>
-                    <div class="memory-content-grid">
-                        <section class="memory-section memory-section-main" id="memory-list-group">
-                            <div class="memory-section-header">
-                                <div>
-                                    <span class="memory-section-eyebrow">Library</span>
-                                    <h3>Memories</h3>
-                                </div>
-                                <button type="button" class="btn-ghost btn-ghost-compact" onclick="OSA.loadMemories()">Refresh</button>
-                            </div>
-                            <div id="memory-list" class="decision-list memory-list">Enable memory to view and manage memories.</div>
-                            <div class="settings-inline-form memory-add-form hidden" id="memory-add-form">
-                                <div class="memory-form-heading"><strong>Add a memory</strong><span>Save something useful for future sessions.</span></div>
-                                <input type="text" id="memory-title" placeholder="Title, e.g. Preferred code style" />
-                                <div class="memory-form-row">
-                                    <select id="memory-scope" aria-label="Memory scope">
-                                        <option value="workspace">Current workspace</option>
-                                        <option value="global">Global</option>
-                                    </select>
-                                    <input type="text" id="memory-tags" placeholder="Tags, comma-separated" />
-                                </div>
-                                <textarea id="memory-content" class="memory-inline-textarea" placeholder="What should OSA remember?" rows="3"></textarea>
-                                <div class="settings-form-actions">
-                                    <button type="button" class="btn-action" onclick="OSA.addMemory()">Save memory</button>
-                                </div>
-                            </div>
-                        </section>
-
-                        <aside class="memory-side-stack">
-                            <section class="memory-section" id="memory-suggestions-group">
-                                <div class="memory-section-header">
-                                    <div>
-                                        <span class="memory-section-eyebrow">Review queue</span>
-                                        <h3>Suggestions</h3>
-                                    </div>
-                                    <div class="memory-section-actions">
-                                        <select id="memory-suggestions-filter" class="settings-filter-select" onchange="OSA.loadMemorySuggestions()" aria-label="Memory suggestion filter">
-                                            <option value="pending">Pending</option>
-                                            <option value="approved">Approved</option>
-                                            <option value="rejected">Rejected</option>
-                                            <option value="all">All</option>
-                                        </select>
-                                        <button type="button" class="icon-button" title="Refresh suggestions" onclick="OSA.loadMemorySuggestions()">↻</button>
-                                    </div>
-                                </div>
-                                <div id="memory-suggestions-list" class="decision-list memory-list memory-review-list">No pending memory suggestions.</div>
-                            </section>
-
-                            <section class="memory-section" id="decision-list-group">
-                                <div class="memory-section-header">
-                                    <div>
-                                        <span class="memory-section-eyebrow">Active rules</span>
-                                        <h3>Approved decisions</h3>
-                                    </div>
-                                    <button type="button" class="icon-button" title="Refresh decisions" onclick="OSA.loadDecisions()">↻</button>
-                                </div>
-                                <div id="decision-list" class="decision-list memory-list">No approved decisions.</div>
-                            </section>
-
-                            <section class="memory-section" id="decision-suggestions-group">
-                                <div class="memory-section-header">
-                                    <div>
-                                        <span class="memory-section-eyebrow">Review queue</span>
-                                        <h3>Decision suggestions</h3>
-                                    </div>
-                                    <div class="memory-section-actions">
-                                        <select id="decision-suggestions-filter" class="settings-filter-select" onchange="OSA.loadDecisionSuggestions()" aria-label="Decision suggestion filter">
-                                            <option value="pending">Pending</option>
-                                            <option value="approved">Approved</option>
-                                            <option value="rejected">Rejected</option>
-                                            <option value="all">All</option>
-                                        </select>
-                                        <button type="button" class="icon-button" title="Refresh decision suggestions" onclick="OSA.loadDecisionSuggestions()">↻</button>
-                                    </div>
-                                </div>
-                                <div id="decision-suggestions-list" class="decision-list memory-list memory-review-list">No pending decision suggestions.</div>
-                            </section>
-                        </aside>
-                    </div>
 
                 </div>
                 <div class="settings-pane" id="pane-security">
@@ -1391,15 +1421,14 @@
                 <div class="settings-pane" id="pane-pairing">
                     <div class="settings-pane-header">
                         <h2>Pairing</h2>
-                        <p class="settings-pane-desc">Reach OSA from your phone, and manage the devices allowed in</p>
+                        <p class="settings-pane-desc">Use OSA from your phone.</p>
                     </div>
 
                     <div class="settings-group">
-                        <div class="settings-group-title">Remote Access (Public Tunnel)</div>
                         <div class="toggle-field">
                             <div class="toggle-info">
-                                <label class="toggle-label">Enable Public Tunnel</label>
-                                <span class="toggle-desc">Expose this instance through cloudflared so you can use it from your phone away from home. Requires a web UI password.</span>
+                                <label class="toggle-label">Public Tunnel</label>
+                                <span class="toggle-desc">Reach OSA remotely via cloudflared. Needs a password.</span>
                             </div>
                             <label class="toggle-switch">
                                 <input type="checkbox" id="setting-remote-enabled" onchange="OSA.Remote.onToggle()" />
@@ -1411,26 +1440,27 @@
                         </div>
                         <div id="remote-access-status" class="settings-help">Disabled.</div>
                         <div id="remote-access-details" class="hidden">
-                            <div class="lan-address-card">
-                                <div class="lan-address-label">Public URL</div>
-                                <div class="lan-address-value" id="remote-public-url">-</div>
-                            </div>
+                            <div class="settings-help">URL: <span id="remote-public-url">-</span></div>
                             <div class="remote-pairing">
-                                <div class="lan-address-label">Scan to pair a device</div>
-                                <div id="remote-qr" class="remote-qr"></div>
-                                <div class="settings-help" id="remote-pairing-expiry"></div>
+                                <div class="settings-help">Scan with your phone to pair.</div>
+                                <div id="remote-qr" class="remote-qr hidden"></div>
+                                <div class="remote-pairing-actions">
+                                    <button type="button" class="btn-ghost" onclick="OSA.Remote.rotate()">New pairing code</button>
+                                    <span class="settings-help" id="remote-pairing-expiry"></span>
+                                </div>
                             </div>
-                            <button type="button" class="btn-secondary" onclick="OSA.Remote.rotate()">New pairing code</button>
                         </div>
                     </div>
 
                     <div class="settings-group">
-                        <div class="settings-group-title">Paired Devices</div>
-                        <div id="paired-devices-list" class="paired-devices-list">
-                            <div class="settings-help">Loading…</div>
+                        <div class="settings-group-title settings-group-title-inline">
+                            <span>Paired Devices</span>
+                            <button type="button" class="settings-link-btn hidden" id="revoke-all-devices" onclick="OSA.Devices.revokeAll()">Revoke all</button>
                         </div>
-                        <button type="button" class="btn-danger" id="revoke-all-devices" onclick="OSA.Devices.revokeAll()">Revoke all devices</button>
-                        <div class="settings-help">Paired devices stay signed in without a password. Revoke any you no longer trust.</div>
+                        <div id="paired-devices-list" class="paired-devices-list">
+                            <div class="settings-help">Loading</div>
+                        </div>
+                        <div class="settings-help hidden" id="paired-devices-hint"></div>
                     </div>
                 </div>
                 <div class="settings-pane" id="pane-updates">
@@ -1768,6 +1798,7 @@
         </div>
     </div>
 
+    <script defer src="/static/js/model-dropdown.js"></script>
     <script defer src="/static/js/providers.js"></script>
     <script defer src="/static/js/messages.js"></script>
     <script defer src="/static/js/goals.js"></script>
@@ -1784,6 +1815,7 @@
     <script defer src="/static/js/question.js"></script>
     <script defer src="/static/js/skills.js"></script>
     <script defer src="/static/js/mcp.js"></script>
+    <script defer src="/static/js/github.js"></script>
     <script defer src="/static/js/browser.js"></script>
     <script defer src="/static/js/jobs.js"></script>
     <script defer src="/static/js/remote.js"></script>

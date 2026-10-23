@@ -16,6 +16,7 @@ test.before(async () => {
 
     require('../js/utils.js');
     require('../js/api.js');
+    require('../js/model-dropdown.js');
     require('../js/providers.js');
 
     OSA.safeUrl = (url, schemes) => {
@@ -189,6 +190,46 @@ test('a blocked popup in a normal browser also falls back to the system browser'
     assert.equal(OSA.currentOAuthFlow.type, 'external_browser');
     assert.match(document.getElementById('oauth-loading-text').textContent, /browser/);
     OSA.cancelOAuthStatusPoll();
+});
+
+test('device-code polling survives transient errors and backs off on slow_down', async () => {
+    const delays = [];
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = (fn, delay) => {
+        delays.push(delay);
+        OSA.__pendingPoll = fn;
+        return delays.length;
+    };
+    let calls = 0;
+    stubAuthedFetch(async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError('Failed to fetch');
+        if (calls === 2) return { ok: true, status: 200, json: async () => ({ pending: true, slow_down: true }) };
+        return { ok: true, status: 200, json: async () => ({ success: true, connected: true }) };
+    });
+    let succeeded = 0;
+    OSA.onOAuthSuccess = async () => { succeeded += 1; };
+    OSA.currentProviderId = 'github-copilot';
+    OSA.currentOAuthFlow = { type: 'device_code', deviceCode: 'dc', interval: 5000 };
+    OSA.deviceCodePollAttempts = 0;
+    OSA.deviceCodeNextDelay = null;
+    try {
+        OSA.pollDeviceCode();
+        for (let i = 0; i < 3; i += 1) {
+            const fn = OSA.__pendingPoll;
+            OSA.__pendingPoll = null;
+            if (!fn) break;
+            await fn();
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+    } finally {
+        global.setTimeout = realSetTimeout;
+    }
+
+    assert.equal(succeeded, 1, 'the sign-in still completed after the hiccup');
+    assert.equal(delays[0], 5000, 'first poll uses the provider interval');
+    assert.equal(delays[1], 5000, 'a transient error retries at the normal interval');
+    assert.ok(delays[2] >= 10000, 'slow_down backs the cadence off');
 });
 
 test('device-code polling sends the auth token', async () => {

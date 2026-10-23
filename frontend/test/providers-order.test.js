@@ -18,6 +18,7 @@ test.before(async () => {
 
     require('../js/state.js');
     require('../js/utils.js');
+    require('../js/model-dropdown.js');
     require('../js/providers.js');
 
     OSA.escapeHtml = value => String(value || '')

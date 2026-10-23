@@ -851,6 +851,7 @@ impl Handler {
                 user_id,
                 prompt,
                 community: false,
+                images: Vec::new(),
             },
         )
         .await;

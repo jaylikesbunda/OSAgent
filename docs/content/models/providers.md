@@ -80,6 +80,12 @@ provider):
 "explore" = "openrouter:deepseek/deepseek-r1"
 ```
 
+You can also ask for a model per run — "use sonnet for this subagent" makes the
+agent pass `model` to the `subagent` tool. A model requested by name resolves to
+the provider it was last run on, so the usual case needs no extra question; if
+several providers still match, the tool reports the candidates and the agent
+asks which provider to use before retrying with `"provider_id:model"`.
+
 ## Model menu
 
 The composer's model dropdown lists connected providers' models. To trim it,

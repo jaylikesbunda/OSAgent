@@ -11,9 +11,9 @@ use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory, diagram, files,
-    lsp, memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan, process,
-    question, scheduler, search, sessions, skill, skill_authoring, subagent, system_status, task,
-    todo, tool_script, tool_search, weather, web,
+    github, lsp, memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan,
+    process, question, scheduler, search, sessions, skill, skill_authoring, subagent, system_status,
+    task, todo, tool_script, tool_search, weather, web,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -1315,6 +1315,18 @@ impl ToolRegistry {
             self.native_catalog.register(tool);
         }
         *self.cached_tool_definitions.write().unwrap() = None;
+    }
+
+    /// GitHub integration tool. Deferred like the other specialty
+    /// built-ins: the schema is large, so it activates via `tool_search`
+    /// when a task names GitHub, PRs, issues, or reviews.
+    pub fn register_github(&mut self, engine: Arc<crate::github::GithubEngine>) {
+        if self.allowed.is_empty() || !self.allowed.contains("github") {
+            let tool: Arc<dyn Tool> = Arc::new(github::GithubTool::new(engine));
+            self.tools.insert("github".to_string(), tool.clone());
+            self.native_catalog.register(tool);
+            *self.cached_tool_definitions.write().unwrap() = None;
+        }
     }
 }
 

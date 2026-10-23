@@ -615,6 +615,19 @@ OSA.updateModel = async function() {
 };
 
 OSA.loadSessions = async function() {
+    // Callers fire this in bursts (stream lifecycle, tool completions, several
+    // panels refreshing at once). Loads are coalesced: while one is in flight
+    // later calls request a single trailing reload, and a minimum gap between
+    // network loads keeps bursts to a single fetch.
+    if (OSA._sessionsLoadInFlight) {
+        OSA._sessionsReloadPending = true;
+        return;
+    }
+    if (OSA._sessionsLoadedAt && Date.now() - OSA._sessionsLoadedAt < 400) {
+        OSA.scheduleSessionsReload();
+        return;
+    }
+    OSA._sessionsLoadInFlight = true;
     try {
         let sessions = null;
         if (Array.isArray(OSA.prefetchedSessions)) {
@@ -801,12 +814,29 @@ OSA.loadSessions = async function() {
 
         const activeEl = list.querySelector('.session-item.active');
         if (activeEl) {
-            activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            // 'auto' on purpose: a smooth scroll here started an animation
+            // that streaming re-renders retargeted every frame.
+            activeEl.scrollIntoView({ block: 'nearest', behavior: 'auto' });
         }
 
     } catch (error) {
         console.error('Failed to load sessions:', error);
+    } finally {
+        OSA._sessionsLoadInFlight = false;
+        OSA._sessionsLoadedAt = Date.now();
+        if (OSA._sessionsReloadPending) {
+            OSA._sessionsReloadPending = false;
+            OSA.scheduleSessionsReload();
+        }
     }
+};
+
+OSA.scheduleSessionsReload = function() {
+    if (OSA._sessionsReloadTimer) return;
+    OSA._sessionsReloadTimer = setTimeout(function() {
+        OSA._sessionsReloadTimer = null;
+        OSA.loadSessions();
+    }, 400);
 };
 
 // Creates a chat in the given workspace, or in the active one when none is given.

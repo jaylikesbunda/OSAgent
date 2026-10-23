@@ -266,7 +266,9 @@ impl EvaluationRunner {
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse, EvalError> {
         self.provider
-            .complete(None, messages, tools)
+            // Prompt-eval runs are one-shot, but some providers (opencode-go)
+            // reject a request that carries no conversation id.
+            .complete(Some("prompt-eval"), messages, tools)
             .await
             .map_err(|e| EvalError::ProviderError(e.to_string()))
     }

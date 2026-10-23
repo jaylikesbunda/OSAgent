@@ -87,8 +87,13 @@ OSA.toggleFavourite = function(modelId, providerId, modelName, providerName) {
 
 OSA.buildModelOptionHtml = function(m, providerId, currentModel, opts) {
     const pid = m.provider_id || providerId;
+    // The composer marks the active route model, a settings picker marks the
+    // value of its own field, so the provider can be overridden per caller.
+    const currentProviderId = (opts && opts.currentProviderId !== undefined)
+        ? opts.currentProviderId
+        : OSA.currentModelProviderId;
     const isCurrent = m.id.toLowerCase() === (currentModel || '').toLowerCase()
-        && (!OSA.currentModelProviderId || OSA.currentModelProviderId === pid);
+        && (!currentProviderId || currentProviderId === pid);
     const isFav = OSA.isFavourite(m.id, pid);
     const ctx = m.context_window >= 1000000
         ? (m.context_window / 1000000).toFixed(0) + 'M'
@@ -187,6 +192,58 @@ OSA.loadProviderCatalog = async function(force = false) {
 
 OSA.CATALOG_REFRESH_MS = 60000;
 
+/// Fill a model picker select from the provider catalog. Options are
+/// "provider_id:model" values; an empty option means "same as current
+/// model". A stored value that is not in the catalog stays selectable.
+/// Only connected providers are listed: the full catalog covers every
+/// provider on models.dev (~9k models), and building that many options
+/// locks the main thread for a long time on every Settings open.
+OSA.populateModelSelect = async function(select, currentValue) {
+    if (!select) return;
+    const catalog = await OSA.loadProviderCatalog();
+    const preferred = (currentValue || '').trim();
+    // Rebuilding is skipped when neither the catalog nor the stored value
+    // changed; selects keep their options for the lifetime of the pane.
+    const signature = OSA.catalogSignature(catalog) + '|' + preferred;
+    if (select.dataset.catalogSig === signature && select.options.length > 0) {
+        select.value = preferred;
+        return;
+    }
+    const providers = (catalog && catalog.providers) || [];
+    const models = (catalog && catalog.all_models) || [];
+    const nameById = {};
+    const connected = {};
+    for (let i = 0; i < providers.length; i++) {
+        nameById[providers[i].id] = providers[i].name || providers[i].id;
+        if (providers[i].connected) connected[providers[i].id] = true;
+    }
+    const fragment = document.createDocumentFragment();
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = 'Same as current model';
+    fragment.appendChild(defaultOption);
+    let hasPreferred = preferred === '';
+    for (let i = 0; i < models.length; i++) {
+        const model = models[i];
+        if (!connected[model.provider_id]) continue;
+        const value = model.provider_id + ':' + model.id;
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = (nameById[model.provider_id] || model.provider_id) + ' · ' + (model.name || model.id);
+        if (value === preferred) hasPreferred = true;
+        fragment.appendChild(option);
+    }
+    if (!hasPreferred) {
+        const option = document.createElement('option');
+        option.value = preferred;
+        option.textContent = preferred;
+        fragment.appendChild(option);
+    }
+    select.replaceChildren(fragment);
+    select.dataset.catalogSig = signature;
+    select.value = preferred;
+};
+
 // The server answers from its build-time models.dev snapshot until the live
 // fetch lands, so the catalog pulled at page load can be a release behind.
 // Re-pull it in the background while the user reads the list.
@@ -233,6 +290,7 @@ OSA.icons = {
     external: '<svg class="icon-inline" viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L9.354 2.354a.25.25 0 0 1 0-.354l.283-.283a.25.25 0 0 1 .354 0l2.96 2.96V2.25a.25.25 0 0 1 .25-.25z"/></svg>'
 };
 
+
 // ── Composer Model Dropdown ─────────────────────────────────
 
 OSA.setModelTrigger = function(providerId, modelId) {
@@ -247,10 +305,13 @@ OSA.setModelTrigger = function(providerId, modelId) {
     trigger.title = provider ? provider.name + ' / ' + (modelId || '') : (modelId || 'Browse models');
 };
 
-OSA.positionModelDropdown = function() {
-    const dropdown = document.getElementById('model-dropdown');
-    const trigger = document.getElementById('model-input');
-    if (!dropdown || !trigger || !OSA.modelDropdownOpen) return;
+// Anchor a model popover to its trigger. The popover is positioned with
+// `position: fixed`, so it can live on the body and escape any scrolling
+// container it is shown inside. Shared by the composer dropdown and the
+// settings model pickers.
+OSA.positionModelPopover = function(popover, trigger, options) {
+    if (!popover || !trigger) return;
+    const opts = options || {};
 
     const margin = 8;
     const gap = 6;
@@ -260,7 +321,9 @@ OSA.positionModelDropdown = function() {
     const viewportTop = viewport?.offsetTop || 0;
     const viewportWidth = viewport?.width || window.innerWidth;
     const viewportBottom = viewportTop + (viewport?.height || window.innerHeight);
-    const width = Math.min(380, viewportWidth - margin * 2);
+    const width = opts.width
+        ? Math.min(opts.width, viewportWidth - margin * 2)
+        : Math.min(opts.maxWidth || 380, viewportWidth - margin * 2);
     const availableBelow = viewportBottom - triggerRect.bottom - gap - margin;
     const availableAbove = triggerRect.top - viewportTop - gap - margin;
     const openBelow = availableBelow >= 240 || availableBelow >= availableAbove;
@@ -270,69 +333,88 @@ OSA.positionModelDropdown = function() {
         Math.max(viewportLeft + margin, viewportLeft + viewportWidth - width - margin)
     );
 
-    dropdown.style.width = width + 'px';
-    dropdown.style.left = left + 'px';
-    dropdown.style.right = 'auto';
-    dropdown.style.maxHeight = Math.min(520, availableHeight) + 'px';
+    popover.style.width = width + 'px';
+    popover.style.left = left + 'px';
+    popover.style.right = 'auto';
+    popover.style.maxHeight = Math.min(opts.maxHeight || 520, availableHeight) + 'px';
     if (openBelow) {
-        dropdown.style.top = (triggerRect.bottom + gap) + 'px';
-        dropdown.style.bottom = 'auto';
+        popover.style.top = (triggerRect.bottom + gap) + 'px';
+        popover.style.bottom = 'auto';
     } else {
-        dropdown.style.top = 'auto';
-        dropdown.style.bottom = (window.innerHeight - triggerRect.top + gap) + 'px';
+        popover.style.top = 'auto';
+        popover.style.bottom = (window.innerHeight - triggerRect.top + gap) + 'px';
     }
 };
 
-OSA.openModelDropdown = function(initialQuery) {
+OSA.positionModelDropdown = function() {
     const dropdown = document.getElementById('model-dropdown');
     const trigger = document.getElementById('model-input');
-    if (!dropdown || !trigger) return;
-    OSA.ensureModelOptionDelegation();
-    if (dropdown.parentElement !== document.body) document.body.appendChild(dropdown);
-    OSA.modelDropdownOpen = true;
-    OSA.modelPickerActiveIndex = -1;
-    trigger.setAttribute('aria-expanded', 'true');
-    dropdown.classList.remove('hidden');
-    OSA.positionModelDropdown();
-    window.addEventListener('resize', OSA.positionModelDropdown);
-    window.addEventListener('scroll', OSA.positionModelDropdown, true);
-    window.visualViewport?.addEventListener('resize', OSA.positionModelDropdown);
+    if (!dropdown || !trigger || !OSA.modelDropdownOpen) return;
+    OSA.positionModelPopover(dropdown, trigger);
+};
 
-    const searchInput = document.getElementById('model-search');
-    if (searchInput) {
-        searchInput.value = initialQuery || '';
-        OSA.modelSearchQuery = initialQuery || '';
-        searchInput.focus();
-    }
-    // Reset the list's cache key rather than overwriting its markup: the
-    // render below restores the cached list, and a stale key used to skip
-    // that restore and leave the "Loading" placeholder on screen.
-    const list = dropdown.querySelector('.model-dropdown-list');
-    if (list) list._osaModelDropdownCacheKey = '';
-    OSA.renderModelDropdown();
-    OSA.refreshProviderCatalogInBackground();
+// ── Composer dropdown instance ──────────────────────────────
+//
+// The chat bar and the Settings model pickers share one dropdown component
+// (model-dropdown.js). The composer keeps its state in the OSA globals, so
+// this adapter maps the component's state onto them and the rest of the page
+// keeps reading the same values.
+OSA.composerDropdownState = {
+    get open() { return OSA.modelDropdownOpen; },
+    set open(value) { OSA.modelDropdownOpen = value; },
+    get searchQuery() { return OSA.modelSearchQuery; },
+    set searchQuery(value) { OSA.modelSearchQuery = value; },
+    get searchDebounce() { return OSA.modelSearchDebounce; },
+    set searchDebounce(value) { OSA.modelSearchDebounce = value; },
+    get searchRequestId() { return OSA.modelSearchRequestId; },
+    set searchRequestId(value) { OSA.modelSearchRequestId = value; },
+    get optionNodes() { return OSA.modelOptionNodes; },
+    set optionNodes(value) { OSA.modelOptionNodes = value; },
+    get activeIndex() { return OSA.modelPickerActiveIndex; },
+    set activeIndex(value) { OSA.modelPickerActiveIndex = value; },
+};
+
+OSA.composerModelDropdown = new OSA.ModelDropdown({
+    triggerId: 'model-input',
+    dropdownId: 'model-dropdown',
+    searchId: 'model-search',
+    listSelector: '#model-dropdown .model-dropdown-list',
+    state: OSA.composerDropdownState,
+    // The composer wires its own handlers through the inline attributes in
+    // index.html, so the component must not attach them a second time.
+    autoBind: false,
+    // providers.js already closes the composer dropdown on an outside click.
+    closeOnOutsideClick: false,
+    // The composer keeps its own active-row bookkeeping.
+    manageActiveIndex: false,
+    renderList: function() {
+        return OSA.renderModelDropdown();
+    },
+    onOpen: function() {
+        OSA.ensureModelOptionDelegation();
+        OSA.modelPickerActiveIndex = -1;
+        // Reset the list's cache key rather than overwriting its markup: the
+        // render below restores the cached list, and a stale key used to skip
+        // that restore and leave the "Loading" placeholder on screen.
+        const list = document.querySelector('#model-dropdown .model-dropdown-list');
+        if (list) list._osaModelDropdownCacheKey = '';
+        OSA.refreshProviderCatalogInBackground();
+    },
+});
+// Binds the viewport listeners, so the dropdown follows a scroll or a
+// resize. The element handlers stay with the inline attributes in index.html.
+OSA.composerModelDropdown.bind();
+
+OSA.openModelDropdown = function(initialQuery) {
+    OSA.composerModelDropdown.open(initialQuery);
 };
 
 OSA.toggleModelDropdown = function() {
-    if (OSA.modelDropdownOpen) {
-        OSA.closeModelDropdown();
-    } else {
-        OSA.openModelDropdown('');
-    }
+    OSA.composerModelDropdown.toggle();
 };
 
 OSA.closeModelDropdown = function(restoreFocus = true) {
-    OSA.modelDropdownOpen = false;
-    OSA.modelSearchRequestId += 1;
-    if (OSA.modelSearchDebounce) clearTimeout(OSA.modelSearchDebounce);
-    const dropdown = document.getElementById('model-dropdown');
-    const trigger = document.getElementById('model-input');
-    if (dropdown) dropdown.classList.add('hidden');
-    if (trigger) trigger.setAttribute('aria-expanded', 'false');
-    window.removeEventListener('resize', OSA.positionModelDropdown);
-    window.removeEventListener('scroll', OSA.positionModelDropdown, true);
-    window.visualViewport?.removeEventListener('resize', OSA.positionModelDropdown);
-    if (restoreFocus && trigger) trigger.focus();
+    OSA.composerModelDropdown.close(restoreFocus);
 };
 
 // Global aliases for inline onclick handlers in HTML
@@ -343,24 +425,17 @@ window.handleModelDropdownKeydown = function(e) { OSA.handleModelDropdownKeydown
 window.handleModelInputKeydown = function(e) { OSA.handleModelInputKeydown(e); };
 
 OSA.handleModelInputKeydown = function(event) {
-    const key = event.key || '';
-    if (key === 'ArrowDown' || key === 'Enter' || key === ' ') {
-        event.preventDefault();
-        if (!OSA.modelDropdownOpen) OSA.openModelDropdown('');
-        return;
-    }
-
-    if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
-        event.preventDefault();
-        OSA.openModelDropdown(key);
-    }
+    OSA.composerModelDropdown.handleTriggerKeydown(event);
 };
 
 OSA.ensureModelOptionDelegation = function() {
     if (OSA.modelOptionDelegationReady) return;
     OSA.modelOptionDelegationReady = true;
     document.addEventListener('click', function(event) {
-        const option = event.target.closest('.model-option[data-model-id]');
+        // Scoped to the composer dropdown: the Settings model pickers render
+        // the same rows, but a pick there records a value instead of
+        // switching the live route.
+        const option = event.target.closest('#model-dropdown .model-option[data-model-id]');
         if (!option) return;
         const modelId = option.dataset.modelId || '';
         const providerId = option.dataset.providerId || '';
@@ -385,18 +460,11 @@ OSA.ensureModelOptionDelegation();
 // in the list on each arrow key.
 OSA.modelOptionNodes = [];
 
+// Kept as the public alias for the highlighted row. The shared component owns
+// the implementation, and its state adapter writes the same globals, so the
+// composer keeps one source of truth for the active option.
 OSA.setActiveModelOption = function(index) {
-    const options = OSA.modelOptionNodes;
-    if (!options.length) {
-        OSA.modelPickerActiveIndex = -1;
-        return;
-    }
-    const nextIndex = Math.max(0, Math.min(index, options.length - 1));
-    const previous = options[OSA.modelPickerActiveIndex];
-    if (previous) previous.classList.remove('keyboard-active');
-    OSA.modelPickerActiveIndex = nextIndex;
-    options[nextIndex].classList.add('keyboard-active');
-    options[nextIndex].scrollIntoView({ block: 'nearest' });
+    OSA.composerModelDropdown.setActiveIndex(index);
 };
 
 OSA.afterModelDropdownRender = function() {
@@ -517,12 +585,13 @@ OSA.renderModelDropdown = async function() {
     const providerRank = new Map(sortedProviders.map(function(provider, index) {
         return [provider.name, index];
     }));
-    const providersById = Object.fromEntries((providers || []).map(function(p) { return [p.id, p]; }));
 
-    const connectedModels = (all_models || []).filter(function(m) {
-        var p = providersById[m.provider_id];
-        return p && p.connected && OSA.modelShownInMenu(hidden, m.provider_id, m);
-    });
+    // Shared with the Settings model pickers so both menus apply the same
+    // "show in model menu" filters.
+    const connectedMap = Object.fromEntries((providers || []).map(function(p) {
+        return [p.id, !!p.connected];
+    }));
+    const connectedModels = OSA.modelMenuVisibleModels(all_models, { connected: connectedMap });
     const grouped = {};
     for (var i = 0; i < connectedModels.length; i++) {
         var m = connectedModels[i];
@@ -579,6 +648,39 @@ OSA.renderModelDropdown = async function() {
     OSA.afterModelDropdownRender();
 };
 
+// Group models by provider name and order the groups the way the composer
+// dropdown does: connected providers first, then the well-known ones, then
+// the rest alphabetically. Shared by the composer dropdown and the settings
+// model pickers so both list models in the same order.
+OSA.groupModelsByProvider = function(models) {
+    const grouped = new Map();
+    for (const m of models || []) {
+        const key = m.provider_name || m.provider_id;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(m);
+    }
+
+    const providersByName = Object.fromEntries(((OSA.providerCatalog || {}).providers || []).map(function(provider) {
+        return [provider.name, provider];
+    }));
+    const orderedProviders = OSA.sortProvidersForDropdown(
+        Array.from(grouped.keys()).map(function(name) {
+            const catalogProvider = providersByName[name];
+            const providerModels = grouped.get(name) || [];
+            // Prefer the catalog's connected flag, but fall back to each model's
+            // own `available` flag: search can run before the catalog has
+            // loaded, and connected providers must still sort to the top.
+            const connected = !!(catalogProvider && catalogProvider.connected)
+                || providerModels.some(function(m) { return !!m.available; });
+            return { name: name, connected: connected };
+        })
+    );
+
+    return orderedProviders.map(function(provider) {
+        return { name: provider.name, models: grouped.get(provider.name) || [] };
+    });
+};
+
 OSA.renderModelSearchResults = function(models, currentModel) {
     const dropdown = document.getElementById('model-dropdown');
     if (!dropdown) return;
@@ -591,34 +693,10 @@ OSA.renderModelSearchResults = function(models, currentModel) {
         return;
     }
 
-    const grouped = {};
-    for (const m of models) {
-        if (!grouped[m.provider_name]) grouped[m.provider_name] = [];
-        grouped[m.provider_name].push(m);
-    }
-
-    const providersByName = Object.fromEntries((OSA.providerCatalog.providers || []).map(function(provider) {
-        return [provider.name, provider];
-    }));
-    const orderedProviders = OSA.sortProvidersForDropdown(
-        Object.keys(grouped).map(function(name) {
-            const catalogProvider = providersByName[name];
-            const providerModels = grouped[name] || [];
-            // Prefer the catalog's connected flag, but fall back to each model's
-            // own `available` flag: search can run before the catalog has
-            // loaded, and connected providers must still sort to the top.
-            const connected = !!(catalogProvider && catalogProvider.connected)
-                || providerModels.some(function(m) { return !!m.available; });
-            return { name: name, connected: connected };
-        })
-    );
-
     let html = '';
-    for (const provider of orderedProviders) {
-        const providerName = provider.name;
-        const providerModels = grouped[providerName] || [];
-        html += '<div class="model-group-title">' + OSA.escapeHtml(providerName) + '</div>';
-        for (const m of providerModels) {
+    for (const group of OSA.groupModelsByProvider(models)) {
+        html += '<div class="model-group-title">' + OSA.escapeHtml(group.name) + '</div>';
+        for (const m of group.models) {
             html += OSA.buildModelOptionHtml(m, m.provider_id, currentModel, {});
         }
     }
@@ -684,46 +762,11 @@ OSA.selectModel = async function(modelId, providerId) {
 OSA.modelSearchDebounce = null;
 
 OSA.handleModelSearch = function(event) {
-    OSA.modelSearchQuery = event.target.value;
-    if (OSA.modelSearchDebounce) clearTimeout(OSA.modelSearchDebounce);
-    OSA.modelSearchDebounce = setTimeout(() => OSA.renderModelDropdown(), 150);
+    OSA.composerModelDropdown.handleSearch(event);
 };
 
 OSA.handleModelDropdownKeydown = function(event) {
-    const dropdown = document.getElementById('model-dropdown');
-    const options = dropdown
-        ? Array.from(dropdown.querySelectorAll('.model-option[data-model-id]'))
-        : [];
-    if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        OSA.closeModelDropdown();
-        return;
-    }
-    if (event.key === 'ArrowDown') {
-        event.preventDefault();
-        OSA.setActiveModelOption(OSA.modelPickerActiveIndex + 1);
-        return;
-    }
-    if (event.key === 'ArrowUp') {
-        event.preventDefault();
-        OSA.setActiveModelOption(OSA.modelPickerActiveIndex < 0 ? options.length - 1 : OSA.modelPickerActiveIndex - 1);
-        return;
-    }
-    if (event.key === 'Home' && options.length) {
-        event.preventDefault();
-        OSA.setActiveModelOption(0);
-        return;
-    }
-    if (event.key === 'End' && options.length) {
-        event.preventDefault();
-        OSA.setActiveModelOption(options.length - 1);
-        return;
-    }
-    if (event.key === 'Enter' && OSA.modelPickerActiveIndex >= 0 && options[OSA.modelPickerActiveIndex]) {
-        event.preventDefault();
-        options[OSA.modelPickerActiveIndex].click();
-    }
+    OSA.composerModelDropdown.handleKeydown(event);
 };
 
 // ── Modal Model Dropdown ────────────────────────────────────
@@ -978,6 +1021,22 @@ OSA.modelMenuFilter = function() {
 // Favourites always show, and so does anything the dropdown would not hide.
 OSA.modelShownInMenu = function(hidden, providerId, model) {
     return OSA.isFavourite(model.id, providerId) || !hidden(providerId, model.id, model.release_date);
+};
+
+// Models the model menu shows, and which the Settings model pickers must show
+// too: connected providers only, minus whatever "show in model menu" hides.
+// `always` keeps a model visible regardless of the filters — the composer uses
+// it for the active model, the Settings pickers for their stored value.
+OSA.modelMenuVisibleModels = function(models, options) {
+    const opts = options || {};
+    const connected = opts.connected || null;
+    const always = typeof opts.always === 'function' ? opts.always : function() { return false; };
+    const hidden = OSA.modelMenuFilter();
+    return (models || []).filter(function(model) {
+        if (connected && !connected[model.provider_id]) return false;
+        if (always(model)) return true;
+        return OSA.modelShownInMenu(hidden, model.provider_id, model);
+    });
 };
 
 OSA.modelMenuSignature = function() {
@@ -1851,11 +1910,15 @@ OSA.cancelOAuthStatusPoll = function() {
     }
 };
 
+OSA.deviceCodeNextDelay = null;
+
 OSA.pollDeviceCode = function() {
     if (!OSA.currentOAuthFlow || OSA.currentOAuthFlow.type !== 'device_code') return;
 
     const deviceCode = OSA.currentOAuthFlow.deviceCode;
-    const interval = OSA.currentOAuthFlow.interval;
+    const baseInterval = OSA.currentOAuthFlow.interval;
+    const delay = OSA.deviceCodeNextDelay || baseInterval;
+    OSA.deviceCodeNextDelay = null;
 
     // Cap the poll so a flow that never completes cannot spin forever.
     OSA.deviceCodePollAttempts = (OSA.deviceCodePollAttempts || 0) + 1;
@@ -1875,16 +1938,57 @@ OSA.pollDeviceCode = function() {
             }
 
             if (data.pending) {
-                document.getElementById('oauth-device-status-text').textContent = 'Waiting for authorization...';
+                // `slow_down` asks for a gentler cadence; everything else
+                // pending just means the user has not approved yet.
+                OSA.deviceCodeNextDelay = data.slow_down
+                    ? Math.max(baseInterval + 5000, Math.round(baseInterval * 1.5))
+                    : baseInterval;
+                const statusEl = document.getElementById('oauth-device-status-text');
+                if (statusEl) statusEl.textContent = 'Waiting for authorization...';
                 OSA.pollDeviceCode();
             } else if (data.error) {
-                document.getElementById('oauth-device-status-text').textContent = 'Error: ' + data.error;
+                const statusEl = document.getElementById('oauth-device-status-text');
+                if (statusEl) statusEl.textContent = 'Error: ' + data.error;
             }
         } catch (error) {
-            document.getElementById('oauth-device-status-text').textContent = 'Error: ' + error.message;
+            // A transient failure (the webview being suspended while the user
+            // authorizes in the system browser aborts in-flight requests) must
+            // not abandon a sign-in that may already be approved — keep polling.
+            OSA.deviceCodeNextDelay = baseInterval;
+            const statusEl = document.getElementById('oauth-device-status-text');
+            if (statusEl) statusEl.textContent = 'Waiting for authorization... (retrying)';
+            OSA.pollDeviceCode();
         }
-    }, interval);
+    }, delay);
 };
+
+// Polling a device code depends on a timer, but Chromium (and WebView2) freeze
+// timers while the page is hidden — exactly the state of the window while the
+// user authorizes in the system browser. Re-poll the moment the page is visible
+// or focused again so an approved sign-in registers immediately.
+OSA.bindDeviceCodeVisibilityPolling = function() {
+    if (OSA.deviceCodeVisibilityBound) return;
+    OSA.deviceCodeVisibilityBound = true;
+    const wake = (event) => {
+        if (!OSA.currentOAuthFlow || OSA.currentOAuthFlow.type !== 'device_code') return;
+        // Only the visibilitychange event is gated on visibilityState: a real
+        // focus/pageshow means the window is back in front even if WebView2
+        // reports the page as hidden.
+        if (event && event.type === 'visibilitychange'
+            && typeof document.visibilityState === 'string'
+            && document.visibilityState === 'hidden') return;
+        if (OSA.deviceCodePollTimer) {
+            clearTimeout(OSA.deviceCodePollTimer);
+            OSA.deviceCodePollTimer = null;
+        }
+        OSA.deviceCodeNextDelay = null;
+        OSA.pollDeviceCode();
+    };
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('focus', wake);
+    window.addEventListener('pageshow', wake);
+};
+OSA.bindDeviceCodeVisibilityPolling();
 
 OSA.cancelDeviceCode = function() {
     if (OSA.deviceCodePollTimer) {

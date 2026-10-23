@@ -566,6 +566,7 @@ You cannot spawn additional subagents."#
                 task.clone(),
                 "general".to_string(),
                 false,
+                None,
             )
             .await?;
 

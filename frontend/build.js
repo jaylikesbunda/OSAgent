@@ -17,6 +17,7 @@ const JS_LOAD_ORDER = [
   "js/diagrams.js",
   "js/preview.js",
   "js/filebrowser.js",
+  "js/model-dropdown.js",
   "js/providers.js",
   "js/messages.js",
   "js/goals.js",
@@ -35,6 +36,7 @@ const JS_LOAD_ORDER = [
   "js/permission.js",
   "js/skills.js",
   "js/mcp.js",
+  "js/github.js",
   "js/browser.js",
   "js/jobs.js",
   "js/remote.js",
@@ -64,6 +66,7 @@ const CSS_LOAD_ORDER = [
   "css/responsive.css",
   "css/skills.css",
   "css/mcp.css",
+  "css/github.css",
   "css/jobs.css",
   "css/settings.css",
 ];

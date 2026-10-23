@@ -99,7 +99,7 @@ class LitegraphAdapter {
 
     this.graph.start();
 
-    setInterval(() => {
+    this.domCleanupTimer = setInterval(() => {
       document.querySelectorAll('.litecontextmenu, .litegdialog, .graphdialog, .litemenubar, .dialog').forEach(el => {
         if (el.style.display !== 'none') {
           el.remove();
@@ -107,7 +107,8 @@ class LitegraphAdapter {
       });
     }, 100);
 
-    window.addEventListener('resize', resizeCanvas);
+    this._resizeHandler = resizeCanvas;
+    window.addEventListener('resize', this._resizeHandler);
     
     setTimeout(resizeCanvas, 100);
   }
@@ -238,9 +239,20 @@ class LitegraphAdapter {
   }
 
   destroy() {
+    if (this.domCleanupTimer) {
+      clearInterval(this.domCleanupTimer);
+      this.domCleanupTimer = null;
+    }
+    if (this._resizeHandler) {
+      window.removeEventListener('resize', this._resizeHandler);
+      this._resizeHandler = null;
+    }
     if (this.graph) {
       this.graph.stop();
       this.graph.clear();
+    }
+    if (this.canvasWidget && typeof this.canvasWidget.stopRendering === 'function') {
+      this.canvasWidget.stopRendering();
     }
     if (this.canvas && this.canvas.parentNode) {
       this.canvas.parentNode.removeChild(this.canvas);

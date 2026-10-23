@@ -721,3 +721,57 @@ pub enum GoalCasOutcome {
     Conflict { current: Goal },
     Missing,
 }
+
+/// One review run by OSA against a pull request, keyed by repo + PR +
+/// reviewed commit. The auto-reviewer uses the newest row per PR to skip
+/// commits it already reviewed; the settings UI reads the table as the
+/// review history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubReview {
+    pub id: i64,
+    /// "owner/repo".
+    pub repo: String,
+    pub pr_number: u64,
+    /// Head commit the review was generated against.
+    pub head_sha: String,
+    /// posted | dry_run | failed.
+    pub status: String,
+    /// Model summary (truncated for storage).
+    pub summary: Option<String>,
+    /// Inline comments included in the posted review.
+    pub comments_count: u64,
+    /// Link to the posted review or fallback comment.
+    pub review_url: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl GithubReview {
+    pub fn new(
+        repo: String,
+        pr_number: u64,
+        head_sha: String,
+        status: &str,
+        summary: Option<String>,
+        comments_count: u64,
+        review_url: Option<String>,
+        error: Option<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: 0,
+            repo,
+            pr_number,
+            head_sha,
+            status: status.to_string(),
+            summary,
+            comments_count,
+            review_url,
+            error,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+

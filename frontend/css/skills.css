@@ -26,8 +26,6 @@
 
 .skill-card {
     background: var(--glass-bg);
-    backdrop-filter: var(--glass-blur);
-    -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-lg);
     padding: 16px;
@@ -346,7 +344,6 @@
     cursor: pointer;
     transition: border-color var(--transition-fast), background var(--transition-fast);
     background: var(--glass-bg);
-    backdrop-filter: blur(8px);
 }
 
 .skills-upload-zone:hover {
@@ -390,7 +387,6 @@
     padding: 48px 24px;
     color: var(--text-muted);
     background: var(--glass-bg);
-    backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-lg);
 }

@@ -223,6 +223,10 @@ pub struct AgentRuntime {
     agent_settings: Arc<tokio::sync::RwLock<AgentConfig>>,
     provider: Arc<tokio::sync::RwLock<Arc<dyn Provider>>>,
     providers: Arc<tokio::sync::RwLock<Vec<(String, Arc<dyn Provider>)>>>,
+    /// Ephemeral providers built for explicit "provider:model" references
+    /// (Discord turns, GitHub reviews, subagent-style overrides), keyed by
+    /// the reference string. Cleared whenever the provider list changes.
+    surface_provider_cache: Arc<DashMap<String, Arc<dyn Provider>>>,
     catalog: Arc<ModelCatalog>,
     catalog_refresh_at: std::sync::atomic::AtomicU64,
     session_manager: Arc<SessionManager>,
@@ -265,6 +269,8 @@ pub struct AgentRuntime {
     shutdown_tx: Arc<watch::Sender<bool>>,
     restart_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     scheduler: Arc<Scheduler>,
+    /// GitHub integration engine (tool backend, reviews, auto-reviewer).
+    github: Arc<crate::github::GithubEngine>,
     run_prompt_rx: tokio::sync::Mutex<
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::executor::RunPromptRequest>>,
     >,
@@ -428,6 +434,92 @@ impl AgentRuntime {
         }
     }
 
+    /// Ephemeral provider for a session/background model reference:
+    /// "provider_id:model" or a bare model id, falling back to the active
+    /// provider when empty or unresolvable. Mirrors `small_slot_provider`
+    /// so the active model entry is never mutated. Built providers are
+    /// cached by reference so per-turn surface models (Discord) are not
+    /// reconstructed for every message.
+    pub async fn provider_for_ref(&self, model_ref: &str) -> Arc<dyn Provider> {
+        let model_ref = model_ref.trim();
+        let active = self.active_provider().await;
+        if model_ref.is_empty() {
+            return active;
+        }
+        if let Some(cached) = self.surface_provider_cache.get(model_ref) {
+            return cached.clone();
+        }
+        // Provider ids never contain ':'.
+        let (provider_id, model) = match model_ref.split_once(':') {
+            Some((provider, model)) => (provider.trim().to_string(), model.trim().to_string()),
+            None => (String::new(), model_ref.to_string()),
+        };
+        let cfg = self.config.read().await;
+        let wanted_id = if provider_id.is_empty() {
+            cfg.default_provider.clone()
+        } else {
+            provider_id
+        };
+        let Some(entry) = cfg
+            .providers
+            .iter()
+            .find(|p| p.effective_id() == wanted_id.as_str() || p.provider_type == wanted_id)
+            .cloned()
+        else {
+            tracing::warn!(
+                "model reference '{}' did not match a configured provider; using active provider",
+                model_ref
+            );
+            return active;
+        };
+        let database = cfg.storage.database.clone();
+        drop(cfg);
+        let mut entry = entry;
+        if !model.is_empty() {
+            entry.model = model;
+        }
+        let oauth_dir = PathBuf::from(shellexpand::tilde(&database).to_string())
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        match OpenAICompatibleProvider::with_catalog_oauth_and_agent_settings(
+            entry,
+            Some(self.catalog.clone()),
+            Some(crate::oauth::create_oauth_storage(&oauth_dir)),
+            self.agent_settings.clone(),
+        ) {
+            Ok(provider) => {
+                let provider: Arc<dyn Provider> = Arc::new(provider);
+                // Only real builds are cached; fallbacks intentionally are
+                // not, so they follow the active provider after a switch.
+                self.surface_provider_cache
+                    .insert(model_ref.to_string(), provider.clone());
+                provider
+            }
+            Err(e) => {
+                tracing::warn!("model-reference provider failed to build ({}); using active", e);
+                active
+            }
+        }
+    }
+
+    /// Model assigned to a session's surface (Discord today), independent
+    /// of the web UI's active model. None means "use the active model".
+    pub async fn surface_model_for_session(&self, session: &crate::storage::Session) -> Option<String> {
+        let source = session
+            .metadata
+            .get("source")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let cfg = self.config.read().await;
+        let discord_model = cfg
+            .discord
+            .as_ref()
+            .map(|discord| discord.model.as_str())
+            .unwrap_or_default();
+        surface_model_ref_for(source, discord_model)
+    }
+
     pub fn new(config: Config) -> Result<Arc<Self>> {
         let startup_profile = std::env::var("OSAGENT_STARTUP_PROFILE")
             .map(|v| {
@@ -547,6 +639,15 @@ impl AgentRuntime {
             }
         }
 
+        // Seed the model usage history with the route restored from config, so
+        // a model requested by name ("use sonnet") prefers the provider it was
+        // last run on even before the first manual switch.
+        if !config.default_model.is_empty() && !config.default_provider.is_empty() {
+            if let Err(e) = storage.record_model_usage(&config.default_model, &config.default_provider) {
+                warn!("Failed to seed model usage history: {}", e);
+            }
+        }
+
         let session_manager = Arc::new(SessionManager::new((*storage).clone()));
         let checkpoint_manager = Arc::new(CheckpointManager::new((*storage).clone()));
         let memory_store = Arc::new(MemoryStore::new(
@@ -599,14 +700,20 @@ impl AgentRuntime {
         };
         log_phase("skills_init", &mut phase_start);
 
+        // The subagent manager shares the runtime's config handle so settings
+        // changes (per-type model overrides, depth limits, timeouts) apply
+        // without a restart, and it gets the model catalog so a model asked
+        // for by name ("sonnet") can be resolved to a provider.
+        let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
         let mut subagent_manager = SubagentManager::new(
             storage.clone(),
             Arc::new(event_bus.clone()),
             session_manager.clone(),
-            Arc::new(tokio::sync::RwLock::new(config.clone())),
+            shared_config.clone(),
             PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string()),
         );
         subagent_manager.set_shared_provider(provider.clone());
+        subagent_manager.set_catalog(catalog.clone());
         let subagent_manager = Arc::new(subagent_manager);
 
         let mut tool_registry_instance = ToolRegistry::with_full(
@@ -619,6 +726,10 @@ impl AgentRuntime {
             Some(decision_memory.clone()),
             Arc::new(FileReadCache::with_default_capacity()),
         )?;
+        // Built before the runtime Arc exists so the tool can share the
+        // handle; the runtime back-reference is attached after `Arc::new`.
+        let github_engine = Arc::new(crate::github::GithubEngine::new(storage.clone()));
+        tool_registry_instance.register_github(github_engine.clone());
         log_phase("tool_registry_init", &mut phase_start);
 
         let workspace_root = PathBuf::from(
@@ -724,10 +835,11 @@ impl AgentRuntime {
         }
 
         let runtime = Arc::new(Self {
-            config: Arc::new(tokio::sync::RwLock::new(config)),
+            config: shared_config,
             agent_settings,
             provider: Arc::new(tokio::sync::RwLock::new(provider)),
             providers: Arc::new(tokio::sync::RwLock::new(provider_instances)),
+            surface_provider_cache: Arc::new(DashMap::new()),
             catalog,
             catalog_refresh_at: std::sync::atomic::AtomicU64::new(0),
             session_manager,
@@ -756,9 +868,11 @@ impl AgentRuntime {
             shutdown_tx: Arc::new(watch::channel(false).0),
             restart_tx: Arc::new(std::sync::Mutex::new(None)),
             scheduler,
+            github: github_engine.clone(),
             run_prompt_rx: tokio::sync::Mutex::new(Some(run_prompt_rx)),
         });
         let _ = runtime.self_arc.set(std::sync::Arc::downgrade(&runtime));
+        github_engine.attach_runtime(&runtime);
 
         // Crash recovery: tasks still marked `running` belong to a previous
         // process. Fail them (leaving notified_at NULL) so the parent is told
@@ -891,6 +1005,11 @@ impl AgentRuntime {
         self.subagent_manager.clone()
     }
 
+    /// Shared GitHub integration handle (tool backend, reviews, poller).
+    pub fn github(&self) -> Arc<crate::github::GithubEngine> {
+        self.github.clone()
+    }
+
     pub async fn get_config(&self) -> Config {
         self.config.read().await.clone()
     }
@@ -958,6 +1077,9 @@ impl AgentRuntime {
             config.inherit_config_path(&existing);
         }
         config.ensure_workspace_defaults();
+        // Provider entries may have changed (keys, endpoints, models), so
+        // every cached "provider:model" ephemeral provider is stale.
+        self.surface_provider_cache.clear();
         {
             let mut agent_settings = self.agent_settings.write().await;
             *agent_settings = config.agent.clone();
@@ -1000,6 +1122,45 @@ impl AgentRuntime {
 
     pub fn set_restart_sender(&self, sender: tokio::sync::oneshot::Sender<()>) {
         *self.restart_tx.lock().unwrap() = Some(sender);
+    }
+}
+
+/// The model a session's surface is pinned to: only Discord has one today.
+/// Kept as a pure function so the rule is testable without a runtime.
+fn surface_model_ref_for(source: &str, discord_model: &str) -> Option<String> {
+    match source {
+        "discord" => {
+            let model = discord_model.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod surface_model_tests {
+    use super::surface_model_ref_for;
+
+    #[test]
+    fn discord_sessions_use_the_discord_model_when_set() {
+        assert_eq!(
+            surface_model_ref_for("discord", "opencode-go:mimo-v2.6-flash"),
+            Some("opencode-go:mimo-v2.6-flash".to_string())
+        );
+        assert_eq!(
+            surface_model_ref_for("discord", "  bare-model  "),
+            Some("bare-model".to_string())
+        );
+        // Empty keeps the active model.
+        assert_eq!(surface_model_ref_for("discord", ""), None);
+        assert_eq!(surface_model_ref_for("discord", "   "), None);
+        // Other surfaces are untouched.
+        assert_eq!(surface_model_ref_for("", "x"), None);
+        assert_eq!(surface_model_ref_for("scheduler", "x"), None);
     }
 }
 

@@ -185,9 +185,16 @@ impl OpenAICompatibleProvider {
         config: &ProviderConfig,
         session_id: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let is_opencode_go = config.provider_type.eq_ignore_ascii_case("opencode-go")
-            || config.base_url.contains("opencode.ai/zen/go");
-        if !is_opencode_go {
+        // OpenCode Go documents three client requirements: coding-agent
+        // traffic, a self-identifying user agent, and a stable
+        // `x-opencode-session` per conversation. Provider ids come from the
+        // models.dev catalog ("opencode-go", "opencode"); a hand-written
+        // provider on the same host still gets the headers, since the session
+        // and user agent are what the gateway looks at.
+        let provider_type = config.provider_type.to_ascii_lowercase();
+        let is_opencode = matches!(provider_type.as_str(), "opencode-go" | "opencode")
+            || config.base_url.contains("opencode.ai");
+        if !is_opencode {
             return request;
         }
 
@@ -3013,6 +3020,56 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(concat!("osagent/", env!("CARGO_PKG_VERSION")))
         );
+    }
+
+    #[test]
+    fn opencode_go_headers_follow_the_documented_base_url_and_skip_other_providers() {
+        // models.dev points opencode-go at the documented /inference/go base,
+        // while older configs used /zen/go; both must get the headers.
+        for (provider_type, base_url) in [
+            ("opencode-go", "https://opencode.ai/inference/go/openai/v1"),
+            ("opencode-go", "https://opencode.ai/zen/go/v1"),
+            // A hand-written provider on the same host: the gateway only
+            // looks at the session and the user agent.
+            ("custom", "https://opencode.ai/inference/go/openai/v1"),
+            ("opencode", "https://opencode.ai/zen/v1"),
+        ] {
+            let config = ProviderConfig {
+                provider_type: provider_type.to_string(),
+                base_url: base_url.to_string(),
+                ..ProviderConfig::default()
+            };
+            let request = OpenAICompatibleProvider::apply_conversation_headers(
+                reqwest::Client::new().post(format!("{base_url}/chat/completions")),
+                &config,
+                Some("session-123"),
+            )
+            .build()
+            .expect("request");
+            assert_eq!(
+                request
+                    .headers()
+                    .get("x-opencode-session")
+                    .and_then(|value| value.to_str().ok()),
+                Some("session-123"),
+                "{provider_type} at {base_url} must send the session id"
+            );
+        }
+
+        let other = ProviderConfig {
+            provider_type: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            ..ProviderConfig::default()
+        };
+        let request = OpenAICompatibleProvider::apply_conversation_headers(
+            reqwest::Client::new().post("https://api.openai.com/v1/chat/completions"),
+            &other,
+            Some("session-123"),
+        )
+        .build()
+        .expect("request");
+        assert!(request.headers().get("x-opencode-session").is_none());
+        assert!(request.headers().get(reqwest::header::USER_AGENT).is_none());
     }
 
     #[test]

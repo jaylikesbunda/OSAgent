@@ -28,6 +28,8 @@ pub(super) struct Turn {
     pub user_id: u64,
     pub prompt: String,
     pub community: bool,
+    /// Images that rode the Discord message (or the message it replies to).
+    pub images: Vec<crate::storage::MessageImage>,
 }
 
 #[derive(Default)]
@@ -250,7 +252,16 @@ impl Handler {
 
     /// Footer shown under every response: what answered, and how much it took.
     async fn turn_footer(&self, session_id: &str, elapsed: Duration, state: &TurnState) -> String {
-        let provider = self.agent.active_provider().await;
+        // Show the model that actually answered: the Discord default when
+        // one is configured, otherwise the active model.
+        let surface_ref = match self.agent.get_session(session_id).await {
+            Ok(Some(session)) => self.agent.surface_model_for_session(&session).await,
+            _ => None,
+        };
+        let provider = match surface_ref {
+            Some(reference) => self.agent.provider_for_ref(&reference).await,
+            None => self.agent.active_provider().await,
+        };
         let model = provider.current_model().await;
         let provider_id = provider.provider_type().to_string();
 
@@ -278,6 +289,7 @@ impl Handler {
             user_id,
             prompt,
             community,
+            images,
         } = turn;
 
         // Route agent-initiated questions for this session back to this channel.
@@ -354,8 +366,22 @@ impl Handler {
 
         let result = tokio::time::timeout(
             Duration::from_secs(TURN_TIMEOUT_SECS),
-            self.agent
-                .process_message(&session_id, prompt, format!("discord:{user_id}")),
+            async {
+                if images.is_empty() {
+                    self.agent
+                        .process_message(&session_id, prompt, format!("discord:{user_id}"))
+                        .await
+                } else {
+                    self.agent
+                        .process_message_with_images(
+                            &session_id,
+                            prompt,
+                            format!("discord:{user_id}"),
+                            images,
+                        )
+                        .await
+                }
+            },
         )
         .await;
 

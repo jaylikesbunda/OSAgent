@@ -39,6 +39,11 @@ or `general` (full tool access) subagents. Depth is capped by
 (`subagent_task_max_retries`), and background completions can auto-resume the
 parent (`subagent_auto_resume`, capped by `subagent_auto_resume_max_turns`).
 
+Pass `model` to run one subagent on a specific model — `"provider_id:model_id"`,
+a model id, or a friendly name like `"sonnet"`. A name resolves to the provider
+that model was last used on; if it is still ambiguous the call returns the
+candidates so the agent asks which provider to use.
+
 ## Related tasks
 
 - [Tool overview]({{< relref "overview.md" >}})

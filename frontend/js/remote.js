@@ -39,11 +39,11 @@ OSA.Remote = {
             } else if (data.status === 'error') {
                 statusEl.textContent = `Tunnel error: ${data.error || 'unknown error'}`;
             } else if (data.status === 'installing') {
-                statusEl.textContent = 'Downloading cloudflared (one time)…';
+                statusEl.textContent = 'Downloading cloudflared (one time)';
             } else if (data.enabled) {
                 statusEl.textContent = data.status === 'running'
                     ? 'Tunnel running.'
-                    : 'Starting tunnel…';
+                    : 'Starting tunnel';
             } else {
                 statusEl.textContent = 'Disabled. Your instance is only reachable on this machine.';
             }
@@ -114,19 +114,38 @@ OSA.Remote = {
     renderQr(svg) {
         const host = document.getElementById('remote-qr');
         if (!host) return;
+        if (!svg) {
+            this.clearQr();
+            return;
+        }
         // The SVG is produced by the server from the encoder matrix, not user
         // input, so it is safe to inject.
-        host.innerHTML = svg || '';
+        host.innerHTML = svg;
+        host.classList.remove('hidden');
     },
 
     clearQr() {
         const host = document.getElementById('remote-qr');
-        if (host) host.innerHTML = '';
+        if (host) {
+            host.innerHTML = '';
+            host.classList.add('hidden');
+        }
         const expiry = document.getElementById('remote-pairing-expiry');
         if (expiry) expiry.textContent = '';
         if (this._countdownTimer) {
             clearInterval(this._countdownTimer);
             this._countdownTimer = null;
+        }
+    },
+
+    /// Generate a code when the pane opens on a running tunnel and none
+    /// is showing, so pairing needs no extra click.
+    async ensureCode() {
+        const host = document.getElementById('remote-qr');
+        const showing = host && !host.classList.contains('hidden') && host.innerHTML.trim() !== '';
+        if (showing) return;
+        if (this._lastStatus && this._lastStatus.enabled && this._lastStatus.status === 'running') {
+            await this.rotate();
         }
     },
 
@@ -137,7 +156,7 @@ OSA.Remote = {
         const tick = () => {
             if (!expiry) return;
             if (remaining <= 0) {
-                expiry.textContent = 'Code expired — generate a new one.';
+                expiry.textContent = 'Code expired. Generate a new one.';
                 clearInterval(this._countdownTimer);
                 this._countdownTimer = null;
                 return;

@@ -1239,72 +1239,125 @@ OSA.buildTranscriptUnits = function() {
     return units;
 };
 
-OSA.unitSignature = function(unit) {
-    const base = unit.items.map(function(item) {
-        if (item.kind === 'message') {
-            let sigContent = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
-            sigContent = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(sigContent) : sigContent;
-            return [
-                item.role,
-                sigContent,
-                item.thinking || '',
-                item.timestamp || '',
-                item.images.length + '/' + item.attachments.length,
-                item.streaming ? 'S' : '',
-                item.thinkingStreaming ? 'T' : '',
-                item.durationMs || '',
-                item.tps || '',
-                item.cacheReported ? '1' : '',
-                item.cacheHitRate || '',
-                item.turnCacheHitRate || '',
-                OSA.getShowThinkingBlocks() ? '1' : '0',
-            ].join('\u0002');
-        }
-        if (item.kind === 'tool') {
-            // Tool metadata is load-bearing: the diagram viewer, the diff
-            // renderer, and the read_file preview payload all read from it,
-            // and it only arrives with the completion event. Folding it into
-            // the signature is what makes the card re-patch when a completion
-            // lands after the start event.
-            return [
-                item.toolName,
-                item.status,
-                item.completed ? '1' : '0',
-                item.output || '',
-                item.title || '',
-                item.prelude || '',
-                item.metadata ? JSON.stringify(item.metadata, function(key, value) {
-                    // Screenshots are large base64 images; their size is
-                    // enough for change detection.
-                    return key === 'data_url' && typeof value === 'string' ? value.length : value;
-                }) : '',
-            ].join('\u0002');
-        }
-        if (item.kind === 'subagent') {
-            return [
-                item.status, item.isRunning ? 'R' : '', item.toolCount,
-                item.result, item.currentTool, item.retryText,
-                item.tools.map(function(t) { return t.name + ':' + t.status + 'x' + (t.count || 1); }).join(','),
-                item.durationMs || '', item.contextState ? JSON.stringify(item.contextState) : '',
-            ].join('\u0002');
-        }
-        if (item.kind === 'compaction') {
-            return ['compaction', item.content || '', item.timestamp || ''].join('\u0002');
-        }
-        return JSON.stringify(item);
-    }).join('\u0001');
+// Signature building runs for every unit on every render tick (and the
+// transcript re-renders on every streamed chunk). The expensive parts are
+// the regex passes that strip speak/tool-call markup from message content
+// and the JSON serialization of tool metadata (which can embed whole diff
+// bodies or file payloads) and subagent context state. Those are derived
+// once per change and cached per item, so the steady-state cost is a list
+// of references compared element-wise instead of rebuilt strings.
+OSA._sigItemCache = new WeakMap();
 
+OSA.sigItemCacheFor = function(item) {
+    let cache = OSA._sigItemCache.get(item);
+    if (!cache) {
+        cache = { content: null, stripped: '', metadata: null, metaStr: '', contextState: null, contextStateStr: '' };
+        OSA._sigItemCache.set(item, cache);
+    }
+    return cache;
+};
+
+/// Per-item signature parts: primitives and reused string references. Two
+/// items with the same visible state produce equal parts, and unchanged
+/// strings compare by pointer fast path in `signaturePartsEqual`.
+OSA.unitSignaturePartsForItem = function(item) {
+    const cache = OSA.sigItemCacheFor(item);
+    if (item.kind === 'message') {
+        if (cache.content !== item.content) {
+            cache.content = item.content;
+            let stripped = OSA.stripSpeakBlock ? OSA.stripSpeakBlock(item.content || '') : (item.content || '');
+            stripped = OSA.stripToolCallMarkup ? OSA.stripToolCallMarkup(stripped) : stripped;
+            cache.stripped = stripped;
+        }
+        return [
+            'm', item.role, cache.stripped,
+            item.thinking || '',
+            item.timestamp || '',
+            item.images.length + '/' + item.attachments.length,
+            item.streaming ? 'S' : '',
+            item.thinkingStreaming ? 'T' : '',
+            item.durationMs || '',
+            item.tps || '',
+            item.cacheReported ? '1' : '',
+            item.cacheHitRate || '',
+            item.turnCacheHitRate || '',
+            OSA.getShowThinkingBlocks() ? '1' : '0',
+        ];
+    }
+    if (item.kind === 'tool') {
+        // Tool metadata is load-bearing: the diagram viewer, the diff
+        // renderer, and the read_file preview payload all read from it,
+        // and it only arrives with the completion event. Folding it into
+        // the signature is what makes the card re-patch when a completion
+        // lands after the start event. Metadata objects are replaced, never
+        // mutated, so identity is a safe cache key.
+        if (cache.metadata !== item.metadata) {
+            cache.metadata = item.metadata;
+            cache.metaStr = item.metadata ? JSON.stringify(item.metadata, function(key, value) {
+                // Screenshots are large base64 images; their size is
+                // enough for change detection.
+                return key === 'data_url' && typeof value === 'string' ? value.length : value;
+            }) : '';
+        }
+        return [
+            't', item.toolName, item.status, item.completed ? '1' : '0',
+            item.output || '', item.title || '', item.prelude || '', cache.metaStr,
+        ];
+    }
+    if (item.kind === 'subagent') {
+        if (cache.contextState !== item.contextState) {
+            cache.contextState = item.contextState;
+            cache.contextStateStr = item.contextState ? JSON.stringify(item.contextState) : '';
+        }
+        return [
+            's', item.status, item.isRunning ? 'R' : '', item.toolCount,
+            item.result, item.currentTool, item.retryText,
+            item.tools.map(function(t) { return t.name + ':' + t.status + 'x' + (t.count || 1); }).join(','),
+            item.durationMs || '', cache.contextStateStr,
+        ];
+    }
+    if (item.kind === 'compaction') {
+        return ['c', item.content || '', item.timestamp || ''];
+    }
+    return ['o', JSON.stringify(item)];
+};
+
+OSA.unitSignatureParts = function(unit) {
+    const parts = [];
+    for (let i = 0; i < unit.items.length; i++) {
+        const itemParts = OSA.unitSignaturePartsForItem(unit.items[i]);
+        for (let j = 0; j < itemParts.length; j++) parts.push(itemParts[j]);
+    }
     if (unit.entries && unit.entries.length) {
-        return base + '\u0001E:' + unit.entries.map(function(entry) {
-            return entry.kind === 'reasoning'
-                ? 'R:' + (entry.text || '')
-                : 'T:' + ((entry.item && (entry.item.callId || entry.item.key)) || '');
-        }).join('\u0002');
+        parts.push('E');
+        for (let i = 0; i < unit.entries.length; i++) {
+            const entry = unit.entries[i];
+            if (entry.kind === 'reasoning') {
+                parts.push('R', entry.text || '');
+            } else {
+                parts.push('T', (entry.item && (entry.item.callId || entry.item.key)) || '');
+            }
+        }
+    } else if (unit.reasoning && unit.reasoning.length) {
+        parts.push('R2');
+        for (let i = 0; i < unit.reasoning.length; i++) parts.push(unit.reasoning[i].text || '');
     }
-    if (unit.reasoning && unit.reasoning.length) {
-        return base + '\u0001R:' + unit.reasoning.map(function(r) { return r.text || ''; }).join('\u0002');
+    return parts;
+};
+
+OSA.signaturePartsEqual = function(a, b) {
+    if (a === b) return true;
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
     }
-    return base;
+    return true;
+};
+
+/// Joined signature kept for tests and one-off callers; the render path
+/// compares parts directly to avoid building these strings per frame.
+OSA.unitSignature = function(unit) {
+    return OSA.unitSignatureParts(unit).join('\u0002');
 };
 
 OSA.unitHasLiveStream = function(unit) {
@@ -1806,13 +1859,18 @@ OSA.ensureUnitNode = function(view, unit) {
     return wrapper;
 };
 
+// Wrapper -> last signature parts array. Weak so closing sessions releases
+// even the retained references. Replaces the old dataset.sig attribute,
+// which duplicated large signatures into the DOM.
+OSA._unitSigCache = new WeakMap();
+
 OSA.patchUnit = function(wrapper, unit) {
     if (!OSA.unitHasLiveStream(unit)) {
-        const sig = OSA.unitSignature(unit);
-        if (wrapper.dataset.sig === sig) return;
-        wrapper.dataset.sig = sig;
-    } else if (wrapper.dataset.sig !== 'live') {
-        wrapper.dataset.sig = 'live';
+        const parts = OSA.unitSignatureParts(unit);
+        if (OSA.signaturePartsEqual(OSA._unitSigCache.get(wrapper), parts)) return;
+        OSA._unitSigCache.set(wrapper, parts);
+    } else {
+        OSA._unitSigCache.delete(wrapper);
     }
 
     switch (unit.type) {

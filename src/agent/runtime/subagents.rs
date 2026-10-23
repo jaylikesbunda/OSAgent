@@ -74,6 +74,7 @@ impl AgentRuntime {
                 continuation,
                 session.agent_type,
                 background,
+                None,
             )
             .await
     }

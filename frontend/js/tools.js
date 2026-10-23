@@ -1005,9 +1005,26 @@ OSA.renderToolDiff = function(outputEl, toolEvent) {
 OSA.previewReadToolOutput = function(toolEvent) {
     if (!toolEvent || toolEvent.tool_name !== 'read_file' || !toolEvent.success) return;
     if (typeof OSA.openFilePreview !== 'function') return;
+    // Only keep an already-open preview fresh: forcing the panel open on
+    // every read_file hijacked the layout mid-stream, and re-rendering a
+    // large file (markdown parse / per-character highlighting) blocked the
+    // main thread at the worst moment. The tool card's own preview button
+    // remains the way to open it on demand.
+    if (!OSA._previewState || !OSA._previewState.open) return;
     const payload = OSA.toolEventPreviewPayload(toolEvent);
     if (!payload || !payload.path) return;
-    OSA.openFilePreview(payload.path, payload.content || '');
+    if ((payload.content || '').length > 400_000) return;
+    const render = function() {
+        // The panel may have been closed between scheduling and running.
+        if (OSA._previewState && OSA._previewState.open) {
+            OSA.openFilePreview(payload.path, payload.content || '');
+        }
+    };
+    if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(render, { timeout: 500 });
+    } else {
+        setTimeout(render, 0);
+    }
 };
 
 OSA.extractReadFileContent = function(rawOutput) {
@@ -1869,6 +1886,9 @@ OSA.startToolSync = function() {
     if (!session || !session.id) return;
 
     OSA._toolSyncInterval = setInterval(() => {
+        // A hidden tab gets no visual benefit from the sync; the first
+        // visible tick catches up.
+        if (document.hidden) return;
         OSA.syncToolsFromBackend();
     }, 2500);
 };

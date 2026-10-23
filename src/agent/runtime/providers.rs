@@ -39,6 +39,12 @@ impl AgentRuntime {
         cfg.set_active_provider_model(&provider_id, &model);
         drop(cfg);
 
+        // Remember which provider this model was last run on, so a model asked
+        // for by name ("use sonnet") resolves to the provider the user used.
+        if let Err(e) = self.storage.record_model_usage(&model, &provider_id) {
+            tracing::warn!("Failed to record model usage: {}", e);
+        }
+
         let mut active_provider = self.provider.write().await;
         *active_provider = new_provider;
         drop(active_provider);
@@ -125,6 +131,9 @@ impl AgentRuntime {
             cfg.default_model = provider_config.model.clone();
         }
         drop(cfg);
+        // A new provider entry can satisfy previously unresolvable
+        // "provider:model" references.
+        self.surface_provider_cache.clear();
 
         if should_activate {
             let active = self
@@ -145,6 +154,8 @@ impl AgentRuntime {
     }
 
     pub async fn remove_provider(&self, provider_id: String) -> Result<()> {
+        // Cached surface providers built from this entry are stale.
+        self.surface_provider_cache.clear();
         let mut providers = self.providers.write().await;
         let was_active = providers.iter().any(|(id, _)| id == &provider_id);
         if providers.len() <= 1 && was_active {

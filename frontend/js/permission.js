@@ -13,6 +13,10 @@ OSA.startPermissionPolling = function() {
 
 OSA.refreshPermissionPrompts = async function() {
     if (!OSA.getToken()) return;
+    // Nothing to show while the tab is hidden; the next visible tick picks
+    // up any prompt. This runs once a second, so skipping hidden time also
+    // keeps the backend quiet.
+    if (document.hidden) return;
     try {
         const res = await OSA.fetchWithAuth('/api/permissions');
         if (!res.ok) return;

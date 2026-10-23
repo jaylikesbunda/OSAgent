@@ -28,34 +28,233 @@ OSA.applyThinkingStateToSelect = function(selectId, state, selectedValue) {
     if (selectId === 'header-thinking-level') OSA.renderThinkingMenu();
 };
 
-// The composer's thinking control is a custom popover in the same style as the
-// model dropdown. The native select stays hidden as the source of truth, so
-// every existing read and write of its value keeps working.
+// The composer's thinking control is a slim slider over the levels the active
+// model publishes ("auto", "off", "minimal", "low", "medium", "high", ...),
+// in the order the reasoning API returns them. The hidden select stays the
+// source of truth: the slider only drives it, so every existing read/write of
+// the thinking level keeps working.
 OSA.renderThinkingMenu = function() {
     const select = document.getElementById('header-thinking-level');
-    const list = document.getElementById('header-thinking-list');
+    const slider = document.getElementById('header-thinking-slider');
+    const levelLabel = document.getElementById('header-thinking-level-name');
+    const modelLabel = document.getElementById('header-thinking-model-name');
+    const stops = document.getElementById('header-thinking-stops');
+    if (!select || !slider) return;
+    OSA.bindThinkingSlider();
+
+    const options = Array.from(select.options);
+    const index = Math.max(0, options.findIndex(function(option) { return option.value === select.value; }));
+    const current = options[index];
+
+    if (levelLabel) {
+        levelLabel.textContent = current ? current.textContent : OSA.labelThinkingOption(select.value);
+    }
+    if (modelLabel) {
+        const provider = (OSA.providerCatalog && OSA.providerCatalog.providers || []).find(function(item) {
+            return item.id === OSA.currentModelProviderId;
+        });
+        const model = OSA.currentModelId || '';
+        modelLabel.textContent = provider && model
+            ? provider.name + ' · ' + model
+            : model;
+        modelLabel.classList.toggle('hidden', !modelLabel.textContent);
+    }
+
     const label = document.getElementById('header-thinking-label');
-    if (!select || !list) return;
-    const current = select.value;
-    list.innerHTML = Array.from(select.options).map(function(option) {
-        const active = option.value === current;
-        return '<div class="model-option' + (active ? ' active' : '') + '" role="option" tabindex="-1" aria-selected="' + (active ? 'true' : 'false') + '"'
-            + ' data-value="' + OSA.escapeAttr(option.value) + '" onclick="OSA.selectThinkingOption(this.dataset.value)">'
-            + '<div class="model-option-info"><span class="model-option-name">' + OSA.escapeHtml(option.textContent) + '</span></div>'
-            + '</div>';
-    }).join('');
     if (label) {
-        const selected = Array.from(select.options).find(function(option) { return option.value === current; });
-        label.textContent = selected ? selected.textContent : OSA.labelThinkingOption(current);
+        label.textContent = current ? current.textContent : OSA.labelThinkingOption(select.value);
+    }
+
+    // Stops only change when the option list changes (i.e. on a model switch),
+    // so rebuilding them on every drag would be wasted work.
+    const signature = options.map(function(option) { return option.value; }).join('|');
+    if (stops && stops._osaSignature !== signature) {
+        stops.innerHTML = options.map(function(option, stopIndex) {
+            const percent = options.length > 1 ? (stopIndex / (options.length - 1)) * 100 : 0;
+            return '<span class="thinking-slider-stop" style="left:' + percent + '%"></span>';
+        }).join('');
+        stops._osaSignature = signature;
+    }
+
+    slider.classList.toggle('is-single', options.length <= 1);
+    slider.setAttribute('aria-valuemin', '0');
+    slider.setAttribute('aria-valuemax', String(Math.max(0, options.length - 1)));
+    slider.setAttribute('aria-valuenow', String(index));
+    slider.setAttribute('aria-valuetext', current ? current.textContent : '');
+    if (options.length <= 1) slider.setAttribute('tabindex', '-1');
+    else slider.setAttribute('tabindex', '0');
+
+    OSA.moveThinkingSlider(index);
+};
+
+// Position the fill and thumb for an option index without touching the select.
+OSA.moveThinkingSlider = function(index) {
+    const select = document.getElementById('header-thinking-level');
+    if (!select) return;
+    const count = select.options.length;
+    const clamped = Math.max(0, Math.min(index, Math.max(0, count - 1)));
+    const percent = count > 1 ? (clamped / (count - 1)) * 100 : 0;
+    const fill = document.getElementById('header-thinking-fill');
+    const thumb = document.getElementById('header-thinking-thumb');
+    const option = select.options[clamped];
+    if (fill) {
+        // The capsule starts one knob radius before the travel range; CSS owns
+        // that inset so the knob always fits inside the track.
+        fill.style.width = 'calc(' + percent + '% + var(--thinking-pill-inset))';
+    }
+    if (thumb) thumb.style.left = percent + '%';
+
+    const stops = document.querySelectorAll('#header-thinking-stops .thinking-slider-stop');
+    for (let i = 0; i < stops.length; i++) {
+        stops[i].classList.toggle('is-current', i === clamped);
+    }
+
+    const slider = document.getElementById('header-thinking-slider');
+    const levelLabel = document.getElementById('header-thinking-level-name');
+    if (option) {
+        if (levelLabel && levelLabel.textContent !== option.textContent) {
+            levelLabel.textContent = option.textContent;
+            // Restart the bump so every level change reads as a state change.
+            levelLabel.classList.remove('is-bump');
+            void levelLabel.offsetWidth;
+            levelLabel.classList.add('is-bump');
+        }
+        if (slider) {
+            slider.setAttribute('aria-valuenow', String(clamped));
+            slider.setAttribute('aria-valuetext', option.textContent);
+        }
     }
 };
+
+// The nearest option to a pointer position inside a known track rect.
+OSA.thinkingIndexFromRect = function(clientX, rect) {
+    const select = document.getElementById('header-thinking-level');
+    if (!select || !rect) return -1;
+    const count = select.options.length;
+    if (count <= 1) return 0;
+    if (rect.width <= 0) return -1;
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return Math.round(ratio * (count - 1));
+};
+
+// The nearest option to a pointer position on the track.
+OSA.thinkingIndexFromPointer = function(clientX) {
+    const track = document.querySelector('#header-thinking-slider .thinking-slider-track');
+    if (!track) return -1;
+    return OSA.thinkingIndexFromRect(clientX, track.getBoundingClientRect());
+};
+
+// Commit an option index through the hidden select, which is what persists it.
+OSA.commitThinkingIndex = function(index) {
+    const select = document.getElementById('header-thinking-level');
+    if (!select) return;
+    const option = select.options[index];
+    if (!option) return;
+    if (select.value === option.value) {
+        OSA.moveThinkingSlider(index);
+        return;
+    }
+    select.value = option.value;
+    // Fire the change so the existing save path (handleQuickThinkingChange) runs.
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+};
+
+// Pointer and keyboard handling for the slider. Bound once, at load.
+OSA.bindThinkingSlider = function() {
+    const slider = document.getElementById('header-thinking-slider');
+    if (!slider || slider._osaBound) return;
+    slider._osaBound = true;
+
+    let dragging = false;
+    let pendingIndex = -1;
+    // Cached for the duration of a drag: measuring on every pointermove forces
+    // a layout read between frames and makes the knob stutter.
+    let dragRect = null;
+
+    const preview = function(index) {
+        if (index < 0 || index === pendingIndex) return;
+        pendingIndex = index;
+        OSA.moveThinkingSlider(index);
+    };
+
+    slider.addEventListener('pointerdown', function(event) {
+        if (event.button !== undefined && event.button !== 0) return;
+        const track = slider.querySelector('.thinking-slider-track');
+        if (!track) return;
+        const rect = track.getBoundingClientRect();
+        const index = OSA.thinkingIndexFromRect(event.clientX, rect);
+        if (index < 0) return;
+        event.preventDefault();
+        dragging = true;
+        dragRect = rect;
+        pendingIndex = index;
+        slider.classList.add('is-dragging');
+        OSA.moveThinkingSlider(index);
+        try { slider.setPointerCapture(event.pointerId); } catch (error) { /* ignore */ }
+    });
+
+    slider.addEventListener('pointermove', function(event) {
+        if (!dragging) return;
+        preview(OSA.thinkingIndexFromRect(event.clientX, dragRect));
+    });
+
+    const finish = function(event) {
+        if (!dragging) return;
+        dragging = false;
+        dragRect = null;
+        slider.classList.remove('is-dragging');
+        try { slider.releasePointerCapture(event.pointerId); } catch (error) { /* ignore */ }
+        if (pendingIndex >= 0) OSA.commitThinkingIndex(pendingIndex);
+        pendingIndex = -1;
+    };
+    slider.addEventListener('pointerup', finish);
+    slider.addEventListener('pointercancel', finish);
+
+    slider.addEventListener('keydown', function(event) {
+        const select = document.getElementById('header-thinking-level');
+        if (!select) return;
+        const count = select.options.length;
+        if (count <= 1) return;
+        let index = Math.max(0, Array.from(select.options).findIndex(function(option) {
+            return option.value === select.value;
+        }));
+        switch (event.key) {
+            case 'ArrowRight':
+            case 'ArrowDown':
+                index = Math.min(count - 1, index + 1);
+                break;
+            case 'ArrowLeft':
+            case 'ArrowUp':
+                index = Math.max(0, index - 1);
+                break;
+            case 'Home':
+                index = 0;
+                break;
+            case 'End':
+                index = count - 1;
+                break;
+            default:
+                return;
+        }
+        event.preventDefault();
+        // Keep Escape/arrow handling from also closing the settings modal.
+        event.stopPropagation();
+        OSA.moveThinkingSlider(index);
+        OSA.commitThinkingIndex(index);
+    });
+};
+
+// The composer markup is present when this deferred script runs; binding here
+// keeps the slider live even before the first render.
+OSA.bindThinkingSlider();
 
 OSA.positionThinkingMenu = function() {
     const menu = document.getElementById('header-thinking-menu');
     const trigger = document.getElementById('header-thinking-trigger');
     if (!menu || !trigger) return;
     const rect = trigger.getBoundingClientRect();
-    const width = Math.min(220, window.innerWidth - 16);
+    // Wide enough for the level name, the model name and the slider stops.
+    const width = Math.min(296, window.innerWidth - 16);
     const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
     menu.style.width = width + 'px';
     menu.style.left = left + 'px';
@@ -73,6 +272,9 @@ OSA.openThinkingMenu = function() {
     menu.classList.remove('hidden');
     trigger.setAttribute('aria-expanded', 'true');
     OSA.positionThinkingMenu();
+    // Keyboard users land straight on the slider.
+    const slider = document.getElementById('header-thinking-slider');
+    if (slider && slider.getAttribute('tabindex') !== '-1') slider.focus();
     document.addEventListener('click', OSA._thinkingMenuOutside, true);
     document.addEventListener('keydown', OSA._thinkingMenuKeydown, true);
     window.addEventListener('resize', OSA.positionThinkingMenu);
@@ -98,16 +300,6 @@ OSA.toggleThinkingMenu = function() {
     } else {
         OSA.openThinkingMenu();
     }
-};
-
-OSA.selectThinkingOption = function(value) {
-    const select = document.getElementById('header-thinking-level');
-    OSA.closeThinkingMenu(true);
-    if (!select || select.value === value) return;
-    select.value = value;
-    // Fire the change so the existing save path (handleQuickThinkingChange) runs.
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    OSA.renderThinkingMenu();
 };
 
 OSA._thinkingMenuOutside = function(event) {
@@ -266,6 +458,9 @@ OSA.openSettings = async function() {
 };
 
 OSA.closeSettings = function() {
+    // A picker popover is anchored to the body, not to the modal, so it has to
+    // be dismissed explicitly or it would float over the closed page.
+    OSA.closeSettingsModelPickers?.();
     document.getElementById('settings-modal').classList.add('hidden');
     document.getElementById('settings-error').classList.add('hidden');
     // Update status is scoped to the open Updates pane. In particular, do not
@@ -341,7 +536,6 @@ OSA.loadSettings = async function() {
         document.getElementById('decision-suggestions-group').classList.toggle('hidden', config.agent?.decision_memory_enabled === false);
         const decisionMemEnabled = config.agent?.decision_memory_enabled !== false;
         document.getElementById('setting-decision-memory-enabled').checked = decisionMemEnabled;
-        OSA.updateMemoryHeaderStatus();
         document.getElementById('setting-decision-memory-file').value = config.agent?.decision_memory_file || '~/.osagent/decision_memories.json';
         document.getElementById('setting-decision-capture-mode').value = config.agent?.decision_capture_mode || 'review';
         document.getElementById('decision-memory-file-field').classList.toggle('hidden', !decisionMemEnabled);
@@ -396,6 +590,18 @@ OSA.loadSettings = async function() {
         await OSA.loadDiscordBotStatus();
         await OSA.renderDiscordActiveModel();
         await OSA.renderSettingsProviders();
+        // Per-surface model defaults. These use the same dropdown as the chat
+        // bar, so the provider groups and the search behave the same there.
+        const subagentModels = config.agent?.subagent_models || {};
+        OSA.initSettingsModelPickers();
+        OSA.setSettingsModelValue('setting-discord-model', config.discord?.model || '');
+        OSA.setSettingsModelValue('setting-subagent-model-general', subagentModels.general || '');
+        OSA.setSettingsModelValue('setting-subagent-model-explore', subagentModels.explore || '');
+        OSA.setSettingsModelValue('setting-subagent-model-verify', subagentModels.verify || '');
+        const smallRef = config.small_provider && config.small_model
+            ? `${config.small_provider}:${config.small_model}`
+            : (config.small_model || '');
+        OSA.setSettingsModelValue('setting-small-model', smallRef);
         OSA.loadDoctorStatus();
     } catch (error) {
         console.error('Failed to load settings:', error);
@@ -497,6 +703,7 @@ OSA.saveSettings = async function() {
         ...(newConfig.discord || {}),
         enabled: document.getElementById('setting-discord-enabled').checked,
         token: document.getElementById('setting-discord-token').value || '',
+        model: document.getElementById('setting-discord-model')?.value || '',
         community_mode: document.getElementById('setting-discord-community-mode').checked,
         allow_community_members: document.getElementById('setting-discord-allow-community-members').checked,
         community_context: document.getElementById('setting-discord-community-context').value || '',
@@ -551,6 +758,24 @@ OSA.saveSettings = async function() {
         custom_identity: customIdentity || null,
         custom_priorities: useCustomPriorities && customPriorities.length > 0 ? customPriorities : null
     };
+    // Per-surface model defaults (Settings -> Models). Discord runs turns
+    // on its own model, so picking a chat model in the composer never
+    // changes these.
+    const subagentModelPicks = {};
+    for (const agentType of ['general', 'explore', 'verify']) {
+        const picked = document.getElementById(`setting-subagent-model-${agentType}`)?.value || '';
+        if (picked) subagentModelPicks[agentType] = picked;
+    }
+    newConfig.agent.subagent_models = subagentModelPicks;
+    const smallRef = document.getElementById('setting-small-model')?.value || '';
+    const smallSplit = smallRef.indexOf(':');
+    if (smallRef && smallSplit > 0) {
+        newConfig.small_provider = smallRef.slice(0, smallSplit);
+        newConfig.small_model = smallRef.slice(smallSplit + 1);
+    } else {
+        newConfig.small_provider = '';
+        newConfig.small_model = smallRef;
+    }
     const previousVoice = OSA.normalizeVoiceConfig(newConfig.voice || {});
     newConfig.voice = OSA.normalizeVoiceConfig({
         ...previousVoice,
@@ -836,6 +1061,7 @@ OSA.onSherpaVoiceAction = async function() {
 };
 
 OSA.switchSettingsTab = async function(tabId) {
+    OSA.closeSettingsModelPickers?.();
     document.querySelectorAll('.settings-sidebar-item').forEach(item => {
         item.classList.toggle('active', item.dataset.tab === tabId);
     });
@@ -873,6 +1099,8 @@ OSA.switchSettingsTab = async function(tabId) {
         await OSA.loadDoctorStatus();
     } else if (tabId === 'skills') {
         await OSA.loadSkillsUI();
+    } else if (tabId === 'github') {
+        await OSA.loadGithubUI();
     } else if (tabId === 'browser') {
         await OSA.loadBrowserUI();
     } else if (tabId === 'mcp') {
@@ -883,7 +1111,10 @@ OSA.switchSettingsTab = async function(tabId) {
         // pane selected before the first config request has completed.
         await OSA.initUpdatesPane();
     } else if (tabId === 'pairing') {
-        if (OSA.Remote) await OSA.Remote.load();
+        if (OSA.Remote) {
+            await OSA.Remote.load();
+            await OSA.Remote.ensureCode();
+        }
         if (OSA.Devices) await OSA.Devices.load();
     }
 };
@@ -1665,31 +1896,11 @@ OSA.initTheme = function() {
     if (toolGroupSelect) toolGroupSelect.value = String(OSA.getToolGroupPreview());
 };
 
-OSA.updateMemoryHeaderStatus = function() {
-    const status = document.getElementById('memory-header-status');
-    if (!status) return;
-    const memoryEnabled = document.getElementById('setting-memory-enabled')?.checked === true;
-    const decisionEnabled = document.getElementById('setting-decision-memory-enabled')?.checked === true;
-    document.getElementById('memory-control-card')?.classList.toggle('is-disabled', !memoryEnabled);
-    document.getElementById('decision-control-card')?.classList.toggle('is-disabled', !decisionEnabled);
-    if (memoryEnabled && decisionEnabled) {
-        status.textContent = 'Memory active';
-        status.className = 'memory-header-status active';
-    } else if (memoryEnabled || decisionEnabled) {
-        status.textContent = decisionEnabled ? 'Decisions active' : 'Memory active';
-        status.className = 'memory-header-status partial';
-    } else {
-        status.textContent = 'Memory off';
-        status.className = 'memory-header-status';
-    }
-};
-
 OSA.onMemoryToggleChange = function() {
     const enabled = document.getElementById('setting-memory-enabled').checked;
     document.getElementById('memory-file-field').classList.toggle('hidden', !enabled);
     document.getElementById('memory-add-form').classList.toggle('hidden', !enabled);
     document.getElementById('memory-suggestions-group').classList.toggle('hidden', !enabled);
-    OSA.updateMemoryHeaderStatus();
     if (enabled) {
         OSA.loadMemories();
         OSA.loadMemorySuggestions();
@@ -1702,7 +1913,6 @@ OSA.onDecisionMemoryToggleChange = function() {
     document.getElementById('decision-memory-file-field').classList.toggle('hidden', !enabled);
     document.getElementById('decision-list-group').classList.toggle('hidden', !enabled);
     document.getElementById('decision-suggestions-group').classList.toggle('hidden', !enabled);
-    OSA.updateMemoryHeaderStatus();
     if (enabled) {
         OSA.loadDecisions();
         OSA.loadDecisionSuggestions();

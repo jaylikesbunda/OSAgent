@@ -71,6 +71,7 @@ OSA.Jobs = {
 
     async pollNotifications() {
         if (!OSA.getScheduledNotifications) return;
+        if (document.hidden) return;
         try {
             const stored = localStorage.getItem('osa-scheduled-notification-cursor');
             const cursor = stored === null ? null : Number(stored);

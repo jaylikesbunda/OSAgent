@@ -1,3 +1,4 @@
+use crate::agent::model_resolution::ModelResolution;
 use crate::agent::subagent_manager::SubagentManager;
 use crate::error::{OSAgentError, Result};
 use crate::tools::registry::{Tool, ToolResult};
@@ -30,7 +31,7 @@ impl Tool for SubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Manage a specialized subagent for complex multi-step tasks. action=run launches a new standalone session; action=status checks a prior task_id without changing it; action=resume continues a prior task_id with its full history. For run/resume, specify exactly what information the subagent should return. Set background=true to launch or resume asynchronously; completion is reported automatically."
+        "Manage a specialized subagent for complex multi-step tasks. action=run launches a new standalone session; action=status checks a prior task_id without changing it; action=resume continues a prior task_id with its full history. For run/resume, specify exactly what information the subagent should return. Set background=true to launch or resume asynchronously; completion is reported automatically. Pass model to run the subagent on a specific model: \"provider_id:model_id\", a model id, or a friendly name like \"sonnet\". A friendly name resolves to the provider it was last used on; if several providers still match, the call fails with the candidates so you can ask the user which provider to use (question tool) and retry with \"provider_id:model_id\"."
     }
 
     fn when_to_use(&self) -> &str {
@@ -79,6 +80,15 @@ impl Tool for SubagentTool {
                 }),
             },
             crate::tools::registry::ToolExample {
+                description: "Run a subagent on a specific model".to_string(),
+                input: json!({
+                    "description": "Review the payment flow",
+                    "prompt": "Review the payment flow for race conditions and report the highest-risk paths.",
+                    "subagent_type": "general",
+                    "model": "sonnet"
+                }),
+            },
+            crate::tools::registry::ToolExample {
                 description: "Check a background task".to_string(),
                 input: json!({
                     "action": "status",
@@ -109,6 +119,10 @@ impl Tool for SubagentTool {
                     "type": "string",
                     "description": "Type of specialized agent",
                     "enum": ["general", "explore", "verify"]
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model for this subagent. Accepts \"provider_id:model_id\", a model id, or a friendly name like \"sonnet\". When the name matches several providers the one you last used that model on wins; if it is still ambiguous the call returns the candidates so you can ask the user which provider to use (question tool) and retry with \"provider_id:model_id\"."
                 },
                 "background": {
                     "type": "boolean",
@@ -182,6 +196,38 @@ impl Tool for SubagentTool {
             .ok_or_else(|| OSAgentError::ToolExecution("Missing session_id".to_string()))?;
         let background = args["background"].as_bool().unwrap_or(false);
 
+        // A model requested for this run. A friendly name ("sonnet") is
+        // resolved against the model catalog, preferring the provider the
+        // model was last used on; a genuinely ambiguous request comes back
+        // with the candidates so the agent can ask the user and retry.
+        let model_override = match args["model"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(spec) => match manager.resolve_model_request(spec).await {
+                ModelResolution::Resolved(resolved) => Some(resolved.as_spec()),
+                ModelResolution::Ambiguous { query, candidates } => {
+                    let options = candidates
+                        .iter()
+                        .map(|candidate| candidate.as_spec())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Ok(ToolResult::retryable(format!(
+                        "Model '{}' matches several providers: {}. Ask the user which provider to use (question tool), then call subagent again with model=\"provider_id:model_id\".",
+                        query, options
+                    )));
+                }
+                ModelResolution::NotFound { query } => {
+                    return Ok(ToolResult::failure(format!(
+                        "No connected provider offers a model matching '{}'. Ask the user which model to use (question tool), or leave model unset to use the configured default.",
+                        query
+                    )));
+                }
+            },
+            None => None,
+        };
+
         let subagent_session_id = if action == "resume" || task_id.is_some() {
             let resume_id = task_id.ok_or_else(|| {
                 OSAgentError::ToolExecution("Missing task_id for subagent resume".to_string())
@@ -194,6 +240,7 @@ impl Tool for SubagentTool {
                     prompt.to_string(),
                     subagent_type.to_string(),
                     background,
+                    model_override,
                 )
                 .await?
         } else {
@@ -204,6 +251,7 @@ impl Tool for SubagentTool {
                     prompt.to_string(),
                     subagent_type.to_string(),
                     background,
+                    model_override,
                 )
                 .await?
         };

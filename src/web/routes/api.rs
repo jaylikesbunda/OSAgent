@@ -808,7 +808,8 @@ pub fn create_router(
         .route("/api/update/install", post(install_update))
         .route("/api/update/cancel", post(cancel_update))
         .route("/api/update/status", get(update_status))
-        .merge(scheduler::create_scheduler_router());
+        .merge(scheduler::create_scheduler_router())
+        .merge(super::github::create_github_router());
 
     public_routes
         .merge(protected_routes.layer(AuthLayer::new(secret.clone(), agent.storage().clone())))
@@ -1360,6 +1361,14 @@ async fn update_config(
     // Same for the model menu: /api/providers/menu persists each toggle, and a
     // settings save from a snapshot taken before the toggle would undo it.
     new_config.model_menu = current_config.model_menu.clone();
+
+    // And the GitHub integration: its fields are managed exclusively through
+    // /api/github/* and the dedicated settings pane, which persist
+    // immediately. A settings snapshot from a page cached before the pane
+    // existed carried serde defaults for this whole section, so a global
+    // "Save Changes" silently turned off the review triggers and cleared the
+    // watch list (the token itself survived via preserve_secrets_from).
+    new_config.github = current_config.github.clone();
 
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
@@ -5504,9 +5513,19 @@ async fn oauth_device_code(
 
     if let Some(error) = data.get("error") {
         let error_str = error.as_str().unwrap_or("unknown_error");
+        // Both mean "keep polling": GitHub asks for a slower cadence with
+        // `slow_down`, and `authorization_pending` means the user has not
+        // approved yet. Treating `slow_down` as fatal killed sign-ins that
+        // were merely polled a touch too fast.
         if error_str == "authorization_pending" {
             return Ok(Json(serde_json::json!({
                 "pending": true,
+            })));
+        }
+        if error_str == "slow_down" {
+            return Ok(Json(serde_json::json!({
+                "pending": true,
+                "slow_down": true,
             })));
         }
         return Err((
@@ -7426,7 +7445,7 @@ async fn auto_name_session(
 
     let provider = agent.active_provider().await;
     let messages = vec![crate::storage::Message::user(prompt_text)];
-    let raw = match provider.complete(None, &messages, &[]).await {
+    let raw = match provider.complete(Some(&id), &messages, &[]).await {
         Ok(resp) => resp.content.unwrap_or_default(),
         Err(e) => {
             // Previously swallowed, which made a failing title call

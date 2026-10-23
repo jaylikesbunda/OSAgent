@@ -423,6 +423,7 @@ impl SafeWorkflowCoordinator {
                 task.clone(),
                 "general".to_string(),
                 false,
+                None,
             )
             .await?;
 

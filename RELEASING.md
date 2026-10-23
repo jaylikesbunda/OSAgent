@@ -18,6 +18,30 @@ release workflow:
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 
+## GitHub sign-in (shared OAuth app)
+
+"Sign in with GitHub" in Settings → GitHub uses a shared OAuth app so users
+need no setup. Client IDs are public values; no client secret is involved
+in the device flow.
+
+One-time registration (project maintainer):
+
+1. Go to https://github.com/settings/applications/new
+   - Name: `OSAgent`
+   - Homepage URL: the project URL
+   - Authorization callback URL: the project URL (unused by the device flow)
+2. On the app's settings page, tick **Enable Device Flow**.
+3. Copy the **Client ID**.
+
+Bake it into release builds either:
+
+- by setting `DEFAULT_GITHUB_OAUTH_CLIENT_ID` in `src/github/mod.rs`, or
+- without editing source: `OSAGENT_GITHUB_OAUTH_CLIENT_ID=<client-id> cargo build`
+  (read at compile time; the env value wins).
+
+Users can always paste their own client ID in Settings → GitHub, which takes
+precedence over the shared app.
+
 The workflow uses these defaults:
 
 - `R2_BUCKET`: `osagent-releases`

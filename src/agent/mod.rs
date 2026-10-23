@@ -8,6 +8,7 @@ pub mod goal;
 pub mod instruction;
 pub mod memory;
 pub mod model_catalog;
+pub mod model_resolution;
 pub mod persona;
 pub mod prompt;
 pub mod provider;

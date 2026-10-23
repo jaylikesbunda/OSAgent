@@ -95,6 +95,10 @@ OSA.renderSessionSnapshots = function() {
 };
 
 OSA.refreshSessionInspector = async function() {
+    // Layouts that do not mount the inspector panel get no fetches at all;
+    // previously every event burst still ran three requests for invisible
+    // panes.
+    if (!document.getElementById('session-history-list')) return;
     const currentSession = OSA.getCurrentSession();
     if (!currentSession?.id) {
         OSA.setSessionInspectorState({ history: [], snapshots: [] });

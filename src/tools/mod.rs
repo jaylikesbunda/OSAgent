@@ -11,6 +11,7 @@ pub mod diagram;
 pub mod file_cache;
 pub mod files;
 pub mod fuzzy_edit;
+pub mod github;
 pub mod goal;
 pub mod guard;
 pub mod loop_detect;

@@ -1,22 +1,73 @@
 v0.8.0 changes (unreleased):
 
+TL;DR:
+* **GitHub inside OSA** — act on pull requests, issues and checks, and get structured PR reviews on demand, automatically on watched repositories, or from a PR comment
+* **Remote access from your phone** — an opt-in Cloudflare tunnel, paired by QR code, with per-device tokens you can revoke
+* **A model per surface** — Discord, each subagent type and background chores can use their own model, separate from the chat model
+* **Subagents on any model** — say "use sonnet for this" and OSA finds it, preferring the provider you last used it on, and asks only if it is still ambiguous
+* **A faster, lighter web UI** — large chats open quickly, Settings no longer stalls, and background polling stops while the tab is hidden
+
 Added:
-* Opt-in remote access: publish the web UI through a cloudflared tunnel and pair a phone by scanning a QR code. Needs a web UI password, and cloudflared is downloaded automatically on first use (nothing to install yourself)
-* A Pairing settings tab: pair by QR and manage every paired device. Each paired device gets its own long-lived, revocable token, so it stays signed in without the password, and revoking it cuts the device off immediately (there's a revoke-all too)
-* Mobile: swipe in from the left edge to open the chat drawer, and swipe it back to the left to close
-* Install the web UI as an app: a web app manifest and icons let iOS and Android add OSA to the home screen as a standalone app, using the same logo as the desktop app
-* Pin a scheduled job to a workspace, set from the job dialog, the `schedule` tool, or the API
+
+GitHub:
+* Connect with a personal access token or "Sign in with GitHub" (no client secret), then choose watched repositories, the review event, the inline-comment limit and your own review instructions. Review history is listed in the same pane, with links
+* Ask in chat — "review PR #123 in owner/repo" — and OSA reads the diff, writes severity-tagged findings with GitHub suggestion blocks, and posts a summary plus inline comments. A dry run previews a review without posting it
+* Automatic reviews on watched repositories. Drafts and bot authors are skipped, and a commit is never reviewed twice
+* Comment triggers: with "On @mention" enabled, a PR comment containing the handle (default `@osagent-review`, which is not a real GitHub user) starts a review. `--dry-run`, `--approve` and `--request-changes` work, inline review threads count, each comment fires once, and OSA reacts with 👀 before replying with the review link
+* A `github` tool covers pull requests, diffs, reviews, issues, branches, commits, checks, Actions runs, releases and code search
+
+Models:
+* Per-surface defaults in Settings → Models: Discord, each subagent type (general, explore, verify) and background chores can use their own model, while "Same as current model" keeps following the chat model
+* Those pickers use the same searchable, provider-grouped dropdown as the composer — connected providers only — now honouring your Show in model menu filters and opening wider so long model names fit. The GitHub pane's review model is a picker too
+* Ask for a model per subagent by name — "use sonnet for this" — and OSA resolves it, preferring the provider that model was last used on; if several providers still match, it asks which one to use and retries with your choice
+* Per-subagent model defaults now apply immediately instead of after a restart
+
+Remote access:
+* Opt-in remote access publishes the web UI through a Cloudflare tunnel and pairs a phone by scanning a QR code. It requires a web UI password, and cloudflared is fetched automatically on first use
+* A Pairing tab manages paired devices: each has its own long-lived token, so it stays signed in without the password, and revoking one cuts that device off immediately. There is a revoke-all as well
+
+Composer:
+* Choose the thinking level from a slider in the composer, which shows the current level and active model and saves as you drag
+
+Discord:
+* Images attached to a message, or to the message it replies to, now reach the model — so "look at this" works on the picture in the original message even when the reply is only the mention
+* Every message names its author (server nickname when set), and the agent is told who it is replying to, so shared servers stay readable
+
+Mobile and the web app:
+* Add the web UI to your home screen on iOS and Android; it then opens as a standalone app with the desktop logo
+* Swipe in from the left edge of a phone to open the chat drawer, and swipe back to close it
+
+Automation:
+* Pin a scheduled job to a workspace from the job dialog, the `schedule` tool or the API
 
 Fixed:
-* "Steer" follow-ups sent over the websocket now interrupt the running turn instead of silently queueing
-* The web server's listening socket is no longer inheritable on Windows, so an abruptly-killed instance can't leave an orphaned child (cloudflared, MCP server, browser, background job) holding port 8765 and blocking the next start with "port already in use"
-* Provider auth and billing failures (401/402/403/404) now fail immediately with the real error instead of being retried four times as if they were transient stream drops; rate limits reported as 403 and 5xx/network stream errors still retry
-* "New chat" now closes the mobile sidebar drawer so the new conversation is visible
-* The sidebar no longer shows a thin strip of chats above the search box; the sticky search covers the top of the list
-* Mobile: the reply action row (Copy/Restore/Retry/Good/Bad) now wraps instead of stretching the chat into a horizontal scroll with dead space on the right
-* Mobile: the pairing public URL wraps inside its card instead of overflowing the settings panel
-* Mobile: a single tap opens a chat and dismisses the drawer (previously it could take two taps, and the drawer stayed open over the conversation)
-* Opening a large chat is much faster: checkpoints no longer ship a full copy of the session, tool events are read without the per-chunk noise, and switching sessions no longer downloads the entire event history
+
+GitHub:
+* Reviews no longer fail when the model runs through OpenCode Go ("Request is missing x-opencode-session")
+* A review whose model calls all fail now reports a failure and retries, instead of posting a green review that only contains error notes
+* Settings → GitHub opens on the first click
+* "Sign in with GitHub" and the pane's external links open in your default browser in the desktop app, and sign-in completes when you return to the window. A transient poll failure or a "slow down" from GitHub no longer abandons an approved sign-in
+
+Providers and settings:
+* Auth and billing errors (401/402/403/404) fail at once with the real message instead of four retries; rate limits and dropped connections still retry
+* Settings opens without building thousands of model options, and model lists stop rebuilding when nothing changed
+* A steer follow-up sent while the agent is working interrupts the turn instead of queuing silently
+* `read_file` results no longer force the preview panel open, and files too large to render are skipped quietly
+
+Mobile and layout:
+* New chat closes the drawer, a single tap opens a chat and dismisses it, and the reply action row wraps instead of stretching the chat sideways
+* The pairing URL wraps inside its card, and the chat list no longer peeks above the sidebar search box
+
+Speed and stability:
+* Large chats open much faster: checkpoints no longer ship a copy of the whole session, and switching chats no longer downloads the entire event history
+* Streaming replies no longer write a database row per text chunk, and the transcript does much less work per frame
+* Background polls pause while the tab is hidden, refreshes are coalesced, and the active chat no longer smooth-scrolls on every refresh
+* Removed the transcript fade mask and several full-screen blurs that made the browser re-composite the whole transcript every frame
+* An abruptly closed instance can no longer leave a child process (a tunnel, MCP server, browser or background job) holding port 8765 and blocking the next start
+
+Under the hood:
+* The workflow editor releases its timers, listeners and render loop when closed
+* Session titles and prompt evals send the conversation id providers expect
 
 v0.7.0 changes (unreleased):
 

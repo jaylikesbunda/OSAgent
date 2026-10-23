@@ -23,8 +23,8 @@ An AI agent that lives on your machine, not in the cloud. Point it at a folder a
 - **Lightweight** — a single binary with no Node, Python, or Docker: warm-starts in ~0.5s and idles at ~20 MB fresh / ~50 MB under use (roughly a tenth of a typical Electron agent), happy on a Raspberry Pi or a 2GB VPS. Reproduce with `cargo run --release --bin osagent-bench`.
 - **Models** — 200+ providers and 7,300+ models (OpenRouter, OpenAI, Anthropic, Google, Ollama, Bedrock, Azure, …), plus OAuth login for OpenAI, Anthropic, Google, GitHub Copilot, Qwen, and Chutes.
 - **Interfaces** — embedded web UI · Discord bot with per-channel sessions · voice (Whisper STT + Piper TTS).
-- **Tools** — 40+ built-ins: file edit/patch, bash + Python/Node execution, grep/glob/code search, LSP, web fetch/search/news, calendar, weather, persistent memory, todos/goals/plans, background subagents.
-- **Automation** — cron jobs, reminders, recurring tasks, daily briefings.
+- **Tools** — 40+ built-ins: file edit/patch, bash + Python/Node execution, grep/glob/code search, LSP, web fetch/search/news, calendar, weather, persistent memory, todos/goals/plans, background subagents, GitHub (PRs, issues, CI, CodeRabbit-style PR reviews).
+- **Automation** — cron jobs, reminders, recurring tasks, daily briefings, automatic GitHub PR reviews on new commits.
 - **Extendable** — visual workflow editor · installable `.oskill` skill bundles · MCP servers · sandboxed tool scripts.
 
 Coding and assistant tools ship side by side — trim `[tools].allowed` to whichever half you want.

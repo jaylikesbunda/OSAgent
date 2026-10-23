@@ -16,6 +16,23 @@ decoded to 16-bit WAV in-process before Whisper transcription.
 > `discord` feature, and `songbird` playback behind `discord-voice`, so default
 > builds stay light.
 
+## Message context
+
+Every message the agent receives is attributed: the prompt names the author
+(server nickname when set, otherwise their display name) and says who wrote the
+message being replied to. Several people can therefore talk to the same
+conversation without the agent losing track of who said what.
+
+Replies carry their context to the agent:
+
+- Replying to a message includes that message's text.
+- Images attached to the reply **or to the message it replies to** are
+  downloaded and handed to the model directly, so "look at this" works on the
+  picture in the original message even when the reply itself only contains the
+  mention.
+- Replying to a voice message transcribes it, and audio attached to the reply
+  is transcribed too.
+
 ## Minimal config
 
 ```toml

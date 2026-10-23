@@ -32,6 +32,7 @@ test.before(async () => {
     require('../js/transcript.js');
     require('../js/tools.js');
     require('../js/app.js');
+    require('../js/model-dropdown.js');
     require('../js/providers.js');
 });
 
