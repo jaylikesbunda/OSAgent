@@ -104,33 +104,41 @@ pub struct ServerConfig {
 #[serde(default)]
 pub struct RemoteAccessConfig {
     pub enabled: bool,
-    /// Tunnel provider. Only "cloudflared" is implemented today.
+    /// Tunnel provider. "opentunnel" gives a stable hostname with no account
+    /// (the key and token are generated locally); "cloudflared" uses a quick
+    /// tunnel whose random URL changes on every restart.
     pub provider: String,
     /// Path to the cloudflared binary. Empty means "look on PATH".
     pub binary: String,
-    /// For named tunnels: the tunnel name passed to `cloudflared tunnel run`.
-    /// Empty uses an ephemeral quick tunnel (random *.trycloudflare.com URL).
+    /// For named cloudflared tunnels: the tunnel name passed to
+    /// `cloudflared tunnel run`. Empty uses an ephemeral quick tunnel.
     pub tunnel_name: String,
-    /// For named tunnels: the public hostname mapped to this origin. Needed to
-    /// build the pairing URL because cloudflared does not print it.
+    /// For named cloudflared tunnels: the public hostname mapped to this
+    /// origin. Needed to build the pairing URL because cloudflared does not
+    /// print it.
     pub public_hostname: String,
     /// How long a pairing code stays redeemable, in seconds.
     pub pairing_ttl_secs: u64,
-    /// How long a paired device's token stays valid, in days. Revoking the
-    /// device in the UI ends it sooner.
+    /// How long a paired device's token stays valid, in days. 0 means it stays
+    /// valid until the device is revoked in the UI.
     pub device_token_ttl_days: u64,
+    /// One-time marker for the move to stable addresses and non-expiring
+    /// device tokens. Older configs did not have it, so loading them migrates
+    /// the old defaults once instead of on every boot.
+    pub stable_default_applied: bool,
 }
 
 impl Default for RemoteAccessConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            provider: "cloudflared".to_string(),
+            provider: "opentunnel".to_string(),
             binary: String::new(),
             tunnel_name: String::new(),
             public_hostname: String::new(),
             pairing_ttl_secs: 600,
-            device_token_ttl_days: 90,
+            device_token_ttl_days: 0,
+            stable_default_applied: true,
         }
     }
 }
@@ -1692,12 +1700,22 @@ impl Config {
         }
 
         let raw = fs::read_to_string(path_ref).map_err(OSAgentError::Io)?;
+        // The marker is written by migrate_remote_access_defaults(), so its
+        // absence means this config predates stable addresses. Checking the
+        // raw text, rather than the parsed bool, keeps a deliberate choice of
+        // "cloudflared" or a 90 day token from being rewritten on every boot.
+        let has_remote_marker = raw.contains("stable_default_applied");
         let mut cfg: Config = toml::from_str(&raw)
             .map_err(|e| OSAgentError::Config(format!("Failed to parse config TOML: {}", e)))?;
         cfg.config_path = Some(path_ref.to_path_buf());
         let mutated = cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();
         cfg.migrate_tool_defaults();
+        let migrated_remote = if has_remote_marker {
+            false
+        } else {
+            cfg.migrate_remote_access_defaults()
+        };
         let migrated_max_tokens = cfg.migrate_max_tokens();
         // Secrets live in auth.toml, not config.toml: fold the legacy
         // single-provider block in first so its key migrates too.
@@ -1735,7 +1753,7 @@ impl Config {
                 }
             }
         }
-        if mutated || migrated_max_tokens || migrated_keys {
+        if mutated || migrated_max_tokens || migrated_keys || migrated_remote {
             cfg.save(path_ref)?;
         }
         Ok(cfg)
@@ -1834,6 +1852,24 @@ impl Config {
     }
 
     pub fn migrate_tool_defaults(&mut self) {}
+
+    /// Older configs used a cloudflared quick tunnel and a 90 day device
+    /// token. Move those defaults once to the stable, no-account address and
+    /// to tokens that last until revoked. A named cloudflared tunnel was a
+    /// deliberate choice, so it keeps its provider.
+    pub fn migrate_remote_access_defaults(&mut self) -> bool {
+        self.remote_access.stable_default_applied = true;
+        if self.remote_access.provider == "cloudflared"
+            && self.remote_access.tunnel_name.trim().is_empty()
+            && self.remote_access.public_hostname.trim().is_empty()
+        {
+            self.remote_access.provider = "opentunnel".to_string();
+        }
+        if self.remote_access.device_token_ttl_days == 90 {
+            self.remote_access.device_token_ttl_days = 0;
+        }
+        true
+    }
 
     pub fn migrate_max_tokens(&mut self) -> bool {
         if self.agent.max_tokens <= 4096 {
@@ -2598,6 +2634,27 @@ hidden_models = ["openai:gpt-4o-mini", "ollama:qwen3:8b"]
         .unwrap();
         assert_eq!(menu.hidden_providers, vec!["openrouter"]);
         assert_eq!(menu.hidden_models[1], "ollama:qwen3:8b");
+    }
+
+    #[test]
+    fn remote_access_moves_old_defaults_to_the_stable_address() {
+        let mut cfg = Config::default_config();
+        cfg.remote_access.provider = "cloudflared".to_string();
+        cfg.remote_access.device_token_ttl_days = 90;
+        cfg.remote_access.stable_default_applied = false;
+
+        assert!(cfg.migrate_remote_access_defaults());
+        assert_eq!(cfg.remote_access.provider, "opentunnel");
+        assert_eq!(cfg.remote_access.device_token_ttl_days, 0);
+        assert!(cfg.remote_access.stable_default_applied);
+
+        // A named cloudflared tunnel was a deliberate choice; keep it.
+        let mut named = Config::default_config();
+        named.remote_access.provider = "cloudflared".to_string();
+        named.remote_access.tunnel_name = "my-tunnel".to_string();
+        named.remote_access.stable_default_applied = false;
+        named.migrate_remote_access_defaults();
+        assert_eq!(named.remote_access.provider, "cloudflared");
     }
 
     /// A snowflake must survive the trip through the web UI unchanged — as a

@@ -34,7 +34,9 @@ OSA.Remote = {
         if (warning) warning.classList.toggle('hidden', passwordReady);
 
         if (statusEl) {
-            if (!data.cloudflared_available) {
+            if (data.status === 'provisioning') {
+                statusEl.textContent = 'Setting up your stable address. The first run can take a minute.';
+            } else if (!data.cloudflared_available) {
                 statusEl.textContent = 'cloudflared is not available for this platform. Install it manually and set remote_access.binary.';
             } else if (data.status === 'error') {
                 statusEl.textContent = `Tunnel error: ${data.error || 'unknown error'}`;
@@ -49,8 +51,66 @@ OSA.Remote = {
             }
         }
 
+        const providerEl = document.getElementById('setting-remote-provider');
+        if (providerEl) providerEl.value = data.provider || 'opentunnel';
+        const providerHelp = document.getElementById('remote-provider-help');
+        if (providerHelp) {
+            providerHelp.textContent = data.provider === 'cloudflared'
+                ? 'Quick tunnels get a new trycloudflare.com address whenever OSA restarts.'
+                : 'The same address every time, with the key stored on this machine. No account needed.';
+        }
+        const ttlEl = document.getElementById('setting-remote-device-ttl');
+        if (ttlEl) ttlEl.value = String(data.device_token_ttl_days ?? 0);
+
         if (urlEl) urlEl.textContent = data.public_url || '-';
         if (details) details.classList.toggle('hidden', !data.enabled);
+    },
+
+    async saveConfig(patch) {
+        const res = await OSA.fetchWithAuth('/api/remote/config', {
+            method: 'POST',
+            body: JSON.stringify(patch)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        this._lastStatus = data;
+        this.render(data);
+        return data;
+    },
+
+    async onProviderChange() {
+        const select = document.getElementById('setting-remote-provider');
+        if (!select) return;
+        select.disabled = true;
+        try {
+            const data = await this.saveConfig({ provider: select.value });
+            if (data.enabled) {
+                // The tunnel restarts on a provider change, so the old URL and
+                // QR are gone. Wait for the new address before pairing again.
+                await this.waitForPublicUrl();
+                await this.rotate();
+            }
+            if (OSA.showToast) OSA.showToast('Remote address updated', 'info');
+        } catch (error) {
+            if (OSA.showToast) OSA.showToast(error.message || 'Could not change the address', 'error');
+            await this.load();
+        } finally {
+            select.disabled = false;
+        }
+    },
+
+    async onDeviceTtlChange() {
+        const select = document.getElementById('setting-remote-device-ttl');
+        if (!select) return;
+        select.disabled = true;
+        try {
+            await this.saveConfig({ device_token_ttl_days: Number(select.value) || 0 });
+        } catch (error) {
+            if (OSA.showToast) OSA.showToast(error.message || 'Could not update device sign-in', 'error');
+            await this.load();
+        } finally {
+            select.disabled = false;
+        }
     },
 
     async onToggle() {
@@ -65,8 +125,8 @@ OSA.Remote = {
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
             this.render(data);
             if (enable) {
-                // The public URL only exists once cloudflared has dialed in; a
-                // QR built before that would be empty.
+                // The public URL only exists once the tunnel is up; a QR
+                // built before that would be empty.
                 await this.waitForPublicUrl();
                 await this.rotate();
             } else {

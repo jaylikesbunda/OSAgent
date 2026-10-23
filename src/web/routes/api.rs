@@ -1370,6 +1370,11 @@ async fn update_config(
     // watch list (the token itself survived via preserve_secrets_from).
     new_config.github = current_config.github.clone();
 
+    // Remote access is managed by /api/remote/*, which persists the provider,
+    // address and device lifetime immediately. A stale settings snapshot must
+    // not undo those choices or the enable flag.
+    new_config.remote_access = current_config.remote_access.clone();
+
     if let Some(discord) = &mut new_config.discord {
         discord.allowed_users.sort_unstable();
         discord.allowed_users.dedup();
@@ -4998,6 +5003,24 @@ async fn validate_provider(
         ));
     }
 
+    // Validate the way we actually talk to the provider. Several providers
+    // need more than a bearer token (Azure uses api-key, Copilot needs
+    // editor headers, Vertex resolves its endpoint from the environment).
+    let provider_config = crate::config::ProviderConfig {
+        provider_type: payload.provider_id.clone(),
+        api_key: payload.api_key.clone(),
+        base_url: base_url.clone(),
+        ..Default::default()
+    };
+    let auth = crate::agent::provider_auth::ProviderAuth::configure(
+        &payload.provider_id,
+        &provider_config,
+    );
+    let base_url = auth
+        .base_url_override
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or(base_url);
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -5027,6 +5050,9 @@ async fn validate_provider(
     let mut request = client.get(&test_url);
     if !payload.api_key.is_empty() {
         request = request.header("Authorization", format!("Bearer {}", payload.api_key));
+    }
+    for (key, value) in &auth.extra_headers {
+        request = request.header(key, value);
     }
     let res = request.send().await;
 

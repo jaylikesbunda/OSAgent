@@ -1,36 +1,38 @@
 v0.8.0 changes (unreleased):
 
 TL;DR:
-* **GitHub inside OSA** — act on pull requests, issues and checks, and get structured PR reviews on demand, automatically on watched repositories, or from a PR comment
-* **Remote access from your phone** — an opt-in Cloudflare tunnel, paired by QR code, with per-device tokens you can revoke
-* **A model per surface** — Discord, each subagent type and background chores can use their own model, separate from the chat model
-* **Subagents on any model** — say "use sonnet for this" and OSA finds it, preferring the provider you last used it on, and asks only if it is still ambiguous
-* **A faster, lighter web UI** — large chats open quickly, Settings no longer stalls, and background polling stops while the tab is hidden
+* **GitHub inside OSA**: act on pull requests, issues and checks, and get structured PR reviews on demand, automatically on watched repositories, or from a PR comment
+* **Remote access from your phone**: a public address that stays the same across restarts, paired by QR code, with device tokens you can revoke
+* **A model per surface**: Discord, each subagent type and background chores can use their own model, separate from the chat model
+* **Subagents on any model**: say "use sonnet for this" and OSA finds it, preferring the provider you last used it on, and asks only if it is still ambiguous
+* **A faster, lighter web UI**: large chats open quickly, Settings no longer stalls, and background polling stops while the tab is hidden
 
 Added:
 
 GitHub:
 * Connect with a personal access token or "Sign in with GitHub" (no client secret), then choose watched repositories, the review event, the inline-comment limit and your own review instructions. Review history is listed in the same pane, with links
-* Ask in chat — "review PR #123 in owner/repo" — and OSA reads the diff, writes severity-tagged findings with GitHub suggestion blocks, and posts a summary plus inline comments. A dry run previews a review without posting it
+* Ask in chat, for example "review PR #123 in owner/repo", and OSA reads the diff, writes severity-tagged findings with GitHub suggestion blocks, and posts a summary plus inline comments. A dry run previews a review without posting it
 * Automatic reviews on watched repositories. Drafts and bot authors are skipped, and a commit is never reviewed twice
 * Comment triggers: with "On @mention" enabled, a PR comment containing the handle (default `@osagent-review`, which is not a real GitHub user) starts a review. `--dry-run`, `--approve` and `--request-changes` work, inline review threads count, each comment fires once, and OSA reacts with 👀 before replying with the review link
 * A `github` tool covers pull requests, diffs, reviews, issues, branches, commits, checks, Actions runs, releases and code search
 
 Models:
 * Per-surface defaults in Settings → Models: Discord, each subagent type (general, explore, verify) and background chores can use their own model, while "Same as current model" keeps following the chat model
-* Those pickers use the same searchable, provider-grouped dropdown as the composer — connected providers only — now honouring your Show in model menu filters and opening wider so long model names fit. The GitHub pane's review model is a picker too
-* Ask for a model per subagent by name — "use sonnet for this" — and OSA resolves it, preferring the provider that model was last used on; if several providers still match, it asks which one to use and retries with your choice
+* Those pickers use the same searchable, provider-grouped dropdown as the composer (connected providers only), now honouring your Show in model menu filters and opening wider so long model names fit. The GitHub pane's review model is a picker too
+* Ask for a model per subagent by name, for example "use sonnet for this", and OSA resolves it, preferring the provider that model was last used on; if several providers still match, it asks which one to use and retries with your choice
 * Per-subagent model defaults now apply immediately instead of after a restart
 
 Remote access:
-* Opt-in remote access publishes the web UI through a Cloudflare tunnel and pairs a phone by scanning a QR code. It requires a web UI password, and cloudflared is fetched automatically on first use
-* A Pairing tab manages paired devices: each has its own long-lived token, so it stays signed in without the password, and revoking one cuts that device off immediately. There is a revoke-all as well
+* Opt-in remote access publishes the web UI through a public address and pairs a phone by scanning a QR code. It requires a web UI password
+* The default address is stable: OpenTunnel gives this machine its own hostname with no account, the key and token are generated locally, and the same address is reused after restarts. A Cloudflare quick tunnel is still available for a throwaway link
+* Choose the address type and how long devices stay signed in from the Pairing tab. Devices are valid until you revoke them by default
+* A Pairing tab manages paired devices: each has its own token, so it stays signed in without the password, and revoking one cuts that device off immediately. There is a revoke-all as well
 
 Composer:
 * Choose the thinking level from a slider in the composer, which shows the current level and active model and saves as you drag
 
 Discord:
-* Images attached to a message, or to the message it replies to, now reach the model — so "look at this" works on the picture in the original message even when the reply is only the mention
+* Images attached to a message, or to the message it replies to, now reach the model, so "look at this" works on the picture in the original message even when the reply is only the mention
 * Every message names its author (server nickname when set), and the agent is told who it is replying to, so shared servers stay readable
 
 Mobile and the web app:

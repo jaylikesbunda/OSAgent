@@ -14,7 +14,7 @@ use crate::error::{OSAgentError, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -29,6 +29,7 @@ const CLOUDFLARED_RELEASE_BASE: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TunnelStatus {
     Disabled,
+    Provisioning,
     Installing,
     Starting,
     Running,
@@ -39,6 +40,7 @@ impl TunnelStatus {
     fn as_str(self) -> &'static str {
         match self {
             TunnelStatus::Disabled => "disabled",
+            TunnelStatus::Provisioning => "provisioning",
             TunnelStatus::Installing => "installing",
             TunnelStatus::Starting => "starting",
             TunnelStatus::Running => "running",
@@ -57,13 +59,16 @@ struct PairingCode {
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteAccessView {
     pub enabled: bool,
+    pub provider: String,
     pub status: String,
     pub public_url: Option<String>,
     pub error: Option<String>,
     /// Whether a usable cloudflared binary already exists, or can be fetched
     /// for this platform. Effectively always true unless the platform is
-    /// unsupported.
+    /// unsupported. OpenTunnel needs no binary, so it is always true there.
     pub cloudflared_available: bool,
+    /// 0 means paired devices stay signed in until revoked.
+    pub device_token_ttl_days: u64,
     /// Seconds until the current pairing code expires, if one is active.
     pub pairing_expires_in_secs: Option<u64>,
     /// Public URL a phone should open (includes the pairing code when active).
@@ -74,9 +79,13 @@ pub struct RemoteAccessManager {
     cfg: RwLock<RemoteAccessConfig>,
     port: u16,
     child: Mutex<Option<Child>>,
+    opentunnel: Mutex<Option<opentunnel::Tunnel>>,
     state: RwLock<(TunnelStatus, Option<String>, Option<String>)>,
     pairing: RwLock<Option<PairingCode>>,
     starting: AtomicBool,
+    /// Bumped whenever the tunnel is (re)started or stopped, so a status
+    /// watcher from an older tunnel cannot overwrite the current state.
+    generation: AtomicU64,
 }
 
 impl RemoteAccessManager {
@@ -85,9 +94,11 @@ impl RemoteAccessManager {
             cfg: RwLock::new(cfg),
             port,
             child: Mutex::new(None),
+            opentunnel: Mutex::new(None),
             state: RwLock::new((TunnelStatus::Disabled, None, None)),
             pairing: RwLock::new(None),
             starting: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -111,7 +122,10 @@ impl RemoteAccessManager {
     }
 
     pub async fn view(&self) -> RemoteAccessView {
-        let enabled = self.cfg.read().await.enabled;
+        let (enabled, provider, device_token_ttl_days) = {
+            let cfg = self.cfg.read().await;
+            (cfg.enabled, cfg.provider.clone(), cfg.device_token_ttl_days)
+        };
         let (status, public_url, error) = {
             let guard = self.state.read().await;
             (guard.0, guard.1.clone(), guard.2.clone())
@@ -129,12 +143,20 @@ impl RemoteAccessManager {
                 _ => (None, None),
             }
         };
+        // Only a cloudflared provider needs the binary; OpenTunnel is built in.
+        let cloudflared_available = if provider == "opentunnel" {
+            true
+        } else {
+            self.cloudflared_available().await
+        };
         RemoteAccessView {
             enabled,
+            provider,
             status: status.as_str().to_string(),
             public_url,
             error,
-            cloudflared_available: self.cloudflared_available().await,
+            cloudflared_available,
+            device_token_ttl_days,
             pairing_expires_in_secs,
             pairing_url,
         }
@@ -196,7 +218,10 @@ impl RemoteAccessManager {
         if !self.enabled().await {
             return;
         }
-        if self.child.lock().await.is_some() || self.starting.load(Ordering::SeqCst) {
+        if self.child.lock().await.is_some()
+            || self.opentunnel.lock().await.is_some()
+            || self.starting.load(Ordering::SeqCst)
+        {
             return;
         }
         {
@@ -218,18 +243,22 @@ impl RemoteAccessManager {
         tokio::spawn(async move {
             if let Err(error) = this.install_and_start().await {
                 warn!("Remote access: {}", error);
-                let mut state = this.state.write().await;
-                state.0 = TunnelStatus::Error;
-                state.1 = None;
-                state.2 = Some(error.to_string());
-                drop(state);
+                // A stop or provider switch during provisioning already set
+                // the state it wants; do not overwrite it with a stale error.
+                if this.enabled().await {
+                    let mut state = this.state.write().await;
+                    state.0 = TunnelStatus::Error;
+                    state.1 = None;
+                    state.2 = Some(error.to_string());
+                    drop(state);
+                }
             }
             this.starting.store(false, Ordering::SeqCst);
         });
     }
 
     async fn install_and_start(self: &Arc<Self>) -> Result<()> {
-        if self.child.lock().await.is_some() {
+        if self.child.lock().await.is_some() || self.opentunnel.lock().await.is_some() {
             return Ok(());
         }
 
@@ -242,6 +271,10 @@ impl RemoteAccessManager {
                 cfg.provider.trim().to_string(),
             )
         };
+
+        if provider == "opentunnel" {
+            return self.start_opentunnel().await;
+        }
 
         if provider != "cloudflared" {
             return Err(OSAgentError::Config(format!(
@@ -258,6 +291,74 @@ impl RemoteAccessManager {
 
         self.spawn_tunnel(&binary, &tunnel_name, &public_hostname)
             .await
+    }
+
+    /// Bring up the built-in OpenTunnel bridge. The first run creates the
+    /// tunnel and a local key, then waits for the certificate; later runs load
+    /// the same identity, so the hostname does not change across restarts.
+    async fn start_opentunnel(self: &Arc<Self>) -> Result<()> {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.state.write().await = (TunnelStatus::Provisioning, None, None);
+
+        let client = crate::web::opentunnel_provider::client();
+        let hostname = crate::web::opentunnel_provider::ensure_identity(&client, "default").await?;
+
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Ok(());
+        }
+        *self.state.write().await = (TunnelStatus::Starting, None, None);
+
+        let tunnel = crate::web::opentunnel_provider::connect(&client, "default", self.port)?;
+        *self.opentunnel.lock().await = Some(tunnel);
+
+        let url = format!("https://{}", hostname);
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if this.generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                let snapshot = {
+                    let guard = this.opentunnel.lock().await;
+                    match guard.as_ref() {
+                        Some(tunnel) => tunnel.status(),
+                        None => return,
+                    }
+                };
+                match snapshot.state {
+                    opentunnel::State::Connected => {
+                        this.set_running(Some(url.clone())).await;
+                    }
+                    // Reconnects are automatic, so the address is still valid;
+                    // keep it visible and surface why it is reconnecting.
+                    opentunnel::State::Reconnecting => {
+                        let mut state = this.state.write().await;
+                        if this.generation.load(Ordering::SeqCst) != generation {
+                            return;
+                        }
+                        state.0 = TunnelStatus::Running;
+                        state.1 = Some(url.clone());
+                        state.2 = snapshot.last_error;
+                    }
+                    opentunnel::State::Stopped => {
+                        let mut state = this.state.write().await;
+                        if this.generation.load(Ordering::SeqCst) != generation {
+                            return;
+                        }
+                        state.0 = TunnelStatus::Error;
+                        state.1 = Some(url.clone());
+                        state.2 = snapshot
+                            .last_error
+                            .or_else(|| Some("OpenTunnel stopped".to_string()));
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        Ok(())
     }
 
     async fn spawn_tunnel(
@@ -446,12 +547,22 @@ impl RemoteAccessManager {
     }
 
     pub async fn stop(&self) {
+        // Invalidate any status watcher from the tunnel being stopped.
+        self.generation.fetch_add(1, Ordering::SeqCst);
+
+        if let Some(tunnel) = self.opentunnel.lock().await.take() {
+            let _ = tunnel.close().await;
+        }
+
         let child = self.child.lock().await.take();
         if let Some(mut child) = child {
             let _ = child.start_kill();
             let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
         }
         *self.state.write().await = (TunnelStatus::Disabled, None, None);
+        // A pairing code is bound to the address that was live when it was
+        // minted, so it cannot survive a tunnel restart.
+        *self.pairing.write().await = None;
         info!("Remote access: tunnel stopped");
     }
 

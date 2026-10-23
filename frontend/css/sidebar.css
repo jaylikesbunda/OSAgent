@@ -639,6 +639,17 @@
     color: var(--text-primary);
 }
 
+/* Sits directly under New chat, one step quieter so the primary action stays
+   the one that starts a conversation. */
+.new-workspace-btn {
+    margin-top: 2px;
+    color: var(--text-muted);
+}
+
+.new-workspace-btn:hover {
+    color: var(--text-primary);
+}
+
 .sessions-list {
     padding: 0 8px 10px;
 }

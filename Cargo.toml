@@ -2,7 +2,7 @@
 name = "osagent"
 version = "0.8.0"
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.89"
 authors = ["OSA Contributors"]
 license = "MIT"
 description = "Secure local AI agent with a web UI, workspace tools, and optional Discord integration"
@@ -23,6 +23,10 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 reqwest-eventsource = "0.6"
+
+# Stable, no-account public address for remote access. Its CLI is Unix-only,
+# but the client library works everywhere and keeps the identity on disk.
+opentunnel = "0.6"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

@@ -1622,19 +1622,22 @@ OSA.validateApiKey = async function() {
     badge.innerHTML = OSA.icons.spinner + ' Checking...';
 
     try {
-        const res = await fetch('/api/providers/validate', {
+        // This route sits behind the /api auth middleware, so it has to carry
+        // the same bearer token as every other request. A bare fetch() would
+        // always come back 401 and read as "invalid key" even for a good one.
+        const res = await OSA.fetchWithAuth('/api/providers/validate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ provider_id: OSA.currentProviderId, api_key: apiKey, base_url: baseUrl || undefined })
         });
-        const data = await res.json();
+        const data = await res.json().catch(function() { return {}; });
 
-        if (data.valid) {
+        if (res.ok && data.valid) {
             badge.className = 'validation-badge valid';
             badge.innerHTML = OSA.icons.check + ' Valid';
         } else {
             badge.className = 'validation-badge invalid';
-            badge.innerHTML = OSA.icons.xmark + ' ' + OSA.escapeHtml(data.error || 'Invalid');
+            badge.innerHTML = OSA.icons.xmark + ' ' + OSA.escapeHtml(data.error || ('Check failed (' + res.status + ')'));
         }
     } catch (e) {
         badge.className = 'validation-badge invalid';

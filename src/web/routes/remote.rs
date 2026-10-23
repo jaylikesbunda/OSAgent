@@ -39,6 +39,7 @@ pub struct PairResponse {
 pub fn protected_router() -> Router {
     Router::new()
         .route("/api/remote/status", get(status))
+        .route("/api/remote/config", post(update_remote_config))
         .route("/api/remote/enable", post(enable))
         .route("/api/remote/disable", post(disable))
         .route("/api/remote/pairing", post(rotate_pairing))
@@ -56,6 +57,66 @@ async fn status(
     Extension(manager): Extension<Arc<RemoteAccessManager>>,
 ) -> Json<RemoteAccessView> {
     Json(manager.view().await)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoteConfigRequest {
+    pub provider: Option<String>,
+    pub device_token_ttl_days: Option<u64>,
+}
+
+/// Change the address provider or device sign-in lifetime. Changing the
+/// provider while remote access is on restarts the tunnel, since the old
+/// address cannot be carried over.
+async fn update_remote_config(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(manager): Extension<Arc<RemoteAccessManager>>,
+    Extension(config_path): Extension<PathBuf>,
+    Json(payload): Json<RemoteConfigRequest>,
+) -> Result<Json<RemoteAccessView>, (StatusCode, Json<ErrorResponse>)> {
+    let mut config = agent.get_config().await;
+    let mut restart = false;
+
+    if let Some(provider) = payload.provider {
+        let provider = provider.trim().to_lowercase();
+        if provider != "opentunnel" && provider != "cloudflared" {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "Unknown remote-access provider.",
+            ));
+        }
+        if config.remote_access.provider != provider {
+            config.remote_access.provider = provider;
+            restart = true;
+        }
+    }
+    if let Some(days) = payload.device_token_ttl_days {
+        // 0 is "until revoked"; cap the rest so a typo cannot overflow the JWT
+        // expiry arithmetic.
+        config.remote_access.device_token_ttl_days = days.min(3650);
+    }
+
+    agent.replace_config(config.clone()).await;
+    manager.set_config(config.remote_access.clone()).await;
+    config
+        .save(&config_path)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if restart && config.remote_access.enabled {
+        manager.stop().await;
+        manager.ensure_started().await;
+    }
+    Ok(Json(manager.view().await))
+}
+
+/// 0 means a paired device stays signed in until it is revoked. jsonwebtoken
+/// requires an `exp` claim, so use a far-future one rather than omitting it.
+fn device_token_lifetime_seconds(days: u64) -> u64 {
+    if days == 0 {
+        100 * 365 * 86_400
+    } else {
+        days.saturating_mul(86_400)
+    }
 }
 
 async fn enable(
@@ -193,12 +254,26 @@ async fn pair(
         .get_config()
         .await
         .remote_access
-        .device_token_ttl_days
-        .max(1);
-    let token = auth::generate_device_token(&device.id, &secret, ttl_days * 86_400)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .device_token_ttl_days;
+    let token = auth::generate_device_token(
+        &device.id,
+        &secret,
+        device_token_lifetime_seconds(ttl_days),
+    )
+    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(PairResponse { token, device }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_token_lifetime_seconds;
+
+    #[test]
+    fn device_tokens_last_until_revoked_by_default() {
+        assert_eq!(device_token_lifetime_seconds(0), 100 * 365 * 86_400);
+        assert_eq!(device_token_lifetime_seconds(30), 30 * 86_400);
+    }
 }
 
 /// Best-effort human label from a User-Agent string (e.g. "iPhone · Safari").

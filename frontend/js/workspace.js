@@ -451,6 +451,107 @@ OSA.saveWorkspaceInline = async function() {
     }
 };
 
+// Minimal "New workspace" flow from the sidebar: one folder field, one
+// button. The folder's name becomes the workspace name and id.
+OSA._newWorkspaceBusy = false;
+
+OSA.openNewWorkspaceDialog = function() {
+    const modal = document.getElementById('new-workspace-modal');
+    if (!modal) return;
+    const input = document.getElementById('new-workspace-path');
+    if (input) input.value = '';
+    OSA.setNewWorkspaceStatus('');
+    modal.classList.remove('hidden');
+    window.setTimeout(function() { if (input) input.focus(); }, 0);
+};
+
+OSA.closeNewWorkspaceDialog = function() {
+    const modal = document.getElementById('new-workspace-modal');
+    if (modal) modal.classList.add('hidden');
+    OSA.setNewWorkspaceStatus('');
+};
+
+OSA.setNewWorkspaceStatus = function(message, isError) {
+    const status = document.getElementById('new-workspace-status');
+    if (!status) return;
+    status.textContent = message || '';
+    status.classList.toggle('error', !!isError);
+};
+
+OSA.workspaceNameFromPath = function(path) {
+    const parts = String(path || '').replace(/\\/g, '/').split('/').filter(Boolean);
+    const name = parts[parts.length - 1] || 'workspace';
+    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return { name: name, id: id || 'workspace' };
+};
+
+OSA.browseNewWorkspaceFolder = async function() {
+    OSA.setNewWorkspaceStatus('');
+    let path = null;
+    try {
+        const tauriDialog = window.__TAURI__ && window.__TAURI__.dialog;
+        if (tauriDialog && typeof tauriDialog.open === 'function') {
+            const picked = await tauriDialog.open({
+                directory: true,
+                title: 'Choose workspace folder',
+                multiple: false
+            });
+            if (typeof picked === 'string' && picked) path = picked;
+        } else {
+            const res = await OSA.fetchWithAuth('/api/workspaces/browse');
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+            path = data.path;
+        }
+    } catch (error) {
+        if (error.message !== 'Folder selection was cancelled') {
+            OSA.setNewWorkspaceStatus(error.message, true);
+        }
+        return;
+    }
+    if (!path) return;
+    const input = document.getElementById('new-workspace-path');
+    if (input) {
+        input.value = path;
+        input.focus();
+    }
+};
+
+OSA.createWorkspaceFromDialog = async function() {
+    if (OSA._newWorkspaceBusy) return;
+    const input = document.getElementById('new-workspace-path');
+    const path = ((input && input.value) || '').trim();
+    if (!path) {
+        OSA.setNewWorkspaceStatus('Choose a folder first.', true);
+        if (input) input.focus();
+        return;
+    }
+
+    const names = OSA.workspaceNameFromPath(path);
+    OSA._newWorkspaceBusy = true;
+    OSA.setNewWorkspaceStatus('Adding...');
+    try {
+        const res = await OSA.fetchWithAuth('/api/workspaces', {
+            method: 'POST',
+            body: JSON.stringify({
+                id: names.id,
+                name: names.name,
+                paths: [{ path: path, permission: 'read_write' }],
+                description: null
+            })
+        });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+        await OSA.loadWorkspaces();
+        OSA.closeNewWorkspaceDialog();
+        OSA.showToast?.('Workspace "' + (data.name || names.name) + '" added');
+    } catch (error) {
+        OSA.setNewWorkspaceStatus(error.message, true);
+    } finally {
+        OSA._newWorkspaceBusy = false;
+    }
+};
+
 OSA.applyInlineWorkspaceToSession = async function() {
     const saved = await OSA.saveWorkspaceInline();
     if (!saved) return;

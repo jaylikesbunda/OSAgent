@@ -67,6 +67,9 @@
                     <button class="new-chat-btn" onclick="createSession()">
                         <span>+</span> New chat
                     </button>
+                    <button class="new-chat-btn new-workspace-btn" type="button" onclick="OSA.openNewWorkspaceDialog()">
+                        <span>+</span> New workspace
+                    </button>
                 </div>
                 <div class="sessions-list" id="sessions-list"></div>
                 <div class="sidebar-footer">
@@ -1428,12 +1431,29 @@
                         <div class="toggle-field">
                             <div class="toggle-info">
                                 <label class="toggle-label">Public Tunnel</label>
-                                <span class="toggle-desc">Reach OSA remotely via cloudflared. Needs a password.</span>
+                                <span class="toggle-desc">Reach OSA remotely through a public address. Needs a password.</span>
                             </div>
                             <label class="toggle-switch">
                                 <input type="checkbox" id="setting-remote-enabled" onchange="OSA.Remote.onToggle()" />
                                 <span class="toggle-slider"></span>
                             </label>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-remote-provider">Address</label>
+                            <select id="setting-remote-provider" onchange="OSA.Remote.onProviderChange()">
+                                <option value="opentunnel">Stable address (no account)</option>
+                                <option value="cloudflared">Quick tunnel (new URL each start)</option>
+                            </select>
+                            <div class="settings-help" id="remote-provider-help">The same address every time you start OSA.</div>
+                        </div>
+                        <div class="settings-field">
+                            <label for="setting-remote-device-ttl">Signed-in devices</label>
+                            <select id="setting-remote-device-ttl" onchange="OSA.Remote.onDeviceTtlChange()">
+                                <option value="0">Until revoked</option>
+                                <option value="30">30 days</option>
+                                <option value="90">90 days</option>
+                                <option value="365">1 year</option>
+                            </select>
                         </div>
                         <div id="remote-access-warning" class="settings-warning hidden">
                             Set a password in Security first. Anyone with the link could run tools on this machine.
@@ -1757,6 +1777,28 @@
                 <button class="btn-danger btn-danger-large" id="jobs-delete-confirm-btn">Delete</button>
             </div>
         </div>
+    </div>
+
+    <!-- Add a workspace from the sidebar: one folder, nothing else. -->
+    <div id="new-workspace-modal" class="modal hidden" onclick="if(event.target===this)OSA.closeNewWorkspaceDialog()">
+        <form class="new-workspace-dialog" onsubmit="event.preventDefault();OSA.createWorkspaceFromDialog()">
+            <div class="new-workspace-header">
+                <h2>New workspace</h2>
+                <button type="button" class="modal-close" onclick="OSA.closeNewWorkspaceDialog()" aria-label="Close">&times;</button>
+            </div>
+            <div class="new-workspace-body">
+                <label class="new-workspace-label" for="new-workspace-path">Folder</label>
+                <div class="new-workspace-path-row">
+                    <input id="new-workspace-path" type="text" placeholder="Paste a folder path or browse" autocomplete="off" spellcheck="false">
+                    <button type="button" class="btn-ghost" onclick="OSA.browseNewWorkspaceFolder()">Browse</button>
+                </div>
+                <div id="new-workspace-status" class="new-workspace-status" role="status" aria-live="polite"></div>
+            </div>
+            <div class="new-workspace-actions">
+                <button type="button" class="btn-ghost" onclick="OSA.closeNewWorkspaceDialog()">Cancel</button>
+                <button type="submit" class="btn-primary">Add workspace</button>
+            </div>
+        </form>
     </div>
 
     <script defer src="/static/js/state.js"></script>
