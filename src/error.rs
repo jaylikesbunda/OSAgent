@@ -409,6 +409,12 @@ impl OSAgentError {
                 "unauthorized",
                 "no auth credentials",
                 "missing api key",
+                "api key has expired",
+                "api key expired",
+                "key has expired",
+                "key expired",
+                "token has expired",
+                "token expired",
             ],
         )
     }
@@ -558,6 +564,19 @@ mod tests {
             .user_facing_message()
             .to_lowercase()
             .contains("authentication failed"));
+    }
+
+    #[test]
+    fn expired_key_message_is_an_auth_error() {
+        let err = structured(None, None, "This API key has expired");
+        assert!(err.is_auth_error());
+        assert!(
+            !err.is_retryable(),
+            "a dead key must fail over to another key, not retry itself"
+        );
+
+        let err = structured(None, None, "token expired");
+        assert!(err.is_auth_error());
     }
 
     #[test]

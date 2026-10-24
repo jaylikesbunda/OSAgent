@@ -22,6 +22,9 @@ Models:
 * Ask for a model per subagent by name, for example "use sonnet for this", and OSA resolves it, preferring the provider that model was last used on; if several providers still match, it asks which one to use and retries with your choice
 * Per-subagent model defaults now apply immediately instead of after a restart
 
+Subagents:
+* A running subagent can be moved to the background from its card, so the parent chat continues immediately while the child keeps working and reports when it finishes
+
 Remote access:
 * Opt-in remote access publishes the web UI through a public address and pairs a phone by scanning a QR code. It requires a web UI password
 * The default address is stable: OpenTunnel gives this machine its own hostname with no account, the key and token are generated locally, and the same address is reused after restarts. A Cloudflare quick tunnel is still available for a throwaway link
@@ -52,6 +55,8 @@ GitHub:
 
 Providers and settings:
 * Auth and billing errors (401/402/403/404) fail at once with the real message instead of four retries; rate limits and dropped connections still retry
+* A rejected or expired API key in a multi-key rotation no longer fails the request: it is skipped and the next key is tried, including inside subagents
+* Provider settings show the saved keys as masked previews, let you remove one, and say when the provider rotates across several keys
 * Settings opens without building thousands of model options, and model lists stop rebuilding when nothing changed
 * A steer follow-up sent while the agent is working interrupts the turn instead of queuing silently
 * `read_file` results no longer force the preview panel open, and files too large to render are skipped quietly

@@ -1110,7 +1110,7 @@ OSA.setProviderModelsVisible = function(providerId, visible) {
 
 OSA.providerAuthLabel = function(entry) {
     if (entry.api_key_preview === '(oauth)') return 'OAuth sign-in';
-    if (entry.key_count > 1) return entry.key_count + ' API keys';
+    if (entry.key_count > 1) return entry.key_count + ' API keys, auto-rotated';
     if (entry.key_count === 1) return 'API key saved';
     return 'No API key';
 };
@@ -1565,8 +1565,14 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     // Reset fields
     document.getElementById('provider-api-key').value = '';
     document.getElementById('provider-api-key').placeholder = connectedEntry && connectedEntry.key_count
-        ? 'Saved. Leave blank to keep it'
+        ? 'Leave blank to keep the saved keys, or add another'
         : 'sk-...';
+    const apiKeyLabel = document.querySelector('label[for="provider-api-key"]');
+    if (apiKeyLabel) {
+        apiKeyLabel.textContent = connectedEntry && connectedEntry.key_count
+            ? 'Add another API key'
+            : 'API Key';
+    }
     document.getElementById('provider-default').checked = !!(connectedEntry && connectedEntry.is_default);
     document.getElementById('validation-badge').style.display = 'none';
     document.getElementById('modal-model-select-text').textContent = 'Use provider default (choose later)';
@@ -1575,6 +1581,7 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
 
     // Populate modal model dropdown
     await OSA.refreshModalProviderModels(provider, connectedEntry);
+    OSA.loadProviderKeys(providerId, connectedEntry);
     const initialModelId = OSA.pendingProviderModel || (connectedEntry && connectedEntry.model) || '';
     if (initialModelId) {
         const selected = OSA.modalProviderModels.find(function(model) { return model.id === initialModelId; });
@@ -1599,6 +1606,56 @@ OSA.openAddProviderModal = async function(providerId, preferredModelId) {
     };
 
     modal.classList.remove('hidden');
+};
+
+// ── Multiple keys ───────────────────────────────────────────
+
+OSA.loadProviderKeys = async function(providerId, connectedEntry) {
+    const section = document.getElementById('provider-keys-section');
+    const list = document.getElementById('provider-keys-list');
+    const count = document.getElementById('provider-keys-count');
+    if (!section || !list) return;
+    section.classList.add('hidden');
+    list.innerHTML = '';
+    if (count) count.textContent = '';
+    if (!connectedEntry) return;
+    try {
+        const res = await OSA.fetchWithAuth('/api/providers/' + encodeURIComponent(providerId) + '/keys');
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+        const keys = data.keys || [];
+        if (!keys.length) return;
+        section.classList.remove('hidden');
+        if (count) count.textContent = keys.length + (keys.length === 1 ? ' key' : ' keys');
+        list.innerHTML = keys.map(function(key) {
+            const remove = keys.length > 1
+                ? '<button type="button" class="btn-ghost" onclick="OSA.removeProviderKey(' + Number(key.index) + ')">Remove</button>'
+                : '';
+            return '<div class="provider-key-row"><span>'
+                + OSA.escapeHtml(key.preview || '••••')
+                + '</span>' + remove + '</div>';
+        }).join('');
+    } catch (error) {
+        console.warn('Could not load provider keys:', error);
+    }
+};
+
+OSA.removeProviderKey = async function(index) {
+    if (!OSA.currentProviderId) return;
+    if (!window.confirm('Remove this API key from the rotation?')) return;
+    try {
+        const res = await OSA.fetchWithAuth(
+            '/api/providers/' + encodeURIComponent(OSA.currentProviderId) + '/keys/' + Number(index),
+            { method: 'DELETE' }
+        );
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+        await OSA.loadProviderKeys(OSA.currentProviderId, true);
+        OSA.renderSettingsProviders();
+        if (OSA.showToast) OSA.showToast('API key removed', 'info');
+    } catch (error) {
+        window.alert(error.message || 'Could not remove that key');
+    }
 };
 
 // ── API Key Validation ──────────────────────────────────────

@@ -380,6 +380,7 @@ OSA.tmodelSubagentItem = function(data, live) {
         prompt: data.prompt || '',
         status: data.status || 'running',
         isRunning,
+        background: data.background === true,
         toolCount: data.tool_count || 0,
         result: data.result || '',
         currentTool: '',
@@ -408,6 +409,7 @@ OSA.tmodelSubagentCreated = function(event) {
         item.prompt = event.prompt || item.prompt;
         item.status = 'running';
         item.isRunning = true;
+        item.background = event.background === true;
         item.result = '';
         item.currentTool = '';
         item.retryText = '';
@@ -2808,6 +2810,28 @@ OSA.patchSubagentUnit = function(wrapper, unit) {
         }
     } else if (!item.isRunning && cancelBtn) {
         cancelBtn.remove();
+    }
+
+    // A foreground run blocks the parent turn. Offer detaching it so the
+    // parent can keep working; the child keeps running and reports later.
+    const backgroundBtnId = 'subagent-background-' + subagentId;
+    let backgroundBtn = card.querySelector('#' + OSA.cssEscape(backgroundBtnId));
+    const canDetach = item.isRunning && !item.background;
+    if (canDetach && !backgroundBtn) {
+        const actions = card.querySelector('.subagent-actions');
+        if (actions) {
+            backgroundBtn = document.createElement('button');
+            backgroundBtn.id = backgroundBtnId;
+            backgroundBtn.className = 'subagent-btn subagent-btn-background';
+            backgroundBtn.textContent = 'Move to background';
+            backgroundBtn.onclick = function(event) {
+                event.stopPropagation();
+                OSA.moveSubagentToBackground(subagentId);
+            };
+            actions.insertBefore(backgroundBtn, actions.firstChild);
+        }
+    } else if (!canDetach && backgroundBtn) {
+        backgroundBtn.remove();
     }
 
     const resumableStatuses = ['timeout', 'partial', 'failed', 'cancelled'];

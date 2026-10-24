@@ -301,6 +301,12 @@ impl Tool for SubagentTool {
                 "<task id=\"{}\" state=\"timeout\">\n<task_result>\n{}\n\nThe subagent is still running. Check action=\"status\" or continue with task_id=\"{}\" when ready.\n</task_result>\n</task>",
                 subagent_session_id, result, subagent_session_id
             ))),
+            // The user moved a foreground run to the background from its
+            // card. The child keeps working; its result arrives later.
+            "background" => Ok(ToolResult::new(format!(
+                "<task id=\"{}\" state=\"background\">\n<task_result>\n{}\n</task_result>\n</task>",
+                subagent_session_id, result
+            ))),
             // The host restarted under a running child. Nothing failed;
             // the child session's history survived, so resume it.
             "interrupted" => Ok(ToolResult::retryable(format!(

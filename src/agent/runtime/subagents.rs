@@ -35,6 +35,12 @@ impl AgentRuntime {
         self.subagent_manager.cancel_subagent(session_id).await
     }
 
+    /// Move a running foreground subagent to the background. The parent turn
+    /// continues immediately; the child's result merges when it finishes.
+    pub fn detach_subagent(&self, session_id: &str) -> Result<bool> {
+        self.subagent_manager.detach_subagent(session_id)
+    }
+
     /// Resume a child session from the web UI or another control surface.
     /// The child keeps its complete message history; only the continuation
     /// prompt is appended and a new task record is created for the run.

@@ -264,6 +264,10 @@ pub enum AgentEvent {
         description: String,
         prompt: String,
         agent_type: String,
+        /// True when launched via the background path. Used by the UI to
+        /// decide whether the running card can be moved to the background.
+        #[serde(default)]
+        background: bool,
         timestamp: SystemTime,
     },
     SubagentProgress {
@@ -856,6 +860,7 @@ impl AgentEvent {
                 description,
                 prompt,
                 agent_type,
+                background,
                 timestamp,
                 ..
             } => AgentEvent::SubagentCreated {
@@ -866,6 +871,7 @@ impl AgentEvent {
                 description,
                 prompt,
                 agent_type,
+                background,
                 timestamp,
             },
             AgentEvent::SubagentProgress {

@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -71,6 +71,37 @@ struct SubagentHandle {
     parent_session_id: String,
     handle: JoinHandle<()>,
     cancel_tx: mpsc::Sender<()>,
+    /// Lets the waiting foreground tool call detach without stopping the
+    /// child. The parent continues; the child's result merges later.
+    detach_tx: watch::Sender<bool>,
+}
+
+/// Resolves when a foreground waiter is asked to move its child to the
+/// background. Missing signal or a dropped sender means "never": the normal
+/// result/heartbeat path stays in charge.
+async fn wait_for_detach(signal: &mut Option<watch::Receiver<bool>>) {
+    let Some(rx) = signal.as_mut() else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    // A detach requested between the card appearing and this wait starting
+    // must not be missed.
+    if *rx.borrow() {
+        return;
+    }
+    loop {
+        match rx.changed().await {
+            Ok(()) => {
+                if *rx.borrow() {
+                    return;
+                }
+            }
+            Err(_) => {
+                std::future::pending::<()>().await;
+                return;
+            }
+        }
+    }
 }
 
 impl SubagentManager {
@@ -370,6 +401,7 @@ impl SubagentManager {
             description: description.clone(),
             prompt: prompt.clone(),
             agent_type: agent_type.clone(),
+            background,
             timestamp: std::time::SystemTime::now(),
         });
 
@@ -465,6 +497,7 @@ impl SubagentManager {
             description: description.clone(),
             prompt: prompt.clone(),
             agent_type: agent_type.clone(),
+            background,
             timestamp: std::time::SystemTime::now(),
         });
 
@@ -515,6 +548,7 @@ impl SubagentManager {
         let task_id = task.id.clone();
 
         let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        let (detach_tx, _detach_rx) = watch::channel(false);
         let storage = self.storage.clone();
         let event_bus = self.event_bus.clone();
         let session_manager = self.session_manager.clone();
@@ -784,6 +818,7 @@ impl SubagentManager {
             parent_session_id: parent_session_id.clone(),
             handle,
             cancel_tx,
+            detach_tx,
         };
 
         self.active_subagents
@@ -1473,6 +1508,35 @@ impl SubagentManager {
             .await
     }
 
+    /// Detach a running foreground subagent from its waiter without stopping
+    /// it. The parent's tool call returns immediately; the child keeps running
+    /// and its result is delivered through the background merge path.
+    pub fn detach_subagent(&self, id_or_session: &str) -> Result<bool> {
+        let session_id = self.resolve_session_id(id_or_session);
+        let Some(handle) = self.active_subagents.get(&session_id) else {
+            return Ok(false);
+        };
+        handle.detach_tx.send_replace(true);
+        drop(handle);
+
+        // Persist the mode so a page reload and the completion summary treat
+        // this run like a background task.
+        self.mark_subagent_background(&session_id);
+        info!("Subagent {} moved to the background", session_id);
+        Ok(true)
+    }
+
+    /// Persist that a run no longer has a waiting parent, so reloads and the
+    /// completion/merge path treat it as a background task.
+    fn mark_subagent_background(&self, session_id: &str) {
+        if let Ok(Some(mut task)) = self.storage.get_subagent_task_by_session(session_id) {
+            if !task.background {
+                task.background = true;
+                let _ = self.storage.update_subagent_task(&task);
+            }
+        }
+    }
+
     pub async fn cancel_all_for_parent(&self, parent_session_id: &str) {
         let child_ids: Vec<String> = self
             .active_subagents
@@ -1545,61 +1609,74 @@ impl SubagentManager {
             // its CleanupGuard, which delivers the terminal outcome and
             // unblocks this waiter immediately.
             let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+            // A manual "move to background" signals this receiver. The child
+            // keeps running; this waiter returns so the parent can continue.
+            let mut detach_rx = self
+                .active_subagents
+                .get(&session_id)
+                .map(|handle| handle.detach_tx.subscribe());
             loop {
-                match tokio::time::timeout(
+                let heartbeat = tokio::time::timeout(
                     Duration::from_secs(Self::WAIT_HEARTBEAT_SECS),
                     &mut receiver,
-                )
-                .await
-                {
-                    Ok(Ok(outcome)) => {
-                        // The waiter got the result directly, so mark this
-                        // generation notified: the merge path must not deliver
-                        // it a second time on the parent's next turn.
-                        if let Ok(Some(task)) =
-                            self.storage.get_subagent_task_by_session(&session_id)
-                        {
-                            if task.completed_at.is_some() {
-                                let _ = self.storage.mark_subagent_notified(&task.id);
+                );
+                tokio::pin!(heartbeat);
+                tokio::select! {
+                    result = &mut heartbeat => {
+                        match result {
+                            Ok(Ok(outcome)) => {
+                                // The waiter got the result directly, so mark this
+                                // generation notified: the merge path must not deliver
+                                // it a second time on the parent's next turn.
+                                if let Ok(Some(task)) =
+                                    self.storage.get_subagent_task_by_session(&session_id)
+                                {
+                                    if task.completed_at.is_some() {
+                                        let _ = self.storage.mark_subagent_notified(&task.id);
+                                    }
+                                }
+                                return Ok(outcome);
+                            }
+                            // Sender dropped without delivering: fall through to storage.
+                            Ok(Err(_)) => break,
+                            Err(_) => {
+                                if let Some(deadline) = deadline {
+                                    if Instant::now() >= deadline {
+                                        // Detach, don't kill: the child keeps running
+                                        // (it may be in a retry backoff longer than
+                                        // this wait) and its terminal state wakes the
+                                        // parent through the merge path. A timeout is
+                                        // an interruption, not a reason to discard the
+                                        // child's work or replace its eventual result
+                                        // with a bare error string.
+                                        let (partial_result, tool_count) =
+                                            self.partial_outcome(&session_id).await;
+                                        let timeout_message = format!(
+                                            "Subagent is still running after {}s and has been left running in the background. Check it with action=\"status\" or continue it with action=\"resume\" using task_id=\"{}\".\n\nPartial result:\n{}",
+                                            timeout_secs.unwrap_or(0),
+                                            session_id,
+                                            partial_result
+                                        );
+                                        self.mark_subagent_background(&session_id);
+                                        return Ok((
+                                            "timeout".to_string(),
+                                            timeout_message,
+                                            tool_count,
+                                        ));
+                                    }
+                                }
+                                self.emit_wait_heartbeat(&session_id).await;
                             }
                         }
-                        return Ok(outcome);
                     }
-                    // Sender dropped without delivering: fall through to storage.
-                    Ok(Err(_)) => break,
-                    Err(_) => {
-                        if let Some(deadline) = deadline {
-                            if Instant::now() >= deadline {
-                                // Detach, don't kill: the child keeps running
-                                // (it may be in a retry backoff longer than
-                                // this wait) and its terminal state wakes the
-                                // parent through the merge path. A timeout is
-                                // an interruption, not a reason to discard the
-                                // child's work or replace its eventual result
-                                // with a bare error string.
-                                let partial_result =
-                                    Self::extract_result(&self.storage, &session_id)
-                                        .await
-                                        .unwrap_or_else(|_| {
-                                            "No partial result available".to_string()
-                                        });
-                                let tool_count = self
-                                    .storage
-                                    .get_subagent_task_by_session(&session_id)
-                                    .ok()
-                                    .flatten()
-                                    .map(|task| task.tool_count)
-                                    .unwrap_or(0);
-                                let timeout_message = format!(
-                                    "Subagent is still running after {}s and has been left running in the background. Check it with action=\"status\" or continue it with action=\"resume\" using task_id=\"{}\".\n\nPartial result:\n{}",
-                                    timeout_secs.unwrap_or(0),
-                                    session_id,
-                                    partial_result
-                                );
-                                return Ok(("timeout".to_string(), timeout_message, tool_count));
-                            }
-                        }
-                        self.emit_wait_heartbeat(&session_id).await;
+                    _ = wait_for_detach(&mut detach_rx) => {
+                        let (partial_result, tool_count) =
+                            self.partial_outcome(&session_id).await;
+                        let message = format!(
+                            "Subagent is still running and was moved to the background, so you can continue. Its result will be delivered when it finishes. Check it with action=\"status\" or continue it with action=\"resume\" using task_id=\"{}\".\n\nPartial result:\n{}",
+                            session_id, partial_result
+                        );
+                        return Ok(("background".to_string(), message, tool_count));
                     }
                 }
             }
@@ -1617,6 +1694,22 @@ impl SubagentManager {
                 0,
             ))
         }
+    }
+
+    /// Partial result plus tool count for a child that is still running. Used
+    /// when a wait times out or the user moves the child to the background.
+    async fn partial_outcome(&self, session_id: &str) -> (String, i32) {
+        let partial_result = Self::extract_result(&self.storage, session_id)
+            .await
+            .unwrap_or_else(|_| "No partial result available".to_string());
+        let tool_count = self
+            .storage
+            .get_subagent_task_by_session(session_id)
+            .ok()
+            .flatten()
+            .map(|task| task.tool_count)
+            .unwrap_or(0);
+        (partial_result, tool_count)
     }
 
     /// Best-effort "still waiting" progress for a blocked waiter. Failures
@@ -1777,5 +1870,19 @@ mod tests {
     fn explore_agents_can_use_read_only_bash_for_repository_inspection() {
         let tools = SubagentManager::get_allowed_tools_for_agent_type("explore");
         assert!(tools.iter().any(|tool| tool == "bash"));
+    }
+
+    #[tokio::test]
+    async fn detach_signal_wakes_a_waiting_parent() {
+        let (tx, rx) = watch::channel(false);
+        let mut signal = Some(rx);
+        let waiter = tokio::spawn(async move {
+            wait_for_detach(&mut signal).await;
+        });
+        tx.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("detach signal should resolve the waiter")
+            .expect("waiter task");
     }
 }

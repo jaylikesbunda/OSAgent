@@ -22,6 +22,28 @@ const BASE_RETRY_DELAY_SECS: u64 = 2;
 const MAX_TOOL_SCHEMA_TOKENS: usize = 16_000;
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
+/// Add a rejected key to the in-memory quarantine. Shared with the streaming
+/// error path, which cannot borrow the provider itself.
+fn quarantine_key(
+    bad_keys: &std::sync::RwLock<HashSet<String>>,
+    provider_type: &str,
+    key: &str,
+) {
+    if key.trim().is_empty() {
+        return;
+    }
+    let mut bad = match bad_keys.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if bad.insert(key.to_string()) {
+        warn!(
+            "Provider {}: an API key was rejected; using the remaining keys for this session",
+            provider_type
+        );
+    }
+}
+
 /// Receives notifications before each provider retry attempt so callers can
 /// surface "retrying in Ns" status in real time instead of after the fact.
 pub trait RetryListener: Send + Sync {
@@ -177,6 +199,10 @@ pub struct OpenAICompatibleProvider {
     /// (each request and each retry) takes the next key, spreading load
     /// and automatically failing over on 429s/expired keys.
     key_cursor: std::sync::atomic::AtomicUsize,
+    /// Keys that returned a permanent auth failure. They are filtered out of
+    /// rotation for the rest of the session, so one expired key cannot keep
+    /// poisoning requests (including subagents, which share this provider).
+    bad_keys: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl OpenAICompatibleProvider {
@@ -276,6 +302,7 @@ impl OpenAICompatibleProvider {
             catalog,
             retry_listener: std::sync::RwLock::new(None),
             key_cursor: std::sync::atomic::AtomicUsize::new(0),
+            bad_keys: Arc::new(std::sync::RwLock::new(HashSet::new())),
         })
     }
 
@@ -1678,8 +1705,42 @@ impl OpenAICompatibleProvider {
         // Multi-key rotation: every resolution (each request, each retry)
         // takes the next candidate, so 429s and dead keys fail over to a
         // fresh key instead of retrying the same one.
-        let candidates = config.key_candidates();
+        let mut candidates = config.key_candidates();
         if candidates.len() > 1 {
+            // Skip keys the provider permanently rejected in this session.
+            let healthy = {
+                let bad = self
+                    .bad_keys
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if bad.is_empty() {
+                    None
+                } else {
+                    Some(
+                        candidates
+                            .iter()
+                            .filter(|key| !bad.contains(*key))
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            };
+            if let Some(healthy) = healthy {
+                if healthy.is_empty() {
+                    // Do not black-hole the provider: a key may have been
+                    // renewed, so try them all again instead of sending an
+                    // empty credential.
+                    if let Ok(mut bad) = self.bad_keys.write() {
+                        bad.clear();
+                    }
+                    warn!(
+                        "Provider {}: every API key was rejected earlier; retrying all of them",
+                        self.config.provider_type
+                    );
+                } else {
+                    candidates = healthy;
+                }
+            }
             let index = self
                 .key_cursor
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -1687,6 +1748,17 @@ impl OpenAICompatibleProvider {
             config.api_key = candidates[index].clone();
         }
         config
+    }
+
+    /// Record a key the provider permanently rejected. Only the request that
+    /// actually used it can report it, so this is called from the response and
+    /// stream error paths.
+    fn mark_key_bad(&self, key: &str) {
+        quarantine_key(&self.bad_keys, &self.config.provider_type, key);
+    }
+
+    fn has_multiple_keys(&self) -> bool {
+        self.config.key_candidates().len() > 1
     }
 
     fn oauth_enabled(&self) -> bool {
@@ -2330,18 +2402,42 @@ impl OpenAICompatibleProvider {
                         return Err(e);
                     }
 
-                    if e.is_retryable() && attempt < MAX_RETRIES {
-                        let delay = Self::retry_delay_for_attempt(attempt, &e);
-                        warn!(
-                            "Provider request failed (attempt {}/{}): {}. Retrying in {}s...",
-                            attempt,
-                            MAX_RETRIES,
-                            e,
-                            delay.as_secs()
-                        );
-                        self.notify_retry(session_id, attempt, MAX_RETRIES, delay, &e.to_string());
+                    // A dead key is permanent for the request, not for the
+                    // provider: rotate to the next key instead of failing the
+                    // whole turn. Subagents call this path directly, so without
+                    // it one expired key in a rotation kills every subagent run
+                    // that happens to land on it.
+                    let auth_failover = e.is_auth_error() && self.has_multiple_keys();
+                    if (e.is_retryable() || auth_failover) && attempt < MAX_RETRIES {
+                        let delay = if e.is_retryable() {
+                            Self::retry_delay_for_attempt(attempt, &e)
+                        } else {
+                            Duration::ZERO
+                        };
+                        if auth_failover && !e.is_retryable() {
+                            warn!(
+                                "Provider request failed (attempt {}/{}): {}. Trying the next API key...",
+                                attempt, MAX_RETRIES, e
+                            );
+                        } else {
+                            warn!(
+                                "Provider request failed (attempt {}/{}): {}. Retrying in {}s...",
+                                attempt,
+                                MAX_RETRIES,
+                                e,
+                                delay.as_secs()
+                            );
+                        }
+                        let reason = if auth_failover && !e.is_retryable() {
+                            "An API key was rejected; trying the next one".to_string()
+                        } else {
+                            e.to_string()
+                        };
+                        self.notify_retry(session_id, attempt, MAX_RETRIES, delay, &reason);
                         last_error = Some(e);
-                        tokio::time::sleep(delay).await;
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
                         continue;
                     }
 
@@ -2369,18 +2465,40 @@ impl OpenAICompatibleProvider {
                         return Err(e);
                     }
 
-                    if e.is_retryable() && attempt < MAX_RETRIES {
-                        let delay = Self::retry_delay_for_attempt(attempt, &e);
-                        warn!(
-                            "Provider stream failed (attempt {}/{}): {}. Retrying in {}s...",
-                            attempt,
-                            MAX_RETRIES,
-                            e,
-                            delay.as_secs()
-                        );
-                        self.notify_retry(session_id, attempt, MAX_RETRIES, delay, &e.to_string());
+                    // Same key failover as the non-streaming path. Most auth
+                    // failures arrive while consuming the stream (handled
+                    // below), but a provider can reject the open request too.
+                    let auth_failover = e.is_auth_error() && self.has_multiple_keys();
+                    if (e.is_retryable() || auth_failover) && attempt < MAX_RETRIES {
+                        let delay = if e.is_retryable() {
+                            Self::retry_delay_for_attempt(attempt, &e)
+                        } else {
+                            Duration::ZERO
+                        };
+                        if auth_failover && !e.is_retryable() {
+                            warn!(
+                                "Provider stream failed (attempt {}/{}): {}. Trying the next API key...",
+                                attempt, MAX_RETRIES, e
+                            );
+                        } else {
+                            warn!(
+                                "Provider stream failed (attempt {}/{}): {}. Retrying in {}s...",
+                                attempt,
+                                MAX_RETRIES,
+                                e,
+                                delay.as_secs()
+                            );
+                        }
+                        let reason = if auth_failover && !e.is_retryable() {
+                            "An API key was rejected; trying the next one".to_string()
+                        } else {
+                            e.to_string()
+                        };
+                        self.notify_retry(session_id, attempt, MAX_RETRIES, delay, &reason);
                         last_error = Some(e);
-                        tokio::time::sleep(delay).await;
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
                         continue;
                     }
 
@@ -2499,8 +2617,20 @@ impl OpenAICompatibleProvider {
             .eventsource()
             .map_err(|e| OSAgentError::Parse(e.to_string()))?;
 
+        // The stream outlives this call, so it carries its own handles. A 401
+        // often arrives as a stream error rather than at request time; this
+        // lets the body reader quarantine that key for the next attempt.
+        let stream_bad_keys = Arc::clone(&self.bad_keys);
+        let stream_provider = Arc::new(self.config.provider_type.clone());
+        let stream_key = Arc::new(request_auth.api_key.clone());
+        let stream_oauth = self.oauth_enabled();
+
         let stream = event_source
-            .filter_map(|event| async move {
+            .filter_map(move |event| {
+                let bad_keys = Arc::clone(&stream_bad_keys);
+                let provider = Arc::clone(&stream_provider);
+                let key = Arc::clone(&stream_key);
+                async move {
                 match event {
                     Ok(Event::Open) => None,
                     Ok(Event::Message(message)) => {
@@ -2570,15 +2700,20 @@ impl OpenAICompatibleProvider {
                     }
                     Err(err) => {
                         let text = err.to_string();
-                        Some(Err(OSAgentError::ProviderStructured(
+                        let structured = OSAgentError::ProviderStructured(
                             crate::error::ProviderErrorInfo {
                                 status_code: Self::parse_status_code_from_message(&text),
                                 message: format!("stream error: {}", text),
                                 retry_after: None,
                                 error_code: None,
                             },
-                        )))
+                        );
+                        if !stream_oauth && structured.is_auth_error() {
+                            quarantine_key(&bad_keys, provider.as_str(), key.as_str());
+                        }
+                        Some(Err(structured))
                     }
+                }
                 }
             })
             .boxed();
@@ -2724,7 +2859,14 @@ impl OpenAICompatibleProvider {
                         }
                         _ => return Err(err),
                     },
-                    other => break other?,
+                    other => {
+                        if let Err(err) = &other {
+                            if err.is_auth_error() {
+                                self.mark_key_bad(&request_auth.api_key);
+                            }
+                        }
+                        break other?;
+                    }
                 }
             };
 
@@ -2796,6 +2938,9 @@ impl OpenAICompatibleProvider {
             let headers = response.headers().clone();
             let error_text = response.text().await.unwrap_or_default();
             let err = Self::provider_http_error(status, &headers, &error_text);
+            if err.is_auth_error() {
+                self.mark_key_bad(&request_auth.api_key);
+            }
             error!("{}", err);
             return Err(err);
         }
@@ -2833,15 +2978,17 @@ impl OpenAICompatibleProvider {
             } else {
                 format!("API error: {}", error_msg)
             };
-            error!("{}", full_error);
-            return Err(OSAgentError::ProviderStructured(
-                crate::error::ProviderErrorInfo {
-                    message: full_error,
-                    status_code: None,
-                    retry_after: None,
-                    error_code,
-                },
-            ));
+            let err = OSAgentError::ProviderStructured(crate::error::ProviderErrorInfo {
+                message: full_error,
+                status_code: None,
+                retry_after: None,
+                error_code,
+            });
+            if err.is_auth_error() {
+                self.mark_key_bad(&request_auth.api_key);
+            }
+            error!("{}", err);
+            return Err(err);
         }
 
         let parsed = Self::parse_chat_completions_response(&response_json);
@@ -2989,6 +3136,30 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(provider.resolved_config().api_key, "only");
         }
+    }
+
+    #[test]
+    fn rejected_keys_are_skipped_and_all_rejected_resets_the_quarantine() {
+        let config = ProviderConfig {
+            provider_type: "openai-compatible".to_string(),
+            api_key: "key-a".to_string(),
+            api_keys: vec!["key-b".to_string(), "key-c".to_string()],
+            base_url: "https://example.invalid/v1".to_string(),
+            model: "x".to_string(),
+            ..ProviderConfig::default()
+        };
+        let provider = OpenAICompatibleProvider::new(config).expect("provider");
+
+        provider.mark_key_bad("key-a");
+        for _ in 0..6 {
+            assert_ne!(provider.resolved_config().api_key, "key-a");
+        }
+
+        provider.mark_key_bad("key-b");
+        provider.mark_key_bad("key-c");
+        // With every key quarantined, rotation clears the quarantine rather
+        // than resolving to an empty credential.
+        assert!(!provider.resolved_config().api_key.is_empty());
     }
 
     #[test]

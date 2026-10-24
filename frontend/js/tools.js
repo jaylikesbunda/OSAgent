@@ -1814,8 +1814,37 @@ OSA.cancelSubagent = async function(subagentId) {
     }
 };
 
-OSA.resumeSubagent = async function(subagentId) {
-    const resumeBtn = document.getElementById(`subagent-resume-${subagentId}`);
+OSA.moveSubagentToBackground = async function(subagentId) {
+    const btn = document.getElementById(`subagent-background-${subagentId}`);
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Moving…';
+    }
+    try {
+        const response = await OSA.fetchWithAuth(`/api/subagents/${subagentId}/background`, {
+            method: 'POST'
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+
+        const item = OSA.tmodelGet('subagent:' + subagentId);
+        if (item) {
+            item.background = true;
+            OSA.tmodelMarkDirty('subagent-background');
+        } else if (btn) {
+            btn.remove();
+        }
+        if (OSA.showToast) OSA.showToast('Subagent moved to the background', 'info');
+    } catch (err) {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Move to background';
+        }
+        if (OSA.showToast) OSA.showToast(err.message || 'Could not move the subagent', 'error');
+    }
+};
+
+OSA.resumeSubagent = async function(subagentId) {    const resumeBtn = document.getElementById(`subagent-resume-${subagentId}`);
     if (resumeBtn) {
         resumeBtn.disabled = true;
         resumeBtn.textContent = 'Resuming…';
@@ -1832,6 +1861,8 @@ OSA.resumeSubagent = async function(subagentId) {
         if (item) {
             item.status = 'running';
             item.isRunning = true;
+            // The UI always resumes in the background, so no detach action.
+            item.background = true;
             item.retryText = '';
             item.result = '';
             OSA.tmodelMarkDirty('subagent-resumed');

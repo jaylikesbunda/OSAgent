@@ -1000,6 +1000,11 @@
     border-color: var(--error);
 }
 
+.subagent-btn-background:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
 @media (max-width: 560px) {
     .subagent-type,
     .subagent-tool-count {

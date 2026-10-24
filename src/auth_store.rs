@@ -47,7 +47,7 @@ pub fn load_auth_keys(config_dir: &Path) -> HashMap<String, Vec<String>> {
     file.entries
         .into_iter()
         .map(|(id, entry)| {
-            let keys: Vec<String> = entry
+            let mut keys: Vec<String> = entry
                 .api_keys
                 .into_iter()
                 .map(|k| k.trim().to_string())
@@ -55,6 +55,9 @@ pub fn load_auth_keys(config_dir: &Path) -> HashMap<String, Vec<String>> {
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
+            // Stable order: the settings UI addresses keys by index when
+            // removing one, so two loads must return the same sequence.
+            keys.sort();
             (id, keys)
         })
         .filter(|(_, keys)| !keys.is_empty())

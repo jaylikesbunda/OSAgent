@@ -735,6 +735,10 @@ pub fn create_router(
             get(get_subagent_status).delete(cancel_subagent),
         )
         .route("/api/subagents/:id/resume", post(resume_subagent))
+        .route(
+            "/api/subagents/:id/background",
+            post(move_subagent_to_background),
+        )
         .route("/api/subagents/:id/result", get(get_subagent_result))
         .route("/api/subagents/cleanup", post(cleanup_subagents))
         .route("/api/tools", get(list_tools))
@@ -753,6 +757,11 @@ pub fn create_router(
         .route("/api/providers/search", get(search_models))
         .route("/api/providers/find", get(search_providers))
         .route("/api/providers/validate", post(validate_provider))
+        .route("/api/providers/:id/keys", get(list_provider_keys))
+        .route(
+            "/api/providers/:id/keys/:index",
+            delete(delete_provider_key),
+        )
         .route("/api/providers/:id", delete(delete_provider))
         .route("/api/local-servers/status", get(local_servers_status))
         .route("/api/oauth/providers", get(oauth_list_providers))
@@ -5114,6 +5123,133 @@ async fn delete_provider(
     })))
 }
 
+/// Mask a stored key for the settings UI. The full value never leaves
+/// auth.toml; the preview is enough to tell entries apart.
+fn mask_api_key(key: &str) -> String {
+    let chars: Vec<char> = key.trim().chars().collect();
+    if chars.len() <= 8 {
+        return "••••".to_string();
+    }
+    format!(
+        "{}…{}",
+        chars[..4].iter().collect::<String>(),
+        chars[chars.len() - 4..].iter().collect::<String>()
+    )
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderKeyView {
+    index: usize,
+    preview: String,
+}
+
+fn provider_key_views(keys: &[String]) -> Vec<ProviderKeyView> {
+    keys.iter()
+        .enumerate()
+        .map(|(index, key)| ProviderKeyView {
+            index,
+            preview: mask_api_key(key),
+        })
+        .collect()
+}
+
+async fn list_provider_keys(
+    Extension(config_path): Extension<PathBuf>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let config_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
+    let stored = crate::auth_store::load_auth_keys(&config_dir);
+    let keys = stored.get(&provider_id).cloned().unwrap_or_default();
+    Ok(Json(serde_json::json!({
+        "keys": provider_key_views(&keys)
+    })))
+}
+
+/// Remove one key from a provider's rotation. The runtime provider is rebuilt
+/// so the change applies without restarting the server.
+async fn delete_provider_key(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+    Path((provider_id, index)): Path<(String, usize)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let config_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
+    let mut stored = crate::auth_store::load_auth_keys(&config_dir);
+    let mut keys = stored.get(&provider_id).cloned().unwrap_or_default();
+
+    if keys.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "No saved keys for this provider".to_string(),
+            }),
+        ));
+    }
+    if keys.len() <= 1 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Add another key before removing the last one".to_string(),
+            }),
+        ));
+    }
+    if index >= keys.len() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Key not found".to_string(),
+            }),
+        ));
+    }
+
+    keys.remove(index);
+    stored.insert(provider_id.clone(), keys.clone());
+    crate::auth_store::save_auth_keys(&config_dir, &stored).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to store API keys: {}", e),
+            }),
+        )
+    })?;
+
+    // The running provider copied its keys at startup. Rebuild that entry so
+    // the removed key stops being used immediately.
+    let mut config = agent.get_config().await;
+    let updated = config
+        .providers
+        .iter_mut()
+        .find(|provider| provider.effective_id() == provider_id.as_str())
+        .map(|provider| {
+            provider.api_key.clear();
+            provider.api_keys.clear();
+            provider.auth_file_keys = keys.clone();
+            provider.clone()
+        });
+    if let Some(updated) = updated {
+        agent.add_provider(updated).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+        agent.save_config(&config_path).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "keys": provider_key_views(&keys)
+    })))
+}
+
 /// Saves which providers and models the composer model dropdown lists.
 /// Persists immediately, like the other provider routes.
 async fn update_provider_menu(
@@ -7556,6 +7692,7 @@ pub struct SessionSubagentTaskResponse {
     pub tool_count: i32,
     pub result: Option<String>,
     pub is_running: bool,
+    pub background: bool,
     pub created_at: i64,
     pub completed_at: Option<i64>,
     pub context_state: Option<crate::storage::SessionContextState>,
@@ -7595,6 +7732,7 @@ async fn get_session_subagents(
                     tool_count: t.tool_count,
                     result: t.result,
                     is_running,
+                    background: t.background,
                     created_at: t.created_at.timestamp_millis(),
                     completed_at: t.completed_at.map(|dt| dt.timestamp_millis()),
                     context_state,
@@ -7678,6 +7816,32 @@ async fn cancel_subagent(
             "message": "Subagent not found or already completed"
         }))),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Detach a running foreground subagent from the turn that is waiting for it.
+/// The child keeps running and its result is merged when it finishes.
+async fn move_subagent_to_background(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    match agent.detach_subagent(&id) {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "success": true,
+            "message": "Subagent moved to the background"
+        }))),
+        Ok(false) => Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Subagent is not running".to_string(),
+            }),
+        )),
+        Err(error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )),
     }
 }
 
@@ -8193,15 +8357,15 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_provider, auth_status, get_config, login, update_config, update_provider_menu,
-        AddProviderRequest, LoginRequest,
+        add_provider, auth_status, delete_provider_key, get_config, list_provider_keys, login,
+        mask_api_key, update_config, update_provider_menu, AddProviderRequest, LoginRequest,
     };
     use crate::agent::runtime::AgentRuntime;
     use crate::config::{
         Config, DiscordConfig, WorkspaceConfig, WorkspacePath, WorkspacePermission,
     };
     use crate::web::auth;
-    use axum::{extract::Extension, http::StatusCode, response::IntoResponse, Json};
+    use axum::{extract::Extension, extract::Path, http::StatusCode, response::IntoResponse, Json};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -8489,6 +8653,70 @@ mod tests {
             .expect("openai entry");
         assert_eq!(entry.key_candidates(), vec!["sk-stored".to_string()]);
         assert_eq!(entry.model, "gpt-4o");
+    }
+
+    #[test]
+    fn api_key_previews_hide_the_middle() {
+        assert_eq!(mask_api_key("sk-1234567890abcd"), "sk-1…abcd");
+        assert_eq!(mask_api_key("short"), "••••");
+    }
+
+    #[tokio::test]
+    async fn provider_keys_can_be_listed_and_removed() {
+        let temp_dir = tempdir().unwrap();
+        let config = test_config(temp_dir.path());
+        let config_path = temp_dir.path().join("config.toml");
+        config.save(&config_path).unwrap();
+        let agent = AgentRuntime::new(config.clone()).unwrap();
+
+        let connect: AddProviderRequest = serde_json::from_value(serde_json::json!({
+            "provider_id": "openai",
+            "api_key": "sk-first-0000",
+            "api_keys": ["sk-second-1111"],
+        }))
+        .unwrap();
+        add_provider(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Json(connect),
+        )
+        .await
+        .unwrap();
+
+        let listed = list_provider_keys(
+            Extension(config_path.clone()),
+            Path("openai".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let keys = listed["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys
+            .iter()
+            .all(|key| key["preview"].as_str().unwrap().contains('…')));
+        assert!(keys
+            .iter()
+            .all(|key| key["preview"].as_str().unwrap() != "sk-first-0000"));
+
+        let removed = delete_provider_key(
+            Extension(agent.clone()),
+            Extension(config_path.clone()),
+            Path(("openai".to_string(), 0)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(removed["keys"].as_array().unwrap().len(), 1);
+
+        let entry = agent
+            .get_config()
+            .await
+            .providers
+            .into_iter()
+            .find(|p| p.effective_id() == "openai")
+            .expect("openai entry");
+        assert_eq!(entry.key_candidates().len(), 1);
     }
 
     #[tokio::test]
