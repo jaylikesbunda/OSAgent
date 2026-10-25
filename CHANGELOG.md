@@ -5,12 +5,12 @@ TL;DR:
 * **Remote access from your phone**: a public address that stays the same across restarts, paired by QR code, with device tokens you can revoke
 * **A model per surface**: Discord, each subagent type and background chores can use their own model, separate from the chat model
 * **Subagents on any model**: say "use sonnet for this" and OSA finds it, preferring the provider you last used it on, and asks only if it is still ambiguous
-* **A faster, lighter web UI**: large chats open quickly, Settings no longer stalls, and background polling stops while the tab is hidden
+* **A faster, lighter web UI**: large chats open quickly, and background polling stops while the tab is hidden
 
 Added:
 
 GitHub:
-* Connect with a personal access token or "Sign in with GitHub" (no client secret), then choose watched repositories, the review event, the inline-comment limit and your own review instructions. Review history is listed in the same pane, with links
+* Connect with a personal access token or "Sign in with GitHub" (no client secret), then choose watched repositories, the review event, the inline-comment limit and your own review instructions. Review history is listed in the same pane, with links. In the desktop app, sign-in and the pane's links open in your default browser, and sign-in completes when you return to the window
 * Ask in chat, for example "review PR #123 in owner/repo", and OSA reads the diff, writes severity-tagged findings with GitHub suggestion blocks, and posts a summary plus inline comments. A dry run previews a review without posting it
 * Automatic reviews on watched repositories. Drafts and bot authors are skipped, and a commit is never reviewed twice
 * Comment triggers: with "On @mention" enabled, a PR comment containing the handle (default `@osagent-review`, which is not a real GitHub user) starts a review. `--dry-run`, `--approve` and `--request-changes` work, inline review threads count, each comment fires once, and OSA reacts with 👀 before replying with the review link
@@ -20,7 +20,6 @@ Models:
 * Per-surface defaults in Settings → Models: Discord, each subagent type (general, explore, verify) and background chores can use their own model, while "Same as current model" keeps following the chat model
 * Those pickers use the same searchable, provider-grouped dropdown as the composer (connected providers only), now honouring your Show in model menu filters and opening wider so long model names fit. The GitHub pane's review model is a picker too
 * Ask for a model per subagent by name, for example "use sonnet for this", and OSA resolves it, preferring the provider that model was last used on; if several providers still match, it asks which one to use and retries with your choice
-* Per-subagent model defaults now apply immediately instead of after a restart
 
 Subagents:
 * A running subagent can be moved to the background from its card, so the parent chat continues immediately while the child keeps working and reports when it finishes
@@ -47,23 +46,16 @@ Automation:
 
 Fixed:
 
-GitHub:
-* Reviews no longer fail when the model runs through OpenCode Go ("Request is missing x-opencode-session")
-* A review whose model calls all fail now reports a failure and retries, instead of posting a green review that only contains error notes
-* Settings → GitHub opens on the first click
-* "Sign in with GitHub" and the pane's external links open in your default browser in the desktop app, and sign-in completes when you return to the window. A transient poll failure or a "slow down" from GitHub no longer abandons an approved sign-in
-
 Providers and settings:
 * Auth and billing errors (401/402/403/404) fail at once with the real message instead of four retries; rate limits and dropped connections still retry
 * A rejected or expired API key in a multi-key rotation no longer fails the request: it is skipped and the next key is tried, including inside subagents
 * Provider settings show the saved keys as masked previews, let you remove one, and say when the provider rotates across several keys
-* Settings opens without building thousands of model options, and model lists stop rebuilding when nothing changed
 * A steer follow-up sent while the agent is working interrupts the turn instead of queuing silently
 * `read_file` results no longer force the preview panel open, and files too large to render are skipped quietly
 
 Mobile and layout:
 * New chat closes the drawer, a single tap opens a chat and dismisses it, and the reply action row wraps instead of stretching the chat sideways
-* The pairing URL wraps inside its card, and the chat list no longer peeks above the sidebar search box
+* The chat list no longer peeks above the sidebar search box
 
 Speed and stability:
 * Large chats open much faster: checkpoints no longer ship a copy of the whole session, and switching chats no longer downloads the entire event history
