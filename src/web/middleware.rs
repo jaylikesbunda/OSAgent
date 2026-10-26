@@ -277,7 +277,10 @@ mod tests {
 
         // A device token with no matching device row is rejected.
         let mut service = AuthLayer::new(secret.clone(), storage.clone()).layer(OkService);
-        assert_eq!(call(&mut service).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            call(&mut service).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
 
         // Once paired, the same token is accepted.
         storage.create_paired_device(&device).unwrap();
@@ -287,6 +290,9 @@ mod tests {
         // Revoking the device invalidates the still-signed token.
         storage.delete_paired_device(&device.id).unwrap();
         let mut service = AuthLayer::new(secret.clone(), storage.clone()).layer(OkService);
-        assert_eq!(call(&mut service).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            call(&mut service).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

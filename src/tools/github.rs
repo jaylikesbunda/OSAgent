@@ -33,9 +33,13 @@ impl GithubTool {
     }
 
     fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-        args[key].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
-            OSAgentError::ToolExecution(format!("'{}' is required for this action", key))
-        })
+        args[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                OSAgentError::ToolExecution(format!("'{}' is required for this action", key))
+            })
     }
 
     fn require_u64(args: &Value, key: &str) -> Result<u64> {
@@ -53,7 +57,11 @@ impl GithubTool {
 
     /// `repo` argument, falling back to a single watched repo.
     async fn resolve_repo(&self, args: &Value) -> Result<String> {
-        if let Some(repo) = args["repo"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(repo) = args["repo"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return normalize_repo(repo);
         }
         let config = self.engine.github_config().await?;
@@ -110,12 +118,17 @@ impl GithubTool {
                         "- #{} {} [{}] by {}{}{}\n  {}\n",
                         pr.number,
                         pr.title.trim(),
-                        if pr.is_draft() { "draft" } else { pr.state.as_str() },
+                        if pr.is_draft() {
+                            "draft"
+                        } else {
+                            pr.state.as_str()
+                        },
                         pr.author(),
                         pr.changed_files
                             .map(|f| format!(" · {} files", f))
                             .unwrap_or_default(),
-                        pr.head.label
+                        pr.head
+                            .label
                             .as_deref()
                             .map(|l| format!(" · {}", l))
                             .unwrap_or_default(),
@@ -148,7 +161,11 @@ impl GithubTool {
                     if !labels.is_empty() {
                         out.push_str(&format!(
                             "Labels: {}\n",
-                            labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(", ")
+                            labels
+                                .iter()
+                                .map(|l| l.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
                 }
@@ -283,7 +300,9 @@ impl GithubTool {
                     repo,
                     pr.number,
                     pr.title.trim(),
-                    pr.html_url.map(|url| format!(" {}", url)).unwrap_or_default()
+                    pr.html_url
+                        .map(|url| format!(" {}", url))
+                        .unwrap_or_default()
                 ))
             }
 
@@ -345,7 +364,11 @@ impl GithubTool {
                         if !labels.is_empty() {
                             out.push_str(&format!(
                                 " [{}]",
-                                labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(", ")
+                                labels
+                                    .iter()
+                                    .map(|l| l.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ));
                         }
                     }
@@ -376,7 +399,12 @@ impl GithubTool {
                 if let Some(url) = &issue.html_url {
                     out.push_str(&format!("URL: {}\n", url));
                 }
-                if let Some(body) = issue.body.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+                if let Some(body) = issue
+                    .body
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|b| !b.is_empty())
+                {
                     out.push_str(&format!("\n{}", truncate(body, 4_000)));
                 }
                 Ok(out)
@@ -402,7 +430,10 @@ impl GithubTool {
                     repo,
                     issue.number,
                     issue.title.trim(),
-                    issue.html_url.map(|url| format!(" {}", url)).unwrap_or_default()
+                    issue
+                        .html_url
+                        .map(|url| format!(" {}", url))
+                        .unwrap_or_default()
                 ))
             }
 
@@ -439,7 +470,11 @@ impl GithubTool {
                 out.push_str(&format!(
                     "Default branch: {}\nVisibility: {}\nOpen issues: {}\n",
                     repo_info.default_branch.as_deref().unwrap_or("unknown"),
-                    if repo_info.private { "private" } else { "public" },
+                    if repo_info.private {
+                        "private"
+                    } else {
+                        "public"
+                    },
                     repo_info.open_issues_count.unwrap_or(0),
                 ));
                 if let Some(url) = &repo_info.html_url {
@@ -649,7 +684,11 @@ impl GithubTool {
                         release.tag_name,
                         release.name.as_deref().unwrap_or(""),
                         release.published_at.as_deref().unwrap_or("unpublished"),
-                        if release.prerelease { " [prerelease]" } else { "" }
+                        if release.prerelease {
+                            " [prerelease]"
+                        } else {
+                            ""
+                        }
                     ));
                 }
                 Ok(out)
@@ -673,7 +712,9 @@ impl GithubTool {
 
             "search_issues" => {
                 let query = Self::require_str(args, "query")?;
-                let results = client.search_issues(query, Self::limit(args) as u32).await?;
+                let results = client
+                    .search_issues(query, Self::limit(args) as u32)
+                    .await?;
                 if results.is_empty() {
                     return Ok("No issue or PR results.".to_string());
                 }
@@ -802,10 +843,7 @@ impl GithubTool {
                     start_side: None,
                 });
             } else {
-                body.push_str(&format!(
-                    "\n\n**`{}:{}`** {}\n",
-                    path, line, text
-                ));
+                body.push_str(&format!("\n\n**`{}:{}`** {}\n", path, line, text));
             }
         }
         Ok(comments)

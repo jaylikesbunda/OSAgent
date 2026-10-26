@@ -526,7 +526,8 @@ mod completion_notice_tests {
 
     #[test]
     fn partial_result_says_the_task_is_not_done() {
-        let notice = subagent_completion_notice(&task("partial", Some("stopped without a summary")));
+        let notice =
+            subagent_completion_notice(&task("partial", Some("stopped without a summary")));
         assert!(notice.contains("state=\"partial\""));
         assert!(notice.contains("do NOT tell the user the task is done"));
         assert!(notice.contains("task_id=\"ses-1\""));

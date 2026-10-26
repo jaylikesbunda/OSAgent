@@ -45,7 +45,11 @@ impl AgentRuntime {
                 user.clone(),
                 None,
                 None,
-                if images.is_empty() { None } else { Some(images) },
+                if images.is_empty() {
+                    None
+                } else {
+                    Some(images)
+                },
                 None,
                 None,
             )

@@ -14,15 +14,15 @@ use crate::agent::runtime::AgentRuntime;
 use crate::config::{Config, GithubConfig};
 use crate::error::{OSAgentError, Result};
 use crate::storage::models::GithubReview;
-use crate::storage::SqliteStorage;
 use crate::storage::Message;
+use crate::storage::SqliteStorage;
 
 use super::client::{resolve_token, GithubClient, TokenSource};
 use super::diff::parse_patch;
 use super::review::{
     batch_files, build_review_user_prompt, compose_review_body, parse_review_response,
-    repair_prompt, to_review_comments, validate_findings, ReviewDraft, ReviewFinding,
-    ReviewStats, MAX_FILES, MAX_TOTAL_PATCH_CHARS, MODEL_CALL_TIMEOUT_SECS, REVIEW_SYSTEM_PROMPT,
+    repair_prompt, to_review_comments, validate_findings, ReviewDraft, ReviewFinding, ReviewStats,
+    MAX_FILES, MAX_TOTAL_PATCH_CHARS, MODEL_CALL_TIMEOUT_SECS, REVIEW_SYSTEM_PROMPT,
 };
 use super::types::GhIssueComment;
 
@@ -223,7 +223,10 @@ impl ReviewOutcome {
                 "Review posted: {} inline comment(s){}.\n",
                 self.comments_posted,
                 if self.comments_dropped > 0 {
-                    format!(", {} finding(s) summarized in the review body", self.comments_dropped)
+                    format!(
+                        ", {} finding(s) summarized in the review body",
+                        self.comments_dropped
+                    )
                 } else {
                     String::new()
                 }
@@ -432,12 +435,17 @@ impl GithubEngine {
         // access tokens" app setting). Refresh lazily, a few minutes ahead
         // of the deadline, so requests never race the expiry.
         if token_source == TokenSource::Config
-            && config.github.token_needs_refresh(chrono::Utc::now().timestamp())
+            && config
+                .github
+                .token_needs_refresh(chrono::Utc::now().timestamp())
         {
             let _guard = self.refresh_lock.lock().await;
             // Re-read: another task may have refreshed while we waited.
             config = runtime.get_config().await;
-            if config.github.token_needs_refresh(chrono::Utc::now().timestamp()) {
+            if config
+                .github
+                .token_needs_refresh(chrono::Utc::now().timestamp())
+            {
                 match self.refresh_sign_in_token(&mut config).await {
                     Ok(()) => token = config.github.token.clone(),
                     Err(error) => {
@@ -580,16 +588,17 @@ impl GithubEngine {
         opts: &ReviewOptions,
     ) -> Result<ReviewOutcome> {
         let started = Instant::now();
-        let ResolvedGithub {
-            client, config, ..
-        } = self.resolve().await?;
+        let ResolvedGithub { client, config, .. } = self.resolve().await?;
 
         let pr = client.get_pull(repo, number).await?;
         let head_sha = pr.head.sha.clone();
 
         // Skip work when this exact commit was already reviewed (auto mode).
         if !opts.force {
-            if let Some(existing) = self.storage.github_review_for_sha(repo, number, &head_sha)? {
+            if let Some(existing) = self
+                .storage
+                .github_review_for_sha(repo, number, &head_sha)?
+            {
                 if existing.status == "posted" {
                     return Ok(ReviewOutcome {
                         repo: repo.to_string(),
@@ -637,10 +646,7 @@ impl GithubEngine {
         let diffs = files
             .iter()
             .map(|file| {
-                let diff = parse_patch(
-                    &file.filename,
-                    file.patch.as_deref().unwrap_or_default(),
-                );
+                let diff = parse_patch(&file.filename, file.patch.as_deref().unwrap_or_default());
                 diff_map.insert(file.filename.clone(), diff.clone());
                 diff
             })
@@ -822,7 +828,8 @@ impl GithubEngine {
                     // issue comment, so the analysis is never lost.
                     let mut fallback_body = body.clone();
                     if comment_count > 0 {
-                        fallback_body.push_str(&render_fallback_comments(&outcome_validation.accepted));
+                        fallback_body
+                            .push_str(&render_fallback_comments(&outcome_validation.accepted));
                     }
                     match client
                         .create_review(repo, number, &head_sha, &fallback_body, &event, &[])
@@ -882,7 +889,11 @@ impl GithubEngine {
             summary: combined_summary,
             // Dry runs report the findings the review would post; real runs
             // report what actually landed inline.
-            comments_posted: if opts.post { posted_inline } else { comment_count },
+            comments_posted: if opts.post {
+                posted_inline
+            } else {
+                comment_count
+            },
             comments_dropped: dropped_count,
             skipped: None,
             model: model_name,
@@ -918,9 +929,7 @@ impl GithubEngine {
     }
 
     async fn poll_once_inner(&self) -> Result<PollSummary> {
-        let ResolvedGithub {
-            client, config, ..
-        } = self.resolve().await?;
+        let ResolvedGithub { client, config, .. } = self.resolve().await?;
         let mut summary = PollSummary {
             swept: true,
             repos: 0,
@@ -954,8 +963,7 @@ impl GithubEngine {
             let mut mentions: HashMap<u64, MentionTrigger> = HashMap::new();
             let mut comment_baselines: HashMap<u64, u64> = HashMap::new();
             if mentions_enabled && !pulls.is_empty() {
-                let open_numbers: HashSet<u64> =
-                    pulls.iter().map(|pull| pull.number).collect();
+                let open_numbers: HashSet<u64> = pulls.iter().map(|pull| pull.number).collect();
                 match client.list_repo_issue_comments(&repo, 2).await {
                     Ok(mut comments) => {
                         // Inline review threads count too: tagging inside a
@@ -964,10 +972,9 @@ impl GithubEngine {
                         // comments only rather than skipping the repo.
                         match client.list_repo_review_comments(&repo, 2).await {
                             Ok(mut review_comments) => comments.append(&mut review_comments),
-                            Err(error) => summary.errors.push(format!(
-                                "{}: review-comment scan failed: {}",
-                                repo, error
-                            )),
+                            Err(error) => summary
+                                .errors
+                                .push(format!("{}: review-comment scan failed: {}", repo, error)),
                         }
                         for number in &open_numbers {
                             if let Some(max_id) = max_comment_id(&comments, *number) {
@@ -979,13 +986,9 @@ impl GithubEngine {
                                 .storage
                                 .github_trigger_state(&repo, *number)?
                                 .map(|value| value.max(0) as u64);
-                            if let Some(trigger) = pick_mention_trigger(
-                                &comments,
-                                *number,
-                                &mention_handle,
-                                last,
-                                now,
-                            ) {
+                            if let Some(trigger) =
+                                pick_mention_trigger(&comments, *number, &mention_handle, last, now)
+                            {
                                 mentions.insert(*number, trigger);
                             }
                         }
@@ -1076,12 +1079,7 @@ impl GithubEngine {
     }
 
     /// Record the highest conversation-comment id consumed for a PR.
-    fn advance_trigger_state(
-        &self,
-        repo: &str,
-        pr_number: u64,
-        max_id: Option<u64>,
-    ) -> Result<()> {
+    fn advance_trigger_state(&self, repo: &str, pr_number: u64, max_id: Option<u64>) -> Result<()> {
         let Some(max_id) = max_id else {
             return Ok(());
         };
@@ -1399,9 +1397,7 @@ fn build_review_session_id(repo: &str, number: u64, head_sha: &str) -> String {
 }
 
 fn render_fallback_comments(findings: &[ReviewFinding]) -> String {
-    let mut out = String::from(
-        "\n\n### Inline comments (posted in the review body)\n",
-    );
+    let mut out = String::from("\n\n### Inline comments (posted in the review body)\n");
     for finding in findings.iter().take(30) {
         out.push_str(&format!(
             "\n**{} `{}:{}` — {}**\n\n{}\n",

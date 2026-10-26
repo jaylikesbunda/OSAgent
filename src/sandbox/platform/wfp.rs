@@ -202,7 +202,7 @@ fn leak_wide(text: &str) -> *mut u16 {
 pub(crate) fn block_package_network(package_sid: &[u8]) -> io::Result<()> {
     let mut engine_slot = ENGINE
         .lock()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "wfp engine lock poisoned"))?;
+        .map_err(|_| io::Error::other("wfp engine lock poisoned"))?;
     if engine_slot.is_some() {
         return Ok(());
     }

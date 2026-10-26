@@ -495,13 +495,11 @@ impl AgentRuntime {
         let action = match evaluated {
             PermissionAction::Allow => PermissionAction::Allow,
             PermissionAction::Deny => unreachable!("handled above"),
-            PermissionAction::Ask => {
-                match self.resolve_ask_by_approval_policy().await? {
-                    crate::permission::PermissionAction::Allow => PermissionAction::Allow,
-                    crate::permission::PermissionAction::Deny => PermissionAction::Deny,
-                    crate::permission::PermissionAction::Ask => PermissionAction::Ask,
-                }
-            }
+            PermissionAction::Ask => match self.resolve_ask_by_approval_policy().await? {
+                crate::permission::PermissionAction::Allow => PermissionAction::Allow,
+                crate::permission::PermissionAction::Deny => PermissionAction::Deny,
+                crate::permission::PermissionAction::Ask => PermissionAction::Ask,
+            },
         };
         match action {
             PermissionAction::Allow => return Ok((vec![execution_root], Some(path))),

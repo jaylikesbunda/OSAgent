@@ -1347,10 +1347,7 @@ async fn get_reasoning_options(
 async fn get_usage(
     Extension(agent): Extension<Arc<AgentRuntime>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Result<
-    Json<crate::agent::runtime::usage::UsageSummary>,
-    (StatusCode, Json<ErrorResponse>),
-> {
+) -> Result<Json<crate::agent::runtime::usage::UsageSummary>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = params.get("session_id").map(|value| value.as_str());
     agent
         .usage_summary(session_id)
@@ -8716,7 +8713,7 @@ mod tests {
             "api_keys": ["sk-second-1111"],
         }))
         .unwrap();
-        add_provider(
+        let _ = add_provider(
             Extension(agent.clone()),
             Extension(config_path.clone()),
             Json(connect),
@@ -8724,13 +8721,10 @@ mod tests {
         .await
         .unwrap();
 
-        let listed = list_provider_keys(
-            Extension(config_path.clone()),
-            Path("openai".to_string()),
-        )
-        .await
-        .unwrap()
-        .0;
+        let listed = list_provider_keys(Extension(config_path.clone()), Path("openai".to_string()))
+            .await
+            .unwrap()
+            .0;
         let keys = listed["keys"].as_array().unwrap();
         assert_eq!(keys.len(), 2);
         assert!(keys

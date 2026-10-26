@@ -10,8 +10,8 @@
 //! charged to budgets (`0`), never guessed — an unpriced model must not
 //! silently burn spend or block a budget.
 
-use crate::config::{Config, TokenPrice};
 use crate::agent::provider::TokenUsage;
+use crate::config::{Config, TokenPrice};
 
 /// Where a price came from — surfaced in `/usage` so the user can tell real
 /// billing data from a curated estimate.
@@ -298,7 +298,10 @@ mod tests {
     #[test]
     fn zero_price_costs_nothing() {
         let price = TokenPrice::default();
-        assert_eq!(request_cost(&usage(1_000_000, 1_000_000, 0, 0), &price), 0.0);
+        assert_eq!(
+            request_cost(&usage(1_000_000, 1_000_000, 0, 0), &price),
+            0.0
+        );
     }
 
     #[test]

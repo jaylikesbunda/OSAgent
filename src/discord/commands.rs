@@ -488,15 +488,9 @@ impl Handler {
         false
     }
 
-    pub(super) async fn command_moderation_authorized(
-        &self,
-        command: &CommandInteraction,
-    ) -> bool {
-        self.moderation_is_authorized(
-            command.user.id.get(),
-            command.guild_id.map(|id| id.get()),
-        )
-        .await
+    pub(super) async fn command_moderation_authorized(&self, command: &CommandInteraction) -> bool {
+        self.moderation_is_authorized(command.user.id.get(), command.guild_id.map(|id| id.get()))
+            .await
     }
 
     async fn discord_setup_is_authorized(&self, command: &CommandInteraction) -> bool {
@@ -1935,7 +1929,12 @@ impl Handler {
     // response helpers
     // -----------------------------------------------------------------------
 
-    pub(super) async fn reply(&self, ctx: &Context, command: &CommandInteraction, embed: CreateEmbed) {
+    pub(super) async fn reply(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        embed: CreateEmbed,
+    ) {
         if let Err(e) = command
             .create_response(
                 &ctx.http,
@@ -1951,7 +1950,12 @@ impl Handler {
         }
     }
 
-    pub(super) async fn edit_reply(&self, ctx: &Context, command: &CommandInteraction, embed: CreateEmbed) {
+    pub(super) async fn edit_reply(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        embed: CreateEmbed,
+    ) {
         if let Err(e) = command
             .edit_response(&ctx.http, EditInteractionResponse::new().embed(embed))
             .await

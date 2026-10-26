@@ -305,13 +305,8 @@ pub async fn run_with_agent(
         use std::os::windows::io::AsRawSocket;
         use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
         // SAFETY: `raw` is a live socket handle owned by `listener`.
-        let _ = unsafe {
-            SetHandleInformation(
-                listener.as_raw_socket() as _,
-                HANDLE_FLAG_INHERIT,
-                0,
-            )
-        };
+        let _ =
+            unsafe { SetHandleInformation(listener.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0) };
     }
 
     info!("OSA web server listening on http://{}", bind_addr);
@@ -333,8 +328,7 @@ pub async fn run_with_agent(
     // bind. Enabling without a password is refused: the public URL would
     // otherwise expose an unauthenticated UI.
     if config.remote_access.enabled {
-        let password_ready =
-            config.server.password_enabled && !config.server.password.is_empty();
+        let password_ready = config.server.password_enabled && !config.server.password.is_empty();
         if password_ready {
             let manager = remote_access.clone();
             tokio::spawn(async move {

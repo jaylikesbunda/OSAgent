@@ -257,7 +257,11 @@ impl Handler {
 
         // Being trusted never grants Discord permissions nobody granted: the
         // invoker and the bot both need the matching permission.
-        match command.member.as_ref().and_then(|member| member.permissions) {
+        match command
+            .member
+            .as_ref()
+            .and_then(|member| member.permissions)
+        {
             Some(permissions)
                 if permissions.contains(required)
                     || permissions.contains(Permissions::ADMINISTRATOR) => {}
@@ -503,8 +507,7 @@ impl Handler {
                 let minutes = opt_i64(options, "minutes")
                     .unwrap_or(0)
                     .clamp(1, MAX_TIMEOUT_MINUTES);
-                let until =
-                    Timestamp::now().unix_timestamp() + minutes.saturating_mul(60);
+                let until = Timestamp::now().unix_timestamp() + minutes.saturating_mul(60);
                 match Timestamp::from_unix_timestamp(until) {
                     Ok(until) => guild_id
                         .edit_member(
@@ -516,7 +519,9 @@ impl Handler {
                         )
                         .await
                         .map(|_| {
-                            format!("{mention} is timed out for {minutes} minute(s). Reason: {reason}")
+                            format!(
+                                "{mention} is timed out for {minutes} minute(s). Reason: {reason}"
+                            )
                         })
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error.to_string()),
@@ -539,16 +544,11 @@ impl Handler {
                 .map(|_| format!("{mention} was kicked. Reason: {reason}"))
                 .map_err(|error| error.to_string()),
             "ban" => {
-                let delete_days = opt_i64(options, "delete_days")
-                    .unwrap_or(0)
-                    .clamp(0, 7)
-                    as u8;
+                let delete_days = opt_i64(options, "delete_days").unwrap_or(0).clamp(0, 7) as u8;
                 guild_id
                     .ban_with_reason(&ctx.http, target_id, delete_days, &reason)
                     .await
-                    .map(|_| {
-                        format!("{mention} was banned. Reason: {reason}")
-                    })
+                    .map(|_| format!("{mention} was banned. Reason: {reason}"))
                     .map_err(|error| error.to_string())
             }
             "unban" => guild_id
@@ -595,7 +595,12 @@ impl Handler {
     /// Bulk-delete recent messages. Discord refuses bulk deletes older than 14
     /// days, so stale messages are skipped and reported instead of failing the
     /// whole purge.
-    async fn mod_purge(&self, ctx: &Context, command: &CommandInteraction, options: &[CommandDataOption]) {
+    async fn mod_purge(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        options: &[CommandDataOption],
+    ) {
         let count = opt_i64(options, "count").unwrap_or(0).clamp(1, MAX_PURGE) as u8;
         let messages = match command
             .channel_id
@@ -684,10 +689,7 @@ impl Handler {
             .clamp(0, MAX_SLOWMODE) as u16;
         match command
             .channel_id
-            .edit(
-                &ctx.http,
-                EditChannel::new().rate_limit_per_user(seconds),
-            )
+            .edit(&ctx.http, EditChannel::new().rate_limit_per_user(seconds))
             .await
         {
             Ok(_) => {
@@ -740,10 +742,7 @@ mod tests {
             role(3, 9, Permissions::empty()),
         ];
         assert_eq!(highest_role_position(&[], &roles), 0);
-        assert_eq!(
-            highest_role_position(&[RoleId::new(2)], &roles),
-            3
-        );
+        assert_eq!(highest_role_position(&[RoleId::new(2)], &roles), 3);
         assert_eq!(
             highest_role_position(&[RoleId::new(2), RoleId::new(3), RoleId::new(42)], &roles),
             9

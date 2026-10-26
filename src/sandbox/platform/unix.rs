@@ -76,14 +76,14 @@ fn finish_spawn(mut child: std::process::Child, new_process_group: bool) -> Sand
     } else {
         None
     };
-    let file_of = |stream: std::process::ChildStdout| {
-        unsafe { std::fs::File::from_raw_fd(stream.into_raw_fd()) }
+    let file_of = |stream: std::process::ChildStdout| unsafe {
+        std::fs::File::from_raw_fd(stream.into_raw_fd())
     };
-    let file_of_in = |stream: std::process::ChildStdin| {
-        unsafe { std::fs::File::from_raw_fd(stream.into_raw_fd()) }
+    let file_of_in = |stream: std::process::ChildStdin| unsafe {
+        std::fs::File::from_raw_fd(stream.into_raw_fd())
     };
-    let file_of_err = |stream: std::process::ChildStderr| {
-        unsafe { std::fs::File::from_raw_fd(stream.into_raw_fd()) }
+    let file_of_err = |stream: std::process::ChildStderr| unsafe {
+        std::fs::File::from_raw_fd(stream.into_raw_fd())
     };
     let stdin = child.stdin.take().map(file_of_in);
     let stdout = child.stdout.take().map(file_of);
@@ -143,21 +143,23 @@ pub(crate) fn spawn_confined(sandbox: &Sandbox, spec: SpawnSpec) -> io::Result<S
     }
 }
 
-pub(crate) fn network_report(
-    sandbox: &Sandbox,
-    notes: &mut Vec<String>,
-) -> bool {
+pub(crate) fn network_report(sandbox: &Sandbox, notes: &mut Vec<String>) -> bool {
     match sandbox.network() {
         SandboxNetworkPolicy::Allow => true,
         SandboxNetworkPolicy::Deny => {
             #[cfg(target_os = "linux")]
             {
-                notes.push("network=deny enforced by seccomp (socket filter) per spawned process".to_string());
+                notes.push(
+                    "network=deny enforced by seccomp (socket filter) per spawned process"
+                        .to_string(),
+                );
                 true
             }
             #[cfg(target_os = "macos")]
             {
-                notes.push("network=deny enforced by the Seatbelt profile per spawned process".to_string());
+                notes.push(
+                    "network=deny enforced by the Seatbelt profile per spawned process".to_string(),
+                );
                 true
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -337,7 +339,12 @@ mod linux {
 
         // Reads everywhere (Codex semantics), writes never by default.
         let read_rights = ACCESS_EXECUTE | ACCESS_READ_FILE | ACCESS_READ_DIR;
-        add_rule(ruleset_fd, std::path::Path::new("/"), read_rights, &mut notes);
+        add_rule(
+            ruleset_fd,
+            std::path::Path::new("/"),
+            read_rights,
+            &mut notes,
+        );
 
         if sandbox.mode() == SandboxMode::WorkspaceWrite {
             // Scratch spaces and devices must stay usable for builds,
@@ -350,7 +357,12 @@ mod linux {
             }
             for root in sandbox.roots() {
                 if root.exists() {
-                    add_rule(ruleset_fd, root, handled | all_write_rights(abi), &mut notes);
+                    add_rule(
+                        ruleset_fd,
+                        root,
+                        handled | all_write_rights(abi),
+                        &mut notes,
+                    );
                 } else {
                     notes.push(format!(
                         "landlock: writable root {} does not exist yet; creating it is denied in-sandbox",
@@ -453,7 +465,9 @@ mod linux {
 
     /// Installs the seccomp deny-list. `deny_network` additionally blocks
     /// `socket(AF_INET/AF_INET6)` (Unix-domain sockets keep working).
-    fn install_seccomp(deny_network: bool) -> Result<(), String> {
+    /// Builds the seccomp filter program (pure construction, unit-testable
+    /// with a tiny BPF interpreter below).
+    fn build_seccomp_filter(deny_network: bool) -> Vec<SockFilter> {
         let mut filter: Vec<SockFilter> = Vec::new();
 
         let ld_arch = SockFilter {
@@ -471,11 +485,14 @@ mod linux {
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let expected_arch = 0;
 
-        // Wrong arch -> deny everything.
+        // Wrong arch -> deny everything. On a match the jump skips the deny
+        // below and falls into normal filtering; on a mismatch it lands
+        // straight on the deny. (Both offsets were inverted in the first
+        // version — which denied *every* syscall on the matching arch.)
         filter.push(SockFilter {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 0,
-            jf: 1,
+            jt: 1,
+            jf: 0,
             k: expected_arch,
         });
         filter.push(SockFilter {
@@ -504,11 +521,13 @@ mod linux {
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             let socket_nr = -1;
 
-            // jeq socket_nr -> family check (jt handled below by layout)
+            // socket(AF_INET/AF_INET6) -> EPERM. On a socket syscall, fall
+            // through to the family check; anything else skips the whole
+            // 5-instruction block.
             filter.push(SockFilter {
                 code: BPF_JMP | BPF_JEQ | BPF_K,
-                jt: 3,
-                jf: 0,
+                jt: 0,
+                jf: 5,
                 k: socket_nr as u32,
             });
             filter.push(SockFilter {
@@ -544,12 +563,12 @@ mod linux {
             });
         }
 
-        let mut denied_jump_count = 0u8;
         for nr in denied_syscalls() {
+            // Match -> fall into the deny below; mismatch -> skip it.
             filter.push(SockFilter {
                 code: BPF_JMP | BPF_JEQ | BPF_K,
-                jt: 1,
-                jf: 0,
+                jt: 0,
+                jf: 1,
                 k: nr as u32,
             });
             filter.push(SockFilter {
@@ -558,9 +577,8 @@ mod linux {
                 jf: 0,
                 k: SECCOMP_RET_ERRNO | (libc::EPERM as u32),
             });
-            denied_jump_count = denied_jump_count.saturating_add(1);
         }
-        let _ = (deny_at, denied_jump_count);
+        let _ = deny_at;
 
         filter.push(SockFilter {
             code: BPF_RET | BPF_K,
@@ -569,6 +587,11 @@ mod linux {
             k: SECCOMP_RET_ALLOW,
         });
 
+        filter
+    }
+
+    fn install_seccomp(deny_network: bool) -> Result<(), String> {
+        let filter = build_seccomp_filter(deny_network);
         let prog = SockFprog {
             len: filter.len() as u16,
             filter: filter.as_ptr(),
@@ -597,6 +620,104 @@ mod linux {
             ));
         }
         Ok(())
+    }
+
+    /// Minimal BPF interpreter over synthetic `seccomp_data`, used to pin the
+    /// filter's semantics: the jump offsets are easy to invert silently and
+    /// no test spawns through the Linux sandbox in CI.
+    #[cfg(test)]
+    mod seccomp_filter_tests {
+        use super::*;
+
+        const ALLOW: u32 = SECCOMP_RET_ALLOW;
+        const DENY: u32 = SECCOMP_RET_ERRNO | (libc::EPERM as u32);
+
+        /// Runs the filter on a fake seccomp_data (nr at 0, arch at 4,
+        /// args[0] low word at 16) and returns the verdict.
+        fn run(filter: &[SockFilter], arch: u32, nr: u32, arg0: u32) -> u32 {
+            let words = |offset: u32| -> u32 {
+                match offset {
+                    0 => nr,
+                    4 => arch,
+                    16 => arg0,
+                    20 => 0,
+                    _ => 0,
+                }
+            };
+            let mut acc: u32 = 0;
+            let mut pc: usize = 0;
+            loop {
+                let insn = filter[pc];
+                match insn.code {
+                    code if code == (BPF_LD | BPF_W | BPF_ABS) => {
+                        acc = words(insn.k);
+                        pc += 1;
+                    }
+                    code if code == (BPF_JMP | BPF_JEQ | BPF_K) => {
+                        pc += 1 + if acc == insn.k {
+                            insn.jt as usize
+                        } else {
+                            insn.jf as usize
+                        };
+                    }
+                    code if code == (BPF_RET | BPF_K) => return insn.k,
+                    other => panic!("unexpected BPF opcode {:#x} at {}", other, pc),
+                }
+            }
+        }
+
+        #[test]
+        fn ordinary_syscalls_pass_and_dangerous_ones_deny() {
+            let filter = build_seccomp_filter(false);
+            let arch = if cfg!(target_arch = "x86_64") {
+                AUDIT_ARCH_X86_64
+            } else {
+                AUDIT_ARCH_AARCH64
+            };
+            assert_eq!(run(&filter, arch, libc::SYS_execve as u32, 0), ALLOW);
+            assert_eq!(run(&filter, arch, libc::SYS_read as u32, 0), ALLOW);
+            assert_eq!(run(&filter, arch, libc::SYS_mount as u32, 0), DENY);
+            assert_eq!(run(&filter, arch, libc::SYS_ptrace as u32, 0), DENY);
+            assert_eq!(run(&filter, arch, libc::SYS_reboot as u32, 0), DENY);
+        }
+
+        #[test]
+        fn wrong_arch_is_denied_outright() {
+            let filter = build_seccomp_filter(false);
+            // Some other arch (i386): the very first check must deny.
+            assert_eq!(run(&filter, 0x4000_0003, libc::SYS_read as u32, 0), DENY);
+        }
+
+        #[test]
+        fn network_deny_blocks_internet_sockets_only() {
+            let filter = build_seccomp_filter(true);
+            let arch = if cfg!(target_arch = "x86_64") {
+                AUDIT_ARCH_X86_64
+            } else {
+                AUDIT_ARCH_AARCH64
+            };
+            // socket(AF_INET) / socket(AF_INET6) are refused...
+            assert_eq!(
+                run(&filter, arch, libc::SYS_socket as u32, libc::AF_INET as u32),
+                DENY
+            );
+            assert_eq!(
+                run(
+                    &filter,
+                    arch,
+                    libc::SYS_socket as u32,
+                    libc::AF_INET6 as u32
+                ),
+                DENY
+            );
+            // ...while unix sockets and everything else keep working.
+            assert_eq!(
+                run(&filter, arch, libc::SYS_socket as u32, libc::AF_UNIX as u32),
+                ALLOW
+            );
+            assert_eq!(run(&filter, arch, libc::SYS_connect as u32, 0), ALLOW);
+            assert_eq!(run(&filter, arch, libc::SYS_mount as u32, 0), DENY);
+        }
     }
 
     pub(super) fn spawn_confined(sandbox: &Sandbox, spec: SpawnSpec) -> io::Result<SandboxedChild> {
@@ -708,8 +829,7 @@ mod macos {
 
         let key = format!(
             "osa-sandbox-{:x}.sb",
-            std::collections::hash_map::DefaultHasher::new().finish() as u64
-                ^ profile.len() as u64
+            std::collections::hash_map::DefaultHasher::new().finish() as u64 ^ profile.len() as u64
         );
         let path = std::env::temp_dir().join(key);
         if !path.exists() {
@@ -730,15 +850,19 @@ mod macos {
         match seatbelt_profile(sandbox) {
             Ok(profile) => spawn_with_profile(profile, spec),
             Err(error) => {
-                sandbox
-                    .platform
-                    .add_note(format!("seatbelt profile unavailable ({}); process ran unsandboxed", error));
+                sandbox.platform.add_note(format!(
+                    "seatbelt profile unavailable ({}); process ran unsandboxed",
+                    error
+                ));
                 spawn_plain(spec)
             }
         }
     }
 
-    fn spawn_with_profile(profile: std::path::PathBuf, spec: SpawnSpec) -> io::Result<SandboxedChild> {
+    fn spawn_with_profile(
+        profile: std::path::PathBuf,
+        spec: SpawnSpec,
+    ) -> io::Result<SandboxedChild> {
         let mut wrapped = spec.clone();
         let mut args = vec![
             std::ffi::OsString::from("-f"),

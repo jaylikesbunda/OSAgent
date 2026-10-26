@@ -378,14 +378,22 @@ mod tests {
             .expect("pending prompt");
 
         // The approving session keeps the grant (including subdirectories)...
-        assert!(manager.has_granted_permission("chat-1", "/outside/file.txt").await);
+        assert!(
+            manager
+                .has_granted_permission("chat-1", "/outside/file.txt")
+                .await
+        );
         assert!(
             manager
                 .has_granted_permission("chat-1", "/outside/deeper/file.txt")
                 .await
         );
         // ...but no other session inherits it.
-        assert!(!manager.has_granted_permission("chat-2", "/outside/file.txt").await);
+        assert!(
+            !manager
+                .has_granted_permission("chat-2", "/outside/file.txt")
+                .await
+        );
         assert!(
             !manager
                 .has_granted_permission("chat-2", "/outside/deeper/file.txt")

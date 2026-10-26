@@ -385,11 +385,7 @@ impl RemoteAccessManager {
             .kill_on_drop(true);
 
         let mut child = cmd.spawn().map_err(|e| {
-            OSAgentError::Unknown(format!(
-                "Could not start '{}': {}",
-                binary.display(),
-                e
-            ))
+            OSAgentError::Unknown(format!("Could not start '{}': {}", binary.display(), e))
         })?;
 
         let stderr = child.stderr.take();
@@ -404,10 +400,7 @@ impl RemoteAccessManager {
             },
             None,
         );
-        info!(
-            "Remote access: starting tunnel via '{}'",
-            binary.display()
-        );
+        info!("Remote access: starting tunnel via '{}'", binary.display());
 
         *self.child.lock().await = Some(child);
 
@@ -622,9 +615,11 @@ async fn download_cloudflared(target: &Path) -> Result<()> {
         .user_agent("osagent-remote-access")
         .build()
         .map_err(|e| OSAgentError::Unknown(format!("HTTP client init failed: {e}")))?;
-    let response = client.get(&url).send().await.map_err(|e| {
-        OSAgentError::Unknown(format!("Could not download cloudflared: {e}"))
-    })?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| OSAgentError::Unknown(format!("Could not download cloudflared: {e}")))?;
     if !response.status().is_success() {
         return Err(OSAgentError::Unknown(format!(
             "cloudflared download failed: HTTP {}",
@@ -646,12 +641,13 @@ async fn download_cloudflared(target: &Path) -> Result<()> {
         }
         let _ = std::fs::remove_file(&temp);
     } else {
-        std::fs::rename(&temp, target).or_else(|_| {
-            std::fs::copy(&temp, target)
-                .map(|_| ())
-                .and_then(|_| std::fs::remove_file(&temp))
-        })
-        .map_err(OSAgentError::Io)?;
+        std::fs::rename(&temp, target)
+            .or_else(|_| {
+                std::fs::copy(&temp, target)
+                    .map(|_| ())
+                    .and_then(|_| std::fs::remove_file(&temp))
+            })
+            .map_err(OSAgentError::Io)?;
     }
 
     #[cfg(unix)]

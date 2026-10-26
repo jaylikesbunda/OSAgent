@@ -21,7 +21,12 @@ struct ErrorResponse {
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: message.into() }))
+    (
+        status,
+        Json(ErrorResponse {
+            error: message.into(),
+        }),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,9 +58,7 @@ pub fn public_router() -> Router {
     Router::new().route("/api/auth/pair", post(pair))
 }
 
-async fn status(
-    Extension(manager): Extension<Arc<RemoteAccessManager>>,
-) -> Json<RemoteAccessView> {
+async fn status(Extension(manager): Extension<Arc<RemoteAccessManager>>) -> Json<RemoteAccessView> {
     Json(manager.view().await)
 }
 
@@ -250,33 +253,15 @@ async fn pair(
         .create_paired_device(&device)
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let ttl_days = agent
-        .get_config()
-        .await
-        .remote_access
-        .device_token_ttl_days;
-    let token = auth::generate_device_token(
-        &device.id,
-        &secret,
-        device_token_lifetime_seconds(ttl_days),
-    )
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let ttl_days = agent.get_config().await.remote_access.device_token_ttl_days;
+    let token =
+        auth::generate_device_token(&device.id, &secret, device_token_lifetime_seconds(ttl_days))
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(PairResponse { token, device }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::device_token_lifetime_seconds;
-
-    #[test]
-    fn device_tokens_last_until_revoked_by_default() {
-        assert_eq!(device_token_lifetime_seconds(0), 100 * 365 * 86_400);
-        assert_eq!(device_token_lifetime_seconds(30), 30 * 86_400);
-    }
-}
-
-/// Best-effort human label from a User-Agent string (e.g. "iPhone · Safari").
+/// Best-effort human label from a User-Agent string (e.g. an iPhone Safari).
 fn device_label(user_agent: Option<&str>) -> String {
     let ua = user_agent.unwrap_or("");
     let platform = if ua.contains("iPhone") {
@@ -309,5 +294,16 @@ fn device_label(user_agent: Option<&str>) -> String {
         platform.to_string()
     } else {
         format!("{} · {}", platform, browser)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_token_lifetime_seconds;
+
+    #[test]
+    fn device_tokens_last_until_revoked_by_default() {
+        assert_eq!(device_token_lifetime_seconds(0), 100 * 365 * 86_400);
+        assert_eq!(device_token_lifetime_seconds(30), 30 * 86_400);
     }
 }

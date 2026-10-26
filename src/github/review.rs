@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::diff::{render_numbered, FileDiff};
-use super::types::{GhReviewCommentInput, GhPullRequest};
+use super::types::{GhPullRequest, GhReviewCommentInput};
 
 /// Character budget for a single model request (diffs + metadata).
 pub const MAX_BATCH_CHARS: usize = 90_000;
@@ -173,8 +173,8 @@ struct RawFinding {
 /// Parse a model completion into a structured review. Returns `Err` with a
 /// repair hint when no JSON object can be recovered at all.
 pub fn parse_review_response(text: &str) -> Result<RawParsed, String> {
-    let json_text = extract_json_object(text)
-        .ok_or_else(|| "response contained no JSON object".to_string())?;
+    let json_text =
+        extract_json_object(text).ok_or_else(|| "response contained no JSON object".to_string())?;
     let raw: RawReview = serde_json::from_str(json_text)
         .map_err(|e| format!("response was not the expected JSON shape: {}", e))?;
 
@@ -263,11 +263,11 @@ pub fn extract_json_object(text: &str) -> Option<&str> {
 
 /// Match a model-reported path to a PR file path. Handles `a/`/`b/`
 /// prefixes and `./` noise; falls back to a unique basename match.
-pub fn match_file_path<'a>(path: &str, files: &'a HashMap<String, FileDiff>) -> Option<&'a FileDiff> {
-    let normalized = path
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/');
+pub fn match_file_path<'a>(
+    path: &str,
+    files: &'a HashMap<String, FileDiff>,
+) -> Option<&'a FileDiff> {
+    let normalized = path.trim().trim_start_matches("./").trim_start_matches('/');
     let normalized = normalized
         .strip_prefix("a/")
         .or_else(|| normalized.strip_prefix("b/"))
@@ -398,19 +398,23 @@ pub fn compose_review_body(
             Severity::Nitpick,
         ] {
             if let Some(count) = counts.get(&severity) {
-                tally.push(format!("{} {} {}", severity.emoji(), count, severity.label().to_lowercase()));
+                tally.push(format!(
+                    "{} {} {}",
+                    severity.emoji(),
+                    count,
+                    severity.label().to_lowercase()
+                ));
             }
         }
         if !tally.is_empty() {
-            out.push_str(&format!(
-                "**Inline findings:** {}",
-                tally.join(" · ")
-            ));
+            out.push_str(&format!("**Inline findings:** {}", tally.join(" · ")));
         }
     }
 
     if !dropped.is_empty() {
-        out.push_str("\n\n<details><summary>Additional findings (not pinned to a diff line)</summary>\n\n");
+        out.push_str(
+            "\n\n<details><summary>Additional findings (not pinned to a diff line)</summary>\n\n",
+        );
         for finding in dropped.iter().take(30) {
             let severity = finding.severity();
             let title = if finding.title.trim().is_empty() {
@@ -500,7 +504,10 @@ pub fn build_review_user_prompt(
     if !commits.is_empty() {
         out.push_str("\nCommit messages:\n");
         for commit in commits.iter().take(30) {
-            out.push_str(&format!("- {}\n", commit.lines().next().unwrap_or("").trim()));
+            out.push_str(&format!(
+                "- {}\n",
+                commit.lines().next().unwrap_or("").trim()
+            ));
         }
     }
 
@@ -538,10 +545,7 @@ pub fn build_review_user_prompt(
 
 /// Split files into batches bounded by `MAX_BATCH_CHARS`, preserving
 /// order. Oversized single files are truncated with a note.
-pub fn batch_files(
-    files: Vec<FileDiff>,
-    total_budget: usize,
-) -> (Vec<Vec<FileDiff>>, Vec<String>) {
+pub fn batch_files(files: Vec<FileDiff>, total_budget: usize) -> (Vec<Vec<FileDiff>>, Vec<String>) {
     let mut batches: Vec<Vec<FileDiff>> = Vec::new();
     let mut current: Vec<FileDiff> = Vec::new();
     let mut current_chars = 0usize;
@@ -610,7 +614,10 @@ pub fn short_sha(sha: &str) -> String {
 
 fn first_sentence(text: &str) -> String {
     let candidate = text.lines().next().unwrap_or("").trim();
-    let candidate = candidate.trim_start_matches('#').trim_start_matches('*').trim();
+    let candidate = candidate
+        .trim_start_matches('#')
+        .trim_start_matches('*')
+        .trim();
     truncate_text(candidate, 80)
 }
 

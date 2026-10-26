@@ -334,7 +334,8 @@ pub async fn transcribe(wav: &Path) -> Result<String, String> {
 async fn transcribe_with(root: &Path, wav: &Path) -> Result<String, String> {
     if !is_installed_in(root) {
         return Err(
-            "The offline speech pack is not set up yet. Open Settings > Voice and set it up.".to_string(),
+            "The offline speech pack is not set up yet. Open Settings > Voice and set it up."
+                .to_string(),
         );
     }
     let stt = stt_dir(root);
@@ -375,7 +376,8 @@ pub async fn synthesize(text: &str, out: &Path) -> Result<(), String> {
 async fn synthesize_with(root: &Path, text: &str, out: &Path) -> Result<(), String> {
     if !is_installed_in(root) {
         return Err(
-            "The offline speech pack is not set up yet. Open Settings > Voice and set it up.".to_string(),
+            "The offline speech pack is not set up yet. Open Settings > Voice and set it up."
+                .to_string(),
         );
     }
     let spoken = sanitize_for_speech(text);

@@ -267,12 +267,26 @@ mod tests {
 
     #[test]
     fn quoting_round_trips_simple_args() {
-        assert_eq!(quote_windows_arg(OsStr::new("hello")), "hello");
-        assert_eq!(quote_windows_arg(OsStr::new("a b")), "\"a b\"");
-        assert_eq!(quote_windows_arg(OsStr::new("say \"hi\"")), "\"say \\\"hi\\\"\"");
-        // No whitespace/quotes means no quoting needed, even with a trailing
-        // backslash — the backslash rule only applies inside quoted spans.
-        assert_eq!(quote_windows_arg(OsStr::new("trail\\")), "trail\\");
-        assert_eq!(quote_windows_arg(OsStr::new("a b\\")), "\"a b\\\\\"");
+        #[cfg(windows)]
+        {
+            assert_eq!(quote_windows_arg(OsStr::new("hello")), "hello");
+            assert_eq!(quote_windows_arg(OsStr::new("a b")), "\"a b\"");
+            assert_eq!(
+                quote_windows_arg(OsStr::new("say \"hi\"")),
+                "\"say \\\"hi\\\"\""
+            );
+            // No whitespace/quotes means no quoting needed, even with a
+            // trailing backslash: the backslash rule only applies inside
+            // quoted spans.
+            assert_eq!(quote_windows_arg(OsStr::new("trail\\")), "trail\\");
+            assert_eq!(quote_windows_arg(OsStr::new("a b\\")), "\"a b\\\\\"");
+        }
+        #[cfg(not(windows))]
+        {
+            // Non-Windows builds pass args through unchanged: argv arrays
+            // need no quoting.
+            assert_eq!(quote_windows_arg(OsStr::new("a b")), "a b");
+            assert_eq!(quote_windows_arg(OsStr::new("say \"hi\"")), "say \"hi\"");
+        }
     }
 }

@@ -64,11 +64,15 @@ impl Sandbox {
     /// Build a sandbox from config and the workspace roots the current session
     /// may write. Roots that do not exist yet are kept (parents get the ACL
     /// treatment lazily at spawn time).
-    pub fn from_config(config: &Config, workspace_roots: impl IntoIterator<Item = PathBuf>) -> Self {
+    pub fn from_config(
+        config: &Config,
+        workspace_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
         let mut roots: Vec<PathBuf> = workspace_roots
             .into_iter()
             .map(|path| {
-                let expanded = PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).to_string());
+                let expanded =
+                    PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).to_string());
                 canonicalize_best_effort(&expanded)
             })
             .collect();
@@ -309,7 +313,8 @@ mod tests {
 
     #[test]
     fn danger_mode_allows_everything() {
-        let sandbox = Sandbox::from_config(&config_with_mode(SandboxMode::DangerFullAccess), vec![]);
+        let sandbox =
+            Sandbox::from_config(&config_with_mode(SandboxMode::DangerFullAccess), vec![]);
         assert!(sandbox.check_write(Path::new("C:\\anywhere.txt")).is_ok());
         assert!(!sandbox.confines_spawns());
     }
@@ -320,10 +325,7 @@ mod tests {
             SandboxMode::parse("workspace-write"),
             Some(SandboxMode::WorkspaceWrite)
         );
-        assert_eq!(
-            SandboxMode::parse("read_only"),
-            Some(SandboxMode::ReadOnly)
-        );
+        assert_eq!(SandboxMode::parse("read_only"), Some(SandboxMode::ReadOnly));
         assert_eq!(
             SandboxMode::parse("danger-full-access"),
             Some(SandboxMode::DangerFullAccess)
@@ -375,11 +377,8 @@ mod windows_behavior_tests {
         );
 
         let inside_file = inside.path().join("probe.txt");
-        let output = run_to_completion(
-            &sandbox,
-            &format!("echo hi > {}", inside_file.display()),
-        )
-        .await;
+        let output =
+            run_to_completion(&sandbox, &format!("echo hi > {}", inside_file.display())).await;
         assert!(
             inside_file.exists(),
             "write inside workspace should succeed: {:?}",
@@ -400,11 +399,7 @@ mod windows_behavior_tests {
             contents
         );
 
-        let output = run_to_completion(
-            &sandbox,
-            &format!("echo hi > {}", outside.display()),
-        )
-        .await;
+        let output = run_to_completion(&sandbox, &format!("echo hi > {}", outside.display())).await;
         assert!(
             !outside.exists(),
             "write outside workspace must be denied by the sandbox (got: {:?})",
@@ -456,7 +451,8 @@ mod windows_behavior_tests {
         )
         .await;
         assert!(
-            !probe.status.success() || !String::from_utf8_lossy(&probe.stdout).contains(&pid.to_string()),
+            !probe.status.success()
+                || !String::from_utf8_lossy(&probe.stdout).contains(&pid.to_string()),
             "process {} survived kill_tree",
             pid
         );

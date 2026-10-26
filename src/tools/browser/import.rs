@@ -262,7 +262,7 @@ pub fn read_cookies(profile: &ProfileInfo) -> Result<ReadOutcome, String> {
     let now = now_secs();
     outcome
         .cookies
-        .retain(|cookie| cookie.expires.map_or(true, |at| at > now));
+        .retain(|cookie| cookie.expires.is_none_or(|at| at > now));
     Ok(outcome)
 }
 

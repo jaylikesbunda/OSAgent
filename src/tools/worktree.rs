@@ -22,7 +22,12 @@ use std::process::Stdio;
 fn worktree_base_dir(repo_root: &Path) -> PathBuf {
     repo_root
         .parent()
-        .map(|parent| parent.join(format!(".worktrees-{}", repo_root.file_name().unwrap_or_default().to_string_lossy())))
+        .map(|parent| {
+            parent.join(format!(
+                ".worktrees-{}",
+                repo_root.file_name().unwrap_or_default().to_string_lossy()
+            ))
+        })
         .unwrap_or_else(|| repo_root.join(".worktrees"))
 }
 
@@ -177,11 +182,10 @@ impl Tool for WorktreeCreateTool {
 
     async fn execute(&self, args: Value) -> Result<String> {
         ensure_git_available()?;
-        let name = sanitize_name(
-            args["name"]
-                .as_str()
-                .ok_or_else(|| OSAgentError::ToolExecution("Missing 'name' parameter".to_string()))?,
-        )?;
+        let name =
+            sanitize_name(args["name"].as_str().ok_or_else(|| {
+                OSAgentError::ToolExecution("Missing 'name' parameter".to_string())
+            })?)?;
         let start = self.resolved_start(args["base"].as_str())?;
         let repo = repo_root(&start)?;
 
@@ -288,7 +292,9 @@ impl Tool for WorktreeListTool {
                          current_branch: &mut Option<String>| {
             if let Some(directory) = current_dir.take() {
                 entries.push(WorktreeEntry {
-                    strategy: current_branch.take().unwrap_or_else(|| "detached".to_string()),
+                    strategy: current_branch
+                        .take()
+                        .unwrap_or_else(|| "detached".to_string()),
                     directory,
                 });
             }
@@ -375,9 +381,9 @@ impl Tool for WorktreeRemoveTool {
 
     async fn execute(&self, args: Value) -> Result<String> {
         ensure_git_available()?;
-        let directory = args["directory"]
-            .as_str()
-            .ok_or_else(|| OSAgentError::ToolExecution("Missing 'directory' parameter".to_string()))?;
+        let directory = args["directory"].as_str().ok_or_else(|| {
+            OSAgentError::ToolExecution("Missing 'directory' parameter".to_string())
+        })?;
         let directory = PathBuf::from(shellexpand::tilde(directory).to_string());
         if !directory.is_absolute() {
             return Err(OSAgentError::ToolExecution(
@@ -445,7 +451,11 @@ mod tests {
             .execute(json!({"name": "probe one"}))
             .await
             .expect("create");
-        assert!(result.contains("Created git worktree 'probe-one'"), "{}", result);
+        assert!(
+            result.contains("Created git worktree 'probe-one'"),
+            "{}",
+            result
+        );
 
         let list = WorktreeListTool::new(config.clone());
         let listed = list.execute(json!({})).await.expect("list");
@@ -487,9 +497,7 @@ mod tests {
     async fn remove_rejects_relative_paths() {
         let repo = init_repo();
         let remove = WorktreeRemoveTool::new(tool_config(repo.path()));
-        let result = remove
-            .execute(json!({"directory": "relative/path"}))
-            .await;
+        let result = remove.execute(json!({"directory": "relative/path"})).await;
         assert!(result.is_err());
     }
 }

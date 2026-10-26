@@ -30,8 +30,8 @@ pub fn spawn_auto_reviewer(agent: Arc<AgentRuntime>) {
                 // Skip silently when GitHub is not connected: the settings
                 // pane shows the setup hint, and a warning every sweep
                 // would just be noise.
-                let connected = crate::github::client::resolve_token(&agent.get_config().await)
-                    .is_some();
+                let connected =
+                    crate::github::client::resolve_token(&agent.get_config().await).is_some();
                 if connected {
                     match engine.poll_once().await {
                         Ok(summary) if summary.swept => {

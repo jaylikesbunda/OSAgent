@@ -120,22 +120,18 @@ async fn run_shell_command_capture(
 
     let mut child = sandbox
         .spawn(spec)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))?;
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
 
     let stdout_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let stderr_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
     let stdout_task = child.take_stdout().map(|stream| {
         let buffer = stdout_buffer.clone();
-        tokio::spawn(async move {
-            drain_pipe(tokio::fs::File::from_std(stream), buffer).await
-        })
+        tokio::spawn(async move { drain_pipe(tokio::fs::File::from_std(stream), buffer).await })
     });
     let stderr_task = child.take_stderr().map(|stream| {
         let buffer = stderr_buffer.clone();
-        tokio::spawn(async move {
-            drain_pipe(tokio::fs::File::from_std(stream), buffer).await
-        })
+        tokio::spawn(async move { drain_pipe(tokio::fs::File::from_std(stream), buffer).await })
     });
 
     let (exit_code, timed_out) = match child.wait_timeout(timeout).await {
@@ -1053,9 +1049,12 @@ impl Tool for BashTool {
 
         let workspace = self.validate_workdir(workdir)?;
         let timeout_duration = Duration::from_secs(timeout_seconds);
-        let capture = run_shell_command_capture(&self.sandbox, &full_command, &workspace, timeout_duration)
-            .await
-            .map_err(|e| OSAgentError::ToolExecution(format!("Failed to spawn command: {}", e)))?;
+        let capture =
+            run_shell_command_capture(&self.sandbox, &full_command, &workspace, timeout_duration)
+                .await
+                .map_err(|e| {
+                    OSAgentError::ToolExecution(format!("Failed to spawn command: {}", e))
+                })?;
 
         let (merged_output, exit_code) = if capture.timed_out {
             (

@@ -250,19 +250,16 @@ impl Tool for CodeInterpreterTool {
             crate::sandbox::SpawnSpec::new(interpreter, vec![&script]).cwd(&workspace)
         };
 
-        let result = timeout(
-            Duration::from_secs(self.config.timeout_seconds),
-            async {
-                let mut child = self
-                    .sandbox
-                    .spawn(spec)
-                    .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
-                child
-                    .wait_with_output()
-                    .await
-                    .map_err(|e| OSAgentError::ToolExecution(e.to_string()))
-            },
-        )
+        let result = timeout(Duration::from_secs(self.config.timeout_seconds), async {
+            let mut child = self
+                .sandbox
+                .spawn(spec)
+                .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
+            child
+                .wait_with_output()
+                .await
+                .map_err(|e| OSAgentError::ToolExecution(e.to_string()))
+        })
         .await
         .map_err(|_| OSAgentError::Timeout)??;
 

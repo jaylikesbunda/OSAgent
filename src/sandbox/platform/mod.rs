@@ -11,17 +11,17 @@ use super::Sandbox;
 use std::io;
 use std::sync::Mutex;
 
-#[cfg(windows)]
-mod windows;
-#[cfg(windows)]
-mod wfp;
 #[cfg(not(windows))]
 mod unix;
-
 #[cfg(windows)]
-pub(crate) use windows::ChildHandle;
+mod wfp;
+#[cfg(windows)]
+mod windows;
+
 #[cfg(not(windows))]
 pub(crate) use unix::ChildHandle;
+#[cfg(windows)]
+pub(crate) use windows::ChildHandle;
 
 /// Per-process-lifetime backend preparation (Windows: AppContainer profile +
 /// WFP session + ACL grants; Unix: nothing global). Cheap to create; real work
@@ -64,7 +64,10 @@ pub(crate) fn backend_report(sandbox: &Sandbox) -> (&'static str, bool, Vec<Stri
         if sandbox.is_unrestricted() {
             notes.push("sandbox mode is danger-full-access: no OS confinement".to_string());
         } else {
-            notes.push("OS enforcement disabled in settings: spawned processes are not confined".to_string());
+            notes.push(
+                "OS enforcement disabled in settings: spawned processes are not confined"
+                    .to_string(),
+            );
         }
         return (backend_name(), false, notes);
     }

@@ -792,4 +792,3 @@ impl GithubReview {
         }
     }
 }
-

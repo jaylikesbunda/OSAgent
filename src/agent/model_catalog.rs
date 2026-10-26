@@ -179,10 +179,7 @@ pub fn published_reasoning_levels(model: &ModelsDevModel) -> Option<ReasoningLev
             ReasoningLevels::Budget { .. } => 1,
             ReasoningLevels::Toggle => 2,
         };
-        if best
-            .as_ref()
-            .map_or(true, |(best_rank, _)| rank < *best_rank)
-        {
+        if best.as_ref().is_none_or(|(best_rank, _)| rank < *best_rank) {
             best = Some((rank, levels));
         }
     }

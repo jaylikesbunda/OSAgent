@@ -3243,7 +3243,11 @@ impl SqliteStorage {
 
     /// Aggregated usage/cost totals, optionally scoped to one session and/or
     /// lower-bounded by a Unix timestamp (UTC day/month budget windows).
-    pub fn usage_totals(&self, session_id: Option<&str>, since: Option<i64>) -> Result<UsageTotals> {
+    pub fn usage_totals(
+        &self,
+        session_id: Option<&str>,
+        since: Option<i64>,
+    ) -> Result<UsageTotals> {
         self.with_conn(|conn| {
             let mut sql = String::from(
                 "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
@@ -3789,7 +3793,7 @@ impl SqliteStorage {
                 return Ok(false);
             };
             let now = Utc::now().timestamp();
-            let stale = last_seen.map_or(true, |ts| now - ts >= min_interval_secs);
+            let stale = last_seen.is_none_or(|ts| now - ts >= min_interval_secs);
             if stale {
                 let _ = conn.execute(
                     "UPDATE paired_devices SET last_seen_at = ?1 WHERE id = ?2",
@@ -3985,11 +3989,7 @@ impl SqliteStorage {
     }
 
     /// Newest review row for a pull request (any commit).
-    pub fn latest_github_review(
-        &self,
-        repo: &str,
-        pr_number: u64,
-    ) -> Result<Option<GithubReview>> {
+    pub fn latest_github_review(&self, repo: &str, pr_number: u64) -> Result<Option<GithubReview>> {
         self.with_conn(|conn| {
             let row = conn
                 .query_row(
@@ -4108,7 +4108,12 @@ impl SqliteStorage {
                  ON CONFLICT(repo, pr_number) DO UPDATE SET
                      last_comment_id = excluded.last_comment_id,
                      updated_at = excluded.updated_at",
-                params![repo, pr_number as i64, last_comment_id, Utc::now().timestamp()],
+                params![
+                    repo,
+                    pr_number as i64,
+                    last_comment_id,
+                    Utc::now().timestamp()
+                ],
             )
             .map_err(OSAgentError::Storage)?;
             Ok(())
@@ -4415,7 +4420,10 @@ mod github_review_tests {
         );
         // Other pull requests are isolated.
         assert_eq!(storage.github_trigger_state("o/r", 8).expect("get"), None);
-        assert_eq!(storage.github_trigger_state("o/other", 7).expect("get"), None);
+        assert_eq!(
+            storage.github_trigger_state("o/other", 7).expect("get"),
+            None
+        );
         cleanup(&path);
     }
 }

@@ -97,17 +97,15 @@ impl GithubClient {
             .http
             .request(method, self.url(path))
             .bearer_auth(&self.token)
-            .header(
-                "Accept",
-                accept.unwrap_or("application/vnd.github+json"),
-            )
+            .header("Accept", accept.unwrap_or("application/vnd.github+json"))
             .header("X-GitHub-Api-Version", "2022-11-28");
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let response = req.send().await.map_err(|e| {
-            OSAgentError::ToolExecution(format!("GitHub request failed: {}", e))
-        })?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| OSAgentError::ToolExecution(format!("GitHub request failed: {}", e)))?;
         let status = response.status();
         let headers = response.headers().clone();
         let text = response.text().await.map_err(|e| {
@@ -189,9 +187,10 @@ impl GithubClient {
         if accept == DIFF_ACCEPT {
             req = req.header("User-Agent", USER_AGENT);
         }
-        let response = req.send().await.map_err(|e| {
-            OSAgentError::ToolExecution(format!("GitHub request failed: {}", e))
-        })?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| OSAgentError::ToolExecution(format!("GitHub request failed: {}", e)))?;
         let status = response.status();
         let headers = response.headers().clone();
         let text = response.text().await.unwrap_or_default();
@@ -205,9 +204,7 @@ impl GithubClient {
 
     /// Authenticated user plus the token's OAuth scopes (if reported).
     pub async fn whoami(&self) -> Result<(GhUser, Vec<String>)> {
-        let (_, headers, value) = self
-            .request_json(Method::GET, "/user", None, None)
-            .await?;
+        let (_, headers, value) = self.request_json(Method::GET, "/user", None, None).await?;
         let user: GhUser = serde_json::from_value(value).map_err(|e| {
             OSAgentError::ToolExecution(format!("Unexpected GitHub user payload: {}", e))
         })?;
@@ -229,8 +226,13 @@ impl GithubClient {
     }
 
     pub async fn list_user_repos(&self, max_pages: u32) -> Result<Vec<GhRepo>> {
-        self.get_paged("/user/repos", "affiliation=owner,collaborator&sort=pushed", 100, max_pages)
-            .await
+        self.get_paged(
+            "/user/repos",
+            "affiliation=owner,collaborator&sort=pushed",
+            100,
+            max_pages,
+        )
+        .await
     }
 
     // ── Pull requests ───────────────────────────────────────────────────
@@ -315,7 +317,12 @@ impl GithubClient {
             payload["draft"] = json!(true);
         }
         let (_, _, value) = self
-            .request_json(Method::POST, &format!("/repos/{}/pulls", repo), Some(payload), None)
+            .request_json(
+                Method::POST,
+                &format!("/repos/{}/pulls", repo),
+                Some(payload),
+                None,
+            )
             .await?;
         serde_json::from_value(value).map_err(|e| {
             OSAgentError::ToolExecution(format!("Unexpected GitHub pull payload: {}", e))
@@ -384,7 +391,12 @@ impl GithubClient {
         })
     }
 
-    pub async fn create_issue_comment(&self, repo: &str, number: u64, body: &str) -> Result<GhComment> {
+    pub async fn create_issue_comment(
+        &self,
+        repo: &str,
+        number: u64,
+        body: &str,
+    ) -> Result<GhComment> {
         let (_, _, value) = self
             .request_json(
                 Method::POST,
@@ -530,7 +542,12 @@ impl GithubClient {
             payload["labels"] = serde_json::to_value(labels).unwrap_or_default();
         }
         let (_, _, value) = self
-            .request_json(Method::POST, &format!("/repos/{}/issues", repo), Some(payload), None)
+            .request_json(
+                Method::POST,
+                &format!("/repos/{}/issues", repo),
+                Some(payload),
+                None,
+            )
             .await?;
         serde_json::from_value(value).map_err(|e| {
             OSAgentError::ToolExecution(format!("Unexpected GitHub issue payload: {}", e))
@@ -587,11 +604,7 @@ impl GithubClient {
         Ok(envelope.check_runs)
     }
 
-    pub async fn list_commit_statuses(
-        &self,
-        repo: &str,
-        sha: &str,
-    ) -> Result<Vec<GhCommitStatus>> {
+    pub async fn list_commit_statuses(&self, repo: &str, sha: &str) -> Result<Vec<GhCommitStatus>> {
         self.get_json(&format!(
             "/repos/{}/commits/{}/statuses?per_page=50",
             repo, sha
@@ -659,7 +672,10 @@ impl GithubClient {
             jobs: Vec<GhWorkflowJob>,
         }
         let envelope: JobsEnvelope = self
-            .get_json(&format!("/repos/{}/actions/runs/{}/jobs?per_page=50", repo, run_id))
+            .get_json(&format!(
+                "/repos/{}/actions/runs/{}/jobs?per_page=50",
+                repo, run_id
+            ))
             .await?;
         Ok(envelope.jobs)
     }
@@ -780,10 +796,7 @@ impl GithubClient {
             Some("slow_down") => Ok(None),
             Some(other) => Err(OSAgentError::ToolExecution(format!(
                 "GitHub device flow failed: {}",
-                parsed
-                    .error_description
-                    .as_deref()
-                    .unwrap_or(other)
+                parsed.error_description.as_deref().unwrap_or(other)
             ))),
         }
     }
@@ -884,7 +897,10 @@ fn map_error_response(
             message, path
         ));
     }
-    OSAgentError::ToolExecution(format!("GitHub error (HTTP {}) for {}: {}", status, path, message))
+    OSAgentError::ToolExecution(format!(
+        "GitHub error (HTTP {}) for {}: {}",
+        status, path, message
+    ))
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -976,10 +992,7 @@ mod tests {
             move |AxumJson(body): AxumJson<Value>| {
                 let captured = captured.clone();
                 async move {
-                    captured
-                        .lock()
-                        .unwrap()
-                        .push((path.to_string(), body));
+                    captured.lock().unwrap().push((path.to_string(), body));
                     Json(serde_json::json!({"id": 1}))
                 }
             }
@@ -1047,7 +1060,8 @@ mod tests {
         assert_eq!(parsed.expires_in, Some(28800));
 
         // Refresh response rotates both tokens.
-        let refreshed = r#"{"access_token":"gho_at2","refresh_token":"ghr_rt2","expires_in":28800}"#;
+        let refreshed =
+            r#"{"access_token":"gho_at2","refresh_token":"ghr_rt2","expires_in":28800}"#;
         let parsed: GhDeviceTokenResponse = serde_json::from_str(refreshed).expect("parses");
         assert_eq!(parsed.access_token.as_deref(), Some("gho_at2"));
         assert_eq!(parsed.refresh_token.as_deref(), Some("ghr_rt2"));
@@ -1151,8 +1165,10 @@ mod tests {
 
         let files = client.list_pull_files("o/r", 1, 1).await.expect("files");
         assert_eq!(files.len(), 1);
-        let diff =
-            crate::github::diff::parse_patch(&files[0].filename, files[0].patch.as_deref().unwrap());
+        let diff = crate::github::diff::parse_patch(
+            &files[0].filename,
+            files[0].patch.as_deref().unwrap(),
+        );
         assert!(diff.is_valid_position(2, "RIGHT"));
 
         let review = client

@@ -149,14 +149,8 @@ fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
 pub fn render_numbered(diff: &FileDiff) -> String {
     let mut out = String::new();
     for line in &diff.lines {
-        let old = line
-            .old_line
-            .map(|n| n.to_string())
-            .unwrap_or_default();
-        let new = line
-            .new_line
-            .map(|n| n.to_string())
-            .unwrap_or_default();
+        let old = line.old_line.map(|n| n.to_string()).unwrap_or_default();
+        let new = line.new_line.map(|n| n.to_string()).unwrap_or_default();
         let marker = match line.kind {
             DiffLineKind::Added => "+",
             DiffLineKind::Removed => "-",

@@ -887,7 +887,8 @@ impl SubagentManager {
         // "openrouter:deepseek/deepseek-r1"). Overrides always use a dedicated
         // provider instance so the shared provider used by the main agent is
         // never mutated.
-        let model_override = model_override.or_else(|| cfg.agent.subagent_models.get(&agent_type).cloned());
+        let model_override =
+            model_override.or_else(|| cfg.agent.subagent_models.get(&agent_type).cloned());
         let provider = if let Some(override_spec) = model_override {
             Self::create_provider_with_override(&cfg, storage.clone(), override_spec).await?
         } else if let Some(shared) = shared_provider {
@@ -1143,12 +1144,14 @@ impl SubagentManager {
         };
 
         let selected = if let Some(id) = &provider_id {
-            Self::find_provider_config(cfg, id).cloned().ok_or_else(|| {
-                crate::error::OSAgentError::ToolExecution(format!(
-                    "Provider '{}' from the subagent model override is not configured",
-                    id
-                ))
-            })?
+            Self::find_provider_config(cfg, id)
+                .cloned()
+                .ok_or_else(|| {
+                    crate::error::OSAgentError::ToolExecution(format!(
+                        "Provider '{}' from the subagent model override is not configured",
+                        id
+                    ))
+                })?
         } else if !cfg.default_provider.is_empty() {
             Self::find_provider_config(cfg, &cfg.default_provider)
                 .cloned()
@@ -1194,7 +1197,10 @@ impl SubagentManager {
     /// The configured provider entry a catalog/provider id refers to. Entries
     /// may be addressed by their stable id (custom endpoints) or by their
     /// provider type (stock presets).
-    fn find_provider_config<'a>(cfg: &'a Config, provider_id: &str) -> Option<&'a crate::config::ProviderConfig> {
+    fn find_provider_config<'a>(
+        cfg: &'a Config,
+        provider_id: &str,
+    ) -> Option<&'a crate::config::ProviderConfig> {
         cfg.providers
             .iter()
             .find(|provider| provider.effective_id() == provider_id)

@@ -44,12 +44,7 @@ impl AgentRuntime {
 
         let mut session = self
             .session_manager
-            .create_session_with_id(
-                id,
-                model,
-                provider,
-                Some(format!("Session {}", id)),
-            )
+            .create_session_with_id(id, model, provider, Some(format!("Session {}", id)))
             .await?;
         Self::set_session_workspace_id(&mut session, &active_workspace_id)?;
         self.session_manager.update_session(&session).await?;

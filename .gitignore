@@ -41,6 +41,10 @@ build/
 coverage/
 *.tsbuildinfo
 
+# Local diagram renderer preview output (frontend/tools/diagram-preview.js)
+frontend/workflow_artifacts/
+frontend/tools/preview.log
+
 # Tauri generated schemas (build artifacts)
 launcher/gen/
 
@@ -82,3 +86,6 @@ frontend/images/3Kx3K-logo.png
 /reference
 /reference/opencode-dev-old
 /pi
+/website
+
+.osa_tool_outputs

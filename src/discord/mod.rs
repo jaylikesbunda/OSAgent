@@ -1543,7 +1543,10 @@ impl Handler {
         for attachment in image_attachments {
             match self.download_image_attachment(attachment).await {
                 Ok(image) => {
-                    parts.push(format!("[Image attached by {author}: `{}`]", image.filename));
+                    parts.push(format!(
+                        "[Image attached by {author}: `{}`]",
+                        image.filename
+                    ));
                     images.push(image);
                 }
                 Err(e) => parts.push(format!(
@@ -2058,16 +2061,34 @@ mod tests {
         };
 
         // The trusted user can moderate the community server...
-        assert!(Handler::moderation_is_authorized_for_config(&discord, 7, Some(42)));
+        assert!(Handler::moderation_is_authorized_for_config(
+            &discord,
+            7,
+            Some(42)
+        ));
         // ...but community members cannot, and DMs never reach moderation.
-        assert!(!Handler::moderation_is_authorized_for_config(&discord, 8, Some(42)));
-        assert!(!Handler::moderation_is_authorized_for_config(&discord, 7, None));
+        assert!(!Handler::moderation_is_authorized_for_config(
+            &discord,
+            8,
+            Some(42)
+        ));
+        assert!(!Handler::moderation_is_authorized_for_config(
+            &discord, 7, None
+        ));
         // Unlisted servers stay out of reach even for the trusted user.
-        assert!(!Handler::moderation_is_authorized_for_config(&discord, 7, Some(43)));
+        assert!(!Handler::moderation_is_authorized_for_config(
+            &discord,
+            7,
+            Some(43)
+        ));
 
         // Without the opt-in nobody gets the tools.
         discord.moderation_enabled = false;
-        assert!(!Handler::moderation_is_authorized_for_config(&discord, 7, Some(42)));
+        assert!(!Handler::moderation_is_authorized_for_config(
+            &discord,
+            7,
+            Some(42)
+        ));
     }
 
     #[test]
@@ -2083,16 +2104,32 @@ mod tests {
         };
 
         // A trusted role is not enough — only trusted *users* get the tools.
-        assert!(!Handler::moderation_is_authorized_for_config(&discord, 9, Some(42)));
+        assert!(!Handler::moderation_is_authorized_for_config(
+            &discord,
+            9,
+            Some(42)
+        ));
         // Neither is an allowed_users grant.
         discord.allowed_users = vec![8];
-        assert!(!Handler::moderation_is_authorized_for_config(&discord, 8, Some(42)));
+        assert!(!Handler::moderation_is_authorized_for_config(
+            &discord,
+            8,
+            Some(42)
+        ));
 
         // Outside community mode the rule does not change: the trusted user
         // list is the only key, even when allowed_users has entries.
         discord.community_mode = false;
-        assert!(!Handler::moderation_is_authorized_for_config(&discord, 8, Some(42)));
-        assert!(Handler::moderation_is_authorized_for_config(&discord, 7, Some(42)));
+        assert!(!Handler::moderation_is_authorized_for_config(
+            &discord,
+            8,
+            Some(42)
+        ));
+        assert!(Handler::moderation_is_authorized_for_config(
+            &discord,
+            7,
+            Some(42)
+        ));
     }
 
     #[test]

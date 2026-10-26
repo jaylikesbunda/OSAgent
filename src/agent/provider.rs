@@ -24,11 +24,7 @@ const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /// Add a rejected key to the in-memory quarantine. Shared with the streaming
 /// error path, which cannot borrow the provider itself.
-fn quarantine_key(
-    bad_keys: &std::sync::RwLock<HashSet<String>>,
-    provider_type: &str,
-    key: &str,
-) {
+fn quarantine_key(bad_keys: &std::sync::RwLock<HashSet<String>>, provider_type: &str, key: &str) {
     if key.trim().is_empty() {
         return;
     }
@@ -2631,89 +2627,92 @@ impl OpenAICompatibleProvider {
                 let provider = Arc::clone(&stream_provider);
                 let key = Arc::clone(&stream_key);
                 async move {
-                match event {
-                    Ok(Event::Open) => None,
-                    Ok(Event::Message(message)) => {
-                        if message.data == "[DONE]" {
-                            return Some(Ok(StreamEvent {
-                                event_type: "done".to_string(),
-                                content: None,
-                                thinking: None,
-                                tool_call_deltas: Vec::new(),
-                                finish_reason: None,
-                                usage: None,
-                                done: true,
-                            }));
+                    match event {
+                        Ok(Event::Open) => None,
+                        Ok(Event::Message(message)) => {
+                            if message.data == "[DONE]" {
+                                return Some(Ok(StreamEvent {
+                                    event_type: "done".to_string(),
+                                    content: None,
+                                    thinking: None,
+                                    tool_call_deltas: Vec::new(),
+                                    finish_reason: None,
+                                    usage: None,
+                                    done: true,
+                                }));
+                            }
+
+                            let parsed: serde_json::Value =
+                                serde_json::from_str(&message.data).ok()?;
+                            let choice = &parsed["choices"][0];
+                            let delta = &choice["delta"];
+                            let final_message = &choice["message"];
+
+                            let content = Self::parse_stream_content(&delta["content"])
+                                .or_else(|| Self::parse_chat_message_content(final_message));
+                            let thinking = Self::parse_stream_thinking(&delta["reasoning_content"])
+                                .or_else(|| {
+                                    Self::parse_stream_thinking(&delta["reasoning_details"])
+                                })
+                                .or_else(|| Self::parse_stream_thinking(&delta["thinking"]))
+                                .or_else(|| Self::parse_stream_thinking(&delta["reasoning"]))
+                                .or_else(|| Self::parse_chat_message_thinking(final_message));
+                            let tool_call_deltas = delta["tool_calls"]
+                                .as_array()
+                                .map(|calls| {
+                                    calls
+                                        .iter()
+                                        .map(|call| StreamToolCallDelta {
+                                            index: call["index"].as_u64().unwrap_or(0) as usize,
+                                            id: call["id"].as_str().map(|s| s.to_string()),
+                                            name: call["function"]["name"]
+                                                .as_str()
+                                                .map(|s| s.to_string()),
+                                            arguments: call["function"]["arguments"]
+                                                .as_str()
+                                                .map(|s| s.to_string()),
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            let finish_reason =
+                                choice["finish_reason"].as_str().map(|s| s.to_string());
+                            let usage = Self::parse_response_usage(&parsed);
+
+                            if content.is_none()
+                                && thinking.is_none()
+                                && tool_call_deltas.is_empty()
+                                && finish_reason.is_none()
+                                && usage.is_none()
+                            {
+                                return None;
+                            }
+
+                            Some(Ok(StreamEvent {
+                                event_type: "token".to_string(),
+                                content,
+                                thinking,
+                                tool_call_deltas,
+                                finish_reason,
+                                usage,
+                                done: false,
+                            }))
                         }
-
-                        let parsed: serde_json::Value = serde_json::from_str(&message.data).ok()?;
-                        let choice = &parsed["choices"][0];
-                        let delta = &choice["delta"];
-                        let final_message = &choice["message"];
-
-                        let content = Self::parse_stream_content(&delta["content"])
-                            .or_else(|| Self::parse_chat_message_content(final_message));
-                        let thinking = Self::parse_stream_thinking(&delta["reasoning_content"])
-                            .or_else(|| Self::parse_stream_thinking(&delta["reasoning_details"]))
-                            .or_else(|| Self::parse_stream_thinking(&delta["thinking"]))
-                            .or_else(|| Self::parse_stream_thinking(&delta["reasoning"]))
-                            .or_else(|| Self::parse_chat_message_thinking(final_message));
-                        let tool_call_deltas = delta["tool_calls"]
-                            .as_array()
-                            .map(|calls| {
-                                calls
-                                    .iter()
-                                    .map(|call| StreamToolCallDelta {
-                                        index: call["index"].as_u64().unwrap_or(0) as usize,
-                                        id: call["id"].as_str().map(|s| s.to_string()),
-                                        name: call["function"]["name"]
-                                            .as_str()
-                                            .map(|s| s.to_string()),
-                                        arguments: call["function"]["arguments"]
-                                            .as_str()
-                                            .map(|s| s.to_string()),
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
-                        let usage = Self::parse_response_usage(&parsed);
-
-                        if content.is_none()
-                            && thinking.is_none()
-                            && tool_call_deltas.is_empty()
-                            && finish_reason.is_none()
-                            && usage.is_none()
-                        {
-                            return None;
+                        Err(err) => {
+                            let text = err.to_string();
+                            let structured =
+                                OSAgentError::ProviderStructured(crate::error::ProviderErrorInfo {
+                                    status_code: Self::parse_status_code_from_message(&text),
+                                    message: format!("stream error: {}", text),
+                                    retry_after: None,
+                                    error_code: None,
+                                });
+                            if !stream_oauth && structured.is_auth_error() {
+                                quarantine_key(&bad_keys, provider.as_str(), key.as_str());
+                            }
+                            Some(Err(structured))
                         }
-
-                        Some(Ok(StreamEvent {
-                            event_type: "token".to_string(),
-                            content,
-                            thinking,
-                            tool_call_deltas,
-                            finish_reason,
-                            usage,
-                            done: false,
-                        }))
                     }
-                    Err(err) => {
-                        let text = err.to_string();
-                        let structured = OSAgentError::ProviderStructured(
-                            crate::error::ProviderErrorInfo {
-                                status_code: Self::parse_status_code_from_message(&text),
-                                message: format!("stream error: {}", text),
-                                retry_after: None,
-                                error_code: None,
-                            },
-                        );
-                        if !stream_oauth && structured.is_auth_error() {
-                            quarantine_key(&bad_keys, provider.as_str(), key.as_str());
-                        }
-                        Some(Err(structured))
-                    }
-                }
                 }
             })
             .boxed();

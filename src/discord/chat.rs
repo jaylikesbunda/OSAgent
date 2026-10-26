@@ -364,25 +364,22 @@ impl Handler {
             .map(|session| session.messages.len())
             .unwrap_or_default();
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(TURN_TIMEOUT_SECS),
-            async {
-                if images.is_empty() {
-                    self.agent
-                        .process_message(&session_id, prompt, format!("discord:{user_id}"))
-                        .await
-                } else {
-                    self.agent
-                        .process_message_with_images(
-                            &session_id,
-                            prompt,
-                            format!("discord:{user_id}"),
-                            images,
-                        )
-                        .await
-                }
-            },
-        )
+        let result = tokio::time::timeout(Duration::from_secs(TURN_TIMEOUT_SECS), async {
+            if images.is_empty() {
+                self.agent
+                    .process_message(&session_id, prompt, format!("discord:{user_id}"))
+                    .await
+            } else {
+                self.agent
+                    .process_message_with_images(
+                        &session_id,
+                        prompt,
+                        format!("discord:{user_id}"),
+                        images,
+                    )
+                    .await
+            }
+        })
         .await;
 
         typing_done.notify_one();

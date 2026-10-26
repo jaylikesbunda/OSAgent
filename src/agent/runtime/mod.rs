@@ -497,7 +497,10 @@ impl AgentRuntime {
                 provider
             }
             Err(e) => {
-                tracing::warn!("model-reference provider failed to build ({}); using active", e);
+                tracing::warn!(
+                    "model-reference provider failed to build ({}); using active",
+                    e
+                );
                 active
             }
         }
@@ -505,7 +508,10 @@ impl AgentRuntime {
 
     /// Model assigned to a session's surface (Discord today), independent
     /// of the web UI's active model. None means "use the active model".
-    pub async fn surface_model_for_session(&self, session: &crate::storage::Session) -> Option<String> {
+    pub async fn surface_model_for_session(
+        &self,
+        session: &crate::storage::Session,
+    ) -> Option<String> {
         let source = session
             .metadata
             .get("source")
@@ -643,7 +649,9 @@ impl AgentRuntime {
         // a model requested by name ("use sonnet") prefers the provider it was
         // last run on even before the first manual switch.
         if !config.default_model.is_empty() && !config.default_provider.is_empty() {
-            if let Err(e) = storage.record_model_usage(&config.default_model, &config.default_provider) {
+            if let Err(e) =
+                storage.record_model_usage(&config.default_model, &config.default_provider)
+            {
                 warn!("Failed to seed model usage history: {}", e);
             }
         }

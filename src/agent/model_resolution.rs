@@ -140,7 +140,7 @@ pub fn resolve_model_request(
         return ModelResolution::Resolved(resolved(preferred[0].1));
     }
     if preferred.len() > 1 {
-        preferred.sort_by(|a, b| b.0.cmp(&a.0));
+        preferred.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         // Strictly newer history wins; a same-second switch stays ambiguous so
         // the user gets the choice instead of a coin flip.
         if preferred[0].0 > preferred[1].0 {
@@ -265,8 +265,18 @@ mod tests {
                 provider("unconfigured", "Unconfigured", false),
             ],
             all_models: vec![
-                model("anthropic", "Anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5"),
-                model("anthropic", "Anthropic", "claude-opus-4-5", "Claude Opus 4.5"),
+                model(
+                    "anthropic",
+                    "Anthropic",
+                    "claude-sonnet-4-5",
+                    "Claude Sonnet 4.5",
+                ),
+                model(
+                    "anthropic",
+                    "Anthropic",
+                    "claude-opus-4-5",
+                    "Claude Opus 4.5",
+                ),
                 model(
                     "openrouter",
                     "OpenRouter",
@@ -312,7 +322,9 @@ mod tests {
     #[test]
     fn a_model_id_containing_a_colon_is_not_read_as_a_provider() {
         let mut catalog = catalog();
-        catalog.providers.push(provider("ollama", "Ollama (Local)", true));
+        catalog
+            .providers
+            .push(provider("ollama", "Ollama (Local)", true));
         catalog
             .all_models
             .push(model("ollama", "Ollama (Local)", "llama3:8b", "Llama 3 8B"));
@@ -329,7 +341,8 @@ mod tests {
 
     #[test]
     fn an_unconfigured_provider_cannot_be_selected_explicitly() {
-        let resolution = resolve_model_request("unconfigured:mystery-sonnet", &catalog(), &usage(&[]));
+        let resolution =
+            resolve_model_request("unconfigured:mystery-sonnet", &catalog(), &usage(&[]));
         assert_eq!(
             resolution,
             ModelResolution::NotFound {
@@ -340,8 +353,7 @@ mod tests {
 
     #[test]
     fn an_exact_model_id_resolves_across_providers() {
-        let resolution =
-            resolve_model_request("claude-sonnet-4-5", &catalog(), &usage(&[]));
+        let resolution = resolve_model_request("claude-sonnet-4-5", &catalog(), &usage(&[]));
         assert_eq!(
             resolution,
             ModelResolution::Resolved(ResolvedModel {
@@ -420,7 +432,12 @@ mod tests {
                 },
                 ModelInfo {
                     release_date: Some("2025-09-29".to_string()),
-                    ..model("anthropic", "Anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5")
+                    ..model(
+                        "anthropic",
+                        "Anthropic",
+                        "claude-sonnet-4-5",
+                        "Claude Sonnet 4.5",
+                    )
                 },
             ],
         };
@@ -454,7 +471,12 @@ mod tests {
                 },
                 ModelInfo {
                     release_date: Some("2025-09-29".to_string()),
-                    ..model("anthropic", "Anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5")
+                    ..model(
+                        "anthropic",
+                        "Anthropic",
+                        "claude-sonnet-4-5",
+                        "Claude Sonnet 4.5",
+                    )
                 },
                 model(
                     "openrouter",

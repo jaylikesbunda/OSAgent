@@ -41,31 +41,30 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT,
-    TRUSTEE_W, TRUSTEE_IS_SID,
+    TRUSTEE_IS_SID, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
 use windows_sys::Win32::Security::{
-    CreateRestrictedToken, FreeSid, IsValidSid, SECURITY_CAPABILITIES,
-    DACL_SECURITY_INFORMATION, PSID, SID_AND_ATTRIBUTES,
+    CreateRestrictedToken, FreeSid, IsValidSid, DACL_SECURITY_INFORMATION, PSID,
+    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, DELETE,
-    FILE_TRAVERSE,
+    CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, CreateProcessWithTokenW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    GetCurrentProcess, InitializeProcThreadAttributeList, OpenProcessToken,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
-    EXTENDED_STARTUPINFO_PRESENT, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW, STARTUPINFOW,
-    STARTF_USESTDHANDLES,
+    CreateProcessAsUserW, CreateProcessWithTokenW, DeleteProcThreadAttributeList,
+    GetCurrentProcess, GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
@@ -268,7 +267,10 @@ fn split_raw_cmdline(raw: &str) -> (String, String) {
     let trimmed = raw.trim_start();
     if let Some(rest) = trimmed.strip_prefix('"') {
         if let Some(end) = rest.find('"') {
-            return (rest[..end].to_string(), rest[end + 1..].trim_start().to_string());
+            return (
+                rest[..end].to_string(),
+                rest[end + 1..].trim_start().to_string(),
+            );
         }
     }
     match trimmed.find(char::is_whitespace) {
@@ -580,12 +582,7 @@ impl Drop for LocalFreeGuard {
 /// Sets an inheritable DACL grant on `root`, merged with the existing DACL.
 /// `propagate` selects `SetNamedSecurityInfoW` (which walks existing children)
 /// vs `SetSecurityInfo` on a handle (which deliberately does not).
-fn set_dacl_grant(
-    root: &Path,
-    sid: &[u8],
-    kind: &AccessKind,
-    propagate: bool,
-) -> io::Result<()> {
+fn set_dacl_grant(root: &Path, sid: &[u8], kind: &AccessKind, propagate: bool) -> io::Result<()> {
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SetSecurityInfo};
 
     if unsafe { IsValidSid(sid.as_ptr() as PSID) } == 0 {
@@ -619,7 +616,7 @@ fn set_dacl_grant(
         return Err(io::Error::from_raw_os_error(result as i32));
     }
 
-    let mut access = EXPLICIT_ACCESS_W {
+    let access = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask(kind),
         grfAccessMode: GRANT_ACCESS,
         grfInheritance: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
@@ -633,9 +630,7 @@ fn set_dacl_grant(
     };
 
     let mut new_dacl: *mut windows_sys::Win32::Security::ACL = std::ptr::null_mut();
-    let result = unsafe {
-        SetEntriesInAclW(1, &mut access, old_dacl, &mut new_dacl)
-    };
+    let result = unsafe { SetEntriesInAclW(1, &access, old_dacl, &mut new_dacl) };
     if result != 0 {
         return Err(io::Error::from_raw_os_error(result as i32));
     }
@@ -659,8 +654,11 @@ fn set_dacl_grant(
         return Ok(());
     }
 
-    let handle = open_for_security(root, 0x0004_0000 /* WRITE_DAC */ | 0x0002_0000 /* READ_CONTROL */)
-        .map_err(|e| io::Error::new(e.kind(), format!("dacl open: {e}")))?;
+    let handle = open_for_security(
+        root,
+        0x0004_0000 /* WRITE_DAC */ | 0x0002_0000, /* READ_CONTROL */
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("dacl open: {e}")))?;
     let result = unsafe {
         SetSecurityInfo(
             handle,
@@ -773,10 +771,7 @@ fn label_tree_inner(root: &Path, propagate: bool) -> io::Result<()> {
     match set_mandatory_label(root, propagate) {
         Ok(()) => Ok(()),
         Err(first) => set_mandatory_label(root, propagate).map_err(|second| {
-            io::Error::new(
-                second.kind(),
-                format!("label: {first} (then {second})"),
-            )
+            io::Error::new(second.kind(), format!("label: {first} (then {second})"))
         }),
     }
 }
@@ -963,9 +958,16 @@ fn spawn_with_token(
     };
 
     // Child ends must be inheritable; parent ends must not.
-    for (parent, child) in [&stdin_pair, &stdout_pair, &stderr_pair].into_iter().flatten() {
+    for (parent, child) in [&stdin_pair, &stdout_pair, &stderr_pair]
+        .into_iter()
+        .flatten()
+    {
         unsafe {
-            SetHandleInformation(child.as_raw_handle() as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            SetHandleInformation(
+                child.as_raw_handle() as HANDLE,
+                HANDLE_FLAG_INHERIT,
+                HANDLE_FLAG_INHERIT,
+            );
             SetHandleInformation(parent.as_raw_handle() as HANDLE, HANDLE_FLAG_INHERIT, 0);
         }
     }
@@ -1105,11 +1107,7 @@ fn spawn_with_token(
     }
 
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    let startup_ptr = if deny_network {
-        &mut startup_ex.StartupInfo as *mut _
-    } else {
-        &mut startup_ex.StartupInfo as *mut _
-    };
+    let startup_ptr = &mut startup_ex.StartupInfo as *mut _;
 
     let created = unsafe {
         CreateProcessAsUserW(
@@ -1159,9 +1157,15 @@ fn spawn_with_token(
     drop(attr_buffer);
 
     // Parent-side pipe ends become the child's stdio surface.
-    let stdin_file = stdin_pair.take().map(|(parent, _child)| file_of_handle(parent));
-    let stdout_file = stdout_pair.take().map(|(parent, _child)| file_of_handle(parent));
-    let stderr_file = stderr_pair.take().map(|(parent, _child)| file_of_handle(parent));
+    let stdin_file = stdin_pair
+        .take()
+        .map(|(parent, _child)| file_of_handle(parent));
+    let stdout_file = stdout_pair
+        .take()
+        .map(|(parent, _child)| file_of_handle(parent));
+    let stderr_file = stderr_pair
+        .take()
+        .map(|(parent, _child)| file_of_handle(parent));
 
     // Job Object: kill-on-close so a dropped/timeout tool run never leaves
     // orphans.
@@ -1237,7 +1241,10 @@ fn create_job(process: HANDLE) -> io::Result<HandleGuard> {
     Ok(HandleGuard(job))
 }
 
-fn build_env_block(overrides: &[(std::ffi::OsString, std::ffi::OsString)], clear: bool) -> Vec<u16> {
+fn build_env_block(
+    overrides: &[(std::ffi::OsString, std::ffi::OsString)],
+    clear: bool,
+) -> Vec<u16> {
     use std::os::windows::ffi::OsStringExt;
 
     let mut entries: Vec<(String, std::ffi::OsString)> = Vec::new();
@@ -1262,4 +1269,3 @@ fn build_env_block(overrides: &[(std::ffi::OsString, std::ffi::OsString)], clear
     block.push(0);
     block
 }
-

@@ -366,9 +366,8 @@ async fn get_status(
         reviewing: snapshot.reviewing,
     };
 
-    if let Some((token, source)) = crate::github::client::resolve_token(
-        &runtime.get_config().await,
-    ) {
+    if let Some((token, source)) = crate::github::client::resolve_token(&runtime.get_config().await)
+    {
         response.configured = true;
         response.token_source = Some(source.as_str().to_string());
         let client = GithubClient::new(token);
@@ -549,7 +548,11 @@ fn validate_github_open_url(url: &str) -> Result<(), String> {
         return Err("url must use https".to_string());
     }
     let after_scheme = &trimmed["https://".len()..];
-    let host_port = after_scheme.split('/').next().unwrap_or("").to_ascii_lowercase();
+    let host_port = after_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let host = host_port.split(':').next().unwrap_or("");
     if host != "github.com" {
         return Err("url must target github.com".to_string());
@@ -566,8 +569,9 @@ async fn github_open_browser(
     if let Err(message) = validate_github_open_url(&request.url) {
         return Err(AppError::BadRequest(message));
     }
-    open::that(request.url.trim())
-        .map_err(|error| AppError::Internal(format!("Could not open the system browser: {}", error)))?;
+    open::that(request.url.trim()).map_err(|error| {
+        AppError::Internal(format!("Could not open the system browser: {}", error))
+    })?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -592,7 +596,9 @@ mod tests {
 
     #[test]
     fn open_browser_urls_are_confined_to_github() {
-        assert!(validate_github_open_url("https://github.com/login/device?user_code=AB-CD").is_ok());
+        assert!(
+            validate_github_open_url("https://github.com/login/device?user_code=AB-CD").is_ok()
+        );
         assert!(validate_github_open_url("https://github.com/settings/tokens").is_ok());
         assert!(validate_github_open_url("https://github.com:443/x").is_ok());
         // Scheme, host, and confusion cases are rejected.

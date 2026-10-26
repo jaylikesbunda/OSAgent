@@ -467,16 +467,7 @@ async fn main() -> anyhow::Result<()> {
             sandbox,
             config,
         } => {
-            run_headless(
-                config,
-                task,
-                json,
-                session_id,
-                model,
-                workspace,
-                sandbox,
-            )
-            .await?;
+            run_headless(config, task, json, session_id, model, workspace, sandbox).await?;
         }
         Commands::Usage {
             session,
@@ -554,9 +545,7 @@ async fn run_headless(
     let agent = agent::AgentRuntime::new(config)?;
 
     let session = match session_id {
-        Some(id) if !id.trim().is_empty() => {
-            agent.get_or_create_session_with_id(id.trim()).await?
-        }
+        Some(id) if !id.trim().is_empty() => agent.get_or_create_session_with_id(id.trim()).await?,
         _ => agent.create_session().await?,
     };
     let session_id = session.id.clone();

@@ -19,8 +19,8 @@ pub mod types;
 pub use auto::spawn_auto_reviewer;
 pub use client::{resolve_token, GithubClient, TokenSource};
 pub use engine::{
-    needs_review, normalize_repo, DeviceFlowPoll, EngineStatusSnapshot, GithubEngine,
-    PollSummary, ReviewOptions, ReviewOutcome,
+    needs_review, normalize_repo, DeviceFlowPoll, EngineStatusSnapshot, GithubEngine, PollSummary,
+    ReviewOptions, ReviewOutcome,
 };
 
 /// Shared OAuth app client id baked into official builds, the way the
@@ -100,7 +100,10 @@ mod tests {
     #[test]
     fn oauth_app_precedence() {
         assert_eq!(classify_oauth_app("", ""), OAuthAppSource::None);
-        assert_eq!(classify_oauth_app("", "Ov23liShared"), OAuthAppSource::Shared);
+        assert_eq!(
+            classify_oauth_app("", "Ov23liShared"),
+            OAuthAppSource::Shared
+        );
         assert_eq!(classify_oauth_app("Iv1Mine", ""), OAuthAppSource::Custom);
         assert_eq!(
             classify_oauth_app("Iv1Mine", "Ov23liShared"),
