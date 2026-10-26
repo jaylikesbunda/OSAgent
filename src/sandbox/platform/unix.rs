@@ -43,7 +43,7 @@ impl ChildHandle {
     pub(crate) fn wait_blocking(&mut self) -> io::Result<std::process::ExitStatus> {
         match self.child.lock() {
             Ok(mut child) => child.wait(),
-            Err(_) => Err(io::Error::new(io::ErrorKind::Other, "child lock poisoned")),
+            Err(_) => Err(io::Error::other("child lock poisoned")),
         }
     }
 
@@ -460,7 +460,7 @@ mod linux {
         ];
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let names: &[(libc::c_long, &str)] = &[];
-        names.iter().map(|(number, _)| *number as i64).collect()
+        names.iter().map(|(number, _)| *number).collect()
     }
 
     /// Installs the seccomp deny-list. `deny_network` additionally blocks
@@ -622,6 +622,68 @@ mod linux {
         Ok(())
     }
 
+    pub(super) fn spawn_confined(sandbox: &Sandbox, spec: SpawnSpec) -> io::Result<SandboxedChild> {
+        use std::os::unix::process::CommandExt;
+
+        let (ruleset_fd, mut notes) = build_ruleset(sandbox);
+        let deny_network = sandbox.network() == SandboxNetworkPolicy::Deny;
+
+        if ruleset_fd.is_none() && sandbox.network() == SandboxNetworkPolicy::Deny {
+            // Strict request without a strict backend: fail closed.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "sandbox network=deny requires Landlock/seccomp support on this kernel",
+            ));
+        }
+
+        let mut cmd = build_command(&spec);
+
+        // SAFETY: the closure only performs raw syscalls on data prepared
+        // above (ruleset fd, plain BPF program) and is safe to run between
+        // fork and exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                if let Some(fd) = ruleset_fd {
+                    // nnp is also required by landlock_restrict_self.
+                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let ret = libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, fd, 0u32);
+                    if ret != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                if deny_network {
+                    if let Err(error) = install_seccomp(true) {
+                        return Err(io::Error::other(error));
+                    }
+                } else if ruleset_fd.is_some() {
+                    // Landlock alone does not block mount/ptrace-class
+                    // syscalls; add the deny-list whenever we confine at all.
+                    if let Err(error) = install_seccomp(false) {
+                        return Err(io::Error::other(error));
+                    }
+                }
+                Ok(())
+            });
+        }
+
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                for note in notes.drain(..) {
+                    sandbox.platform.add_note(note);
+                }
+                return Err(error);
+            }
+        };
+        for note in notes {
+            sandbox.platform.add_note(note);
+        }
+        let new_process_group = spec.new_process_group;
+        Ok(finish_spawn(child, new_process_group))
+    }
+
     /// Minimal BPF interpreter over synthetic `seccomp_data`, used to pin the
     /// filter's semantics: the jump offsets are easy to invert silently and
     /// no test spawns through the Linux sandbox in CI.
@@ -718,68 +780,6 @@ mod linux {
             assert_eq!(run(&filter, arch, libc::SYS_connect as u32, 0), ALLOW);
             assert_eq!(run(&filter, arch, libc::SYS_mount as u32, 0), DENY);
         }
-    }
-
-    pub(super) fn spawn_confined(sandbox: &Sandbox, spec: SpawnSpec) -> io::Result<SandboxedChild> {
-        use std::os::unix::process::CommandExt;
-
-        let (ruleset_fd, mut notes) = build_ruleset(sandbox);
-        let deny_network = sandbox.network() == SandboxNetworkPolicy::Deny;
-
-        if ruleset_fd.is_none() && sandbox.network() == SandboxNetworkPolicy::Deny {
-            // Strict request without a strict backend: fail closed.
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "sandbox network=deny requires Landlock/seccomp support on this kernel",
-            ));
-        }
-
-        let mut cmd = build_command(&spec);
-
-        // SAFETY: the closure only performs raw syscalls on data prepared
-        // above (ruleset fd, plain BPF program) and is safe to run between
-        // fork and exec.
-        unsafe {
-            cmd.pre_exec(move || {
-                if let Some(fd) = ruleset_fd {
-                    // nnp is also required by landlock_restrict_self.
-                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    let ret = libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, fd, 0u32);
-                    if ret != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                if deny_network {
-                    if let Err(error) = install_seccomp(true) {
-                        return Err(io::Error::new(io::ErrorKind::Other, error));
-                    }
-                } else if ruleset_fd.is_some() {
-                    // Landlock alone does not block mount/ptrace-class
-                    // syscalls; add the deny-list whenever we confine at all.
-                    if let Err(error) = install_seccomp(false) {
-                        return Err(io::Error::new(io::ErrorKind::Other, error));
-                    }
-                }
-                Ok(())
-            });
-        }
-
-        let child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                for note in notes.drain(..) {
-                    sandbox.platform.add_note(note);
-                }
-                return Err(error);
-            }
-        };
-        for note in notes {
-            sandbox.platform.add_note(note);
-        }
-        let new_process_group = spec.new_process_group;
-        Ok(finish_spawn(child, new_process_group))
     }
 }
 
