@@ -1,5 +1,6 @@
 use crate::config::{BashMode, BashToolConfig, Config};
 use crate::error::{OSAgentError, Result};
+use crate::sandbox::{Sandbox, SpawnSpec, StdioKind};
 use crate::tools::guard::{command_touches_backups, ensure_relative_path_not_backups};
 use crate::tools::output::maybe_store_large_output_result;
 use crate::tools::registry::{Tool, ToolExample, ToolOutcome, ToolResult};
@@ -101,64 +102,46 @@ where
 }
 
 async fn run_shell_command_capture(
+    sandbox: &Sandbox,
     command: &str,
     workspace: &std::path::Path,
     timeout: Duration,
 ) -> std::io::Result<ShellCapture> {
-    #[cfg(windows)]
-    let mut builder = {
-        use std::os::windows::process::CommandExt;
-        let mut builder = tokio::process::Command::new("cmd");
-        builder
-            .as_std_mut()
-            .raw_arg(format!("/C {}", command))
-            .creation_flags(0x08000000);
-        builder
-    };
-    #[cfg(not(windows))]
-    let mut builder = {
-        let mut builder = tokio::process::Command::new("sh");
-        builder.args(["-lc", command]);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            builder.as_std_mut().process_group(0);
-        }
-        builder
+    let spec = if cfg!(windows) {
+        SpawnSpec::new("cmd", Vec::<&str>::new())
+            .windows_raw_cmdline(format!("cmd /C {}", command))
+            .stdio(StdioKind::Null, StdioKind::Pipe, StdioKind::Pipe)
+            .cwd(workspace)
+    } else {
+        SpawnSpec::new("sh", ["-lc", command])
+            .stdio(StdioKind::Null, StdioKind::Pipe, StdioKind::Pipe)
+            .cwd(workspace)
     };
 
-    let mut child = builder
-        .current_dir(workspace)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+    let mut child = sandbox
+        .spawn(spec)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))?;
 
     let stdout_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let stderr_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
-    let stdout_task = child.stdout.take().map(|stream| {
+    let stdout_task = child.take_stdout().map(|stream| {
         let buffer = stdout_buffer.clone();
-        tokio::spawn(async move { drain_pipe(stream, buffer).await })
+        tokio::spawn(async move {
+            drain_pipe(tokio::fs::File::from_std(stream), buffer).await
+        })
     });
-    let stderr_task = child.stderr.take().map(|stream| {
+    let stderr_task = child.take_stderr().map(|stream| {
         let buffer = stderr_buffer.clone();
-        tokio::spawn(async move { drain_pipe(stream, buffer).await })
+        tokio::spawn(async move {
+            drain_pipe(tokio::fs::File::from_std(stream), buffer).await
+        })
     });
 
-    let mut guard = CommandTreeGuard(child.id());
-    let (exit_code, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => {
-            guard.0 = None;
-            (status.code(), false)
-        }
-        Ok(Err(error)) => return Err(error),
-        Err(_) => {
-            // Dropping the guard `taskkill`s the whole tree; keep whatever the
-            // pipes already delivered.
-            drop(guard);
-            (None, true)
-        }
+    let (exit_code, timed_out) = match child.wait_timeout(timeout).await {
+        Ok(Some(status)) => (status.code(), false),
+        Ok(None) => (None, true),
+        Err(error) => return Err(error),
     };
 
     let join_readers = async {
@@ -238,6 +221,7 @@ pub struct BashTool {
     workspaces: Vec<PathBuf>,
     writable: bool,
     description: String,
+    sandbox: Sandbox,
 }
 
 impl BashTool {
@@ -272,7 +256,8 @@ impl BashTool {
         .to_string();
 
         Self {
-            config: config.tools.bash,
+            config: config.tools.bash.clone(),
+            sandbox: Sandbox::from_config(&config, workspaces.clone()),
             workspaces,
             writable,
             description,
@@ -916,7 +901,12 @@ impl Tool for BashTool {
     }
 
     fn timeout_ms(&self) -> Option<u64> {
-        Some(self.config.timeout_seconds.saturating_mul(1_000).max(1_000))
+        // Backstop only: `execute` bounds itself with the per-call
+        // `timeout_seconds` (clamped to 300s). The fused registry cap must
+        // sit above that, or a config default (30s) kills calls that asked
+        // for longer — which also died mid-approval with a misleading
+        // "Tool timeout after 30s" while a permission prompt was pending.
+        Some(310_000)
     }
 
     fn description(&self) -> &str {
@@ -1063,7 +1053,7 @@ impl Tool for BashTool {
 
         let workspace = self.validate_workdir(workdir)?;
         let timeout_duration = Duration::from_secs(timeout_seconds);
-        let capture = run_shell_command_capture(&full_command, &workspace, timeout_duration)
+        let capture = run_shell_command_capture(&self.sandbox, &full_command, &workspace, timeout_duration)
             .await
             .map_err(|e| OSAgentError::ToolExecution(format!("Failed to spawn command: {}", e)))?;
 

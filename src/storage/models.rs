@@ -159,6 +159,24 @@ pub struct ToolUsageStats {
     pub estimated_tokens: usize,
 }
 
+/// Aggregated token/cost totals over `usage_events` (per request accounting).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct UsageTotals {
+    pub requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_read_tokens: i64,
+    pub cached_write_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub cost_usd: f64,
+}
+
+impl UsageTotals {
+    pub fn tokens_total(&self) -> i64 {
+        self.input_tokens + self.output_tokens + self.cached_read_tokens + self.cached_write_tokens
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CompactionStats {
     pub total_compactions: usize,

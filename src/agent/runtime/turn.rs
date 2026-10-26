@@ -337,6 +337,8 @@ impl AgentRuntime {
         // aggregate separately so tool-heavy turns do not make the displayed
         // final-request cache rate look artificially low.
         let mut last_request_usage: Option<EventTokenUsage> = None;
+        // USD cost of this turn's provider requests (cost guard + /usage).
+        let mut turn_cost_usd: f64 = 0.0;
 
         loop {
             iteration += 1;
@@ -639,7 +641,44 @@ impl AgentRuntime {
                 ));
             }
 
-            let provider = self.active_provider().await;
+            // Cost guard: spend limits may route this request through the
+            // small_model slot or refuse it outright before any tokens move.
+            let provider = match self.budget_decision(session_id).await {
+                usage::BudgetDecision::Allow => self.active_provider().await,
+                usage::BudgetDecision::Downgrade { limit, cost_usd } => {
+                    self.event_bus.emit(AgentEvent::BudgetWarning {
+                        session_id: session_id.to_string(),
+                        sequence: 0,
+                        limit,
+                        downgraded: true,
+                        message: format!(
+                            "Spend limit reached (${:.2} spent) — continuing on the small model until the budget window resets.",
+                            cost_usd
+                        ),
+                        cost_usd: Some(cost_usd),
+                        timestamp: SystemTime::now(),
+                    });
+                    self.small_slot_provider().await
+                }
+                usage::BudgetDecision::Block { limit, cost_usd } => {
+                    self.event_bus.emit(AgentEvent::BudgetWarning {
+                        session_id: session_id.to_string(),
+                        sequence: 0,
+                        limit,
+                        downgraded: false,
+                        message: format!(
+                            "Spend limit reached (${:.2} spent) — turn blocked. Raise the limit in Settings -> Usage & Budgets.",
+                            cost_usd
+                        ),
+                        cost_usd: Some(cost_usd),
+                        timestamp: SystemTime::now(),
+                    });
+                    return Err(OSAgentError::Session(format!(
+                        "spend limit reached (${:.2} spent); turn blocked by the cost guard",
+                        cost_usd
+                    )));
+                }
+            };
             // Fall back to the configured window when the provider and the
             // catalog both come up empty: without a window the pressure
             // trigger below never runs and the session grows until the
@@ -1241,6 +1280,40 @@ impl AgentRuntime {
                 reasoning: usage.reasoning,
                 cache_reason: Some(response_cache_reason.clone()),
             });
+
+            // Per-request cost accounting: one usage_events row per provider
+            // request, priced via config override -> catalog -> fallback table.
+            if let Some(usage) = response.usage.as_ref() {
+                let model_id = provider.current_model().await;
+                let provider_id = provider.provider_type().to_string();
+                let catalog_price = self.catalog.model_price(&provider_id, &model_id);
+                let resolved = {
+                    let config = self.config.read().await;
+                    crate::agent::pricing::resolve_price(
+                        &config,
+                        catalog_price,
+                        &provider_id,
+                        &model_id,
+                    )
+                };
+                let cost_usd = resolved
+                    .map(|price| crate::agent::pricing::request_cost(usage, &price.price))
+                    .unwrap_or(0.0);
+                if let Err(error) = self.storage.record_usage_event(
+                    session_id,
+                    &provider_id,
+                    &model_id,
+                    usage.input as u64,
+                    usage.output as u64,
+                    usage.cached_read.unwrap_or(0) as u64,
+                    usage.cached_write.unwrap_or(0) as u64,
+                    usage.reasoning.unwrap_or(0) as u64,
+                    cost_usd,
+                ) {
+                    warn!("failed to record usage event: {}", error);
+                }
+                turn_cost_usd += cost_usd;
+            }
             info!(
                 "Session {} cache result: {} (input={}, cached_read={:?})",
                 session_id,
@@ -2374,6 +2447,11 @@ impl AgentRuntime {
         session.task_status = "active".to_string();
         info!("process_message: Loop complete, finalizing session");
         self.session_manager.update_session(&session).await?;
+        let session_cost_usd = self
+            .storage
+            .usage_totals(Some(session_id), None)
+            .ok()
+            .map(|totals| totals.cost_usd);
         self.event_bus.emit(AgentEvent::ResponseComplete {
             session_id: session_id.to_string(),
             sequence: 0,
@@ -2392,6 +2470,8 @@ impl AgentRuntime {
             } else {
                 None
             },
+            cost_usd: Some(turn_cost_usd),
+            session_cost_usd,
         });
 
         if runtime_config.agent.checkpoint_enabled {

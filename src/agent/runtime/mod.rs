@@ -973,6 +973,7 @@ mod subagents;
 mod tool_loop;
 mod tools_exec;
 mod turn;
+pub mod usage;
 mod workspaces;
 
 impl AgentRuntime {

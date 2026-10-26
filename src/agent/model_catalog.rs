@@ -22,6 +22,10 @@ pub struct ModelInfo {
     pub input_cost_per_1m: f64,
     #[serde(default)]
     pub output_cost_per_1m: f64,
+    #[serde(default)]
+    pub cache_read_cost_per_1m: f64,
+    #[serde(default)]
+    pub cache_write_cost_per_1m: f64,
     /// Publication date (YYYY-MM-DD) from models.dev. None when unknown, which
     /// keeps the model visible under an age filter.
     #[serde(default)]
@@ -199,6 +203,10 @@ pub struct ModelsDevCost {
     pub input: f64,
     #[serde(default)]
     pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -457,6 +465,8 @@ impl ModelCatalog {
                     available,
                     input_cost_per_1m: m.cost.input,
                     output_cost_per_1m: m.cost.output,
+                    cache_read_cost_per_1m: m.cost.cache_read,
+                    cache_write_cost_per_1m: m.cost.cache_write,
                     release_date: (!m.release_date.is_empty()).then(|| m.release_date.clone()),
                 }
             })
@@ -575,6 +585,8 @@ impl ModelCatalog {
                 available: connected,
                 input_cost_per_1m: 0.0,
                 output_cost_per_1m: 0.0,
+                cache_read_cost_per_1m: 0.0,
+                cache_write_cost_per_1m: 0.0,
                 release_date: None,
             });
         }
@@ -630,6 +642,8 @@ impl ModelCatalog {
                     available: true,
                     input_cost_per_1m: 0.0,
                     output_cost_per_1m: 0.0,
+                    cache_read_cost_per_1m: 0.0,
+                    cache_write_cost_per_1m: 0.0,
                     release_date: None,
                 });
             }
@@ -639,6 +653,25 @@ impl ModelCatalog {
             providers,
             all_models,
         }
+    }
+
+    /// Published price for a model (USD per 1M tokens), if the catalog knows
+    /// it. Zero-priced entries are returned as-is; `pricing::resolve_price`
+    /// decides when to fall through to the fallback table.
+    pub fn model_price(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<crate::config::TokenPrice> {
+        self.get_models_for_provider(provider_id)
+            .into_iter()
+            .find(|model| model.id == model_id)
+            .map(|model| crate::config::TokenPrice {
+                input: model.input_cost_per_1m,
+                output: model.output_cost_per_1m,
+                cache_read: model.cache_read_cost_per_1m,
+                cache_write: model.cache_write_cost_per_1m,
+            })
     }
 
     pub fn get_models_for_provider(&self, provider_id: &str) -> Vec<ModelInfo> {

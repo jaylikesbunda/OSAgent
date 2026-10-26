@@ -20,6 +20,17 @@ impl SessionManager {
         self.storage.create_session(model, provider, name)
     }
 
+    pub async fn create_session_with_id(
+        &self,
+        id: &str,
+        model: String,
+        provider: String,
+        name: Option<String>,
+    ) -> Result<Session> {
+        self.storage
+            .create_session_with_id(id, model, provider, name)
+    }
+
     pub async fn get_session_count(&self) -> Result<i64> {
         self.storage.get_session_count()
     }

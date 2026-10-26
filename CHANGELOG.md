@@ -6,8 +6,13 @@ TL;DR:
 * **A model per surface**: Discord, each subagent type and background chores can use their own model, separate from the chat model
 * **Subagents on any model**: say "use sonnet for this" and OSA finds it, preferring the provider you last used it on, and asks only if it is still ambiguous
 * **A faster, lighter web UI**: large chats open quickly, and background polling stops while the tab is hidden
+* **OS sandboxing**: spawned tools run confined to the workspace by default, enforced by the operating system rather than by advice
 
 Added:
+
+Security:
+* A sandbox decides what tool execution may modify at all, separately from the approval prompts, which decide who signs off: `read-only`, `workspace-write` (the default) and `danger-full-access`. It is enforced by the OS for spawned processes — a privilege-stripped restricted token at Low integrity with mandatory-label ACLs and kill-on-close job objects on Windows, Landlock with a seccomp deny-list on Linux, Seatbelt on macOS — and `network = "deny"` cuts those processes off from the network too. The bash command blocklist stays as defence in depth
+* Settings → Security reports the live status: the backend in use, whether it is enforced, and any degradations it had to fall back to. Where the OS cannot confine a process (an old kernel, or firewall rules that need admin rights on Windows) OSA says so instead of claiming confinement it did not get
 
 GitHub:
 * Connect with a personal access token or "Sign in with GitHub" (no client secret), then choose watched repositories, the review event, the inline-comment limit and your own review instructions. Review history is listed in the same pane, with links. In the desktop app, sign-in and the pane's links open in your default browser, and sign-in completes when you return to the window
@@ -23,6 +28,8 @@ Models:
 
 Subagents:
 * A running subagent can be moved to the background from its card, so the parent chat continues immediately while the child keeps working and reports when it finishes
+* The parent agent now verifies a subagent's result when it stops and drives it to completion: the completion notice says how to judge the result, and an unfinished subagent can be continued with `resume` and told to finish its task and write the summary
+* `subagent` status reports real progress — tool count, the last tool it worked on and whether a final summary exists — so "stopped mid-task" is distinguishable from "finished properly"
 
 Remote access:
 * Opt-in remote access publishes the web UI through a public address and pairs a phone by scanning a QR code. It requires a web UI password
@@ -45,6 +52,10 @@ Automation:
 * Pin a scheduled job to a workspace from the job dialog, the `schedule` tool or the API
 
 Fixed:
+
+Subagents:
+* A subagent that stops with an empty reply is no longer reported as completed with a misleading earlier progress line as its "result": the run is nudged up to twice to write its final summary, and a stop without one is reported as partial with a resume hint, so the parent can tell it stopped unfinished and ask it to finish
+* A background subagent's completion notice now carries explicit next steps, so the parent no longer looks at a finished-but-unfinished task and tells the user it is still running
 
 Providers and settings:
 * Auth and billing errors (401/402/403/404) fail at once with the real message instead of four retries; rate limits and dropped connections still retry

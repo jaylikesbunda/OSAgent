@@ -236,6 +236,8 @@ mod tests {
             available: true,
             input_cost_per_1m: 0.0,
             output_cost_per_1m: 0.0,
+            cache_read_cost_per_1m: 0.0,
+            cache_write_cost_per_1m: 0.0,
             release_date: None,
         }
     }

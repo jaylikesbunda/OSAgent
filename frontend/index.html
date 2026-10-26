@@ -243,7 +243,7 @@
                                 <div class="permission-dock-actions">
                                     <button type="button" class="perm-btn perm-deny" id="permission-deny" onclick="OSA.respondToPermission(false, false)">Deny</button>
                                     <button type="button" class="perm-btn perm-once" id="permission-once" onclick="OSA.respondToPermission(true, false)">Allow once</button>
-                                    <button type="button" class="perm-btn perm-always" id="permission-always" onclick="OSA.respondToPermission(true, true)">Always allow</button>
+                                    <button type="button" class="perm-btn perm-always" id="permission-always" onclick="OSA.respondToPermission(true, true)" title="Grants this path for the rest of this chat only. For permanent access add the path to a workspace or the external whitelist in Settings.">Always allow</button>
                                 </div>
                             </div>
                         </div>
@@ -277,6 +277,16 @@
                                     <button id="goal-trigger" class="input-icon-btn" type="button" onclick="OSA.openGoalEditor()" title="Set a goal" aria-label="Set a goal" aria-controls="goal-editor" aria-expanded="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg></button>
                                 </div>
                                 <div class="input-right-bar">
+                                    <div class="safety-control">
+                                        <button class="model-trigger safety-trigger" id="safety-trigger" type="button" onclick="OSA.toggleSafetyMenu()" title="Sandbox &amp; approvals" aria-haspopup="dialog" aria-expanded="false" aria-controls="safety-menu" aria-label="Sandbox and approval settings">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/></svg>
+                                            <span class="safety-dot" id="safety-dot" aria-hidden="true"></span>
+                                            <span class="model-trigger-label sr-only" id="safety-trigger-label">ws-write · ask</span>
+                                        </button>
+                                        <div id="safety-menu" class="model-picker-popover safety-menu hidden" role="dialog" aria-label="Sandbox mode and approval behavior">
+                                            <div class="safety-menu-list" id="safety-menu-list"></div>
+                                        </div>
+                                    </div>
                                     <div class="model-selector">
                                         <div class="model-selector-input-wrap">
                                             <button class="model-trigger" id="model-input" type="button" onclick="toggleModelDropdown()" onkeydown="handleModelInputKeydown(event)" title="Browse models" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-dropdown">
@@ -507,6 +517,7 @@
                         <option value="mcp">MCP Servers</option>
                         <option value="browser">Browser</option>
                         <option value="security">Security</option>
+                        <option value="usage">Usage &amp; Budgets</option>
                         <option value="updates">Updates</option>
                     </optgroup>
                 </select>
@@ -559,6 +570,9 @@
                         </button>
                         <button class="settings-sidebar-item" data-tab="security" onclick="switchSettingsTab('security')">
                             Security
+                        </button>
+                        <button class="settings-sidebar-item" data-tab="usage" onclick="switchSettingsTab('usage')">
+                            Usage &amp; Budgets
                         </button>
                         <button class="settings-sidebar-item" data-tab="updates" onclick="switchSettingsTab('updates')">
                             Updates
@@ -1053,18 +1067,18 @@
                                 <select id="setting-stt-provider">
                                     <option value="browser">Browser built-in</option>
                                     <option value="whisper-local">Local Whisper</option>
-                                    <option value="sherpa-local">Offline voice</option>
+                                    <option value="sherpa-local">NVIDIA Parakeet TDT 0.6B v2</option>
                                 </select>
-                                <span class="settings-field-hint">Where dictated mic audio is transcribed. Local Whisper needs the runtime and a model installed below. Offline voice is set up in the card below.</span>
+                                <span class="settings-field-hint">Where dictated mic audio is transcribed. Local Whisper needs the runtime and a model installed below. Parakeet TDT 0.6B v2 comes from the offline speech pack set up in the card below.</span>
                             </div>
                             <div class="settings-field flex-1">
                                 <label for="setting-tts-provider">Output &mdash; text to speech</label>
                                 <select id="setting-tts-provider">
                                     <option value="browser">Browser built-in</option>
                                     <option value="piper-local">Local Piper</option>
-                                    <option value="sherpa-local">Offline voice</option>
+                                    <option value="sherpa-local">Piper VITS en_US-amy-low</option>
                                 </select>
-                                <span class="settings-field-hint">Which engine speaks replies. Local Piper needs the runtime and a voice installed below. Offline voice is set up in the card below.</span>
+                                <span class="settings-field-hint">Which engine speaks replies. Local Piper needs the runtime and a voice installed below. The en_US-amy-low voice comes from the offline speech pack set up in the card below.</span>
                             </div>
                         </div>
                         <div class="settings-field-row">
@@ -1140,14 +1154,14 @@
                         </details>
                     </div>
                     <div class="settings-group sherpa-voice-card" id="sherpa-voice-card">
-                        <div class="settings-group-title">Offline Voice</div>
-                        <p class="settings-field-hint">Speech input and output that run on this computer with no network service. One download of about 525 MB. Use it when browser speech is blocked, as it is in the desktop app.</p>
+                        <div class="settings-group-title">Offline Speech Pack &mdash; Parakeet + Piper</div>
+                        <p class="settings-field-hint">Speech input and output that run on this computer with no network service, built on sherpa-onnx: NVIDIA Parakeet TDT 0.6B v2 for input, Piper VITS en_US-amy-low for output. One download of about 525 MB. Use it when browser speech is blocked, as it is in the desktop app.</p>
                         <div class="sherpa-voice-state" id="sherpa-voice-state">Checking…</div>
                         <div class="sherpa-voice-progress hidden" id="sherpa-voice-progress">
                             <span class="sherpa-voice-bar-fill" id="sherpa-voice-bar-fill"></span>
                         </div>
                         <div class="sherpa-voice-actions">
-                            <button type="button" class="btn-primary" id="sherpa-voice-action" data-mode="install" onclick="OSA.onSherpaVoiceAction()">Set up offline voice</button>
+                            <button type="button" class="btn-primary" id="sherpa-voice-action" data-mode="install" onclick="OSA.onSherpaVoiceAction()">Set up Parakeet + Piper</button>
                         </div>
                     </div>
                     <div class="settings-group">
@@ -1337,6 +1351,55 @@
                         </div>
                     </div>
                     
+                    <div class="settings-group">
+                        <div class="settings-group-title">Protection level</div>
+                        <div class="settings-choice" id="sandbox-mode-choice" role="radiogroup" aria-label="Protection level">
+                            <button type="button" class="settings-choice-item" data-mode="read-only" onclick="OSA.setSandboxMode('read-only')">
+                                <span class="choice-name">Read-only</span>
+                                <span class="choice-desc">Nothing can be changed</span>
+                            </button>
+                            <button type="button" class="settings-choice-item" data-mode="workspace-write" onclick="OSA.setSandboxMode('workspace-write')">
+                                <span class="choice-name">Workspace</span>
+                                <span class="choice-desc">Writes only inside the workspace</span>
+                            </button>
+                            <button type="button" class="settings-choice-item" data-mode="danger-full-access" onclick="OSA.setSandboxMode('danger-full-access')">
+                                <span class="choice-name">Full access</span>
+                                <span class="choice-desc">No restrictions</span>
+                            </button>
+                        </div>
+                        <div id="sandbox-status-line" class="settings-status"></div>
+                    </div>
+
+                    <details class="settings-advanced">
+                        <summary>Advanced</summary>
+                        <div class="settings-advanced-body">
+                            <div class="toggle-field">
+                                <div class="toggle-info">
+                                    <label class="toggle-label">Block network access</label>
+                                    <span class="toggle-desc">Spawned commands can't reach the network</span>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="setting-sandbox-network-deny" onchange="OSA.saveSandboxSettings()" />
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="toggle-field">
+                                <div class="toggle-info">
+                                    <label class="toggle-label">OS enforcement</label>
+                                    <span class="toggle-desc">Turn off only for containers or root</span>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="setting-sandbox-os-enforcement" onchange="OSA.saveSandboxSettings()" />
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-field settings-field-spaced">
+                                <label for="setting-sandbox-extra-roots">Extra writable folders</label>
+                                <textarea id="setting-sandbox-extra-roots" rows="2" placeholder="D:\shared-cache&#10;~/toolchains" onchange="OSA.saveSandboxSettings()"></textarea>
+                            </div>
+                        </div>
+                    </details>
+                    
                     <div class="settings-group" id="password-change-section">
                         <div class="settings-group-title">Change Password</div>
                         <div class="settings-field">
@@ -1483,6 +1546,88 @@
                         <div class="settings-help hidden" id="paired-devices-hint"></div>
                     </div>
                 </div>
+                <div class="settings-pane" id="pane-usage">
+                    <div class="settings-pane-header">
+                        <h2>Usage &amp; Budgets</h2>
+                        <p class="settings-pane-desc">What you've spent, and when to stop</p>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="usage-hero">
+                            <div class="usage-metric">
+                                <div class="usage-metric-value" id="usage-today">$0.00</div>
+                                <div class="usage-metric-label">today</div>
+                            </div>
+                            <div class="usage-metric">
+                                <div class="usage-metric-value" id="usage-month">$0.00</div>
+                                <div class="usage-metric-label">this month</div>
+                            </div>
+                            <div class="usage-metric usage-metric-proj">
+                                <div class="usage-metric-value" id="usage-projected">$0.00</div>
+                                <div class="usage-metric-label" id="usage-projected-label">projected</div>
+                            </div>
+                        </div>
+                        <div id="usage-hero-note" class="settings-status"></div>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="settings-group-title">Budget</div>
+                        <div class="settings-field-row">
+                            <div class="settings-field flex-1">
+                                <label for="setting-usage-monthly-limit">Monthly limit</label>
+                                <div class="usage-money">
+                                    <span class="usage-money-sign">$</span>
+                                    <input type="number" id="setting-usage-monthly-limit" min="0" step="1" placeholder="none" onchange="OSA.saveUsageSettings()" />
+                                </div>
+                            </div>
+                            <div class="settings-field flex-1">
+                                <label for="setting-usage-limit-action">When it's reached</label>
+                                <select id="setting-usage-limit-action" onchange="OSA.saveUsageSettings()">
+                                    <option value="downgrade">Switch to the cheap model</option>
+                                    <option value="block">Stop until next month</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <details class="settings-advanced">
+                        <summary>Per-day and per-session limits</summary>
+                        <div class="settings-advanced-body">
+                            <div class="settings-field-row">
+                                <div class="settings-field flex-1">
+                                    <label for="setting-usage-daily-limit">Daily limit</label>
+                                    <div class="usage-money">
+                                        <span class="usage-money-sign">$</span>
+                                        <input type="number" id="setting-usage-daily-limit" min="0" step="1" placeholder="none" onchange="OSA.saveUsageSettings()" />
+                                    </div>
+                                </div>
+                                <div class="settings-field flex-1">
+                                    <label for="setting-usage-session-limit">Per-session limit</label>
+                                    <div class="usage-money">
+                                        <span class="usage-money-sign">$</span>
+                                        <input type="number" id="setting-usage-session-limit" min="0" step="1" placeholder="none" onchange="OSA.saveUsageSettings()" />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+
+                    <details class="settings-advanced">
+                        <summary>Model prices</summary>
+                        <div class="settings-advanced-body">
+                            <div class="settings-field">
+                                <label for="setting-usage-price-overrides">Price overrides</label>
+                                <textarea id="setting-usage-price-overrides" rows="3" placeholder="provider/model = input, output, cache_read, cache_write" onchange="OSA.saveUsageSettings()"></textarea>
+                                <div class="settings-help">Per 1M tokens. Leave empty — prices come from the bundled catalog.</div>
+                            </div>
+                            <div class="settings-field settings-field-spaced">
+                                <label>Spent so far</label>
+                                <div id="usage-breakdown" class="usage-breakdown"></div>
+                            </div>
+                        </div>
+                    </details>
+                </div>
+
                 <div class="settings-pane" id="pane-updates">
                     <div class="settings-pane-header">
                         <h2>Updates</h2>

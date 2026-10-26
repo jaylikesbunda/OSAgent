@@ -31,11 +31,11 @@ impl Tool for SubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Manage a specialized subagent for complex multi-step tasks. action=run launches a new standalone session; action=status checks a prior task_id without changing it; action=resume continues a prior task_id with its full history. For run/resume, specify exactly what information the subagent should return. Set background=true to launch or resume asynchronously; completion is reported automatically. Pass model to run the subagent on a specific model: \"provider_id:model_id\", a model id, or a friendly name like \"sonnet\". A friendly name resolves to the provider it was last used on; if several providers still match, the call fails with the candidates so you can ask the user which provider to use (question tool) and retry with \"provider_id:model_id\"."
+        "Manage a specialized subagent for complex multi-step tasks. action=run launches a new standalone session; action=status checks a prior task_id without changing it (shows state, tool count, last tool worked on, and whether a real final summary exists); action=resume continues a prior task_id with its full history, including telling a stopped subagent to finish its task and write its summary. For run/resume, specify exactly what information the subagent should return. Set background=true to launch or resume asynchronously; completion is reported automatically. When a background subagent finishes, verify its result before reporting to the user: if it stopped without a final summary or the task looks unfinished, resume it and tell it to finish. Pass model to run the subagent on a specific model: \"provider_id:model_id\", a model id, or a friendly name like \"sonnet\". A friendly name resolves to the provider it was last used on; if several providers still match, the call fails with the candidates so you can ask the user which provider to use (question tool) and retry with \"provider_id:model_id\"."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use this tool when you need to delegate work to a specialized agent. The subagent will run autonomously with its own tools, and you will receive its final response. You should summarize the result for the user. The result returned by the agent is not visible to the user."
+        "Use this tool when you need to delegate work to a specialized agent. The subagent will run autonomously with its own tools, and you will receive its final response. You should summarize the result for the user. The result returned by the agent is not visible to the user. When a subagent stops — especially in the background — check that its result is complete before moving on; if it stopped without finishing or without a summary, use action=resume to tell it to finish its task and produce the final summary."
     }
 
     fn when_not_to_use(&self) -> &str {
@@ -126,7 +126,7 @@ impl Tool for SubagentTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Launch asynchronously and return immediately. You will be notified automatically when it completes. Do not sleep, poll for progress, or duplicate the task's work."
+                    "description": "Launch asynchronously and return immediately. You will be notified automatically when it completes. Do not sleep, poll for progress, or duplicate the task's work. When the completion arrives, verify the result is complete; if the subagent stopped without a final summary, resume it (action=resume) and tell it to finish."
                 },
                 "task_id": {
                     "type": "string",
@@ -163,16 +163,42 @@ impl Tool for SubagentTool {
                     task_id
                 )));
             };
+            let progress = manager.subagent_progress(&task.session_id);
             let state = if is_running {
                 "running"
             } else {
                 task.status.as_str()
             };
             let result = task.result.unwrap_or_else(|| "No result yet.".to_string());
-            return Ok(ToolResult::new(format!(
-                "<task id=\"{}\" task_row=\"{}\" state=\"{}\" tools=\"{}\">\n<task_result>\n{}\n</task_result>\n</task>",
-                task.session_id, task.id, state, task.tool_count, result
-            )));
+            let last_tool = progress
+                .last_tool
+                .as_deref()
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| "none yet".to_string());
+            let summary_flag = if progress.has_final_summary {
+                "yes"
+            } else {
+                "no"
+            };
+            let mut output = format!(
+                "<task id=\"{}\" task_row=\"{}\" state=\"{}\" tools=\"{}\" last_tool=\"{}\" has_summary=\"{}\">\n<task_result>\n{}\n</task_result>\n</task>",
+                task.session_id,
+                task.id,
+                state,
+                task.tool_count,
+                last_tool,
+                summary_flag,
+                result
+            );
+            // A stop without a real summary is not a finished task: say so and
+            // point at the way to drive it to completion.
+            if !is_running && !progress.has_final_summary {
+                output.push_str(&format!(
+                    "\n\nThis subagent stopped without a final summary; the task is NOT finished. To finish it, call subagent(action=\"resume\", task_id=\"{}\", prompt=\"Finish the task and write the complete final summary.\").",
+                    task.session_id
+                ));
+            }
+            return Ok(ToolResult::new(output));
         }
 
         if action != "run" && action != "resume" {
@@ -258,7 +284,7 @@ impl Tool for SubagentTool {
 
         if background {
             return Ok(ToolResult::new(format!(
-                "Subagent launched in background.\nDescription: {}\nSession: {}\nYou will be notified automatically when it finishes. Do NOT poll for its progress or duplicate its work.",
+                "Subagent launched in background.\nDescription: {}\nSession: {}\nYou will be notified automatically when it finishes. Do NOT poll for its progress or duplicate its work. When the completion arrives, check the result: if it stopped without a final summary or the task looks unfinished, resume it with action=\"resume\" and tell it to finish.",
                 description, subagent_session_id
             )));
         }

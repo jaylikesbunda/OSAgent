@@ -133,6 +133,7 @@ impl ProcessRegistry {
 pub struct ProcessTool {
     workspace: PathBuf,
     registry: Arc<ProcessRegistry>,
+    sandbox: crate::sandbox::Sandbox,
 }
 
 impl ProcessTool {
@@ -145,9 +146,16 @@ impl ProcessTool {
     /// the registry rebuilds tools for another workspace.
     pub(crate) fn with_registry(config: Config, registry: Arc<ProcessRegistry>) -> Self {
         let workspace = PathBuf::from(shellexpand::tilde(&config.agent.workspace).to_string());
+        let roots: Vec<PathBuf> = config
+            .get_active_workspace()
+            .paths
+            .iter()
+            .map(|wp| PathBuf::from(shellexpand::tilde(&wp.path).to_string()))
+            .collect();
         Self {
             workspace,
             registry,
+            sandbox: crate::sandbox::Sandbox::from_config(&config, roots),
         }
     }
 
@@ -205,21 +213,28 @@ impl ProcessTool {
             )));
         }
 
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", &command]);
-            c
+        let spec = if cfg!(windows) {
+            crate::sandbox::SpawnSpec::new("cmd", Vec::<&str>::new())
+                .windows_raw_cmdline(format!("cmd /C {}", command))
+                .stdio(
+                    crate::sandbox::StdioKind::Null,
+                    crate::sandbox::StdioKind::Pipe,
+                    crate::sandbox::StdioKind::Pipe,
+                )
+                .cwd(&cwd_path)
         } else {
-            let mut c = Command::new("sh");
-            c.args(["-lc", &command]);
-            c
+            crate::sandbox::SpawnSpec::new("sh", ["-lc", command.as_str()])
+                .stdio(
+                    crate::sandbox::StdioKind::Null,
+                    crate::sandbox::StdioKind::Pipe,
+                    crate::sandbox::StdioKind::Pipe,
+                )
+                .cwd(&cwd_path)
         };
-        cmd.current_dir(&cwd_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
 
-        let mut child = cmd
-            .spawn()
+        let mut child = self
+            .sandbox
+            .spawn(spec)
             .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
 
         let pid = child.id();
@@ -230,8 +245,8 @@ impl ProcessTool {
         // `wait_with_output` path buffered everything until exit, so `poll` and
         // `log` reported "(no output)" for the entire lifetime of a long job —
         // which made a healthy background process look hung.
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let stdout = child.take_stdout();
+        let stderr = child.take_stderr();
 
         let registry = self.registry.clone();
         let session_id_clone = session_id.clone();
@@ -263,7 +278,7 @@ impl ProcessTool {
                 })
             });
 
-            let status = child.wait();
+            let status = child.wait_blocking();
 
             // Drain the reader threads before publishing the final status so a
             // poll immediately after completion still sees the trailing output.

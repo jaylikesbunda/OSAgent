@@ -415,7 +415,12 @@ OSA.setSessionInspectorState = s => OSA.sessionInspectorState = s;
 OSA.getWorkspaceState = () => OSA.workspaceState;
 OSA.setWorkspaceState = s => OSA.workspaceState = s;
 OSA.getCachedConfig = () => OSA.cachedConfig;
-OSA.setCachedConfig = c => OSA.cachedConfig = c;
+OSA.setCachedConfig = c => {
+    OSA.cachedConfig = c;
+    // Keep the composer safety chips (sandbox / approval) in sync with any
+    // config cache update, wherever it comes from.
+    if (typeof OSA.refreshSafetyChips === 'function') OSA.refreshSafetyChips();
+};
 OSA.getSessionTodos = () => OSA.sessionTodos;
 OSA.setSessionTodos = t => OSA.sessionTodos = t;
 OSA.getSessionQueue = () => {    const id = OSA.getCurrentSessionId();

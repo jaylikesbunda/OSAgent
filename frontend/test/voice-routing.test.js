@@ -43,7 +43,7 @@ test('an engine the user chose is never swapped for the offline voice', () => {
 });
 
 test('local speech names say which engine answered', () => {
-    assert.equal(OSA.localSttName('sherpa-local'), 'Offline Voice');
+    assert.equal(OSA.localSttName('sherpa-local'), 'NVIDIA Parakeet TDT 0.6B v2');
     assert.equal(OSA.localSttName('whisper-local'), 'Local Whisper');
     assert.equal(OSA.isLocalSttProvider('sherpa-local'), true);
     assert.equal(OSA.isLocalSttProvider('browser'), false);

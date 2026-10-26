@@ -291,21 +291,7 @@ impl AgentRuntime {
             }
         };
         for task in &tasks {
-            let state = match task.status.as_str() {
-                "completed" => "completed",
-                "partial" => "partial",
-                "timeout" => "timeout",
-                "cancelled" => "cancelled",
-                _ => "error",
-            };
-            let result = task
-                .result
-                .clone()
-                .unwrap_or_else(|| "No result".to_string());
-            let body = format!(
-                "<task id=\"{}\" state=\"{}\">\n<summary>Background subagent '{}' finished: {}</summary>\n<task_result>\n{}\n</task_result>\n</task>",
-                task.session_id, state, task.description, task.status, result
-            );
+            let body = subagent_completion_notice(task);
             session
                 .messages
                 .push(Message::synthetic_user(body, "subagent_completed"));
@@ -482,5 +468,73 @@ impl AgentRuntime {
         });
 
         Ok(Some(started_queue_id))
+    }
+}
+
+/// Build the synthetic message a parent receives when a background subagent
+/// stops. Beyond the result itself it tells the parent what to do next: verify
+/// the result, and drive the subagent to completion when it stopped without a
+/// real summary, instead of reporting a half-finished task as done.
+fn subagent_completion_notice(task: &crate::storage::models::SubagentTask) -> String {
+    let state = match task.status.as_str() {
+        "completed" | "partial" | "timeout" | "cancelled" | "failed" | "interrupted" => {
+            task.status.as_str()
+        }
+        _ => "error",
+    };
+    let result = task
+        .result
+        .clone()
+        .unwrap_or_else(|| "No result".to_string());
+    let sid = &task.session_id;
+    format!(
+        "<task id=\"{}\" state=\"{}\">\n<summary>Background subagent '{}' stopped: {} after {} tool call(s)</summary>\n<task_result>\n{}\n</task_result>\n<next_steps>\nThe subagent has stopped. Before replying to the user, judge the result above:\n- If state=\"completed\" and the result is a real, complete answer with a summary, relay the answer to the user.\n- Otherwise (missing a final summary, state is partial/interrupted/failed/timeout, or the text reads like progress notes), do NOT tell the user the task is done. Check its progress with subagent(action=\"status\", task_id=\"{}\"), then continue it with subagent(action=\"resume\", task_id=\"{}\", prompt=\"Finish the task and write the complete final summary.\") and keep driving it until it finishes.\n</next_steps>\n</task>",
+        sid, state, task.description, task.status, task.tool_count, result, sid, sid
+    )
+}
+
+#[cfg(test)]
+mod completion_notice_tests {
+    use super::subagent_completion_notice;
+    use crate::storage::models::SubagentTask;
+
+    fn task(status: &str, result: Option<&str>) -> SubagentTask {
+        SubagentTask {
+            id: "task-row".to_string(),
+            session_id: "ses-1".to_string(),
+            parent_session_id: "parent-1".to_string(),
+            description: "Explore workspace".to_string(),
+            prompt: "explore".to_string(),
+            agent_type: "explore".to_string(),
+            status: status.to_string(),
+            tool_count: 12,
+            result: result.map(|r| r.to_string()),
+            created_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            notified_at: None,
+            background: true,
+        }
+    }
+
+    #[test]
+    fn completed_result_still_carries_verify_and_resume_guidance() {
+        let notice = subagent_completion_notice(&task("completed", Some("full summary")));
+        assert!(notice.contains("state=\"completed\""));
+        assert!(notice.contains("subagent(action=\"resume\""));
+        assert!(notice.contains("full summary"));
+    }
+
+    #[test]
+    fn partial_result_says_the_task_is_not_done() {
+        let notice = subagent_completion_notice(&task("partial", Some("stopped without a summary")));
+        assert!(notice.contains("state=\"partial\""));
+        assert!(notice.contains("do NOT tell the user the task is done"));
+        assert!(notice.contains("task_id=\"ses-1\""));
+    }
+
+    #[test]
+    fn missing_result_renders_placeholder() {
+        let notice = subagent_completion_notice(&task("failed", None));
+        assert!(notice.contains("No result"));
     }
 }

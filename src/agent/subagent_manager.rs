@@ -76,6 +76,19 @@ struct SubagentHandle {
     detach_tx: watch::Sender<bool>,
 }
 
+/// What a subagent has actually done so far, so the parent can judge progress
+/// and completeness (did it stop with a real summary?) without reading the
+/// whole child transcript.
+#[derive(Debug, Clone, Default)]
+pub struct SubagentProgress {
+    /// Number of tool results recorded in the child session.
+    pub tool_results: usize,
+    /// Name of the last tool the child called, if any.
+    pub last_tool: Option<String>,
+    /// Whether the child produced a genuine final summary.
+    pub has_final_summary: bool,
+}
+
 /// Resolves when a foreground waiter is asked to move its child to the
 /// background. Missing signal or a dropped sender means "never": the normal
 /// result/heartbeat path stays in charge.
@@ -996,6 +1009,9 @@ impl SubagentManager {
         let budget_warning_at = (max_iterations as f64 * 0.75) as usize;
         let mut budget_warned = false;
         let mut tool_count = 0;
+        // How many times we have nudged the model to write its final summary
+        // after it stopped with an empty reply. Keeps the nudge from looping.
+        let mut summary_nudges: u32 = 0;
 
         for iteration in 0..max_iterations {
             if !budget_warned && iteration >= budget_warning_at {
@@ -1042,8 +1058,34 @@ impl SubagentManager {
                     });
 
                     if completed {
-                        let result_text = Self::extract_result(&storage, &session_id).await?;
-                        return Ok(("completed".to_string(), result_text, tool_count));
+                        // A stop with no real final message is not a finished
+                        // task: the model went silent instead of summarizing.
+                        // Nudge it to write the summary before giving up, so a
+                        // run that did all the work still ends with a result.
+                        if Self::final_summary(&storage, &session_id).is_some() {
+                            let result_text = Self::extract_result(&storage, &session_id).await?;
+                            return Ok(("completed".to_string(), result_text, tool_count));
+                        }
+                        if summary_nudges < 2 {
+                            summary_nudges += 1;
+                            if let Ok(Some(mut session)) = storage.get_session(&session_id) {
+                                session.messages.push(Message::synthetic_user(
+                                    "Your previous reply was empty. Do not call any more tools. Write the complete final summary of your findings now, as plain text: what you looked at, what you found, and the answer to the task.".to_string(),
+                                    "summary_nudge",
+                                ));
+                                let _ = storage.update_session(&session);
+                            }
+                            continue;
+                        }
+                        let best_text = Self::extract_result(&storage, &session_id).await?;
+                        return Ok((
+                            "partial".to_string(),
+                            format!(
+                                "The subagent stopped after {} tool calls without producing a final summary (its last replies were empty).\n\nBest available material from the subagent (not a summary):\n{}\n\n(Note: this task is NOT finished. Resume it by passing task_id=\"{}\" and tell it to finish and write the final summary.)",
+                                tool_count, best_text, task_id
+                            ),
+                            tool_count,
+                        ));
                     }
                 }
                 Err(e) => {
@@ -1431,10 +1473,16 @@ impl SubagentManager {
         Ok((completed, tool_count))
     }
 
-    async fn extract_result(storage: &Arc<SqliteStorage>, session_id: &str) -> Result<String> {
-        if let Ok(Some(session)) = storage.get_session(session_id) {
-            // First: find the last assistant message with no tool calls and non-empty content
-            let final_message = session.messages.iter().rev().find(|message| {
+    /// The subagent's genuine final summary: the last assistant message with
+    /// no tool calls and real content. An empty or tool-only ending does not
+    /// count — that means the model stopped without answering.
+    fn final_summary(storage: &Arc<SqliteStorage>, session_id: &str) -> Option<String> {
+        let session = storage.get_session(session_id).ok()??;
+        session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
                 message.role == "assistant"
                     && !message.content.trim().is_empty()
                     && message
@@ -1443,10 +1491,15 @@ impl SubagentManager {
                         .map(|calls| calls.is_empty())
                         .unwrap_or(true)
                     && !Self::looks_like_internal_tool_dump(&message.content)
-            });
+            })
+            .map(|message| message.content.clone())
+    }
 
-            if let Some(message) = final_message {
-                return Ok(message.content.clone());
+    async fn extract_result(storage: &Arc<SqliteStorage>, session_id: &str) -> Result<String> {
+        if let Ok(Some(session)) = storage.get_session(session_id) {
+            // First: the last assistant message with no tool calls and non-empty content
+            if let Some(text) = Self::final_summary(storage, session_id) {
+                return Ok(text);
             }
 
             // Second: find the last assistant message with non-empty content even if it has tool calls
@@ -1586,6 +1639,41 @@ impl SubagentManager {
         }))
     }
 
+    /// Progress of a subagent session: how many tool calls it ran, the last
+    /// tool it worked on, and whether it produced a real final summary. Lets
+    /// the parent tell "stopped mid-task" from "finished properly".
+    pub fn subagent_progress(&self, id_or_session: &str) -> SubagentProgress {
+        let session_id = self.resolve_session_id(id_or_session);
+        Self::progress_of(&self.storage, &session_id)
+    }
+
+    fn progress_of(storage: &Arc<SqliteStorage>, session_id: &str) -> SubagentProgress {
+        let Ok(Some(session)) = storage.get_session(session_id) else {
+            return SubagentProgress::default();
+        };
+        let mut tool_results = 0usize;
+        let mut last_tool = None;
+        for message in &session.messages {
+            match message.role.as_str() {
+                "tool" => tool_results += 1,
+                "assistant" => {
+                    if let Some(calls) = &message.tool_calls {
+                        if let Some(call) = calls.last() {
+                            last_tool = Some(call.name.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let has_final_summary = Self::final_summary(storage, session_id).is_some();
+        SubagentProgress {
+            tool_results,
+            last_tool,
+            has_final_summary,
+        }
+    }
+
     /// How often a blocked waiter proves it is still attached. Each slice
     /// expiry emits a progress heartbeat, which keeps SSE streams and
     /// proxies from treating a long single provider call as a dead
@@ -1698,6 +1786,8 @@ impl SubagentManager {
 
     /// Partial result plus tool count for a child that is still running. Used
     /// when a wait times out or the user moves the child to the background.
+    /// Without a real summary yet, the text is labelled as progress material so
+    /// the parent does not mistake an early status line for the answer.
     async fn partial_outcome(&self, session_id: &str) -> (String, i32) {
         let partial_result = Self::extract_result(&self.storage, session_id)
             .await
@@ -1709,7 +1799,21 @@ impl SubagentManager {
             .flatten()
             .map(|task| task.tool_count)
             .unwrap_or(0);
-        (partial_result, tool_count)
+        let text = if Self::final_summary(&self.storage, session_id).is_some() {
+            partial_result
+        } else {
+            let progress = Self::progress_of(&self.storage, session_id);
+            let last_tool = progress
+                .last_tool
+                .as_deref()
+                .map(|name| format!(", last working on `{}`", name))
+                .unwrap_or_default();
+            format!(
+                "No final summary yet ({} tool call(s) so far{}). The text below is progress material, not a finished answer:\n\n{}",
+                progress.tool_results, last_tool, partial_result
+            )
+        };
+        (text, tool_count)
     }
 
     /// Best-effort "still waiting" progress for a blocked waiter. Failures
@@ -1884,5 +1988,89 @@ mod tests {
             .await
             .expect("detach signal should resolve the waiter")
             .expect("waiter task");
+    }
+
+    fn session_with_messages(messages: Vec<Message>) -> (Arc<SqliteStorage>, String) {
+        let storage =
+            Arc::new(SqliteStorage::new_in_memory().expect("in-memory storage should open"));
+        let mut session = storage
+            .create_session("test-model".to_string(), "test".to_string(), None)
+            .expect("create session");
+        session.messages = messages;
+        storage.update_session(&session).expect("update session");
+        (storage, session.id.clone())
+    }
+
+    fn call(name: &str) -> Option<Vec<crate::storage::ToolCall>> {
+        Some(vec![crate::storage::ToolCall {
+            id: "call-1".to_string(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        }])
+    }
+
+    #[test]
+    fn empty_final_message_is_not_a_final_summary() {
+        // The incident shape: the model ran tools, then ended with an empty
+        // reply. That is a stopped-without-summary run, not a completed one.
+        let (storage, id) = session_with_messages(vec![
+            Message::assistant("I'll start exploring.".to_string(), call("bash")),
+            Message::tool_result("call-1".to_string(), "output".to_string()),
+            Message::assistant(String::new(), None),
+        ]);
+        assert!(SubagentManager::final_summary(&storage, &id).is_none());
+    }
+
+    #[test]
+    fn text_only_final_message_is_the_summary() {
+        let (storage, id) = session_with_messages(vec![
+            Message::assistant("I'll start exploring.".to_string(), call("bash")),
+            Message::tool_result("call-1".to_string(), "output".to_string()),
+            Message::assistant("Here is the full summary.".to_string(), None),
+        ]);
+        assert_eq!(
+            SubagentManager::final_summary(&storage, &id).as_deref(),
+            Some("Here is the full summary.")
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_result_falls_back_to_progress_text_but_final_summary_stays_none() {
+        let (storage, id) = session_with_messages(vec![
+            Message::assistant("I'll start exploring.".to_string(), call("bash")),
+            Message::tool_result("call-1".to_string(), "output".to_string()),
+            Message::assistant(String::new(), None),
+        ]);
+        // Best-effort extraction still returns something usable...
+        let best = SubagentManager::extract_result(&storage, &id)
+            .await
+            .expect("extract");
+        assert!(best.contains("I'll start exploring."));
+        // ...but the run must not be reported as completed on that basis.
+        assert!(SubagentManager::final_summary(&storage, &id).is_none());
+    }
+
+    #[test]
+    fn progress_tracks_tool_activity_and_summary_presence() {
+        let (storage, id) = session_with_messages(vec![
+            Message::assistant(String::new(), call("grep")),
+            Message::tool_result("call-1".to_string(), "match".to_string()),
+            Message::assistant("Summary.".to_string(), None),
+        ]);
+        let progress = SubagentManager::progress_of(&storage, &id);
+        assert_eq!(progress.tool_results, 1);
+        assert_eq!(progress.last_tool.as_deref(), Some("grep"));
+        assert!(progress.has_final_summary);
+    }
+
+    #[test]
+    fn progress_reports_missing_summary_after_a_silent_stop() {
+        let (storage, id) = session_with_messages(vec![
+            Message::assistant(String::new(), call("bash")),
+            Message::tool_result("call-1".to_string(), "output".to_string()),
+            Message::assistant(String::new(), None),
+        ]);
+        let progress = SubagentManager::progress_of(&storage, &id);
+        assert!(!progress.has_final_summary);
     }
 }

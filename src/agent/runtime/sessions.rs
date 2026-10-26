@@ -21,6 +21,42 @@ impl AgentRuntime {
         self.session_manager.get_session(id).await
     }
 
+    /// Headless entry: continue the session with `id`, creating it with that
+    /// exact id when it does not exist yet (so `osagent run --session-id X`
+    /// is idempotent across CI invocations).
+    pub async fn get_or_create_session_with_id(&self, id: &str) -> Result<Session> {
+        if let Some(session) = self.session_manager.get_session(id).await? {
+            return Ok(session);
+        }
+        let cfg = self.config.read().await;
+        let model = cfg.active_model();
+        let provider = if cfg.default_provider.is_empty() {
+            "openai-compatible".to_string()
+        } else {
+            cfg.default_provider.clone()
+        };
+        let active_workspace_id = cfg
+            .agent
+            .active_workspace
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        drop(cfg);
+
+        let mut session = self
+            .session_manager
+            .create_session_with_id(
+                id,
+                model,
+                provider,
+                Some(format!("Session {}", id)),
+            )
+            .await?;
+        Self::set_session_workspace_id(&mut session, &active_workspace_id)?;
+        self.session_manager.update_session(&session).await?;
+        info!("Created headless session: {}", session.id);
+        Ok(session)
+    }
+
     pub async fn get_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>> {
         self.storage.get_child_sessions(parent_id)
     }

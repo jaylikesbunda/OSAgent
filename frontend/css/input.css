@@ -1754,13 +1754,23 @@
 }
 
 .composer-footer .model-trigger {
-    width: 160px;
+    /* max-width, not width: let triggers shrink rather than overflow the card */
+    width: auto;
+    max-width: 160px;
+    min-width: 0;
     height: 30px;
     padding: 0 8px;
     border: 0;
     border-radius: 8px;
     background: transparent;
     color: var(--text-secondary);
+}
+
+.composer-footer .model-trigger .model-trigger-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .composer-footer .model-trigger:hover,
@@ -1832,7 +1842,7 @@
     }
 
     .composer-footer .model-trigger {
-        width: 132px;
+        max-width: 132px;
     }
 
     .composer-footer .input-left-controls .input-tab {
@@ -2013,3 +2023,119 @@
     color: var(--warning);
     border-color: var(--warning);
 }
+
+/* ---- Composer safety chip (sandbox + approvals, one compact dropdown) ---- */
+
+.safety-control {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+/* Icon-only control: the shield is tinted by protection level and the dot
+   shows there is something to look at. Detail lives in the tooltip/menu,
+   which keeps the composer row from overflowing. */
+#safety-trigger.safety-trigger {
+    position: relative;
+    width: 30px;
+    min-width: 30px;
+    max-width: 30px;
+    height: 30px;
+    padding: 0;
+    gap: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.safety-trigger .model-trigger-label {
+    /* retained for screen readers only */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.safety-dot {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 1.5px var(--composer-bg, var(--bg-primary));
+}
+
+#safety-trigger.safety-trigger[data-level="safe"]  { color: var(--success); }
+#safety-trigger.safety-trigger[data-level="warn"]  { color: var(--warning); }
+#safety-trigger.safety-trigger[data-level="risky"] { color: var(--error); }
+
+.safety-menu {
+    display: block;
+}
+
+.safety-menu.hidden {
+    display: none;
+}
+
+.safety-menu-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 6px;
+}
+
+.safety-menu-section-title {
+    padding: 6px 8px 3px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.safety-menu-item {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    padding: 5px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+}
+
+.safety-menu-item:hover {
+    background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.safety-menu-item.active {
+    border-color: var(--accent);
+}
+
+.safety-menu-item-title {
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.safety-menu-item-desc {
+    font-size: 11px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* .safety-trigger is a fixed 30px icon button at every width; no need to
+   clamp it in a breakpoint. */

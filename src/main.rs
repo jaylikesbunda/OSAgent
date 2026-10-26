@@ -32,6 +32,7 @@ mod mcp;
 mod oauth;
 mod permission;
 mod plugin;
+mod sandbox;
 mod scheduler;
 mod skills;
 mod storage;
@@ -94,6 +95,18 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Show token usage and cost (the /usage summary)
+    Usage {
+        /// Include totals for this specific session
+        #[arg(long)]
+        session: Option<String>,
+        /// Emit the summary as JSON
+        #[arg(long)]
+        json: bool,
+        /// Configuration file path
+        #[arg(short, long, default_value = "~/.osagent/config.toml")]
+        config: PathBuf,
+    },
     /// Install as system service
     Service {
         #[command(subcommand)]
@@ -103,6 +116,30 @@ enum Commands {
     Update {
         #[command(subcommand)]
         command: UpdateCommands,
+    },
+    /// Run a single task headlessly and exit (CI, scripting, subagent-of-a-harness)
+    Run {
+        /// The task to run (sent as one user message)
+        task: String,
+        /// Stream NDJSON events to stdout (one JSON object per line); logs
+        /// stay on stderr so stdout is machine-readable end to end
+        #[arg(long)]
+        json: bool,
+        /// Session id to continue; created with this exact id when missing
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Model override ("provider:model" or plain model id)
+        #[arg(long)]
+        model: Option<String>,
+        /// Custom workspace directory (overrides config)
+        #[arg(short = 'w', long)]
+        workspace: Option<String>,
+        /// Sandbox mode: read-only | workspace-write | danger-full-access
+        #[arg(long)]
+        sandbox: Option<String>,
+        /// Configuration file path
+        #[arg(short, long, default_value = "~/.osagent/config.toml")]
+        config: PathBuf,
     },
 }
 
@@ -173,6 +210,8 @@ async fn main() -> anyhow::Result<()> {
     let verbose = matches!(&command, Commands::Start { verbose: true, .. });
     let default_level = if verbose { Level::DEBUG } else { Level::INFO };
     tracing_subscriber::fmt()
+        // Logs go to stderr so headless NDJSON output on stdout stays clean.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(default_level.into())
@@ -419,9 +458,188 @@ async fn main() -> anyhow::Result<()> {
         Commands::Update { command } => {
             run_update_command(command).await?;
         }
+        Commands::Run {
+            task,
+            json,
+            session_id,
+            model,
+            workspace,
+            sandbox,
+            config,
+        } => {
+            run_headless(
+                config,
+                task,
+                json,
+                session_id,
+                model,
+                workspace,
+                sandbox,
+            )
+            .await?;
+        }
+        Commands::Usage {
+            session,
+            json,
+            config,
+        } => {
+            let config_path = shellexpand::tilde(&config.to_string_lossy()).to_string();
+            let config = config::Config::load(&config_path)?;
+            let agent = agent::AgentRuntime::new(config)?;
+            let summary = agent.usage_summary(session.as_deref()).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                print!(
+                    "{}",
+                    agent::AgentRuntime::format_usage_report(&summary, session.as_deref())
+                );
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Headless one-shot: run a single task and exit. NDJSON on stdout (with
+/// `--json`), human text otherwise. Exit code 0 on success, 1 on failure.
+async fn run_headless(
+    config_path: PathBuf,
+    task: String,
+    json: bool,
+    session_id: Option<String>,
+    model: Option<String>,
+    workspace: Option<String>,
+    sandbox: Option<String>,
+) -> anyhow::Result<()> {
+    let config_path = shellexpand::tilde(&config_path.to_string_lossy()).to_string();
+    let mut config = config::Config::load(&config_path)?;
+
+    if let Some(custom_workspace) = workspace {
+        config.agent.workspace = custom_workspace.clone();
+        config.agent.active_workspace = Some("default".to_string());
+        if let Some(default_ws) = config
+            .agent
+            .workspaces
+            .iter_mut()
+            .find(|ws| ws.id == "default")
+        {
+            default_ws.path = custom_workspace;
+        }
+    }
+
+    if let Some(model) = model {
+        match model.split_once(':') {
+            Some((provider, model)) => {
+                config.default_provider = provider.to_string();
+                config.default_model = model.to_string();
+            }
+            None => {
+                config.default_model = model;
+            }
+        }
+    }
+
+    if let Some(sandbox) = sandbox {
+        match config::SandboxMode::parse(&sandbox) {
+            Some(mode) => config.sandbox.mode = mode,
+            None => anyhow::bail!(
+                "unknown sandbox mode '{}' (expected read-only | workspace-write | danger-full-access)",
+                sandbox
+            ),
+        }
+    }
+
+    config.ensure_workspace_defaults();
+    let agent = agent::AgentRuntime::new(config)?;
+
+    let session = match session_id {
+        Some(id) if !id.trim().is_empty() => {
+            agent.get_or_create_session_with_id(id.trim()).await?
+        }
+        _ => agent.create_session().await?,
+    };
+    let session_id = session.id.clone();
+
+    // Event pump: NDJSON lines on stdout (or streaming text). Runs until the
+    // shutdown signal, then drains whatever the bus still holds.
+    let mut events = agent.subscribe_to_events();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let pump = tokio::spawn(async move {
+        let mut shutdown = shutdown_rx;
+        let mut print_event = |event: agent::events::AgentEvent| {
+            if json {
+                match serde_json::to_string(&event) {
+                    Ok(line) => println!("{}", line),
+                    Err(error) => eprintln!("event serialization error: {}", error),
+                }
+            } else {
+                use agent::events::AgentEvent;
+                match event {
+                    AgentEvent::ResponseChunk { content, .. } => {
+                        print!("{}", content);
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                    }
+                    AgentEvent::ToolStart { tool_name, .. } => {
+                        eprintln!("\n[tool: {}]", tool_name)
+                    }
+                    AgentEvent::ResponseComplete { .. } => println!(),
+                    _ => {}
+                }
+            }
+        };
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => {
+                    while let Ok(event) = events.try_recv() {
+                        print_event(event);
+                    }
+                    break;
+                }
+                received = events.recv() => match received {
+                    Ok(event) => print_event(event),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                },
+            }
+        }
+    });
+
+    let result = agent
+        .process_message(&session_id, task, "headless".to_string())
+        .await;
+
+    let _ = shutdown_tx.send(());
+    let _ = pump.await;
+
+    match result {
+        Ok(text) => {
+            if json {
+                let line = serde_json::json!({
+                    "type": "result",
+                    "session_id": session_id,
+                    "ok": true,
+                    "text": text,
+                });
+                println!("{}", serde_json::to_string(&line)?);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if json {
+                let line = serde_json::json!({
+                    "type": "result",
+                    "session_id": session_id,
+                    "ok": false,
+                    "error": error.to_string(),
+                });
+                println!("{}", serde_json::to_string(&line)?);
+            }
+            eprintln!("error: {}", error);
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn run_update_command(command: UpdateCommands) -> anyhow::Result<()> {

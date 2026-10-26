@@ -2324,6 +2324,7 @@ OSA.SLASH_COMMANDS = [
     { cmd: '/goal', label: 'Persistent goal', desc: 'Set an objective, or use status / pause / resume / clear', action: () => { const input = document.getElementById('message-input'); if (input) { input.value = '/goal '; input.focus(); OSA.resizeMessageInput(input); } } },
     { cmd: '/clear', label: 'Clear screen', desc: 'Clear the message display', action: () => { OSA.resetTranscriptView(); } },
     { cmd: '/reset', label: 'Reset session', desc: 'Clear messages and start fresh', action: () => OSA.createSession() },
+    { cmd: '/usage', label: 'Usage & costs', desc: 'Show token usage, cost, and spend limits', action: async () => { await OSA.openSettings?.(); OSA.switchSettingsTab('usage'); } },
     { cmd: '/help', label: 'Help', desc: 'Show available commands', action: () => {} },
 ];
 

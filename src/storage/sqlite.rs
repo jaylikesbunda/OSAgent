@@ -727,6 +727,23 @@ impl SqliteStorage {
                     provider_id TEXT NOT NULL,
                     used_at INTEGER NOT NULL
                 );
+
+                -- Per-request token/cost accounting (cost guard + /usage).
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL DEFAULT '',
+                    provider_id TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_read_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_write_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                    cost_usd REAL NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at);
+                CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id);
                 "#,
             )
             .map_err(OSAgentError::Storage)?;
@@ -935,6 +952,54 @@ impl SqliteStorage {
                     metadata_bytes,
                     session.parent_id.as_ref(),
                     session.agent_type,
+                    session.task_status,
+                    context_state_bytes,
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(session)
+        })
+    }
+
+    /// Creates a session with a caller-chosen id (headless `osagent run
+    /// --session-id`). Fails if the id already exists.
+    pub fn create_session_with_id(
+        &self,
+        id: &str,
+        model: String,
+        provider: String,
+        name: Option<String>,
+    ) -> Result<Session> {
+        if self.get_session(id)?.is_some() {
+            return Err(OSAgentError::Session(format!(
+                "session {} already exists",
+                id
+            )));
+        }
+        let mut session = Session::new(model, provider, name);
+        session.id = id.to_string();
+        let messages_bytes = serde_json::to_vec(&session.messages)
+            .map_err(|e| OSAgentError::Parse(e.to_string()))?;
+        let metadata_bytes = serde_json::to_vec(&session.metadata)
+            .map_err(|e| OSAgentError::Parse(e.to_string()))?;
+        let context_state_bytes: Option<Vec<u8>> = session
+            .context_state
+            .as_ref()
+            .map(|cs| serde_json::to_vec(cs).unwrap_or_default());
+
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO sessions (id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    session.id,
+                    session.created_at.timestamp(),
+                    session.updated_at.timestamp(),
+                    session.model,
+                    session.provider,
+                    messages_bytes,
+                    metadata_bytes,
+                    session.parent_id.as_ref(),
+                    session.agent_type.clone(),
                     session.task_status,
                     context_state_bytes,
                 ],
@@ -3130,6 +3195,173 @@ impl SqliteStorage {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(OSAgentError::Storage)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)
+        })
+    }
+
+    /// Record one provider request's token usage and cost (`usage_events`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_usage_event(
+        &self,
+        session_id: &str,
+        provider_id: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_read: u64,
+        cached_write: u64,
+        reasoning: u64,
+        cost_usd: f64,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO usage_events
+                    (session_id, provider_id, model, input_tokens, output_tokens,
+                     cached_read_tokens, cached_write_tokens, reasoning_tokens, cost_usd, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    session_id,
+                    provider_id,
+                    model,
+                    input_tokens as i64,
+                    output_tokens as i64,
+                    cached_read as i64,
+                    cached_write as i64,
+                    reasoning as i64,
+                    cost_usd,
+                    Utc::now().timestamp(),
+                ],
+            )
+            .map_err(OSAgentError::Storage)?;
+            Ok(())
+        })
+    }
+
+    /// Aggregated usage/cost totals, optionally scoped to one session and/or
+    /// lower-bounded by a Unix timestamp (UTC day/month budget windows).
+    pub fn usage_totals(&self, session_id: Option<&str>, since: Option<i64>) -> Result<UsageTotals> {
+        self.with_conn(|conn| {
+            let mut sql = String::from(
+                "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cached_read_tokens), 0), COALESCE(SUM(cached_write_tokens), 0),
+                        COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cost_usd), 0)
+                 FROM usage_events WHERE 1 = 1",
+            );
+            let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(session_id) = session_id {
+                sql.push_str(" AND session_id = ?");
+                binds.push(Box::new(session_id.to_string()));
+            }
+            if let Some(since) = since {
+                sql.push_str(" AND created_at >= ?");
+                binds.push(Box::new(since));
+            }
+            let mut stmt = conn.prepare_cached(&sql).map_err(OSAgentError::Storage)?;
+            let row = stmt
+                .query_row(rusqlite::params_from_iter(binds.iter()), |row| {
+                    Ok(UsageTotals {
+                        requests: row.get(0)?,
+                        input_tokens: row.get(1)?,
+                        output_tokens: row.get(2)?,
+                        cached_read_tokens: row.get(3)?,
+                        cached_write_tokens: row.get(4)?,
+                        reasoning_tokens: row.get(5)?,
+                        cost_usd: row.get(6)?,
+                    })
+                })
+                .map_err(OSAgentError::Storage)?;
+            Ok(row)
+        })
+    }
+
+    /// Totals per `provider/model`, most expensive first.
+    pub fn usage_by_model(
+        &self,
+        session_id: Option<&str>,
+        since: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(String, String, UsageTotals)>> {
+        self.with_conn(|conn| {
+            let mut sql = String::from(
+                "SELECT provider_id, model, COUNT(*), COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached_read_tokens), 0),
+                        COALESCE(SUM(cached_write_tokens), 0), COALESCE(SUM(reasoning_tokens), 0),
+                        COALESCE(SUM(cost_usd), 0)
+                 FROM usage_events WHERE 1 = 1",
+            );
+            let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(session_id) = session_id {
+                sql.push_str(" AND session_id = ?");
+                binds.push(Box::new(session_id.to_string()));
+            }
+            if let Some(since) = since {
+                sql.push_str(" AND created_at >= ?");
+                binds.push(Box::new(since));
+            }
+            sql.push_str(" GROUP BY provider_id, model ORDER BY SUM(cost_usd) DESC LIMIT ?");
+            binds.push(Box::new(limit as i64));
+            let mut stmt = conn.prepare_cached(&sql).map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        UsageTotals {
+                            requests: row.get(2)?,
+                            input_tokens: row.get(3)?,
+                            output_tokens: row.get(4)?,
+                            cached_read_tokens: row.get(5)?,
+                            cached_write_tokens: row.get(6)?,
+                            reasoning_tokens: row.get(7)?,
+                            cost_usd: row.get(8)?,
+                        },
+                    ))
+                })
+                .map_err(OSAgentError::Storage)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)
+        })
+    }
+
+    /// Totals per session, most expensive first (the /usage session table).
+    pub fn usage_by_session(
+        &self,
+        since: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(String, UsageTotals)>> {
+        self.with_conn(|conn| {
+            let mut sql = String::from(
+                "SELECT session_id, COUNT(*), COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached_read_tokens), 0),
+                        COALESCE(SUM(cached_write_tokens), 0), COALESCE(SUM(reasoning_tokens), 0),
+                        COALESCE(SUM(cost_usd), 0)
+                 FROM usage_events WHERE 1 = 1",
+            );
+            let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(since) = since {
+                sql.push_str(" AND created_at >= ?");
+                binds.push(Box::new(since));
+            }
+            sql.push_str(" GROUP BY session_id ORDER BY SUM(cost_usd) DESC LIMIT ?");
+            binds.push(Box::new(limit as i64));
+            let mut stmt = conn.prepare_cached(&sql).map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        UsageTotals {
+                            requests: row.get(1)?,
+                            input_tokens: row.get(2)?,
+                            output_tokens: row.get(3)?,
+                            cached_read_tokens: row.get(4)?,
+                            cached_write_tokens: row.get(5)?,
+                            reasoning_tokens: row.get(6)?,
+                            cost_usd: row.get(7)?,
+                        },
                     ))
                 })
                 .map_err(OSAgentError::Storage)?;

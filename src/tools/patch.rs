@@ -54,6 +54,7 @@ pub struct ApplyPatchTool {
     backup_dir: PathBuf,
     cache: Arc<FileReadCache>,
     lsp: LspClient,
+    sandbox: crate::sandbox::Sandbox,
 }
 
 impl ApplyPatchTool {
@@ -65,6 +66,7 @@ impl ApplyPatchTool {
                 backup_dir: PathBuf::new(),
                 cache,
                 lsp: LspClient::new(HashMap::new()),
+                sandbox: crate::sandbox::Sandbox::for_config(&config),
             };
         }
 
@@ -84,6 +86,7 @@ impl ApplyPatchTool {
             backup_dir,
             cache,
             lsp: LspClient::new(HashMap::new()),
+            sandbox: crate::sandbox::Sandbox::for_config(&config),
         }
     }
 
@@ -538,6 +541,7 @@ impl Tool for ApplyPatchTool {
                 "Workspace is read-only; patch operations are disabled".to_string(),
             ));
         }
+        self.sandbox.check_mutation("applying patches")?;
 
         let patch = args["patch"]
             .as_str()

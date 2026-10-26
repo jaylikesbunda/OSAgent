@@ -577,6 +577,10 @@ OSA.loadSettings = async function() {
         OSA.updateLanAddressDisplay();
         OSA.updateFirewallWarning();
         document.getElementById('network-restart-notice').classList.add('hidden');
+
+        OSA.hydrateSandboxSettings(config.sandbox || {});
+        OSA.hydrateUsageSettings(config.usage || {});
+        OSA.refreshSandboxStatus();
         
         const experimental = config.experimental || {};
         document.getElementById('setting-experimental-workflows').checked = experimental.workflows_enabled || false;
@@ -917,7 +921,7 @@ OSA.updateSherpaCard = function(status) {
 
     if (progress.running) {
         fillEl.style.width = `${Math.max(2, Math.min(100, progress.percent || 0))}%`;
-        stateEl.textContent = progress.phase || 'Setting up offline voice…';
+        stateEl.textContent = progress.phase || 'Setting up the offline speech pack…';
         action.disabled = true;
         action.textContent = 'Setting up…';
         action.className = 'btn-primary';
@@ -942,7 +946,7 @@ OSA.updateSherpaCard = function(status) {
         return;
     }
     stateEl.textContent = `Not installed. One download of about ${status.download_mb} MB.`;
-    action.textContent = 'Set up offline voice';
+    action.textContent = 'Set up Parakeet + Piper';
     action.className = 'btn-primary';
     action.dataset.mode = 'install';
 };
@@ -958,7 +962,7 @@ OSA.renderSherpaCard = async function() {
         const stateEl = document.getElementById('sherpa-voice-state');
         if (stateEl) {
             stateEl.dataset.tone = 'error';
-            stateEl.textContent = 'Could not read the offline voice status.';
+            stateEl.textContent = 'Could not read the offline speech pack status.';
         }
     }
 };
@@ -1040,7 +1044,7 @@ OSA.onSherpaVoiceAction = async function() {
     }
 
     if (mode === 'remove') {
-        if (!window.confirm('Remove the offline voice? Speech input and output will go back to the browser.')) return;
+        if (!window.confirm('Remove the offline speech pack? Speech input and output will go back to the browser.')) return;
         try {
             const res = await OSA.fetchWithAuth('/api/voice/sherpa/remove', { method: 'POST' });
             if (!res.ok) {
@@ -1050,7 +1054,7 @@ OSA.onSherpaVoiceAction = async function() {
         } catch (error) {
             if (stateEl) {
                 stateEl.dataset.tone = 'error';
-                stateEl.textContent = `Could not remove the offline voice: ${error.message}`;
+                stateEl.textContent = `Could not remove the offline speech pack: ${error.message}`;
             }
             return;
         }
@@ -1110,6 +1114,10 @@ OSA.switchSettingsTab = async function(tabId) {
         // sure the pane initializes every time it is selected, including a
         // pane selected before the first config request has completed.
         await OSA.initUpdatesPane();
+    } else if (tabId === 'security') {
+        OSA.refreshSandboxStatus();
+    } else if (tabId === 'usage') {
+        await OSA.loadUsageStats();
     } else if (tabId === 'pairing') {
         if (OSA.Remote) {
             await OSA.Remote.load();
@@ -2767,6 +2775,448 @@ window.closeSettings = OSA.closeSettings;
 
 window.saveSettings = OSA.saveSettings;
 window.installVoiceModels = OSA.installVoiceModels;
+// ---------------------------------------------------------------------------
+// OS Sandbox settings (Security pane). Persisted through the whole-config
+// round trip like every other settings pane.
+// ---------------------------------------------------------------------------
+
+OSA.formatPriceOverrides = function(overrides) {
+    return Object.entries(overrides || {}).map(([key, price]) => {
+        return `${key} = ${price.input || 0}, ${price.output || 0}, ${price.cache_read || 0}, ${price.cache_write || 0}`;
+    }).join('\n');
+};
+
+OSA.parsePriceOverrides = function(text) {
+    const overrides = {};
+    (text || '').split('\n').forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) return;
+        const eq = trimmed.indexOf('=');
+        if (eq < 0) return;
+        const key = trimmed.slice(0, eq).trim();
+        const parts = trimmed.slice(eq + 1).split(',').map(v => parseFloat(v.trim()) || 0);
+        if (!key || parts.length === 0) return;
+        overrides[key] = {
+            input: parts[0] || 0,
+            output: parts[1] || 0,
+            cache_read: parts[2] || 0,
+            cache_write: parts[3] || 0
+        };
+    });
+    return overrides;
+};
+
+OSA.sandboxBackendName = function(backend) {
+    const names = {
+        'windows-restricted-token': 'Windows',
+        'landlock-seccomp': 'Linux',
+        'seatbelt': 'macOS',
+        'none': 'none'
+    };
+    return names[backend] || backend || 'unknown';
+};
+
+OSA.hydrateSandboxSettings = function(sandbox) {
+    OSA.setSandboxMode(sandbox.mode || 'workspace-write', { silent: true });
+    const net = document.getElementById('setting-sandbox-network-deny');
+    if (net) net.checked = sandbox.network === 'deny';
+    const enforce = document.getElementById('setting-sandbox-os-enforcement');
+    if (enforce) enforce.checked = sandbox.os_enforcement !== false;
+    const roots = document.getElementById('setting-sandbox-extra-roots');
+    if (roots) roots.value = (sandbox.extra_roots || []).join('\n');
+};
+
+// The protection level is one decision, so it's a choice group rather than a
+// select — and picking one saves immediately.
+OSA.setSandboxMode = function(mode, opts) {
+    const group = document.getElementById('sandbox-mode-choice');
+    if (!group) return;
+    group.querySelectorAll('.settings-choice-item').forEach((item) => {
+        const on = item.getAttribute('data-mode') === mode;
+        item.classList.toggle('is-selected', on);
+        item.setAttribute('aria-checked', on ? 'true' : 'false');
+        item.setAttribute('role', 'radio');
+    });
+    if (!opts || !opts.silent) OSA.saveSandboxSettings();
+};
+
+OSA.refreshSandboxStatus = async function() {
+    const line = document.getElementById('sandbox-status-line');
+    if (!line) return;
+    line.classList.remove('is-ok', 'is-warn', 'is-bad');
+    try {
+        const res = await OSA.fetchWithAuth('/api/sandbox');
+        const status = await res.json();
+        if (!res.ok) throw new Error(status.error || `HTTP ${res.status}`);
+        const notes = status.notes || [];
+        if (notes.length) {
+            line.textContent = notes[0];
+            line.classList.add('is-warn');
+        } else if (status.enforced) {
+            line.textContent = 'Enforced · ' + OSA.sandboxBackendName(status.backend);
+            line.classList.add('is-ok');
+        } else {
+            line.textContent = 'Not enforced';
+            line.classList.add('is-bad');
+        }
+    } catch (error) {
+        line.textContent = 'Status unavailable';
+        line.classList.add('is-bad');
+    }
+};
+
+OSA.saveSandboxSettings = async function() {
+    const errorDiv = document.getElementById('settings-error');
+    if (errorDiv) errorDiv.classList.add('hidden');
+
+    let cfg = OSA.getCachedConfig();
+    if (!cfg) cfg = await OSA.getJson('/api/config');
+
+    const checked = (id, fallback) => {
+        const el = document.getElementById(id);
+        return el ? el.checked : fallback;
+    };
+    const rootsValue = () => {
+        const el = document.getElementById('setting-sandbox-extra-roots');
+        return (el && el.value || '').split('\n').map(v => v.trim()).filter(Boolean);
+    };
+
+    const selected = document.querySelector('#sandbox-mode-choice .settings-choice-item.is-selected');
+    const next = {
+        ...cfg,
+        sandbox: {
+            ...(cfg.sandbox || {}),
+            mode: (selected && selected.getAttribute('data-mode')) || 'workspace-write',
+            network: checked('setting-sandbox-network-deny', false) ? 'deny' : 'allow',
+            os_enforcement: checked('setting-sandbox-os-enforcement', true),
+            extra_roots: rootsValue()
+        }
+    };
+
+    try {
+        const res = await OSA.fetchWithAuth('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify(next)
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        OSA.setCachedConfig(next);
+        OSA.refreshSandboxStatus();
+    } catch (error) {
+        if (errorDiv) {
+            errorDiv.textContent = error.message || String(error);
+            errorDiv.classList.remove('hidden');
+        }
+    }
+};
+
+OSA.hydrateUsageSettings = function(usage) {
+    const set = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value ?? '';
+    };
+    set('setting-usage-monthly-limit', usage.monthly_limit_usd);
+    set('setting-usage-daily-limit', usage.daily_limit_usd);
+    set('setting-usage-session-limit', usage.session_limit_usd);
+    const action = document.getElementById('setting-usage-limit-action');
+    if (action) action.value = usage.limit_action || 'downgrade';
+    const prices = document.getElementById('setting-usage-price-overrides');
+    if (prices) prices.value = OSA.formatPriceOverrides(usage.price_overrides || {});
+};
+
+OSA.saveUsageSettings = async function() {
+    const errorDiv = document.getElementById('settings-error');
+    if (errorDiv) errorDiv.classList.add('hidden');
+
+    let cfg = OSA.getCachedConfig();
+    if (!cfg) cfg = await OSA.getJson('/api/config');
+
+    const numberOrNull = (id) => {
+        const el = document.getElementById(id);
+        const raw = el ? el.value : '';
+        if (raw === '' || raw === null || raw === undefined) return null;
+        const value = parseFloat(raw);
+        return Number.isFinite(value) && value > 0 ? value : null;
+    };
+    const valueOf = (id, fallback) => {
+        const el = document.getElementById(id);
+        return el ? el.value : fallback;
+    };
+
+    const next = {
+        ...cfg,
+        usage: {
+            ...(cfg.usage || {}),
+            enabled: true,
+            session_limit_usd: numberOrNull('setting-usage-session-limit'),
+            daily_limit_usd: numberOrNull('setting-usage-daily-limit'),
+            monthly_limit_usd: numberOrNull('setting-usage-monthly-limit'),
+            limit_action: valueOf('setting-usage-limit-action', 'downgrade') || 'downgrade',
+            price_overrides: OSA.parsePriceOverrides(valueOf('setting-usage-price-overrides', ''))
+        }
+    };
+
+    try {
+        const res = await OSA.fetchWithAuth('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify(next)
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        OSA.setCachedConfig(next);
+        OSA.loadUsageStats();
+    } catch (error) {
+        if (errorDiv) {
+            errorDiv.textContent = error.message || String(error);
+            errorDiv.classList.remove('hidden');
+        }
+    }
+};
+
+OSA.renderUsageBreakdown = function(rows) {
+    const el = document.getElementById('usage-breakdown');
+    if (!el) return;
+    const sorted = (rows || []).slice()
+        .sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
+    if (!sorted.length) {
+        el.innerHTML = '<div class="usage-breakdown-empty">Nothing recorded yet.</div>';
+        return;
+    }
+    el.innerHTML = sorted.slice(0, 5).map(row => `
+        <div class="usage-breakdown-row">
+            <span class="ub-name">${OSA.escapeHtml(row.provider)}/${OSA.escapeHtml(row.model)}</span>
+            <span class="ub-cost">$${(row.cost_usd || 0).toFixed(2)}</span>
+        </div>`).join('');
+};
+
+// Hero metrics: today, this month, and the pace projection. Three numbers
+// instead of a usage table.
+OSA.loadUsageStats = async function() {
+    const todayEl = document.getElementById('usage-today');
+    if (!todayEl) return;
+    const money = (v) => '$' + (v || 0).toFixed(2);
+    try {
+        const res = await OSA.fetchWithAuth('/api/usage');
+        const summary = await res.json();
+        if (!res.ok) throw new Error(summary.error || `HTTP ${res.status}`);
+
+        const today = (summary.today && summary.today.cost_usd) || 0;
+        const month = (summary.this_month && summary.this_month.cost_usd) || 0;
+        const now = new Date();
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        const projected = (month / now.getDate()) * daysInMonth;
+
+        todayEl.textContent = money(today);
+        const monthEl = document.getElementById('usage-month');
+        if (monthEl) monthEl.textContent = money(month);
+        const projEl = document.getElementById('usage-projected');
+        if (projEl) projEl.textContent = money(projected);
+
+        // One line of budget context beats a help paragraph.
+        const cfg = OSA.getCachedConfig() || {};
+        const cap = (cfg.usage && cfg.usage.monthly_limit_usd) || 0;
+        const note = document.getElementById('usage-hero-note');
+        if (note) {
+            note.classList.remove('is-ok', 'is-warn', 'is-bad');
+            if (cap > 0) {
+                const pct = Math.min(999, Math.round((month / cap) * 100));
+                note.textContent = pct + '% of your $' + cap.toFixed(0) + ' limit';
+                note.classList.add(pct >= 90 ? 'is-bad' : pct >= 70 ? 'is-warn' : 'is-ok');
+            } else {
+                note.textContent = 'No budget set';
+            }
+        }
+
+        OSA.renderUsageBreakdown(summary.by_model || []);
+    } catch (error) {
+        todayEl.textContent = '—';
+        const note = document.getElementById('usage-hero-note');
+        if (note) {
+            note.textContent = 'Usage unavailable';
+            note.classList.add('is-bad');
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Composer safety chips (Codex-style): sandbox mode + approval behavior,
+// switchable from the composer without opening Settings. Both persist through
+// the whole-config round trip.
+// ---------------------------------------------------------------------------
+
+OSA.SANDBOX_MODES = [
+    { value: 'read-only', short: 'read-only', label: 'Read-only', desc: 'Nothing may be modified anywhere' },
+    { value: 'workspace-write', short: 'ws-write', label: 'Workspace-write', desc: 'Writes confined to workspace roots' },
+    { value: 'danger-full-access', short: 'full', label: 'Full access', desc: 'No OS confinement' },
+];
+
+OSA.APPROVAL_POLICIES = [
+    { value: 'ask', short: 'ask', label: 'Ask', desc: 'Prompt on every approval request (default)' },
+    { value: 'allow', short: 'auto-ok', label: 'Auto-approve', desc: 'Approve requests without prompting' },
+    { value: 'deny', short: 'auto-deny', label: 'Auto-deny', desc: 'Refuse requests without prompting' },
+];
+
+OSA.refreshSafetyChips = function() {
+    const trigger = document.getElementById('safety-trigger');
+    const label = document.getElementById('safety-trigger-label');
+    if (!trigger && !label) return;
+
+    const cfg = OSA.getCachedConfig() || {};
+    const sandbox = cfg.sandbox || {};
+    const mode = sandbox.mode || 'workspace-write';
+    const policy = (cfg.agent && cfg.agent.approval_policy) || 'ask';
+    const sandboxEntry = OSA.SANDBOX_MODES.find(m => m.value === mode) || OSA.SANDBOX_MODES[1];
+    const approvalEntry = OSA.APPROVAL_POLICIES.find(p => p.value === policy) || OSA.APPROVAL_POLICIES[0];
+
+    // One compact string for the tooltip and screen readers.
+    const parts = [
+        'Sandbox: ' + sandboxEntry.label,
+        'Approvals: ' + approvalEntry.label
+    ];
+    if (sandbox.network === 'deny') parts.push('Network blocked');
+    if (sandbox.os_enforcement === false) parts.push('OS enforcement off');
+    const text = parts.join(' · ');
+
+    if (label) label.textContent = text;
+
+    // Shield colour = how much rope the agent has right now.
+    let level = 'safe';
+    if (mode === 'danger-full-access' || sandbox.os_enforcement === false) {
+        level = 'risky';
+    } else if (policy === 'allow') {
+        level = 'warn';
+    }
+
+    if (trigger) {
+        trigger.setAttribute('data-level', level);
+        trigger.setAttribute('title', text);
+    }
+};
+
+OSA._safetyMenuOutside = function(event) {
+    const menu = document.getElementById('safety-menu');
+    const trigger = document.getElementById('safety-trigger');
+    if (!menu || menu.classList.contains('hidden')) return;
+    if (menu.contains(event.target) || (trigger && trigger.contains(event.target))) return;
+    OSA.closeSafetyMenu(false);
+};
+
+OSA._safetyMenuKeydown = function(event) {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        OSA.closeSafetyMenu(true);
+    }
+};
+
+OSA.toggleSafetyMenu = function() {
+    const menu = document.getElementById('safety-menu');
+    if (menu && !menu.classList.contains('hidden')) {
+        OSA.closeSafetyMenu(true);
+    } else {
+        OSA.openSafetyMenu();
+    }
+};
+
+OSA.openSafetyMenu = function() {
+    const menu = document.getElementById('safety-menu');
+    const trigger = document.getElementById('safety-trigger');
+    if (!menu || !trigger) return;
+
+    const cfg = OSA.getCachedConfig() || {};
+    const currentSandbox = (cfg.sandbox && cfg.sandbox.mode) || 'workspace-write';
+    const currentApproval = (cfg.agent && cfg.agent.approval_policy) || 'ask';
+
+    const row = (entry, active, setter) => `
+        <button type="button" class="safety-menu-item ${entry.value === active ? 'active' : ''}"
+                onclick="${setter}('${entry.value}')">
+            <span class="safety-menu-item-title">${OSA.escapeHtml(entry.label)}</span>
+            <span class="safety-menu-item-desc">${OSA.escapeHtml(entry.desc)}</span>
+        </button>`;
+
+    const list = menu.querySelector('.safety-menu-list');
+    if (list) {
+        list.innerHTML =
+            `<div class="safety-menu-section-title">Sandbox</div>`
+            + OSA.SANDBOX_MODES.map(e => row(e, currentSandbox, 'OSA.setComposerSandbox')).join('')
+            + `<div class="safety-menu-section-title">Approvals</div>`
+            + OSA.APPROVAL_POLICIES.map(e => row(e, currentApproval, 'OSA.setComposerApproval')).join('');
+    }
+
+    // Open upward like the thinking menu: the composer sits at the bottom.
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.min(280, window.innerWidth - 16);
+    const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+    menu.style.width = width + 'px';
+    menu.style.left = left + 'px';
+    menu.style.right = 'auto';
+    menu.style.top = 'auto';
+    menu.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+
+    menu.classList.remove('hidden');
+    trigger.setAttribute('aria-expanded', 'true');
+    document.addEventListener('click', OSA._safetyMenuOutside, true);
+    document.addEventListener('keydown', OSA._safetyMenuKeydown, true);
+};
+
+OSA.closeSafetyMenu = function(restoreFocus) {
+    const menu = document.getElementById('safety-menu');
+    const trigger = document.getElementById('safety-trigger');
+    const wasOpen = menu && !menu.classList.contains('hidden');
+    if (menu) menu.classList.add('hidden');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', OSA._safetyMenuOutside, true);
+    document.removeEventListener('keydown', OSA._safetyMenuKeydown, true);
+    if (restoreFocus && wasOpen && trigger && trigger.focus) trigger.focus();
+};
+
+OSA._saveSafetyConfig = async function(mutate) {
+    let cfg = OSA.getCachedConfig();
+    if (!cfg) cfg = await OSA.getJson('/api/config');
+    const next = mutate({ ...cfg });
+    const res = await OSA.fetchWithAuth('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify(next)
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    OSA.setCachedConfig(next);
+};
+
+OSA.setComposerSandbox = async function(mode) {
+    try {
+        await OSA._saveSafetyConfig(cfg => ({
+            ...cfg,
+            sandbox: { ...(cfg.sandbox || {}), mode }
+        }));
+        OSA.refreshSafetyChips();
+        OSA.refreshSandboxStatus();
+        OSA.closeSafetyMenu(true);
+    } catch (error) {
+        console.error('Failed to switch sandbox mode:', error);
+        alert(error.message || 'Failed to switch sandbox mode');
+    }
+};
+
+OSA.setComposerApproval = async function(policy) {
+    try {
+        await OSA._saveSafetyConfig(cfg => ({
+            ...cfg,
+            agent: { ...(cfg.agent || {}), approval_policy: policy }
+        }));
+        OSA.refreshSafetyChips();
+        OSA.closeSafetyMenu(true);
+    } catch (error) {
+        console.error('Failed to switch approval behavior:', error);
+        alert(error.message || 'Failed to switch approval behavior');
+    }
+};
+
 window.switchSettingsTab = OSA.switchSettingsTab;
 
 document.addEventListener('DOMContentLoaded', OSA.bindVoiceDeviceListeners);

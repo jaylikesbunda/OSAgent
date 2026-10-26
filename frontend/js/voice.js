@@ -44,7 +44,7 @@ OSA.refreshSherpaStatus = async function() {
 };
 
 OSA.localSttName = function(engine) {
-    return engine === 'sherpa-local' ? 'Offline Voice' : 'Local Whisper';
+    return engine === 'sherpa-local' ? 'NVIDIA Parakeet TDT 0.6B v2' : 'Local Whisper';
 };
 
 OSA.isLocalSttProvider = function(provider) {
@@ -439,7 +439,7 @@ OSA.initSpeechRecognition = function() {
 // fix is a local engine rather than retrying the browser one.
 OSA.browserSpeechErrorMessage = function(code) {
     if (code === 'network' || code === 'service-not-allowed') {
-        return "Browser speech recognition can't reach its speech service from this window. Set up Offline Voice or choose Local Whisper for Input in Settings → Voice.";
+        return "Browser speech recognition can't reach its speech service from this window. Set up the offline speech pack or choose Local Whisper for Input in Settings → Voice.";
     }
     if (code === 'not-allowed') return 'Microphone access was blocked for this window.';
     if (code === 'audio-capture') return 'No microphone was found.';
@@ -450,7 +450,7 @@ OSA.browserSpeechErrorMessage = function(code) {
 // WebView often lacks. Piper runs on the server and does not.
 OSA.browserSpeechSynthesisErrorMessage = function(code) {
     if (code === 'network' || code === 'synthesis-unavailable' || code === 'synthesis-failed') {
-        return "Browser voice output failed in this window. Set up Offline Voice or choose Piper for Output in Settings → Voice.";
+        return "Browser voice output failed in this window. Set up the offline speech pack or choose Piper for Output in Settings → Voice.";
     }
     return `Browser voice output error: ${code}`;
 };
@@ -678,7 +678,7 @@ OSA.processLocalWhisperRecording = async function(blob) {
 OSA.ensureLocalWhisperReady = async function(engine) {
     if (engine === 'sherpa-local') {
         if (!(await OSA.refreshSherpaStatus())) {
-            throw new Error('Offline voice is not set up yet. Open Settings > Voice and click Set up offline voice.');
+            throw new Error('The offline speech pack is not set up yet. Open Settings > Voice and click Set up Parakeet + Piper.');
         }
         return;
     }

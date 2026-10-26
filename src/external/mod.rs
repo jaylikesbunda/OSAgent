@@ -65,7 +65,12 @@ pub struct ExternalDirectoryManager {
     path_matchers: Vec<(GlobMatcher, PermissionAction)>,
     whitelist_matchers: Vec<(GlobMatcher, PermissionAction)>,
     pending_prompts: Arc<RwLock<HashMap<String, PermissionPrompt>>>,
-    granted_permissions: Arc<RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
+    /// Prompt approvals, keyed by `(session_id, path)`. Grants are strictly
+    /// per-session: an "Always allow" in one chat must never unlock a path for
+    /// a different chat (that was a real leak — a grant from one session let a
+    /// later session with auto-deny read outside the workspace). Permanent
+    /// allows live in `whitelist` / `rules` (Settings), not here.
+    granted_permissions: Arc<RwLock<HashMap<(String, String), chrono::DateTime<chrono::Utc>>>>,
     pending_responses: Arc<RwLock<HashMap<String, oneshot::Sender<bool>>>>,
 }
 
@@ -206,14 +211,14 @@ impl ExternalDirectoryManager {
         if allowed && always {
             let mut permissions = self.granted_permissions.write().await;
             let now = chrono::Utc::now();
-            permissions.insert(prompt.path.clone(), now);
+            permissions.insert((prompt.session_id.clone(), prompt.path.clone()), now);
             // `patterns` carries the folder the approval covers (for example
             // `C:\outside\**`). Remember that folder too so "Always allow"
             // holds for every subdirectory beneath it instead of only the
-            // exact path that triggered the prompt.
+            // exact path that triggered the prompt — scoped to this session.
             for pattern in &prompt.patterns {
                 if let Some(root) = grant_root_from_pattern(pattern) {
-                    permissions.insert(root, now);
+                    permissions.insert((prompt.session_id.clone(), root), now);
                 }
             }
         }
@@ -241,20 +246,25 @@ impl ExternalDirectoryManager {
             .collect()
     }
 
-    pub async fn has_granted_permission(&self, path: &str) -> bool {
+    /// Whether *this session* holds a prompt approval covering `path`.
+    /// Grants never cross session boundaries.
+    pub async fn has_granted_permission(&self, session_id: &str, path: &str) -> bool {
         let permissions = self.granted_permissions.read().await;
-        if permissions.contains_key(path) {
+        if permissions.contains_key(&(session_id.to_string(), path.to_string())) {
             return true;
         }
         // An approval remembers the folder it covered, so anything beneath
-        // that folder (any subdirectory) counts as approved too. Session
-        // resources (`session://…`) are matched exactly only.
+        // that folder (any subdirectory) counts as approved too, still within
+        // the same session. Session resources (`session://...`) are matched
+        // exactly only.
         if path.starts_with("session://") {
             return false;
         }
-        permissions
-            .keys()
-            .any(|granted| !granted.starts_with("session://") && path_is_within(path, granted))
+        permissions.keys().any(|(granted_session, granted)| {
+            granted_session == session_id
+                && !granted.starts_with("session://")
+                && path_is_within(path, granted)
+        })
     }
 
     pub async fn clear_expired_permissions(&self, ttl_hours: i64) {
@@ -347,6 +357,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grants_never_cross_sessions() {
+        // Regression: an "Always allow" pressed in one chat used to unlock the
+        // path in *every* chat — silently bypassing a later chat's auto-deny
+        // and letting it read outside the workspace.
+        let manager = ExternalDirectoryManager::default();
+        let (prompt, _response) = manager
+            .create_waiting_prompt(
+                "chat-1".to_string(),
+                "read_file:call".to_string(),
+                "/outside/file.txt".to_string(),
+                "read".to_string(),
+                vec!["/outside/**".to_string()],
+            )
+            .await;
+
+        manager
+            .respond_to_prompt(&prompt.id, true, true)
+            .await
+            .expect("pending prompt");
+
+        // The approving session keeps the grant (including subdirectories)...
+        assert!(manager.has_granted_permission("chat-1", "/outside/file.txt").await);
+        assert!(
+            manager
+                .has_granted_permission("chat-1", "/outside/deeper/file.txt")
+                .await
+        );
+        // ...but no other session inherits it.
+        assert!(!manager.has_granted_permission("chat-2", "/outside/file.txt").await);
+        assert!(
+            !manager
+                .has_granted_permission("chat-2", "/outside/deeper/file.txt")
+                .await
+        );
+    }
+
+    #[tokio::test]
     async fn always_response_remembers_exact_path() {
         let manager = ExternalDirectoryManager::default();
         let (prompt, _response) = manager
@@ -364,7 +411,11 @@ mod tests {
             .await
             .expect("pending prompt");
 
-        assert!(manager.has_granted_permission("/outside/file.txt").await);
+        assert!(
+            manager
+                .has_granted_permission("session", "/outside/file.txt")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -388,18 +439,18 @@ mod tests {
         // Siblings and anything deeper under the approved folder are covered.
         assert!(
             manager
-                .has_granted_permission("/outside/project/src/lib.rs")
+                .has_granted_permission("session", "/outside/project/src/lib.rs")
                 .await
         );
         assert!(
             manager
-                .has_granted_permission("/outside/project/src/nested/deep/mod.rs")
+                .has_granted_permission("session", "/outside/project/src/nested/deep/mod.rs")
                 .await
         );
         // A sibling folder that merely shares a name prefix is not.
         assert!(
             !manager
-                .has_granted_permission("/outside/project/src-other/file.rs")
+                .has_granted_permission("session", "/outside/project/src-other/file.rs")
                 .await
         );
     }
@@ -424,7 +475,7 @@ mod tests {
 
         assert!(
             !manager
-                .has_granted_permission("/outside/project/src/lib.rs")
+                .has_granted_permission("session", "/outside/project/src/lib.rs")
                 .await
         );
     }

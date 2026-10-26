@@ -292,6 +292,15 @@ impl AgentRuntime {
         path.parent().unwrap_or(path).to_string_lossy().to_string()
     }
 
+    /// The composer's approval behavior (Codex-style `approvals` chip):
+    /// resolves a would-be *Ask* to Allow/Deny without raising the prompt
+    /// dock, or keeps Ask so the prompt appears. Explicit Allow/Deny rules
+    /// are resolved before this — this only governs requests that would
+    /// otherwise ask the user.
+    async fn resolve_ask_by_approval_policy(&self) -> Result<crate::permission::PermissionAction> {
+        Ok(self.config.read().await.agent.approval_policy.clone())
+    }
+
     /// Policy gate for the `sessions` tool. Reading or searching
     /// conversations other than the caller's own (its own subagent children
     /// are exempt) follows `session_access` permission rules first, then
@@ -342,9 +351,21 @@ impl AgentRuntime {
             }
         }
 
+        // The composer's approval behavior can be a hard session lockdown:
+        // `deny` refuses everything outside the workspace before any grant,
+        // whitelist, or rule can allow it.
+        if let crate::permission::PermissionAction::Deny =
+            self.config.read().await.agent.approval_policy
+        {
+            return Err(OSAgentError::ToolExecution(format!(
+                "Access to conversation '{}' is denied by this session's approval policy (auto-deny)",
+                resource
+            )));
+        }
+
         if self
             .external_manager
-            .has_granted_permission(&resource)
+            .has_granted_permission(caller_session_id, &resource)
             .await
         {
             return Ok(());
@@ -359,6 +380,12 @@ impl AgentRuntime {
         // Note: `evaluate_permission_rule` returns the `permission` module's
         // action enum; the external-path flow uses the identical-looking
         // `external` module one.
+        let effective = match effective {
+            crate::permission::PermissionAction::Ask => {
+                self.resolve_ask_by_approval_policy().await?
+            }
+            other => other,
+        };
         match effective {
             crate::permission::PermissionAction::Allow => return Ok(()),
             crate::permission::PermissionAction::Deny => {
@@ -428,13 +455,54 @@ impl AgentRuntime {
             return Ok((Vec::new(), None));
         }
         let execution_root = Self::external_execution_root(tool_name, &path);
-        if self.external_manager.has_granted_permission(&path).await {
+
+        // The composer's approval behavior can be a hard session lockdown:
+        // `deny` refuses everything outside the workspace before any grant,
+        // whitelist, or rule can allow it. (Fixes a real leak: an "Always
+        // allow" pressed in one chat used to unlock the path in every chat,
+        // silently bypassing a later chat's auto-deny.)
+        if let crate::permission::PermissionAction::Deny =
+            self.config.read().await.agent.approval_policy
+        {
+            return Err(OSAgentError::ToolExecution(format!(
+                "Access to external path '{}' is denied by this session's approval policy (auto-deny)",
+                path
+            )));
+        }
+
+        // Explicit Deny rules still deny...
+        let evaluated = self
+            .external_manager
+            .evaluate(&path, &workspace.resolved_path());
+        if matches!(evaluated, PermissionAction::Deny) {
+            return Err(OSAgentError::ToolExecution(format!(
+                "Access to external path '{}' is denied by policy",
+                path
+            )));
+        }
+
+        // ...session-scoped prompt approvals cover the rest of this chat...
+        if self
+            .external_manager
+            .has_granted_permission(session_id, &path)
+            .await
+        {
             return Ok((vec![execution_root], Some(path)));
         }
 
-        let action = self
-            .external_manager
-            .evaluate(&path, &workspace.resolved_path());
+        // ...explicit Allow (whitelist / rules) and the auto-approve policy
+        // skip the prompt; anything else asks.
+        let action = match evaluated {
+            PermissionAction::Allow => PermissionAction::Allow,
+            PermissionAction::Deny => unreachable!("handled above"),
+            PermissionAction::Ask => {
+                match self.resolve_ask_by_approval_policy().await? {
+                    crate::permission::PermissionAction::Allow => PermissionAction::Allow,
+                    crate::permission::PermissionAction::Deny => PermissionAction::Deny,
+                    crate::permission::PermissionAction::Ask => PermissionAction::Ask,
+                }
+            }
+        };
         match action {
             PermissionAction::Allow => return Ok((vec![execution_root], Some(path))),
             PermissionAction::Deny => {
@@ -537,8 +605,10 @@ impl AgentRuntime {
         self.external_manager.get_session_prompts(session_id).await
     }
 
-    pub async fn has_granted_external_permission(&self, path: &str) -> bool {
-        self.external_manager.has_granted_permission(path).await
+    pub async fn has_granted_external_permission(&self, session_id: &str, path: &str) -> bool {
+        self.external_manager
+            .has_granted_permission(session_id, path)
+            .await
     }
 
     pub async fn get_permission_rules(&self) -> Vec<crate::permission::PermissionRule> {

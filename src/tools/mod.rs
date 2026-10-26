@@ -45,3 +45,4 @@ pub mod truncation;
 pub mod weather;
 pub mod web;
 pub mod web_search;
+pub mod worktree;

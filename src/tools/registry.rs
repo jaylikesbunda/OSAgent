@@ -13,7 +13,7 @@ use crate::tools::{
     bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory, diagram, files,
     github, lsp, memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan,
     process, question, scheduler, search, sessions, skill, skill_authoring, subagent, system_status,
-    task, todo, tool_script, tool_search, weather, web,
+    task, todo, tool_script, tool_search, weather, web, worktree,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -138,6 +138,7 @@ impl ToolProfile {
                     | "plan_exit"
                     | "persona"
                     | "draw_diagram"
+                    | "worktree_list"
             ),
             Self::Creative => !matches!(
                 tool_name,
@@ -465,6 +466,21 @@ impl ToolRegistry {
         let task_tool: Arc<dyn Tool> = Arc::new(task::TaskTool::new(storage.clone()));
         tools.insert("task".to_string(), task_tool.clone());
         native_catalog.register(task_tool);
+
+        // Git worktrees: low-frequency, so they live in the deferred catalog
+        // rather than the always-loaded block.
+        let worktree_create: Arc<dyn Tool> =
+            Arc::new(worktree::WorktreeCreateTool::new(config.clone()));
+        tools.insert("worktree_create".to_string(), worktree_create.clone());
+        native_catalog.register(worktree_create);
+        let worktree_list: Arc<dyn Tool> =
+            Arc::new(worktree::WorktreeListTool::new(config.clone()));
+        tools.insert("worktree_list".to_string(), worktree_list.clone());
+        native_catalog.register(worktree_list);
+        let worktree_remove: Arc<dyn Tool> =
+            Arc::new(worktree::WorktreeRemoveTool::new(config.clone()));
+        tools.insert("worktree_remove".to_string(), worktree_remove.clone());
+        native_catalog.register(worktree_remove);
         let persona_tool: Arc<dyn Tool> = Arc::new(persona::PersonaTool::new());
         tools.insert("persona".to_string(), persona_tool.clone());
         native_catalog.register(persona_tool);

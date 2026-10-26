@@ -570,6 +570,8 @@ pub fn create_router(
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/usage", get(get_usage))
+        .route("/api/sandbox", get(get_sandbox_status))
         .route("/api/network", get(get_network_info))
         .route("/api/discord/status", get(get_discord_bot_status))
         .route("/api/discord/start", post(start_discord_bot))
@@ -1337,6 +1339,41 @@ async fn get_reasoning_options(
             .get_reasoning_state(&provider_id, &model, &config.agent.thinking_level)
             .await,
     )
+}
+
+/// /usage summary: lifetime, today, and this-month totals, per-model and
+/// per-session breakdowns, and the configured spend limits. `?session_id=`
+/// scopes the session row.
+async fn get_usage(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<
+    Json<crate::agent::runtime::usage::UsageSummary>,
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let session_id = params.get("session_id").map(|value| value.as_str());
+    agent
+        .usage_summary(session_id)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+        })
+}
+
+/// Live sandbox status: which backend is active on this host, whether
+/// enforcement is real, and any degradations. The settings UI shows this so
+/// OSA never claims confinement it did not get.
+async fn get_sandbox_status(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Json<crate::sandbox::SandboxStatus> {
+    let config = agent.get_config().await;
+    Json(crate::sandbox::Sandbox::for_config(&config).status())
 }
 
 async fn update_config(
@@ -3890,7 +3927,7 @@ async fn sherpa_install(
         return Err((
             StatusCode::CONFLICT,
             Json(ErrorResponse {
-                error: "Offline voice is already being set up.".to_string(),
+                error: "The offline speech pack is already being set up.".to_string(),
             }),
         ));
     }
@@ -7006,6 +7043,8 @@ async fn fetch_live_ollama_models_uncached(
                 available: true,
                 input_cost_per_1m: 0.0,
                 output_cost_per_1m: 0.0,
+                cache_read_cost_per_1m: 0.0,
+                cache_write_cost_per_1m: 0.0,
                 release_date: None,
             })
         })
@@ -7241,6 +7280,8 @@ async fn fetch_live_unsloth_models_uncached(
                     available: true,
                     input_cost_per_1m: 0.0,
                     output_cost_per_1m: 0.0,
+                    cache_read_cost_per_1m: 0.0,
+                    cache_write_cost_per_1m: 0.0,
                     release_date: None,
                 })
             })

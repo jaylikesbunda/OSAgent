@@ -11,41 +11,58 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::time::timeout;
 
+/// Active workspace roots for the sandbox, shared by the interpreter tools.
+fn workspace_roots(config: &Config) -> Vec<std::path::PathBuf> {
+    config
+        .get_active_workspace()
+        .paths
+        .iter()
+        .map(|wp| std::path::PathBuf::from(shellexpand::tilde(&wp.path).to_string()))
+        .collect()
+}
+
 pub struct CodeInterpreterTool {
     language: String,
     config: CodeToolConfig,
     workspace: String,
     writable: bool,
+    sandbox: crate::sandbox::Sandbox,
 }
 
 impl CodeInterpreterTool {
     pub fn python(config: Config) -> Self {
         let writable = config.is_workspace_writable_for_path(&config.agent.workspace);
+        let sandbox = crate::sandbox::Sandbox::from_config(&config, workspace_roots(&config));
         Self {
             language: "python".to_string(),
             config: config.tools.code_python,
             workspace: config.agent.workspace,
             writable,
+            sandbox,
         }
     }
 
     pub fn node(config: Config) -> Self {
         let writable = config.is_workspace_writable_for_path(&config.agent.workspace);
+        let sandbox = crate::sandbox::Sandbox::from_config(&config, workspace_roots(&config));
         Self {
             language: "node".to_string(),
             config: config.tools.code_node,
             workspace: config.agent.workspace,
             writable,
+            sandbox,
         }
     }
 
     pub fn bash(config: Config) -> Self {
         let writable = config.is_workspace_writable_for_path(&config.agent.workspace);
+        let sandbox = crate::sandbox::Sandbox::from_config(&config, workspace_roots(&config));
         Self {
             language: "bash".to_string(),
             config: config.tools.code_bash,
             workspace: config.agent.workspace,
             writable,
+            sandbox,
         }
     }
 
@@ -199,7 +216,11 @@ impl Tool for CodeInterpreterTool {
 
         let interpreter = self.get_interpreter()?;
 
-        let temp_file = NamedTempFile::new().map_err(|e| {
+        // Scratch scripts live under the OSA scratch dir (a sandbox root), so
+        // interpreters can create caches beside them even when confined.
+        let scratch = std::path::PathBuf::from(shellexpand::tilde("~/.osagent/tmp").to_string());
+        let _ = fs::create_dir_all(&scratch);
+        let temp_file = NamedTempFile::new_in(&scratch).map_err(|e| {
             OSAgentError::ToolExecution(format!("Failed to create temp file: {}", e))
         })?;
 
@@ -222,27 +243,28 @@ impl Tool for CodeInterpreterTool {
 
         let workspace = shellexpand::tilde(&self.workspace).to_string();
 
+        let script = temp_path.to_string_lossy().to_string();
+        let spec = if cfg!(windows) && interpreter == "cmd" {
+            crate::sandbox::SpawnSpec::new(interpreter, vec!["/C", &script]).cwd(&workspace)
+        } else {
+            crate::sandbox::SpawnSpec::new(interpreter, vec![&script]).cwd(&workspace)
+        };
+
         let result = timeout(
             Duration::from_secs(self.config.timeout_seconds),
-            tokio::task::spawn_blocking(move || {
-                if cfg!(windows) && interpreter == "cmd" {
-                    Command::new(interpreter)
-                        .arg("/C")
-                        .arg(&temp_path)
-                        .current_dir(&workspace)
-                        .output()
-                } else {
-                    Command::new(interpreter)
-                        .arg(&temp_path)
-                        .current_dir(&workspace)
-                        .output()
-                }
-            }),
+            async {
+                let mut child = self
+                    .sandbox
+                    .spawn(spec)
+                    .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
+                child
+                    .wait_with_output()
+                    .await
+                    .map_err(|e| OSAgentError::ToolExecution(e.to_string()))
+            },
         )
         .await
-        .map_err(|_| OSAgentError::Timeout)?
-        .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?
-        .map_err(|e| OSAgentError::ToolExecution(e.to_string()))?;
+        .map_err(|_| OSAgentError::Timeout)??;
 
         let stdout = String::from_utf8_lossy(&result.stdout).to_string();
         let stderr = String::from_utf8_lossy(&result.stderr).to_string();

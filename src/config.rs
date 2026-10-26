@@ -67,6 +67,13 @@ pub struct Config {
     /// auto-reviewer. Configured in Settings -> GitHub.
     #[serde(default)]
     pub github: GithubConfig,
+    /// OS sandbox for tool execution (read-only / workspace-write /
+    /// danger-full-access). Separate from the approval policy.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+    /// Cost accounting, spend limits, and the budget cost guard.
+    #[serde(default)]
+    pub usage: UsageConfig,
 }
 
 /// Visibility filter for the composer model dropdown. Empty lists mean
@@ -255,6 +262,12 @@ pub struct AgentConfig {
     /// `session://<id>` or `session://*`.
     #[serde(default)]
     pub session_access_default_action: PermissionAction,
+    /// Composer-level approval behavior (Codex-style): how *Ask* resolutions
+    /// at approval prompts behave. `ask` shows the prompt dock (default);
+    /// `allow` auto-approves requests that would prompt; `deny` auto-refuses
+    /// them. Explicit Allow/Deny rules always win over this.
+    #[serde(default)]
+    pub approval_policy: PermissionAction,
     #[serde(default)]
     pub custom_identity: Option<String>,
     #[serde(default)]
@@ -860,6 +873,152 @@ pub struct ExternalConfig {
     pub permission: ExternalPermissionConfig,
 }
 
+/// How much of the machine the agent is allowed to touch. This is an OS
+/// capability axis, deliberately separate from the approval policy in
+/// `crate::permission` (which decides *who signs off*, this decides *what is
+/// even possible*): Codex's `read-only | workspace-write | danger-full-access`
+/// split. Enforced for in-process tools at the tool layer and for spawned
+/// processes by the platform sandbox (`crate::sandbox`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    /// Nothing may be modified anywhere. Mutating tools fail, spawned
+    /// processes get a read-only view of the filesystem.
+    ReadOnly,
+    /// Reads anywhere; writes confined to the workspace roots. The default:
+    /// builds, tests, and edits inside the project all work, while a runaway
+    /// command cannot touch the rest of the machine.
+    #[default]
+    WorkspaceWrite,
+    /// No sandboxing. Equivalent to OSA's historical behavior.
+    DangerFullAccess,
+}
+
+impl SandboxMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "read-only" | "readonly" => Some(Self::ReadOnly),
+            "workspace-write" | "workspaces-write" => Some(Self::WorkspaceWrite),
+            "danger-full-access" | "full-access" | "danger" => Some(Self::DangerFullAccess),
+            _ => None,
+        }
+    }
+
+    pub fn allows_writes(self) -> bool {
+        !matches!(self, Self::ReadOnly)
+    }
+
+    /// Writes may leave the workspace roots.
+    pub fn allows_unrestricted_writes(self) -> bool {
+        matches!(self, Self::DangerFullAccess)
+    }
+}
+
+/// Network policy for sandboxed (spawned) processes. `Deny` is opt-in because
+/// it needs OS firewall integration (WFP on Windows; without it the sandbox
+/// degrades to filesystem-only enforcement and says so).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxNetworkPolicy {
+    /// Sandboxed processes keep network access.
+    #[default]
+    Allow,
+    /// Sandboxed processes are cut off from the network (loopback aside).
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    pub mode: SandboxMode,
+    /// Network policy for *spawned* processes only; in-process tools (web
+    /// fetch/search) are unaffected.
+    pub network: SandboxNetworkPolicy,
+    /// Apply OS-level confinement to spawned processes. Turning this off
+    /// leaves only the tool-layer checks (advisory), which is what "bash
+    /// blocklist" security looks like — not recommended.
+    pub os_enforcement: bool,
+    /// Additional directories that should be writable in workspace-write mode
+    /// (toolchains, caches, shared scratch space), editable from Settings.
+    pub extra_roots: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            mode: SandboxMode::WorkspaceWrite,
+            network: SandboxNetworkPolicy::Allow,
+            os_enforcement: true,
+            extra_roots: Vec::new(),
+        }
+    }
+}
+
+/// What to do when a spend limit is hit.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BudgetAction {
+    /// Route further turns to the small_model slot until the budget window
+    /// resets.
+    #[default]
+    Downgrade,
+    /// Refuse further provider requests until the budget window resets.
+    Block,
+}
+
+/// Per-token price in USD per 1M tokens. `0` means "not priced" and is never
+/// charged to the budget.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct TokenPrice {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+/// Cost accounting and spend limits. Prices resolve from the models.dev
+/// catalog (already bundled), then `[usage.price_overrides]`, with a small
+/// curated fallback table for common models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageConfig {
+    pub enabled: bool,
+    /// USD cap per session. None/0 disables.
+    pub session_limit_usd: Option<f64>,
+    /// USD cap per calendar day (UTC). None/0 disables.
+    pub daily_limit_usd: Option<f64>,
+    /// USD cap per calendar month (UTC). None/0 disables.
+    pub monthly_limit_usd: Option<f64>,
+    /// What happens at the first tripped limit: downgrade to the small_model
+    /// slot or block entirely.
+    pub limit_action: BudgetAction,
+    /// Manual prices keyed by `provider/model` or bare `model` (first match
+    /// wins). USD per 1M tokens.
+    pub price_overrides: std::collections::HashMap<String, TokenPrice>,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            session_limit_usd: None,
+            daily_limit_usd: None,
+            monthly_limit_usd: None,
+            limit_action: BudgetAction::Downgrade,
+            price_overrides: std::collections::HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginConfig {
@@ -1305,6 +1464,7 @@ impl Default for AgentConfig {
             decision_capture_mode: CaptureMode::Review,
             permission_rules: vec![],
             session_access_default_action: PermissionAction::Ask,
+            approval_policy: PermissionAction::Ask,
             custom_identity: None,
             custom_priorities: None,
             prompt_cache_enabled: default_prompt_cache_enabled(),
@@ -1588,6 +1748,8 @@ impl Config {
             browser: BrowserConfig::default(),
             remote_access: RemoteAccessConfig::default(),
             github: GithubConfig::default(),
+            sandbox: SandboxConfig::default(),
+            usage: UsageConfig::default(),
         };
         cfg.ensure_server_security_defaults();
         cfg.ensure_workspace_defaults();

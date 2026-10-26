@@ -1277,6 +1277,7 @@ impl Tool for WriteFileTool {
                 "Workspace is read-only; write operations are disabled".to_string(),
             ));
         }
+        crate::sandbox::Sandbox::for_config(&self.config).check_mutation("writing files")?;
 
         let path = args["path"]
             .as_str()
@@ -1575,6 +1576,7 @@ impl Tool for EditFileTool {
                 "Workspace is read-only; edit operations are disabled".to_string(),
             ));
         }
+        crate::sandbox::Sandbox::for_config(&self.config).check_mutation("editing files")?;
 
         let path = args["path"]
             .as_str()
@@ -2085,6 +2087,7 @@ impl Tool for DeleteFileTool {
                 "Workspace is read-only; delete operations are disabled".to_string(),
             ));
         }
+        crate::sandbox::Sandbox::for_config(&self.config).check_mutation("deleting files")?;
 
         let path = args["path"]
             .as_str()

@@ -29,6 +29,7 @@ pub mod oauth;
 pub mod permission;
 pub mod plugin;
 pub mod prompt_eval;
+pub mod sandbox;
 pub mod scheduler;
 pub mod skills;
 pub mod storage;

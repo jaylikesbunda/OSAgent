@@ -10,6 +10,7 @@ pub mod memory;
 pub mod model_catalog;
 pub mod model_resolution;
 pub mod persona;
+pub mod pricing;
 pub mod prompt;
 pub mod provider;
 pub mod provider_adapter;

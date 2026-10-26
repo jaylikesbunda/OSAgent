@@ -213,6 +213,17 @@ max_tokens = 16384
 temperature = 0.7
 checkpoint_enabled = true
 checkpoint_interval = 5
+# Composer approval behavior (the lock entry in the composer safety menu):
+# how access requests outside the workspace are answered.
+#   "ask"    show the prompt dock and wait (default)
+#   "allow"  auto-approve requests that would prompt (explicit Deny rules
+#            still deny)
+#   "deny"   session lockdown: refuse everything outside the workspace,
+#            including earlier approvals and the external whitelist
+# Prompt approvals ("Allow once" / "Always allow") last for the rest of the
+# current chat only; permanent access belongs in a workspace or the external
+# whitelist.
+approval_policy = "ask"
 # Enable prompt caching to reuse stable system prompt prefixes across turns.
 # Reduces token usage and latency when using Claude models via OpenRouter.
 # Works with OpenRouter (Anthropic models), OpenAI, and other providers that
@@ -464,3 +475,52 @@ import_cookies = true           # use sessions imported in Settings -> Browser
 hidden_providers = []          # provider ids, e.g. ["openrouter"]
 hidden_models = []             # "provider_id:model_id", e.g. ["openai:gpt-4o-mini"]
 # hide_older_than_days = 365       # hide models released longer ago than this; omit to show all
+
+[sandbox]
+# OS sandbox for tool execution — what is *possible*, separate from the
+# approval prompts (which decide who signs off). Managed from
+# Settings -> Security -> OS Sandbox.
+#
+#   "read-only"          nothing may be modified anywhere
+#   "workspace-write"    reads anywhere; spawned processes can only write
+#                        inside the workspace roots (+ extra_roots + scratch)
+#   "danger-full-access" no OS confinement (pre-0.9 behavior)
+mode = "workspace-write"
+
+# Network policy for spawned processes only (in-process web tools are
+# unaffected). "deny" blocks outbound connections: WFP firewall rules keyed
+# to the sandbox identity on Windows (adding rules needs admin rights; OSA
+# degrades to filesystem-only enforcement and says so), seccomp on Linux,
+# Seatbelt on macOS.
+network = "allow"
+
+# Apply OS-level confinement to spawned processes (Windows: restricted token
+# + mandatory-label ACLs + Job Object; Linux: Landlock + seccomp; macOS:
+# Seatbelt). Turning this off leaves only the advisory command checks.
+os_enforcement = true
+
+# Extra directories that stay writable in workspace-write mode (toolchains,
+# caches, shared scratch), one per line in Settings or as a TOML list.
+extra_roots = []
+
+[usage]
+# Token/cost accounting, spend limits, and the cost guard. Managed from
+# Settings -> Usage & Budgets. Every provider request is priced (USD per 1M
+# tokens) and recorded; costs appear on every turn and in `osagent usage`.
+enabled = true
+
+# Spend limits in USD. Empty / 0 disables the limit.
+# session_limit_usd = 5.00
+# daily_limit_usd = 10.00
+# monthly_limit_usd = 100.00
+
+# What happens when a limit trips:
+#   "downgrade"  route further turns through the small_model slot (cost guard)
+#   "block"      refuse further turns until the budget window resets
+limit_action = "downgrade"
+
+# Manual per-model prices (USD per 1M tokens). Keys are "provider/model" or
+# bare "model"; they override the bundled models.dev catalog and the curated
+# fallback table. Unpriced models are never charged to budgets.
+# [usage.price_overrides]
+# "openai/gpt-4o" = { input = 2.50, output = 10.00, cache_read = 1.25, cache_write = 0.0 }

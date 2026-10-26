@@ -106,6 +106,14 @@ pub enum AgentEvent {
         /// describe the response the user actually received.
         #[serde(default)]
         turn_usage: Option<EventTokenUsage>,
+        /// USD cost of this user turn (all provider requests), when pricing
+        /// is known. `0` may mean "free model" or "no price published" —
+        /// see the /usage summary for per-model breakdowns.
+        #[serde(default)]
+        cost_usd: Option<f64>,
+        /// Cumulative USD cost of the session including this turn.
+        #[serde(default)]
+        session_cost_usd: Option<f64>,
     },
     QueuedMessageDispatched {
         session_id: String,
@@ -210,6 +218,20 @@ pub enum AgentEvent {
         sequence: u64,
         error: String,
         recoverable: bool,
+        timestamp: SystemTime,
+    },
+    /// A spend limit tripped: the turn either downgraded to the small model
+    /// slot or is being refused outright.
+    BudgetWarning {
+        session_id: String,
+        sequence: u64,
+        /// Which limit tripped ("session $5.00", "daily $10.00", ...).
+        limit: String,
+        /// What happened: true = routed to small_model, false = blocked.
+        downgraded: bool,
+        message: String,
+        #[serde(default)]
+        cost_usd: Option<f64>,
         timestamp: SystemTime,
     },
     Cancelled {
@@ -432,6 +454,7 @@ impl AgentEvent {
             AgentEvent::ResponseStart { session_id, .. } => session_id,
             AgentEvent::ResponseChunk { session_id, .. } => session_id,
             AgentEvent::ResponseComplete { session_id, .. } => session_id,
+            AgentEvent::BudgetWarning { session_id, .. } => session_id,
             AgentEvent::QueuedMessageDispatched { session_id, .. } => session_id,
             AgentEvent::ContextUpdate { session_id, .. } => session_id,
             AgentEvent::Reasoning { session_id, .. } => session_id,
@@ -474,6 +497,7 @@ impl AgentEvent {
             AgentEvent::ResponseStart { sequence, .. } => *sequence,
             AgentEvent::ResponseChunk { sequence, .. } => *sequence,
             AgentEvent::ResponseComplete { sequence, .. } => *sequence,
+            AgentEvent::BudgetWarning { sequence, .. } => *sequence,
             AgentEvent::QueuedMessageDispatched { sequence, .. } => *sequence,
             AgentEvent::ContextUpdate { sequence, .. } => *sequence,
             AgentEvent::Reasoning { sequence, .. } => *sequence,
@@ -604,6 +628,8 @@ impl AgentEvent {
                 timestamp,
                 usage,
                 turn_usage,
+                cost_usd,
+                session_cost_usd,
                 ..
             } => AgentEvent::ResponseComplete {
                 session_id,
@@ -611,6 +637,25 @@ impl AgentEvent {
                 timestamp,
                 usage,
                 turn_usage,
+                cost_usd,
+                session_cost_usd,
+            },
+            AgentEvent::BudgetWarning {
+                session_id,
+                limit,
+                downgraded,
+                message,
+                cost_usd,
+                timestamp,
+                ..
+            } => AgentEvent::BudgetWarning {
+                session_id,
+                sequence: value,
+                limit,
+                downgraded,
+                message,
+                cost_usd,
+                timestamp,
             },
             AgentEvent::QueuedMessageDispatched {
                 session_id,
@@ -1126,6 +1171,7 @@ impl AgentEvent {
             AgentEvent::ResponseStart { .. } => "response_start",
             AgentEvent::ResponseChunk { .. } => "response_chunk",
             AgentEvent::ResponseComplete { .. } => "response_complete",
+            AgentEvent::BudgetWarning { .. } => "budget_warning",
             AgentEvent::QueuedMessageDispatched { .. } => "queued_message_dispatched",
             AgentEvent::ContextUpdate { .. } => "context_update",
             AgentEvent::Reasoning { .. } => "reasoning",
