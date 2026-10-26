@@ -52,10 +52,39 @@ allowed_users = ["123456789012345678"]
 | `trusted_users` / `trusted_roles` / `trusted_guilds` / `trusted_channels` | Full machine-capable access — keep narrow |
 | `allow_dms` | DMs need this **plus** an explicit `allowed_users` entry |
 | `community_mode` | Separate public support access from trusted access |
+| `moderation_enabled` | Register the `/mod` moderation tools — `trusted_users` only |
 
 Optional extras: `community_context` system prompt, `docs_url`, and GitHub
 new-issue/PR announcements (`github_repo`, `github_tracking_channel`,
 `github_poll_seconds`).
+
+## Moderation tools
+
+`/mod` covers basic community-server moderation: `warn`, `timeout`, `untimeout`,
+`kick`, `ban`, `unban`, `purge`, and `slowmode`. Every part of it is narrow by
+design:
+
+- **Opt-in.** `moderation_enabled = true` (default off). `/mod` is only
+  registered while the flag is on — toggle it in the web UI (Discord → Trusted
+  Full Access) or with `/discord-setup mod-tools on`, and the command list
+  updates immediately.
+- **Trusted users only.** `trusted_users` is the only key. Trusted *roles* and
+  community grants (allowed users, allowed roles, all-member access) never
+  unlock `/mod`, and DMs never reach it.
+- **Known servers only.** The invocation must land in a server listed in
+  `trusted_guilds` or `allowed_guilds` (channel lists deliberately do not
+  narrow moderation).
+- **Discord permissions still apply.** The invoker *and* the bot need the
+  matching permission (Moderate Members, Kick Members, Ban Members, Manage
+  Messages, or Manage Channels), and actions only land on targets below both
+  highest role positions.
+- **Protected targets.** The server owner, other bots, and anyone in
+  `trusted_users` / `trusted_roles` can never be targeted.
+
+```toml
+[discord]
+moderation_enabled = true
+```
 
 ## Related tasks
 

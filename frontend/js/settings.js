@@ -500,6 +500,7 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-discord-trusted-roles').value = (discord.trusted_roles || []).join('\n');
         document.getElementById('setting-discord-trusted-guilds').value = (discord.trusted_guilds || []).join('\n');
         document.getElementById('setting-discord-trusted-channels').value = (discord.trusted_channels || []).join('\n');
+        document.getElementById('setting-discord-moderation-enabled').checked = discord.moderation_enabled === true;
         document.getElementById('setting-discord-music-enabled').checked = discord.music_enabled === true;
         document.getElementById('setting-discord-yt-dlp-path').value = discord.yt_dlp_path || '';
         document.getElementById('setting-discord-yt-dlp-extra-args').value = discord.yt_dlp_extra_args || '';
@@ -724,6 +725,7 @@ OSA.saveSettings = async function() {
         trusted_roles: trustedDiscordRoles,
         trusted_guilds: trustedDiscordGuilds,
         trusted_channels: trustedDiscordChannels,
+        moderation_enabled: document.getElementById('setting-discord-moderation-enabled').checked,
         music_enabled: document.getElementById('setting-discord-music-enabled').checked,
         yt_dlp_path: document.getElementById('setting-discord-yt-dlp-path').value || '',
         yt_dlp_extra_args: document.getElementById('setting-discord-yt-dlp-extra-args').value || '',

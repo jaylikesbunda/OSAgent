@@ -521,6 +521,11 @@ pub struct DiscordConfig {
     pub trusted_guilds: Vec<u64>,
     #[serde(with = "snowflake::list")]
     pub trusted_channels: Vec<u64>,
+    /// Enables the `/mod` moderation tools (warn, timeout, kick, ban, purge,
+    /// slowmode) for trusted identities, including inside community servers.
+    /// Off by default so community servers never inherit moderation commands.
+    #[serde(default)]
+    pub moderation_enabled: bool,
     #[serde(with = "snowflake::optional")]
     pub last_channel_id: Option<u64>,
     // ── Music / voice playback ──────────────────────────────────────────
@@ -571,6 +576,7 @@ impl Default for DiscordConfig {
             trusted_roles: Vec::new(),
             trusted_guilds: Vec::new(),
             trusted_channels: Vec::new(),
+            moderation_enabled: false,
             last_channel_id: None,
             music_enabled: false,
             music_max_queue: default_music_max_queue(),
@@ -2870,6 +2876,7 @@ last_channel_id = 1478327393205882900
             trusted_roles: vec![],
             trusted_guilds: vec![],
             trusted_channels: vec![],
+            moderation_enabled: false,
             last_channel_id: None,
             music_enabled: false,
             music_max_queue: 50,

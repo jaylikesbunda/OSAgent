@@ -7,6 +7,7 @@
 
 mod chat;
 mod commands;
+mod moderation;
 mod music;
 mod panel;
 mod ui;
@@ -269,6 +270,41 @@ impl Handler {
         Self::control_is_authorized_for_config(&discord, user_id, guild_id, channel_id, role_ids)
     }
 
+    /// Moderation (`/mod`) is guild-only, opt-in through `moderation_enabled`,
+    /// and reserved strictly for `trusted_users` — trusted *roles* and
+    /// community grants deliberately do not unlock it. A trusted user keeps
+    /// moderation reach inside the community server without that server
+    /// becoming a trusted location for chat or agent access. Channel lists
+    /// deliberately do not gate `/mod` — a trusted operator moderates the
+    /// whole server, while the per-action checks in [`moderation`] still refuse
+    /// the server owner, bots, protected trusted members, and anyone at or
+    /// above the acting role position.
+    fn moderation_is_authorized_for_config(
+        discord: &DiscordConfig,
+        user_id: u64,
+        guild_id: Option<u64>,
+    ) -> bool {
+        if !discord.moderation_enabled {
+            return false;
+        }
+        let Some(guild_id) = guild_id else {
+            return false;
+        };
+        if !discord.trusted_users.contains(&user_id) {
+            return false;
+        }
+        (discord.trusted_guilds.is_empty() && discord.allowed_guilds.is_empty())
+            || discord.trusted_guilds.contains(&guild_id)
+            || discord.allowed_guilds.contains(&guild_id)
+    }
+
+    async fn moderation_is_authorized(&self, user_id: u64, guild_id: Option<u64>) -> bool {
+        let Some(discord) = self.agent.discord_config().await else {
+            return false;
+        };
+        Self::moderation_is_authorized_for_config(&discord, user_id, guild_id)
+    }
+
     /// Component-level control check used by the settings panel: the model
     /// select, "Use anyway" force button and delete-session confirm share the
     /// slash-command control gate, so the owner keeps them from a Community
@@ -331,6 +367,15 @@ impl Handler {
         role_ids: &[u64],
     ) -> bool {
         Self::control_is_authorized_for_config(discord, user_id, guild_id, channel_id, role_ids)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_moderation_authorized(
+        discord: &DiscordConfig,
+        user_id: u64,
+        guild_id: Option<u64>,
+    ) -> bool {
+        Self::moderation_is_authorized_for_config(discord, user_id, guild_id)
     }
 
     fn community_owner_key(user_id: u64, guild_id: Option<u64>) -> String {
@@ -1999,6 +2044,55 @@ mod tests {
             99,
             &[]
         ));
+    }
+
+    #[test]
+    fn moderation_requires_the_opt_in_and_a_trusted_user() {
+        let mut discord = DiscordConfig {
+            community_mode: true,
+            allow_community_members: true,
+            allowed_guilds: vec![42],
+            trusted_users: vec![7],
+            moderation_enabled: true,
+            ..DiscordConfig::default()
+        };
+
+        // The trusted user can moderate the community server...
+        assert!(Handler::moderation_is_authorized_for_config(&discord, 7, Some(42)));
+        // ...but community members cannot, and DMs never reach moderation.
+        assert!(!Handler::moderation_is_authorized_for_config(&discord, 8, Some(42)));
+        assert!(!Handler::moderation_is_authorized_for_config(&discord, 7, None));
+        // Unlisted servers stay out of reach even for the trusted user.
+        assert!(!Handler::moderation_is_authorized_for_config(&discord, 7, Some(43)));
+
+        // Without the opt-in nobody gets the tools.
+        discord.moderation_enabled = false;
+        assert!(!Handler::moderation_is_authorized_for_config(&discord, 7, Some(42)));
+    }
+
+    #[test]
+    fn moderation_ignores_trusted_roles_and_allowed_users() {
+        let mut discord = DiscordConfig {
+            community_mode: true,
+            allow_community_members: true,
+            allowed_guilds: vec![42],
+            trusted_users: vec![7],
+            trusted_roles: vec![5],
+            moderation_enabled: true,
+            ..DiscordConfig::default()
+        };
+
+        // A trusted role is not enough — only trusted *users* get the tools.
+        assert!(!Handler::moderation_is_authorized_for_config(&discord, 9, Some(42)));
+        // Neither is an allowed_users grant.
+        discord.allowed_users = vec![8];
+        assert!(!Handler::moderation_is_authorized_for_config(&discord, 8, Some(42)));
+
+        // Outside community mode the rule does not change: the trusted user
+        // list is the only key, even when allowed_users has entries.
+        discord.community_mode = false;
+        assert!(!Handler::moderation_is_authorized_for_config(&discord, 8, Some(42)));
+        assert!(Handler::moderation_is_authorized_for_config(&discord, 7, Some(42)));
     }
 
     #[test]

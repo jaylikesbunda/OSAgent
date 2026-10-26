@@ -297,6 +297,12 @@ subagent_task_max_retries = 2
 # trusted_roles = []
 # trusted_guilds = ["567890123456789012"]
 # trusted_channels = []
+# Basic moderation tools (/mod warn, timeout, kick, ban, purge, slowmode).
+# Off by default so community servers never inherit moderation commands.
+# Only trusted_users can use them — trusted_roles and community grants never
+# unlock /mod. Invoker and bot both need the matching Discord permission, and
+# the server owner, bots, and trusted members are never valid targets.
+# moderation_enabled = false
 
 [tools]
 denied = []

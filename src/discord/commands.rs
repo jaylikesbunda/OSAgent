@@ -29,20 +29,20 @@ const CHOICE_LIMIT: usize = 25;
 // option helpers
 // ---------------------------------------------------------------------------
 
-fn sub(name: &str, description: &str) -> CreateCommandOption {
+pub(super) fn sub(name: &str, description: &str) -> CreateCommandOption {
     CreateCommandOption::new(CommandOptionType::SubCommand, name, description)
 }
 
-fn str_opt(name: &str, description: &str, required: bool) -> CreateCommandOption {
+pub(super) fn str_opt(name: &str, description: &str, required: bool) -> CreateCommandOption {
     CreateCommandOption::new(CommandOptionType::String, name, description).required(required)
 }
 
-fn int_opt(name: &str, description: &str) -> CreateCommandOption {
+pub(super) fn int_opt(name: &str, description: &str) -> CreateCommandOption {
     CreateCommandOption::new(CommandOptionType::Integer, name, description).required(false)
 }
 
 /// The invoked subcommand and its own options, or `("", &[])` for flat commands.
-fn subcommand(command: &CommandInteraction) -> (&str, &[CommandDataOption]) {
+pub(super) fn subcommand(command: &CommandInteraction) -> (&str, &[CommandDataOption]) {
     for option in &command.data.options {
         if let CommandDataOptionValue::SubCommand(options) = &option.value {
             return (option.name.as_str(), options.as_slice());
@@ -51,7 +51,7 @@ fn subcommand(command: &CommandInteraction) -> (&str, &[CommandDataOption]) {
     ("", &[])
 }
 
-fn opt_str<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
+pub(super) fn opt_str<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
     options
         .iter()
         .find(|option| option.name == name)
@@ -60,7 +60,7 @@ fn opt_str<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> 
         .filter(|value| !value.is_empty())
 }
 
-fn opt_i64(options: &[CommandDataOption], name: &str) -> Option<i64> {
+pub(super) fn opt_i64(options: &[CommandDataOption], name: &str) -> Option<i64> {
     options
         .iter()
         .find(|option| option.name == name)
@@ -92,7 +92,7 @@ impl Handler {
     // -----------------------------------------------------------------------
 
     pub(super) async fn register_commands(&self, http: &Http) {
-        let commands = vec![
+        let mut commands = vec![
             CreateCommand::new("chat")
                 .description("Send a message to the agent")
                 .add_option(str_opt("message", "What you want the agent to do", true)),
@@ -223,6 +223,13 @@ impl Handler {
                 .add_option(
                     sub("github-here", "Post new issues and pull requests here")
                         .add_sub_option(str_opt("repo", "GitHub owner/repository", true)),
+                )
+                .add_option(
+                    sub("mod-tools", "Enable or disable the /mod moderation tools").add_sub_option(
+                        str_opt("state", "Whether the moderation tools should be on", true)
+                            .add_string_choice("on", "on")
+                            .add_string_choice("off", "off"),
+                    ),
                 ),
             CreateCommand::new("server-info")
                 .description("Show this server's OSAgent access tier and IDs"),
@@ -240,6 +247,18 @@ impl Handler {
             CreateCommand::new("queue").description("Show the music queue"),
             CreateCommand::new("nowplaying").description("Show the current track"),
         ];
+
+        // `/mod` only exists while moderation tools are opted in, so community
+        // servers never see a moderation command they cannot use.
+        let moderation_enabled = self
+            .agent
+            .discord_config()
+            .await
+            .map(|discord| discord.moderation_enabled)
+            .unwrap_or(false);
+        if moderation_enabled {
+            commands.extend(super::moderation::moderation_commands());
+        }
 
         match Command::set_global_commands(http, commands).await {
             Ok(registered) => {
@@ -286,6 +305,16 @@ impl Handler {
                 return;
             };
             self.handle_session(ctx, command, access).await;
+            return;
+        }
+
+        // Moderation tools sit between chat and control access: opt-in, guild
+        // only, and reserved for the trusted identity lists.
+        if name == "mod" {
+            if !self.ensure_moderation_authorized(ctx, command).await {
+                return;
+            }
+            self.handle_moderation(ctx, command).await;
             return;
         }
 
@@ -428,6 +457,48 @@ impl Handler {
         .await
     }
 
+    /// Gate for `/mod`: the tools are opt-in (`moderation_enabled`), guild-only,
+    /// and reserved for `trusted_users` alone — trusted *roles* and community
+    /// grants deliberately do not unlock them. Unlike chat and control access
+    /// this never widens a location — a trusted user can moderate the
+    /// community server without that server becoming trusted for anyone else.
+    async fn ensure_moderation_authorized(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> bool {
+        if self.command_moderation_authorized(command).await {
+            return true;
+        }
+        let discord = self.agent.discord_config().await.unwrap_or_default();
+        let embed = if discord.moderation_enabled {
+            ui::embed(
+                "Access Denied",
+                "Moderation tools are limited to users in the Trusted User IDs list.",
+                ui::COLOR_ERROR,
+            )
+        } else {
+            ui::embed(
+                "Moderation Disabled",
+                "Moderation tools are turned off. Enable them in the web UI (Discord → Trusted Full Access) or with `/discord-setup mod-tools on`.",
+                ui::COLOR_ERROR,
+            )
+        };
+        self.reply(ctx, command, embed).await;
+        false
+    }
+
+    pub(super) async fn command_moderation_authorized(
+        &self,
+        command: &CommandInteraction,
+    ) -> bool {
+        self.moderation_is_authorized(
+            command.user.id.get(),
+            command.guild_id.map(|id| id.get()),
+        )
+        .await
+    }
+
     async fn discord_setup_is_authorized(&self, command: &CommandInteraction) -> bool {
         let Some(discord) = self.agent.discord_config().await else {
             return false;
@@ -553,14 +624,31 @@ impl Handler {
                     true,
                 )
             }
+            "mod-tools" => {
+                discord.moderation_enabled = opt_str(options, "state") == Some("on");
+                (
+                    if discord.moderation_enabled {
+                        "Moderation Tools Enabled"
+                    } else {
+                        "Moderation Tools Disabled"
+                    },
+                    if discord.moderation_enabled {
+                        "Trusted users can now moderate this server with `/mod` (warn, timeout, kick, ban, purge, slowmode). The command is registered now.".to_string()
+                    } else {
+                        "The `/mod` command is removed until moderation tools are enabled again.".to_string()
+                    },
+                    true,
+                )
+            }
             _ => (
                 "Discord Access Policy",
                 format!(
-                    "Community mode: **{}** · all members: **{}**\nCommunity servers: **{}** · channels: **{}** · roles: **{}**\nTrusted servers: **{}** · channels: **{}** · users: **{}** · roles: **{}**\nDocs: {}",
+                    "Community mode: **{}** · all members: **{}**\nCommunity servers: **{}** · channels: **{}** · roles: **{}**\nTrusted servers: **{}** · channels: **{}** · users: **{}** · roles: **{}**\nModeration tools: **{}**\nDocs: {}",
                     if discord.community_mode { "enabled" } else { "disabled" },
                     if discord.allow_community_members { "enabled" } else { "disabled" },
                     discord.allowed_guilds.len(), discord.allowed_channels.len(), discord.allowed_roles.len(),
                     discord.trusted_guilds.len(), discord.trusted_channels.len(), discord.trusted_users.len(), discord.trusted_roles.len(),
+                    if discord.moderation_enabled { "enabled" } else { "disabled" },
                     if discord.docs_url.is_empty() { "not set" } else { discord.docs_url.as_str() },
                 ),
                 false,
@@ -578,6 +666,12 @@ impl Handler {
                 .await;
                 return;
             }
+        }
+
+        // The `/mod` command follows the moderation flag: re-register so it
+        // appears or disappears without a bot restart.
+        if changed && action == "mod-tools" {
+            self.register_commands(&ctx.http).await;
         }
         self.reply(ctx, command, ui::embed(title, description, ui::COLOR_INFO))
             .await;
@@ -1826,6 +1920,13 @@ impl Handler {
                 "Responses show model · provider · persona in their footer",
             ));
         }
+        if self.command_moderation_authorized(command).await {
+            embed = embed.field(
+                "Moderation",
+                "`/mod warn` · `/mod timeout` · `/mod untimeout` · `/mod kick` · `/mod ban` · `/mod unban` · `/mod purge` · `/mod slowmode`",
+                false,
+            );
+        }
 
         self.reply(ctx, command, embed).await;
     }
@@ -1834,7 +1935,7 @@ impl Handler {
     // response helpers
     // -----------------------------------------------------------------------
 
-    async fn reply(&self, ctx: &Context, command: &CommandInteraction, embed: CreateEmbed) {
+    pub(super) async fn reply(&self, ctx: &Context, command: &CommandInteraction, embed: CreateEmbed) {
         if let Err(e) = command
             .create_response(
                 &ctx.http,
@@ -1850,7 +1951,7 @@ impl Handler {
         }
     }
 
-    async fn edit_reply(&self, ctx: &Context, command: &CommandInteraction, embed: CreateEmbed) {
+    pub(super) async fn edit_reply(&self, ctx: &Context, command: &CommandInteraction, embed: CreateEmbed) {
         if let Err(e) = command
             .edit_response(&ctx.http, EditInteractionResponse::new().embed(embed))
             .await

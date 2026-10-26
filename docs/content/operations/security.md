@@ -23,6 +23,9 @@ time to fix before disclosing publicly.
 - Leave `cors_allowed_origins` empty unless you need cross-origin API access.
 - Keep Discord `trusted_*` lists narrow; DMs need `allow_dms` **plus** an
   explicit `allowed_users` entry.
+- Discord moderation tools (`moderation_enabled`) are off by default and only
+  `trusted_users` can run `/mod` — treat that list as "people you would hand
+  moderator powers to", since every entry can kick, ban, purge, and slowmode.
 - Point the workspace at the smallest folder the agent needs, and deny tools
   you don't use via `[tools].denied`.
 - Keep the OS sandbox at `workspace-write` (the default) and raise it to
