@@ -827,10 +827,13 @@ mod macos {
             profile.push_str("(allow network-out (local ip \"localhost:*\"))\n");
         }
 
-        let key = format!(
-            "osa-sandbox-{:x}.sb",
-            std::collections::hash_map::DefaultHasher::new().finish() as u64 ^ profile.len() as u64
-        );
+        // Content-derived cache key: each policy must get its own profile
+        // file. (Hashing a fresh hasher with `.finish()` returns a constant,
+        // which silently made every policy reuse the first-written profile.)
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        profile.hash(&mut hasher);
+        let key = format!("osa-sandbox-{:x}.sb", hasher.finish());
         let path = std::env::temp_dir().join(key);
         if !path.exists() {
             std::fs::write(&path, &profile)
@@ -842,9 +845,8 @@ mod macos {
     pub(super) fn spawn_confined(sandbox: &Sandbox, spec: SpawnSpec) -> io::Result<SandboxedChild> {
         if sandbox.network() == SandboxNetworkPolicy::Deny {
             // Strict request; the profile must exist to honor it.
-            let profile = seatbelt_profile(sandbox).map_err(|error| {
-                io::Error::new(io::ErrorKind::Other, format!("sandbox: {}", error))
-            })?;
+            let profile = seatbelt_profile(sandbox)
+                .map_err(|error| io::Error::other(format!("sandbox: {}", error)))?;
             return spawn_with_profile(profile, spec);
         }
         match seatbelt_profile(sandbox) {
