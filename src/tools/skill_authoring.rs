@@ -437,15 +437,15 @@ impl Tool for SkillCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Create a new runtime skill from instructions so it can be used immediately in this session. For executable actions, include the action definition and its script source in the same call; skill_create writes the files itself."
+        "Create an installable skill: `SKILL.md` instructions plus `manifest.toml` metadata, packaged as a .oskill bundle the user can install and reuse."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when the user asks for a new reusable capability ('make a skill that...', 'teach OSA to...') or when you notice a repeatable workflow worth saving"
+        "the user asks for a new reusable capability rather than a one-off change"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Don't use for one-off tasks with no reuse value, or to overwrite an existing skill (use skill_update)"
+        "one-off work this run can just do directly"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
@@ -580,15 +580,15 @@ impl Tool for SkillUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "Update an existing runtime skill's instructions, config, actions or scripts; applies immediately. Prefer action_patches for small action tweaks"
+        "Update an existing skill, replacing only the manifest or instruction fields you pass."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use to fix, extend or improve a skill. For small action tweaks (rename, reword a description) use action_patches with just {name + changed fields}; only send the full actions array when restructuring"
+        "an existing skill needs corrected instructions or metadata"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Don't use to create a brand-new skill (use skill_create)"
+        "See tool description"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
@@ -748,15 +748,15 @@ impl Tool for SkillDeleteTool {
     }
 
     fn description(&self) -> &str {
-        "Delete a runtime skill by name (removes its directory immediately)"
+        "Delete an installed skill and its bundle."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when the user asks to remove a skill, or to clear the way before recreating one with a different shape"
+        "the user asks to remove a skill"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Don't use without the user asking (or your own failed create needing a clean slate)"
+        "See tool description"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {

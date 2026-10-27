@@ -857,15 +857,15 @@ impl Tool for GithubTool {
     }
 
     fn description(&self) -> &str {
-        "GitHub operations: pull requests (list/view/diff/files/create/merge/close), CodeRabbit-style automated PR review (review_pr), posting reviews and comments, issues, branches, commits, checks, Actions runs, releases, and code search"
+        "GitHub operations: pull requests (list, view, diff, files, create, merge, close), CodeRabbit-style PR review, reviews and comments, issues, branches, commits, checks, Actions runs and logs, releases, and code search. `action` picks the operation; `repo` is `owner/repo` and is optional when one repository is watched."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for anything GitHub: 'review PR #123', 'what's failing in CI', 'open an issue', 'show me the latest release', or inspecting pull request diffs"
+        "anything on GitHub - PR review, CI failures, issues, releases"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Don't use for generic web content that happens to be on github.com (use web_fetch), or for local git operations (use bash)"
+        "generic web pages on github.com (`web_fetch`) or local git (`bash`)"
     }
 
     fn timeout_ms(&self) -> Option<u64> {

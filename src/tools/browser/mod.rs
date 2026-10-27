@@ -638,15 +638,15 @@ impl Tool for BrowserTool {
     }
 
     fn description(&self) -> &str {
-        "Drive a real sandboxed web browser (Chromium; headless by default) to read and interact with JavaScript-heavy or interactive pages. Observe pages through accessibility snapshots with [ref=eN] element handles; act by ref (click, type, select, press, scroll, hover). Keeps state across calls within a session: pages, tabs, logins in that browser. Local and private network addresses are blocked."
+        "Drive a sandboxed Chromium (headless by default) through accessibility snapshots: read `[ref=eN]` handles, then click, type, select, press, scroll or hover by ref. Pages, tabs and logins persist across calls in one session. Local and private network addresses are blocked."
     }
 
     fn when_to_use(&self) -> &str {
-        "Pages that need JavaScript, logins, clicking, forms, infinite scroll, or visual inspection; web_fetch returned an empty or blocked page"
+        "JavaScript, logins, forms or visual checks, or web_fetch returned nothing"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Plain pages and APIs that web_fetch or web_search can read; anything on localhost or a private network"
+        "plain pages and APIs web_fetch can read; anything on localhost"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

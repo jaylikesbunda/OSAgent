@@ -502,15 +502,15 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply structured multi-file patches for atomic changes across one or more files.\n\nUsage:\n- Use for precise multi-hunk edits where edit_file would require multiple calls.\n- Use for coordinated changes across multiple files in a single operation.\n- The patch format uses *** Begin Patch / *** End Patch envelopes with *** Add File / *** Update File / *** Delete File headers.\n- Update hunks use @@ markers with - (remove) and + (add) lines, like unified diff.\n- Hunk matching falls back to whitespace-insensitive and similarity-based matching when the context is not byte-exact.\n- Read the target files first before constructing a patch.\n- After applying, LSP diagnostics (when an LSP server is available) may be reported so you can fix errors.\n- Creates automatic backups in .osagent_backups before modifying."
+        "Apply one structured patch spanning hunks or files, atomically. Envelope is `*** Begin Patch` / `*** End Patch` with `*** Add File`, `*** Update File` or `*** Delete File` headers and `@@` hunks of `-`/`+` lines. Context may match fuzzily. Read the targets first; LSP diagnostics may follow; backups go to .osagent_backups."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you need to change multiple locations in a file or across files atomically. Preferred over edit_file for complex changes spanning several sections."
+        "coordinated changes across several hunks or files, in one atomic edit"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for simple single replacements that edit_file can handle."
+        "a single replacement `edit_file` already handles"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

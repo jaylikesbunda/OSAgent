@@ -267,9 +267,14 @@ pub struct ToolRegistry {
 }
 
 /// Render the model-facing description for a tool: description,
-/// when-to-use, when-not-to-use, and up to two examples. Shared by the
-/// always-loaded block, the deferred built-in catalog, and `tool_search`
-/// results so a tool reads identically wherever the model meets it.
+/// when-to-use, then when-not-to-use. Shared by the always-loaded block,
+/// the deferred built-in catalog, and `tool_search` results so a tool
+/// reads identically wherever the model meets it.
+///
+/// Examples are deliberately not rendered. The JSON schema already names
+/// every parameter and its meaning, so a worked payload mostly restates
+/// it at ~50 chars per example on every request. `Tool::examples` stays
+/// on the trait for tooling, but nothing in the prompt pays for it.
 pub(crate) fn tool_prompt_description(tool: &Arc<dyn Tool>) -> String {
     let mut sections = vec![tool.description().trim().to_string()];
 
@@ -281,22 +286,6 @@ pub(crate) fn tool_prompt_description(tool: &Arc<dyn Tool>) -> String {
     let when_not_to_use = tool.when_not_to_use().trim();
     if !when_not_to_use.is_empty() && when_not_to_use != "See tool description" {
         sections.push(format!("Avoid when: {}", when_not_to_use));
-    }
-
-    let examples = tool.examples();
-    if !examples.is_empty() {
-        let rendered_examples = examples
-            .iter()
-            .take(2)
-            .map(|example| {
-                let payload = serde_json::to_string(&example.input).unwrap_or_default();
-                format!("{} => {}", example.description.trim(), payload)
-            })
-            .collect::<Vec<_>>()
-            .join(" | ");
-        if !rendered_examples.is_empty() {
-            sections.push(format!("Examples: {}", rendered_examples));
-        }
     }
 
     sections.join(" ")

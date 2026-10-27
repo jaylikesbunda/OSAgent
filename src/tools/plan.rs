@@ -28,7 +28,7 @@ impl Tool for PlanExitTool {
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when the plan is complete and you want to start implementing"
+        "the plan is ready and implementation can start"
     }
 
     fn when_not_to_use(&self) -> &str {

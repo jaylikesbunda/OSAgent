@@ -16,23 +16,73 @@ $ErrorActionPreference = "Stop"
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptRoot
 
+# Every external tool in this script — cargo, npm, esbuild — writes ordinary
+# progress to stderr. Under Windows PowerShell 5.1, `$ErrorActionPreference =
+# "Stop"` turns the first stderr line into a terminating NativeCommandError
+# before `$LASTEXITCODE` is ever read, so a *successful* step aborts the build.
+# (PowerShell 7 does not do this, which is why the script worked in some
+# terminals and not others.) Merge the streams for the duration of the call,
+# print what the tool printed, and judge the step only by its exit code.
+function Invoke-NativeStep {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Exe,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$CommandArgs
+    )
+
+    Write-Host ""
+    Write-Host "==> $Label" -ForegroundColor Cyan
+    Write-Host "$Exe $($CommandArgs -join ' ')" -ForegroundColor DarkGray
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Exe @CommandArgs 2>&1 | ForEach-Object {
+            # Native stderr arrives as an ErrorRecord whose exception message
+            # is the line the tool wrote; anything else is plain output.
+            $line = if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $_.Exception.Message
+            } else {
+                $_
+            }
+            Write-Host $line
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Step failed: $Label"
+    }
+}
+
 function Invoke-CargoStep {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Label,
 
         [Parameter(Mandatory = $true)]
-        [string[]]$Args
+        [string[]]$CommandArgs
     )
 
-    Write-Host ""
-    Write-Host "==> $Label" -ForegroundColor Cyan
-    Write-Host "cargo $($Args -join ' ')" -ForegroundColor DarkGray
+    Invoke-NativeStep -Label $Label -Exe "cargo" -CommandArgs $CommandArgs
+}
 
-    & cargo @Args
-    if ($LASTEXITCODE -ne 0) {
-        throw "Step failed: $Label"
-    }
+function Invoke-NpmStep {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$CommandArgs
+    )
+
+    Invoke-NativeStep -Label $Label -Exe "npm" -CommandArgs $CommandArgs
 }
 
 $BundleFrontend = -not $NoFrontendBundle
@@ -63,56 +113,43 @@ if ($Fast -and $Checks) {
 
 if ($Checks) {
     if (-not $Fast) {
-        Invoke-CargoStep -Label "Check core formatting" -Args @("fmt", "--", "--check")
-        Invoke-CargoStep -Label "Run core clippy" -Args @("clippy", "--all-targets", "--all-features", "--", "-D", "warnings")
+        Invoke-CargoStep -Label "Check core formatting" -CommandArgs @("fmt", "--", "--check")
+        Invoke-CargoStep -Label "Run core clippy" -CommandArgs @("clippy", "--all-targets", "--all-features", "--", "-D", "warnings")
     }
-    Invoke-CargoStep -Label "Run core tests" -Args @("test", "--all-features", "--verbose")
+    Invoke-CargoStep -Label "Run core tests" -CommandArgs @("test", "--all-features", "--verbose")
     if (-not $Fast) {
-        Invoke-CargoStep -Label "Check launcher formatting" -Args @("fmt", "--manifest-path", "launcher/Cargo.toml", "--all", "--", "--check")
-        Invoke-CargoStep -Label "Run launcher clippy" -Args @("clippy", "--manifest-path", "launcher/Cargo.toml", "--all-targets", "--all-features", "--", "-D", "warnings")
+        Invoke-CargoStep -Label "Check launcher formatting" -CommandArgs @("fmt", "--manifest-path", "launcher/Cargo.toml", "--all", "--", "--check")
+        Invoke-CargoStep -Label "Run launcher clippy" -CommandArgs @("clippy", "--manifest-path", "launcher/Cargo.toml", "--all-targets", "--all-features", "--", "-D", "warnings")
     }
 }
 
 if ($BundleFrontend) {
-    Write-Host ""
-    Write-Host "==> Bundle frontend (esbuild)" -ForegroundColor Cyan
     $FrontendDir = Join-Path $ScriptRoot "frontend"
     if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
-        Write-Host "npm install" -ForegroundColor DarkGray
-        & npm install --prefix $FrontendDir
-        if ($LASTEXITCODE -ne 0) { throw "Step failed: npm install" }
+        Invoke-NpmStep -Label "Install frontend deps" -CommandArgs @("install", "--prefix", $FrontendDir)
     }
-    Write-Host "npm run build" -ForegroundColor DarkGray
-    & npm run build --prefix $FrontendDir
-    if ($LASTEXITCODE -ne 0) { throw "Step failed: npm run build" }
+    Invoke-NpmStep -Label "Bundle frontend (esbuild)" -CommandArgs @("run", "build", "--prefix", $FrontendDir)
 }
 
 $Profile = if ($Fast) { "dev-release" } else { "release" }
 $ProfileArg = @("--profile", $Profile)
 
-Invoke-CargoStep -Label "Build core ($Profile)" -Args (@("build") + $ProfileArg + $CoreFeatureArgs)
-Invoke-CargoStep -Label "Build updater ($Profile)" -Args (@("build", "--manifest-path", "updater/Cargo.toml") + $ProfileArg)
+Invoke-CargoStep -Label "Build core ($Profile)" -CommandArgs (@("build") + $ProfileArg + $CoreFeatureArgs)
+Invoke-CargoStep -Label "Build updater ($Profile)" -CommandArgs (@("build", "--manifest-path", "updater/Cargo.toml") + $ProfileArg)
 
 $ProfileDir = if ($Fast) { "dev-release" } else { "release" }
 $env:OSAGENT_CORE_SOURCE = Join-Path $ScriptRoot "target/$ProfileDir/osagent.exe"
 $env:OSAGENT_UPDATER_SOURCE = Join-Path $ScriptRoot "updater/target/$ProfileDir/osagent-updater.exe"
-Invoke-CargoStep -Label "Build launcher ($Profile) (embeds core + updater)" -Args (@("build", "--manifest-path", "launcher/Cargo.toml") + $ProfileArg)
+Invoke-CargoStep -Label "Build launcher ($Profile) (embeds core + updater)" -CommandArgs (@("build", "--manifest-path", "launcher/Cargo.toml") + $ProfileArg)
 
 if ($Installer) {
     if ($Fast) {
         Write-Host ""
         Write-Host "WARNING: -Installer with -Fast uses dev-release profile. Use without -Fast for production installer." -ForegroundColor Yellow
     }
-    Write-Host ""
-    Write-Host "==> Build launcher installer (NSIS + WebView2 bootstrapper)" -ForegroundColor Cyan
-    Write-Host "cargo tauri build --bundles nsis" -ForegroundColor DarkGray
-
     Push-Location (Join-Path $ScriptRoot "launcher")
     try {
-        & cargo tauri build --bundles nsis
-        if ($LASTEXITCODE -ne 0) {
-            throw "Step failed: Build launcher installer"
-        }
+        Invoke-NativeStep -Label "Build launcher installer (NSIS + WebView2 bootstrapper)" -Exe "cargo" -CommandArgs @("tauri", "build", "--bundles", "nsis")
     }
     finally {
         Pop-Location

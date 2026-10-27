@@ -620,15 +620,15 @@ impl Tool for CodeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Quick-context code search: fans one natural-language query out into a batch of derived greps (keyword terms, camelCase/snake_case identifier variants, definition anchors) and returns the most relevant files with matching snippets ranked by hit quality. Reads live files, no index, always current.\n\nUsage:\n- Best when you're unsure what to look for or where: give 2-6 distinctive concept terms rather than full sentences.\n- Results rank files that tie multiple query terms together higher than files mentioning just one.\n- Follow up with read_file on promising paths."
+        "Fan one natural-language query into derived greps (term variants, identifier casing, definition anchors) and return files ranked by hit quality, with snippets. Reads live files, no index. Give 2-6 distinctive terms rather than a sentence."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use FIRST for vague 'where/how does X work' questions before grepping; returns ranked files with snippets."
+        "a vague where-or-how question, before grepping"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for exact literal matches or regex (use grep), file names (use glob), or when you already know the file (use read_file)."
+        "exact literals (`grep`), file names (`glob`), or a known file"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

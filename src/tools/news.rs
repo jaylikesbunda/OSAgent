@@ -362,11 +362,11 @@ impl Tool for NewsTool {
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when the user asks for news, headlines, current events, or what's happening in the world. Prefer over web_search for general news queries."
+        "the user asks for news, headlines or current events"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for specific article lookups (use web_fetch), fact-checking, or non-news web searches (use web_search)."
+        "a specific article (`web_fetch`) or a non-news search (`web_search`)"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

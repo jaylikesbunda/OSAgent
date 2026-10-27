@@ -28,11 +28,11 @@ impl Tool for BatchTool {
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when multiple reads, searches (grep/glob/codesearch/lsp), web fetches, todo reads, skill lookups, or explicitly read-only bash commands can run at the same time"
+        "independent reads, searches, fetches or read-only bash can run at once"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use when calls depend on each other or when you need sequential edits based on prior results"
+        "calls depend on each other or on a prior result"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

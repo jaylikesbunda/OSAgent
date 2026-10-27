@@ -245,9 +245,9 @@ impl BashTool {
             .collect();
 
         let description = if cfg!(windows) {
-            "Execute a shell command with optional timeout and working directory.\n\nUsage:\n- Runs via `cmd /C` on this Windows host — use Windows/cmd syntax (dir, findstr, del, cmd built-ins, PowerShell via `powershell -Command \"...\"`), NOT POSIX/Unix syntax. Commands like `ls`, `/mnt/c/...`, `2>/dev/null`, or `cat` will fail with 'not recognized'.\n- Use for builds, tests, linting, git operations (staging, diff, log), package management, and any CLI commands.\n- Commands are workspace-scoped by default. Use workdir to run in a subdirectory.\n- Synchronous with a timeout (max 300s). For long-running servers, watch-mode commands, or background jobs, use the `process` tool (start/poll/log/kill) instead of blocking bash.\n- Direct deletes (rm, del) are blocked - use delete_file instead.\n- Do NOT use for simple file reads (use read_file) or content searches (use grep/glob).\n- Do NOT use for file edits (use edit_file or apply_patch).\n- When making multiple independent bash calls, send them in a single message to run in parallel."
+        "Run a shell command synchronously, up to 300s, workspace-scoped; `workdir` runs it in a subdirectory. Uses `cmd /C` on this Windows host, so Windows syntax only (`dir`, `findstr`, PowerShell via `powershell -Command`); `ls`, `cat` and `2>/dev/null` fail. For servers, watches or background jobs use `process`. Direct deletes are blocked (use `delete_file`). Send independent calls in one message to run them in parallel."
         } else {
-            "Execute a shell command with optional timeout and working directory.\n\nUsage:\n- Runs via `sh -lc` — use POSIX/Unix shell syntax.\n- Use for builds, tests, linting, git operations (staging, diff, log), package management, and any CLI commands.\n- Commands are workspace-scoped by default. Use workdir to run in a subdirectory.\n- Synchronous with a timeout (max 300s). For long-running servers, watch-mode commands, or background jobs, use the `process` tool (start/poll/log/kill) instead of blocking bash.\n- Direct deletes (rm, del) are blocked - use delete_file instead.\n- Do NOT use for simple file reads (use read_file) or content searches (use grep/glob).\n- Do NOT use for file edits (use edit_file or apply_patch).\n- When making multiple independent bash calls, send them in a single message to run in parallel."
+        "Run a shell command synchronously, up to 300s, workspace-scoped; `workdir` runs it in a subdirectory. Uses `sh -lc`. For servers, watches or background jobs use `process`. Direct deletes are blocked (use `delete_file`). Send independent calls in one message to run them in parallel."
         }
         .to_string();
 
@@ -910,11 +910,11 @@ impl Tool for BashTool {
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for running build tools, test suites, linters, git commands, package managers, and any system commands that aren't covered by dedicated tools."
+        "building, testing, linting, git or package-manager commands"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for file reads (use read_file), content searches (use grep/glob), file edits (use edit_file), or file creation (use write_file)."
+        "file reads, searches, creations or edits that have dedicated tools"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

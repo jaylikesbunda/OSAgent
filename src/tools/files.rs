@@ -976,15 +976,15 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- Paths are relative to the workspace root.\n- By default, returns up to 200 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Batch mode: pass `paths` (up to 10) to read several files/dirs in one call instead of N parallel calls; per-path errors fail only their section.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by pattern.\n- Contents are returned with each line prefixed by its line number.\n- For directories, entries are returned one per line with a trailing / for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- Image files (png/jpeg/gif/webp) are attached to the conversation as images so you can see them.\n- PDF files are read as extracted text with the same offset/limit pagination."
+        "Read a file or list a directory; paths are relative to the workspace. Returns line-numbered content, the first 200 lines by default; `offset` is 1-indexed and `limit` pages from there. Pass `paths` (max 10) to read several files at once instead of N parallel calls. Lines over 2000 chars are cut. Images attach as images; PDFs extract as text."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you have an exact path and need file content or directory listings. Always read before editing."
+        "you know the exact path and need its content"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for broad content discovery across many files; use glob or grep first. Do not use for file modifications."
+        "broad discovery across many files (use `glob` or `grep`)"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
@@ -1243,15 +1243,15 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use read_file first to read the file's contents. This tool will fail if you did not read the file first.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the user.\n- Creates an automatic backup in .osagent_backups before overwriting."
+        "Write a whole file, creating or overwriting it; an existing file is backed up to .osagent_backups first. Fails on an existing file you have not read this session. Never create documentation unasked; prefer `edit_file` for partial changes."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for creating new files or when a full file rewrite is more appropriate than targeted edits."
+        "creating a file, or a full rewrite beats targeted edits"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for partial changes to existing files; use edit_file or apply_patch instead."
+        "partial changes to an existing file (use `edit_file`)"
     }
 
     fn parameters(&self) -> Value {
@@ -1520,15 +1520,15 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Performs exact string replacements in files with fuzzy matching fallbacks.\n\nUsage:\n- You MUST use read_file at least once before editing a file. The tool will error if you attempt an edit without reading the file first.\n- When editing text from read_file output, copy the exact text you want to replace, preserving indentation (tabs/spaces).\n- Single-hunk mode: pass old_text + new_text. Batch mode: pass `edits` (up to 20 {old_text, new_text, replace_all?}) for atomic multi-hunk changes in one call — all edits apply or none does. Prefer `edits` over N sequential edit_file calls.\n- The tool will FAIL if old_text is not found in the file. Read the file first and copy the exact text. Not-found errors include a context snippet plus the closest fuzzy candidate location to copy from.\n- The tool will FAIL if old_text is found multiple times. Provide more surrounding context to make the match unique, or use replace_all to change every instance.\n- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.\n- If the exact text is not found, the tool falls back to fuzzy matching (whitespace, indentation, and small context differences).\n- Creates an automatic backup in .osagent_backups before modifying."
+        "Replace exact text in one file. Copy `old_text` verbatim from read_file, indentation included. Pass `edits` (max 20) for atomic multi-hunk work: all apply or none do. Fails when `old_text` is missing or matches more than once; `replace_all` takes every match. Context differing only in whitespace still matches fuzzily. Requires a prior read; backs up to .osagent_backups."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for targeted inline changes to existing files, single- or multi-hunk (via `edits`). For changes across several files, prefer apply_patch."
+        "targeted changes inside one file, single- or multi-hunk"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for creating new files (use write_file) or full file rewrites (use write_file)."
+        "new files (`write_file`) or edits spanning several files (`apply_patch`)"
     }
 
     fn parameters(&self) -> Value {
@@ -1846,15 +1846,15 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "List files and directories in the workspace.\n\nUsage:\n- Returns entries sorted alphabetically as `[FILE <size>B] path` / `[DIR] path`.\n- Directories are shown with a trailing /.\n- Skips common noise directories like node_modules, target, .git by default.\n- Use recursive:true to list all files under a directory tree.\n- Use glob for pattern-based file discovery instead."
+        "List a directory as `[FILE <size>B] path` or `[DIR] path`, sorted, skipping node_modules, target and .git. `recursive=true` walks the whole tree."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use for quick directory inspection when you need to understand the local file layout."
+        "you need the local file layout"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use when you need content search (use grep) or pattern-based file finding (use glob) or when you already know the exact file path (use read_file)."
+        "content search (`grep`) or name patterns (`glob`)"
     }
 
     fn parameters(&self) -> Value {
@@ -2057,15 +2057,15 @@ impl Tool for DeleteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Delete a file from the workspace. Irreversible - creates an automatic backup before deletion.\n\nUsage:\n- Only use when a file truly needs removal and the user requested or clearly implied that change.\n- Creates a timestamped backup in .osagent_backups before deleting.\n- The path must be relative to the workspace root.\n- Cannot delete directories; only individual files."
+        "Delete one file, backing it up to .osagent_backups first. Files only, never directories; use only when removal is what the user asked for."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use only when a file must be removed and the user explicitly requested deletion."
+        "the user asked for this file to be removed"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for routine edits (use edit_file), content replacement (use write_file), or when keeping the file with modifications is safer."
+        "See tool description"
     }
 
     fn parameters(&self) -> Value {

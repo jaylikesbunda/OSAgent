@@ -432,7 +432,7 @@ impl Tool for ProcessTool {
     }
 
     fn description(&self) -> &str {
-        "Manage background processes: list, start, poll, log, kill. Core companion to bash: start long-running commands (servers, watch mode, slow builds/tests) here with `start`, then `poll`/`log` for output and `kill` to stop — no blocking, no timeout retries."
+        "Manage background processes: `start` a long-running command (server, watch mode, slow build), then `poll` or `log` for output and `kill` to stop it. Companion to `bash`, which blocks."
     }
 
     fn parameters(&self) -> Value {
@@ -537,7 +537,7 @@ impl Tool for ProcessTool {
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you need to run long-running commands in the background, monitor their output, or interact with running processes."
+        "a command outlives the 300s bash limit or must be polled"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

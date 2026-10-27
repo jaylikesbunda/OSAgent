@@ -146,15 +146,15 @@ impl Tool for ToolSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Find and load tools that are not loaded by default. Core tools (files, edits, bash + process background, search, web, todos, skills) are always loaded; this searches the deferred catalogs: low-frequency built-ins (weather, calendar, news, system status, memory, decisions, goals, skill authoring, public web, ...) and connected MCP server tools. Their schemas are not in context until you search for them; matches returned here become callable immediately by name."
+        "Find and load tools that are not loaded by default. Searches deferred built-ins (weather, calendar, news, memory, decisions, goals, skill authoring, public web, and more) plus connected MCP server tools; their schemas stay out of context until searched. Matches become callable immediately by name; `select:name1,name2` fetches exact tools."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when the task needs a capability listed in the prompt's tool manifest (deferred built-ins or MCP servers) that you do not already have loaded, or to reload a schema with select:<tool_name>"
+        "the task needs a capability in the tool manifest that you do not have loaded"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for core tools (files, bash/process, search, web, todos, skills) — those are always loaded"
+        "core tools, which are always loaded"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

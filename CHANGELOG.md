@@ -1,4 +1,15 @@
-v0.8.0 changes (unreleased):
+v0.8.1 changes (unreleased):
+
+TL;DR:
+* **38% smaller tool schema**: denser built-in tool descriptions cut the always-loaded tool block from 8,608 to 5,357 tokens per request
+
+Changed:
+* Rewrote every built-in tool description as one dense paragraph with the constraints inline and no worked examples, and stopped rendering examples into the tool schema. About 3,250 fewer tokens of context on every request - 0.3% of a 1M window, roughly 10% of a 32k one
+
+Fixed:
+* The deferred-tool manifest blurb now truncates on a character boundary instead of panicking when a multi-byte character lands at the 120-byte cap
+
+v0.8.0 changes:
 
 TL;DR:
 * **GitHub inside OSA**: act on pull requests, issues and checks, and get structured PR reviews on demand, automatically on watched repositories, or from a PR comment

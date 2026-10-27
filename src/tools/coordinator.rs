@@ -23,7 +23,7 @@ impl Tool for CoordinatorTool {
     }
 
     fn description(&self) -> &str {
-        "Launch a coordinator that manages parallel worker agents through research, implementation, and verification phases for complex multi-file tasks"
+        "Launch a coordinator that runs parallel worker agents through research, implementation and verification for complex multi-file work."
     }
 
     fn when_to_use(&self) -> &str {

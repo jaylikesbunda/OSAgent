@@ -256,8 +256,9 @@ impl NativeToolCatalog {
 }
 
 /// One-line manifest blurb: the tool's when-to-use, capped. When a tool
-/// has no when-to-use, its description's first sentence is used instead.
+/// has no when-to-use, its description is used instead.
 fn short_blurb(tool: &Arc<dyn Tool>) -> String {
+    const CAP: usize = 120;
     let when_to_use = tool.when_to_use().trim();
     let source = if !when_to_use.is_empty() && when_to_use != "See tool description" {
         when_to_use
@@ -265,8 +266,15 @@ fn short_blurb(tool: &Arc<dyn Tool>) -> String {
         tool.description().trim()
     };
     let mut blurb = source.split_whitespace().collect::<Vec<_>>().join(" ");
-    blurb.truncate(120);
-    if blurb.len() >= 120 {
+    // Cap on a char boundary: `String::truncate` panics when the byte index
+    // lands mid-codepoint, and these strings are author-supplied.
+    if blurb.chars().count() > CAP {
+        let cut = blurb
+            .char_indices()
+            .nth(CAP)
+            .map(|(index, _)| index)
+            .unwrap_or(blurb.len());
+        blurb.truncate(cut);
         blurb.push('…');
     }
     blurb
@@ -301,6 +309,21 @@ mod tests {
 
     fn stub(name: &'static str, description: &'static str) -> Arc<dyn Tool> {
         Arc::new(StubTool { name, description })
+    }
+
+    #[test]
+    fn short_blurb_caps_on_char_boundary() {
+        // 200 multi-byte chars: a byte-index truncate at 120 would panic.
+        let long: &'static str = Box::leak("é".repeat(200).into_boxed_str());
+        let blurb = short_blurb(&stub("x", long));
+        assert_eq!(blurb.chars().count(), 121, "120 chars plus the ellipsis");
+        assert!(blurb.ends_with('…'));
+    }
+
+    #[test]
+    fn short_blurb_leaves_short_text_alone() {
+        let blurb = short_blurb(&stub("x", "Current conditions and forecast"));
+        assert_eq!(blurb, "Current conditions and forecast");
     }
 
     fn catalog() -> Arc<NativeToolCatalog> {

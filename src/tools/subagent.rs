@@ -31,15 +31,15 @@ impl Tool for SubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Manage a specialized subagent for complex multi-step tasks. action=run launches a new standalone session; action=status checks a prior task_id without changing it (shows state, tool count, last tool worked on, and whether a real final summary exists); action=resume continues a prior task_id with its full history, including telling a stopped subagent to finish its task and write its summary. For run/resume, specify exactly what information the subagent should return. Set background=true to launch or resume asynchronously; completion is reported automatically. When a background subagent finishes, verify its result before reporting to the user: if it stopped without a final summary or the task looks unfinished, resume it and tell it to finish. Pass model to run the subagent on a specific model: \"provider_id:model_id\", a model id, or a friendly name like \"sonnet\". A friendly name resolves to the provider it was last used on; if several providers still match, the call fails with the candidates so you can ask the user which provider to use (question tool) and retry with \"provider_id:model_id\"."
+        "Run a subagent on its own tool set. `action=run` starts one, `status` reads a `task_id` without touching it, `resume` continues that task with its history and can tell a stopped agent to finish. Say exactly what it must return; its output is not shown to the user, so summarize it. `background=true` returns at once and reports completion - verify the result before relaying it. `model` takes `provider:model`, a model id, or a friendly name."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use this tool when you need to delegate work to a specialized agent. The subagent will run autonomously with its own tools, and you will receive its final response. You should summarize the result for the user. The result returned by the agent is not visible to the user. When a subagent stops — especially in the background — check that its result is complete before moving on; if it stopped without finishing or without a summary, use action=resume to tell it to finish its task and produce the final summary."
+        "the work is multi-step and separable, or would flood this context"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for trivial single-step operations (use read_file, grep, or bash directly). Do not use for simple todo tracking (use todowrite). Do not nest subagent calls inside subagents."
+        "trivial single calls, todo tracking, or nesting inside a subagent"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {

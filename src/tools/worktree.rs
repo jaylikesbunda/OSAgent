@@ -145,15 +145,15 @@ impl Tool for WorktreeCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Create an isolated git worktree for parallel work, following OpenCode's worktree_create. Creates <repo>/.worktrees-<name> style directory with its own branch so multiple explorations (e.g. subagents) can run without colliding. Returns the worktree directory — use it as a workdir for bash/process or add it as a workspace root for full tool access there."
+        "Create an isolated git worktree at `<repo>/.worktrees-<name>` with its own branch, so parallel work cannot collide. Returns the directory - use it as a bash `workdir`, or add it as a workspace root for full tool access."
     }
 
     fn when_to_use(&self) -> &str {
-        "starting an isolated investigation or experiment that must not disturb the main checkout, or when running parallel subagent explorations"
+        "an experiment must not disturb the main checkout, or parallel subagents"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "for ordinary edits in the current workspace — just edit the files directly"
+        "ordinary edits in the current workspace"
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -256,11 +256,11 @@ impl Tool for WorktreeListTool {
     }
 
     fn description(&self) -> &str {
-        "List the repository's git worktrees (OpenCode worktree_list). Returns each worktree directory and its strategy, including the main checkout."
+        "List the repository git worktrees, including the main checkout, with each directory and its strategy."
     }
 
     fn when_to_use(&self) -> &str {
-        "before creating a worktree (to see what already exists) or to find a worktree's directory again"
+        "before creating a worktree, or to find one again"
     }
 
     fn parameters(&self) -> Value {
@@ -348,11 +348,11 @@ impl Tool for WorktreeRemoveTool {
     }
 
     fn description(&self) -> &str {
-        "Remove a git worktree (OpenCode worktree_remove). The directory must be an absolute path returned by worktree_create/worktree_list. Without force, modified or untracked files block removal; force discards them — only use force when the user has confirmed those changes can be lost."
+        "Remove a git worktree by absolute `directory` from worktree_create or worktree_list. Modified or untracked files block it unless `force` discards them - only force when the user confirmed those changes can be lost."
     }
 
     fn when_to_use(&self) -> &str {
-        "cleaning up an isolated exploration when its findings have been merged or copied back"
+        "cleaning up an exploration whose findings are merged or copied back"
     }
 
     fn examples(&self) -> Vec<ToolExample> {

@@ -46,15 +46,15 @@ impl Tool for QuestionTool {
     }
 
     fn description(&self) -> &str {
-        "Use this tool when you need to ask the user questions during execution"
+        "Ask the user one or more questions and wait for the answers. Each question takes `options` for a multiple-choice reply; omit them for free text."
     }
 
     fn when_to_use(&self) -> &str {
-        "Use when you need to gather user preferences, clarify ambiguous instructions, or get decisions on implementation choices"
+        "a preference, scope or design decision belongs to the user"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Don't use for simple yes/no questions where reasonable defaults exist"
+        "a reasonable default exists and the task can proceed"
     }
 
     fn examples(&self) -> Vec<crate::tools::registry::ToolExample> {
