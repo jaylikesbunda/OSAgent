@@ -525,6 +525,7 @@ OSA.disconnectSessionChannel = function() {
 };
 
 OSA.showLogin = function() {
+    document.getElementById('setup-view')?.classList.add('hidden');
     document.getElementById('login-view').classList.remove('hidden');
     document.getElementById('app-view').classList.add('hidden');
     OSA._startupDeferredQueued = false;
@@ -541,7 +542,26 @@ OSA.showLogin = function() {
     }
 };
 
-OSA.showApp = function() {
+OSA.showApp = async function(options) {
+    const force = !!(options && options.force);
+    if (!force) {
+        // A stale token triggers a logout inside fetchWithAuth; do not reveal
+        // the app over the login screen afterwards.
+        if (!OSA.getToken()) {
+            OSA.showLogin();
+            return;
+        }
+        if (typeof OSA.setupNeeded === 'function' && await OSA.setupNeeded()) {
+            OSA.showSetup();
+            return;
+        }
+        if (!OSA.getToken()) {
+            OSA.showLogin();
+            return;
+        }
+    }
+
+    document.getElementById('setup-view')?.classList.add('hidden');
     document.getElementById('login-view').classList.add('hidden');
     document.getElementById('app-view').classList.remove('hidden');
     document.getElementById('app-view').style.display = 'grid';

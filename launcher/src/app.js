@@ -573,13 +573,12 @@
     hydrateWizardFields();
     refreshCurrentProviderModels();
 
-    if (setup.needs_setup) {
-      state.wizard.step = 0;
-      updateWizardTabs();
-      showView('setup');
-    } else {
-      showView('dashboard');
-    }
+    // First-run onboarding lives in the web UI now. The launcher window is a
+    // control panel, so it always lands on the dashboard; "Reconfigure" opens
+    // the same web wizard from the dashboard.
+    state.wizard.step = 0;
+    updateWizardTabs();
+    showView('dashboard');
   }
 
   function openSetupWizard() {
@@ -1666,7 +1665,13 @@
       }
     });
 
-    els.btnOpenSetup.addEventListener('click', openSetupWizard);
+    els.btnOpenSetup.addEventListener('click', async () => {
+      try {
+        await openNativeWebUi();
+      } catch (error) {
+        addLog('error', 'Failed to open setup in the Web UI: ' + error);
+      }
+    });
 
     if (els.buildProfileToggle) {
       els.buildProfileToggle.querySelectorAll('.profile-btn').forEach((btn) => {

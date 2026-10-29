@@ -42,6 +42,7 @@ const JS_LOAD_ORDER = [
   "js/remote.js",
   "js/devices.js",
   "js/pwa.js",
+  "js/setup.js",
   "js/app.js",
 ];
 
@@ -69,6 +70,7 @@ const CSS_LOAD_ORDER = [
   "css/github.css",
   "css/jobs.css",
   "css/settings.css",
+  "css/setup.css",
 ];
 
 const COPY_FILES = [

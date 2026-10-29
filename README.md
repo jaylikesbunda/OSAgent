@@ -31,7 +31,7 @@ Coding and assistant tools ship side by side — trim `[tools].allowed` to which
 
 ## Quick Start
 
-Download and run [`osagent-windows-x86_64-setup.exe`](https://github.com/jaylikesbunda/OSAgent/releases/latest) from the [**latest release**](https://github.com/jaylikesbunda/OSAgent/releases/latest). Pick a provider (OAuth or API key), pick a workspace, done — your browser opens at `http://localhost:8765`.
+Download and run [`osagent-windows-x86_64-setup.exe`](https://github.com/jaylikesbunda/OSAgent/releases/latest) from the [**latest release**](https://github.com/jaylikesbunda/OSAgent/releases/latest). First launch opens the native web UI with a setup wizard: connect a provider (OAuth or API key), pick a model and workspace, done. The same UI is at `http://localhost:8765`.
 
 Linux (`.deb`) and macOS (`.dmg`) installers are on the same releases page.
 

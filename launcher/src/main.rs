@@ -456,7 +456,7 @@ const TITLEBAR_INJECTION_SCRIPT: &str = r#"(function () {
     root.style.height = 'calc(100vh - 36px)';
     root.style.marginTop = '36px';
     var overlayStyle = document.createElement('style');
-    overlayStyle.textContent = '.voice-mode,.modal,.image-preview-modal,.workflow-run-modal,.workflow-run-modal-backdrop,.question-modal,.context-modal,.workflow-editor,#app-view > .sidebar-backdrop{top:36px !important;height:calc(100vh - 36px) !important;}';
+    overlayStyle.textContent = '.voice-mode,.modal,.image-preview-modal,.workflow-run-modal,.workflow-run-modal-backdrop,.question-modal,.context-modal,.workflow-editor,#setup-view,#app-view > .sidebar-backdrop{top:36px !important;height:calc(100vh - 36px) !important;}';
     (document.head || document.body).appendChild(overlayStyle);
   }
   if (document.readyState === 'loading') {
@@ -2938,14 +2938,6 @@ fn start_osagent(
         return Err(msg);
     }
 
-    if compute_setup_state(&state).needs_setup {
-        let msg = "Finish setup before starting OSAgent".to_string();
-        add_log(&state, "warn", msg.clone());
-        window.show().ok();
-        window.set_focus().ok();
-        return Err(msg);
-    }
-
     if let Some(parent) = state.config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -3164,6 +3156,22 @@ async fn open_native_webui_impl(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn open_native_webui(app: AppHandle) -> Result<(), String> {
     open_native_webui_impl(app).await
+}
+
+/// Open the native Web UI, falling back to the maintenance window when the
+/// server cannot be started (for example a core binary that has not been
+/// built yet). Shared by the tray, relaunch, and startup paths so every entry
+/// point lands in the same place.
+fn open_webui_or_launcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if open_native_webui_impl(app.clone()).await.is_err() {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -4688,11 +4696,10 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            // Relaunching should feel like re-opening the app, not like
+            // summoning the maintenance window. Fall back to it only if the
+            // server cannot be reached.
+            open_webui_or_launcher(app.clone());
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
@@ -4773,25 +4780,13 @@ fn main() {
                         button_state: MouseButtonState::Up,
                         ..
                     } => {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                window.hide().ok();
-                            } else {
-                                window.show().ok();
-                                window.set_focus().ok();
-                            }
-                        }
+                        open_webui_or_launcher(tray.app_handle().clone());
                     }
                     TrayIconEvent::DoubleClick {
                         button: MouseButton::Left,
                         ..
                     } => {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            window.show().ok();
-                            window.set_focus().ok();
-                        }
+                        open_webui_or_launcher(tray.app_handle().clone());
                     }
                     _ => {}
                 })
@@ -4846,27 +4841,31 @@ fn main() {
                 add_log(
                     &state,
                     "info",
-                    "Launcher is ready to guide first-time setup".into(),
+                    "First run detected; opening the web setup wizard".into(),
                 );
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                }
-            } else {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = open_native_webui_impl(handle.clone()).await {
-                        let state = handle.state::<AppState>();
-                        add_log(
-                            &state,
-                            "error",
-                            format!("Could not open Web UI automatically: {}", e),
-                        );
-                    }
-                });
             }
+            // Setup now lives in the web UI, so the launcher never opens its
+            // own wizard window. If the server cannot start (for example the
+            // core binary has not been built yet), fall back to the maintenance
+            // window so the user can still build or repair the install.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = open_native_webui_impl(handle.clone()).await {
+                    let state = handle.state::<AppState>();
+                    add_log(
+                        &state,
+                        "error",
+                        format!("Could not open the Web UI automatically: {}", e),
+                    );
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            });
 
             if std::env::var_os("OSAGENT_UPDATE_TRANSACTION").is_some() {
                 if let Err(error) = acknowledge_update_transaction() {

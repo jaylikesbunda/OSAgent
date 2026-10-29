@@ -570,6 +570,7 @@ pub fn create_router(
         .route("/api/auth/password", post(change_password))
         .route("/api/admin/restart", post(restart_server))
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/setup/state", get(get_setup_state))
         .route("/api/usage", get(get_usage))
         .route("/api/sandbox", get(get_sandbox_status))
         .route("/api/network", get(get_network_info))
@@ -1095,6 +1096,43 @@ async fn restart_server(
 
 async fn get_config(Extension(agent): Extension<Arc<AgentRuntime>>) -> Json<Config> {
     Json(agent.get_config().await.redacted_for_api())
+}
+
+/// First-run state for the web setup wizard. The launcher used to own this
+/// decision; the web UI now asks the same server that will run the agent, so
+/// a config edited by hand and a fresh install agree on what "ready" means.
+#[derive(Debug, serde::Serialize)]
+struct SetupStateResponse {
+    needs_setup: bool,
+    config_path: String,
+    default_provider: String,
+    default_model: String,
+    workspace: String,
+    provider_count: usize,
+}
+
+fn setup_is_ready(config: &Config) -> bool {
+    // A fresh install has no entries in `providers`; the runtime's in-memory
+    // legacy fallback is deliberately ignored so the wizard still appears.
+    !config.providers.is_empty()
+        && !config.default_model.trim().is_empty()
+        && !config.agent.workspace.trim().is_empty()
+}
+
+async fn get_setup_state(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+    Extension(config_path): Extension<PathBuf>,
+) -> Json<SetupStateResponse> {
+    let config = agent.get_config().await;
+
+    Json(SetupStateResponse {
+        needs_setup: !setup_is_ready(&config),
+        config_path: config_path.to_string_lossy().to_string(),
+        default_provider: config.default_provider.clone(),
+        default_model: config.default_model.clone(),
+        workspace: config.agent.workspace.clone(),
+        provider_count: config.providers.len(),
+    })
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -8396,7 +8434,8 @@ async fn update_status(
 mod tests {
     use super::{
         add_provider, auth_status, delete_provider_key, get_config, list_provider_keys, login,
-        mask_api_key, update_config, update_provider_menu, AddProviderRequest, LoginRequest,
+        mask_api_key, setup_is_ready, update_config, update_provider_menu, AddProviderRequest,
+        LoginRequest,
     };
     use crate::agent::runtime::AgentRuntime;
     use crate::config::{
@@ -8752,6 +8791,27 @@ mod tests {
             .find(|p| p.effective_id() == "openai")
             .expect("openai entry");
         assert_eq!(entry.key_candidates().len(), 1);
+    }
+
+    #[test]
+    fn setup_state_ignores_the_in_memory_legacy_provider() {
+        // The runtime seeds default_provider/default_model from the legacy
+        // single-provider block on a fresh install. That must not make the
+        // wizard think setup is complete: there is no real provider entry yet.
+        let mut config = Config::default_config();
+        config.default_provider = "openai-compatible".to_string();
+        config.default_model = "gpt-4.1".to_string();
+        assert!(!setup_is_ready(&config));
+
+        config.providers.push(crate::config::ProviderConfig {
+            provider_type: "openrouter".to_string(),
+            model: "anthropic/claude-sonnet-4".to_string(),
+            ..Default::default()
+        });
+        assert!(setup_is_ready(&config));
+
+        config.agent.workspace.clear();
+        assert!(!setup_is_ready(&config));
     }
 
     #[tokio::test]

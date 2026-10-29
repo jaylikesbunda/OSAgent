@@ -37,9 +37,126 @@
     <link rel="stylesheet" href="/static/css/github.css">
     <link rel="stylesheet" href="/static/css/jobs.css">
     <link rel="stylesheet" href="/static/css/settings.css">
+    <link rel="stylesheet" href="/static/css/setup.css">
 </head>
 <body>
     <div class="app">
+        <div id="setup-view" class="setup-shell hidden">
+            <div class="setup-aurora" aria-hidden="true"></div>
+            <div class="setup-card">
+                <header class="setup-top">
+                    <div class="setup-brand">
+                        <img class="logo-icon" src="images/thinking-indicator.png" alt="">
+                        <span class="logo-wordmark">OS<span class="logo-accent">Agent</span></span>
+                    </div>
+                    <div class="setup-steps" id="setup-steps" aria-label="Setup progress">
+                        <div class="setup-step-dot active" data-step-dot="0"><span>1</span><em>Provider</em></div>
+                        <div class="setup-step-line" aria-hidden="true"></div>
+                        <div class="setup-step-dot" data-step-dot="1"><span>2</span><em>Model</em></div>
+                        <div class="setup-step-line" aria-hidden="true"></div>
+                        <div class="setup-step-dot" data-step-dot="2"><span>3</span><em>Workspace</em></div>
+                    </div>
+                    <div class="setup-top-spacer" aria-hidden="true"></div>
+                    <button id="setup-cancel" class="setup-btn ghost hidden" type="button">Cancel</button>
+                </header>
+
+                <div class="setup-content">
+                    <section class="setup-pane active" data-step-pane="0">
+                        <div id="setup-provider-picker">
+                            <div class="setup-heading">
+                                <span class="setup-kicker">Step 1 of 3</span>
+                                <h1>Connect your AI provider</h1>
+                                <p>Pick a service, then paste a key or sign in. Nothing leaves this machine unless you connect it.</p>
+                            </div>
+                            <div class="setup-search-row">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                                <input id="setup-provider-search" type="text" placeholder="Search providers..." autocomplete="off" spellcheck="false">
+                            </div>
+                            <div id="setup-provider-list" class="setup-provider-grid"></div>
+                            <p id="setup-provider-empty" class="setup-empty hidden">No providers match that search.</p>
+                        </div>
+
+                        <div id="setup-provider-connect" class="hidden">
+                            <button id="setup-change-provider" class="setup-link setup-back-link" type="button">&larr; All providers</button>
+                            <div class="setup-connect-head">
+                                <div id="setup-connect-icon" class="setup-provider-icon">AI</div>
+                                <div class="setup-connect-copy">
+                                    <h2 id="setup-connect-name">Provider</h2>
+                                    <p id="setup-connect-desc"></p>
+                                </div>
+                            </div>
+                            <div id="setup-connect-error" class="setup-error hidden"></div>
+                            <button id="setup-save-anyway" class="setup-link hidden" type="button">Save this key anyway</button>
+                            <div id="setup-api-key-row" class="setup-field">
+                                <label for="setup-api-key">API key</label>
+                                <input id="setup-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key">
+                                <div class="setup-field-foot">
+                                    <a id="setup-api-key-link" class="setup-link hidden" target="_blank" rel="noopener noreferrer">Get an API key</a>
+                                    <button id="setup-use-oauth" class="setup-link hidden" type="button">Sign in instead</button>
+                                    <span id="setup-connect-hint" class="setup-hint"></span>
+                                </div>
+                            </div>
+                            <div id="setup-oauth-row" class="hidden">
+                                <button id="setup-oauth-btn" class="setup-btn primary" type="button">Sign in with provider</button>
+                                <p id="setup-oauth-status" class="setup-hint"></p>
+                                <div id="setup-device-box" class="setup-device hidden">
+                                    <span>Enter this code on the provider's sign-in page:</span>
+                                    <code id="setup-device-code"></code>
+                                    <a id="setup-device-link" class="setup-link" target="_blank" rel="noopener noreferrer">Open sign-in page</a>
+                                </div>
+                                <button id="setup-oauth-cancel" class="setup-link hidden" type="button">Cancel sign-in</button>
+                                <button id="setup-use-key" class="setup-link" type="button">Use an API key instead</button>
+                            </div>
+                            <button id="setup-connect-btn" class="setup-btn primary setup-connect-submit" type="button">Connect</button>
+                        </div>
+                    </section>
+
+                    <section class="setup-pane" data-step-pane="1">
+                        <div class="setup-heading">
+                            <span class="setup-kicker">Step 2 of 3</span>
+                            <h1>Pick a model</h1>
+                            <p>This is the model new chats use. You can switch at any time from the model picker.</p>
+                        </div>
+                        <div class="setup-search-row">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                            <input id="setup-model-search" type="text" placeholder="Search models..." autocomplete="off" spellcheck="false">
+                        </div>
+                        <div id="setup-model-list" class="setup-model-list" role="radiogroup" aria-label="Models"></div>
+                        <p id="setup-model-empty" class="setup-empty hidden">No models listed for this provider.</p>
+                        <div id="setup-manual-model" class="setup-field hidden">
+                            <label for="setup-model-input">Model ID</label>
+                            <input id="setup-model-input" type="text" placeholder="e.g. gpt-5.2" autocomplete="off" spellcheck="false">
+                            <span class="setup-hint">This provider did not return a model list. Type the model name to use.</span>
+                        </div>
+                    </section>
+
+                    <section class="setup-pane" data-step-pane="2">
+                        <div class="setup-heading">
+                            <span class="setup-kicker">Step 3 of 3</span>
+                            <h1>Choose a workspace</h1>
+                            <p>This is the folder OSA can read and edit. Pick a project folder, or keep the default.</p>
+                        </div>
+                        <div class="setup-field">
+                            <label for="setup-workspace-path">Workspace folder</label>
+                            <div class="setup-path-row">
+                                <input id="setup-workspace-path" type="text" autocomplete="off" spellcheck="false" placeholder="~/.osagent/workspace">
+                                <button id="setup-browse" class="setup-btn secondary" type="button">Browse</button>
+                            </div>
+                            <span class="setup-hint">You can add more workspaces later from the sidebar.</span>
+                        </div>
+                        <div id="setup-finish-error" class="setup-error hidden"></div>
+                    </section>
+                </div>
+
+                <footer class="setup-footer">
+                    <button id="setup-back" class="setup-btn ghost hidden" type="button">Back</button>
+                    <div class="setup-footer-spacer"></div>
+                    <span id="setup-footer-hint" class="setup-footer-hint"></span>
+                    <button id="setup-continue" class="setup-btn primary" type="button" disabled>Continue</button>
+                </footer>
+            </div>
+        </div>
+
         <div id="login-view" class="login-container">
             <div class="login-card">
                 <h1 class="login-title">
@@ -654,6 +771,10 @@
                     <div class="settings-group">
                         <div class="settings-group-title">Current Route</div>
                         <div id="provider-routing-summary" class="provider-routing-summary">Loading...</div>
+                        <div class="settings-field">
+                            <button type="button" class="btn-ghost" onclick="OSA.openSetupWizard()">Run setup wizard</button>
+                            <span class="settings-field-hint">Walk through provider, model, and workspace again.</span>
+                        </div>
                     </div>
                     <div class="settings-group">
                         <div class="settings-group-title">Default Models</div>
@@ -2026,6 +2147,7 @@
     <script defer src="/static/js/remote.js"></script>
     <script defer src="/static/js/devices.js"></script>
     <script defer src="/static/js/pwa.js"></script>
+    <script defer src="/static/js/setup.js"></script>
     <script defer src="/static/js/app.js"></script>
 </body>
 </html>
