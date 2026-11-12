@@ -914,7 +914,35 @@ impl AgentRuntime {
                 }
             }));
 
+        // Subagents route `agents` tool calls through the runtime, which owns
+        // the session tree, run state and permissions.
+        let weak_for_agents = Arc::downgrade(&runtime);
+        runtime.subagent_manager.set_agent_tool_handler(Arc::new(
+            move |source, tool_call_id, args| {
+                let weak = weak_for_agents.clone();
+                Box::pin(async move {
+                    let runtime = weak.upgrade().ok_or_else(|| {
+                        OSAgentError::ToolExecution("Agent runtime is shutting down.".into())
+                    })?;
+                    runtime
+                        .handle_agents_tool(&source, &tool_call_id, &args)
+                        .await
+                })
+            },
+        ));
+
         Ok(runtime)
+    }
+
+    pub async fn get_or_create_global_session(&self) -> Result<Session> {
+        let cfg = self.config.read().await;
+        let model = cfg.active_model();
+        let provider = if cfg.default_provider.is_empty() {
+            "openai-compatible".to_string()
+        } else {
+            cfg.default_provider.clone()
+        };
+        self.storage.get_or_create_global_session(model, provider)
     }
 
     pub async fn create_session(&self) -> Result<Session> {
@@ -963,6 +991,7 @@ impl AgentRuntime {
     }
 }
 
+mod agent_mail;
 mod checkpoints;
 mod compaction;
 mod goals;
@@ -1443,6 +1472,290 @@ mod workspace_lock_tests {
     use crate::config::{Config, WorkspaceConfig, WorkspacePath, WorkspacePermission};
     use crate::storage::models::Message;
     use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct CaptureProvider(
+        std::sync::Mutex<Vec<(Vec<Message>, Vec<crate::agent::provider::ToolDefinition>)>>,
+    );
+
+    struct GlobalListProvider {
+        path: String,
+        calls: std::sync::Mutex<Vec<Vec<Message>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agent::provider::Provider for GlobalListProvider {
+        async fn complete(
+            &self,
+            _: Option<&str>,
+            _: &[Message],
+            _: &[crate::agent::provider::ToolDefinition],
+        ) -> crate::error::Result<crate::agent::provider::ProviderResponse> {
+            unreachable!()
+        }
+        async fn complete_stream(
+            &self,
+            _: Option<&str>,
+            messages: &[Message],
+            _: &[crate::agent::provider::ToolDefinition],
+        ) -> crate::error::Result<
+            futures::stream::BoxStream<
+                'static,
+                crate::error::Result<crate::agent::provider::StreamEvent>,
+            >,
+        > {
+            use futures::StreamExt;
+            let mut calls = self.calls.lock().unwrap();
+            let first = calls.is_empty();
+            calls.push(messages.to_vec());
+            let delta = if first {
+                vec![crate::agent::provider::StreamToolCallDelta {
+                    index: 0,
+                    id: Some("list-test".into()),
+                    name: Some("list_files".into()),
+                    arguments: Some(serde_json::json!({"path": self.path}).to_string()),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(
+                futures::stream::iter(vec![Ok(crate::agent::provider::StreamEvent {
+                    event_type: "content".into(),
+                    content: if first { None } else { Some("Done".into()) },
+                    thinking: None,
+                    tool_call_deltas: delta,
+                    finish_reason: Some(if first { "tool_calls" } else { "stop" }.into()),
+                    usage: None,
+                    done: true,
+                })])
+                .boxed(),
+            )
+        }
+        async fn model_context_window(&self) -> Option<usize> {
+            Some(128_000)
+        }
+        async fn current_model(&self) -> String {
+            "test-model".into()
+        }
+        async fn set_model(&self, _: String) {}
+        fn provider_type(&self) -> &str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn global_chat_lists_explicit_external_directory() {
+        let temp = tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("visible.txt"), "hello").unwrap();
+        let mut config = Config::default_config();
+        config.search.enabled = false;
+        config.agent.checkpoint_enabled = false;
+        config.agent.approval_policy = crate::permission::PermissionAction::Allow;
+        config.storage.database = temp.path().join("io.db").to_string_lossy().into_owned();
+        let agent = AgentRuntime::new(config).unwrap();
+        let provider = std::sync::Arc::new(GlobalListProvider {
+            path: docs.to_string_lossy().into_owned(),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        *agent.provider.write().await = provider.clone();
+        let session = agent.get_or_create_global_session().await.unwrap();
+        agent
+            .process_message(&session.id, "List my documents".into(), "test".into())
+            .await
+            .unwrap();
+        let calls = provider.calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .flatten()
+                .any(|m| m.role == "tool" && m.content.contains("visible.txt")),
+            "list result must reach the model"
+        );
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agent::provider::Provider for CaptureProvider {
+        async fn complete(
+            &self,
+            _: Option<&str>,
+            _: &[Message],
+            _: &[crate::agent::provider::ToolDefinition],
+        ) -> crate::error::Result<crate::agent::provider::ProviderResponse> {
+            unreachable!("this test uses streaming")
+        }
+        async fn complete_stream(
+            &self,
+            _: Option<&str>,
+            messages: &[Message],
+            tools: &[crate::agent::provider::ToolDefinition],
+        ) -> crate::error::Result<
+            futures::stream::BoxStream<
+                'static,
+                crate::error::Result<crate::agent::provider::StreamEvent>,
+            >,
+        > {
+            use futures::StreamExt;
+            self.0
+                .lock()
+                .unwrap()
+                .push((messages.to_vec(), tools.to_vec()));
+            Ok(
+                futures::stream::iter(vec![Ok(crate::agent::provider::StreamEvent {
+                    event_type: "content".into(),
+                    content: Some("Hello".into()),
+                    thinking: None,
+                    tool_call_deltas: vec![],
+                    finish_reason: Some("stop".into()),
+                    usage: None,
+                    done: true,
+                })])
+                .boxed(),
+            )
+        }
+        async fn model_context_window(&self) -> Option<usize> {
+            Some(128_000)
+        }
+        async fn current_model(&self) -> String {
+            "test-model".into()
+        }
+        async fn set_model(&self, _: String) {}
+        fn provider_type(&self) -> &str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn global_chat_turn_has_no_project_instructions_but_offers_file_tools() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("private-project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("AGENTS.md"),
+            "PRIVATE_PROJECT_INSTRUCTIONS_MARKER",
+        )
+        .unwrap();
+        let mut config = Config::default_config();
+        config.search.enabled = false;
+        config.agent.checkpoint_enabled = false;
+        config.storage.database = temp.path().join("turn.db").to_string_lossy().into_owned();
+        config.agent.workspace = workspace.to_string_lossy().into_owned();
+        config.agent.workspaces[0].paths = vec![WorkspacePath {
+            path: config.agent.workspace.clone(),
+            permission: WorkspacePermission::ReadWrite,
+            description: None,
+        }];
+        let agent = AgentRuntime::new(config).unwrap();
+        let provider = std::sync::Arc::new(CaptureProvider::default());
+        *agent.provider.write().await = provider.clone();
+        let session = agent.get_or_create_global_session().await.unwrap();
+        agent
+            .process_message(&session.id, "hello".into(), "test".into())
+            .await
+            .unwrap();
+        let calls = provider.0.lock().unwrap();
+        let (messages, tools) = calls.first().expect("provider called");
+        assert!(messages
+            .iter()
+            .any(|m| m.content.contains("# Global coordinator")));
+        assert!(!messages
+            .iter()
+            .any(|m| m.content.contains("PRIVATE_PROJECT_INSTRUCTIONS_MARKER")));
+        assert!(tools.iter().any(|t| t.function.name == "subagent"));
+        assert!(tools.iter().any(|t| t.function.name == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn global_chat_persists_and_requires_explicit_workspace_for_children() {
+        let temp = tempdir().unwrap();
+        let mut config = Config::default_config();
+        config.search.enabled = false;
+        config.storage.database = temp.path().join("global.db").to_string_lossy().into_owned();
+        let agent = AgentRuntime::new(config.clone()).unwrap();
+        let mut session = agent.get_or_create_global_session().await.unwrap();
+        assert!(session.is_global_coordinator());
+        assert!(agent.get_session_workspace(&session.id).await.is_err());
+        assert!(agent
+            .set_session_workspace(&session.id, "default")
+            .await
+            .is_err());
+        session.messages.push(Message::user("remember this".into()));
+        agent.update_session(&session).await.unwrap();
+
+        let manager = agent.get_subagent_manager();
+        for target in [None, Some("does-not-exist".to_string())] {
+            let result = manager
+                .spawn_subagent_in_workspace(
+                    session.id.clone(),
+                    "test".into(),
+                    "test".into(),
+                    "general".into(),
+                    true,
+                    None,
+                    target,
+                )
+                .await;
+            assert!(result.is_err(), "missing or unknown workspace must fail");
+        }
+        let target_id = config.get_active_workspace().id;
+        let valid_child_id = manager
+            .spawn_subagent_in_workspace(
+                session.id.clone(),
+                "workspace test".into(),
+                "Reply with a short acknowledgement.".into(),
+                "general".into(),
+                false,
+                None,
+                Some(target_id.clone()),
+            )
+            .await
+            .unwrap();
+        let valid_child = agent.storage.get_session(&valid_child_id).unwrap().unwrap();
+        assert_eq!(valid_child.metadata["workspace_id"], target_id);
+        assert_eq!(valid_child.metadata["global_coordinator_child"], true);
+        manager.cancel_all_for_parent(&session.id).await;
+        let mut child = agent
+            .storage
+            .create_subagent_session(
+                session.id.clone(),
+                session.model.clone(),
+                session.provider.clone(),
+                "general".into(),
+            )
+            .unwrap();
+        child.metadata["workspace_id"] = serde_json::json!("removed-workspace");
+        child.metadata["global_coordinator_child"] = serde_json::json!(true);
+        agent.storage.update_session(&child).unwrap();
+        assert!(manager
+            .resume_subagent(
+                session.id.clone(),
+                child.id.clone(),
+                "test".into(),
+                "test".into(),
+                "general".into(),
+                true,
+                None
+            )
+            .await
+            .is_err());
+        assert!(agent.get_session_workspace(&child.id).await.is_err());
+        assert!(agent
+            .process_message(&child.id, "hello".into(), "test".into())
+            .await
+            .is_err());
+        drop(manager);
+        drop(agent);
+
+        let reopened = AgentRuntime::new(config)
+            .unwrap()
+            .get_or_create_global_session()
+            .await
+            .unwrap();
+        assert_eq!(reopened.id, session.id);
+        assert_eq!(reopened.messages.len(), 1);
+        assert!(reopened.metadata.get("workspace_id").is_none());
+    }
 
     #[tokio::test]
     async fn chat_workspace_locks_once_it_has_messages() {

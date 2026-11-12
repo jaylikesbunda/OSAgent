@@ -114,8 +114,7 @@ impl Tool for SessionsTool {
     }
 
     fn description(&self) -> &str {
-        "List, read, and search your other conversations (sessions), including \
-content that was compacted out of context. Read-only."
+        "List, read, and search your other conversations (sessions), including content compacted out of context. Read-only; message chats or agents with the agents tool."
     }
 
     fn when_to_use(&self) -> &str {
@@ -125,8 +124,7 @@ to locate content, then read a specific window"
     }
 
     fn when_not_to_use(&self) -> &str {
-        "Do not use for the current session (you already have its history), \
-for files on disk, or to modify other sessions — this tool cannot write"
+        "Do not use for the current session (you already have its history), for files on disk, or to modify other sessions — this tool cannot write"
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -235,7 +233,7 @@ impl SessionsTool {
             };
             lines.push(format!(
                 "- {} {}model={}{} status={} updated={}",
-                Self::short_id(&summary.id),
+                summary.id,
                 name,
                 summary.model,
                 kind,
@@ -244,9 +242,7 @@ impl SessionsTool {
             ));
         }
         lines.push(
-            "Pass a full session id from `/api/sessions` output or Settings → \
-Sessions; ids shown here are shortened prefixes. Use action=read with \
-target_session_id to inspect one."
+            "Use action=read with target_session_id to inspect a chat. To message another chat or agent, use the agents tool."
                 .to_string(),
         );
         Ok(lines.join("\n"))

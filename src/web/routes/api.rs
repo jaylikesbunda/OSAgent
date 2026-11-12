@@ -647,6 +647,7 @@ pub fn create_router(
                 .delete(delete_sessions),
         )
         .route("/api/session-summaries", get(list_session_summaries))
+        .route("/api/global-session", post(open_global_session))
         .route("/api/session-search", get(search_sessions))
         .route(
             "/api/sessions/:id/messages/truncate",
@@ -2386,6 +2387,23 @@ async fn get_session_archive_messages(
         )
     })?;
     Ok(Json(serde_json::json!({ "messages": messages })))
+}
+
+async fn open_global_session(
+    Extension(agent): Extension<Arc<AgentRuntime>>,
+) -> Result<Json<Session>, (StatusCode, Json<ErrorResponse>)> {
+    agent
+        .get_or_create_global_session()
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })
 }
 
 async fn create_session(

@@ -47,6 +47,8 @@ const BRIDGE_BLOCKED_TOOLS: &[&str] = &[
     "plan_exit",
     "task",
     "schedule",
+    "sessions",
+    "agents",
 ];
 
 /// Ceiling on bridge calls from one script. A runaway loop should fail
@@ -897,7 +899,7 @@ mod tests {
 
     #[test]
     fn control_plane_tools_are_blocked_by_name() {
-        for tool in ["tool_script", "question", "subagent"] {
+        for tool in ["tool_script", "question", "subagent", "sessions", "agents"] {
             assert!(BRIDGE_BLOCKED_TOOLS.contains(&tool));
         }
     }

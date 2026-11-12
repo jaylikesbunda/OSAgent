@@ -129,8 +129,16 @@ impl AgentRuntime {
     /// Start a continuation turn for undelivered background subagent results,
     /// unless auto-resume is disabled, queued user messages are waiting (they
     /// will carry the results on their own turn), or the session is busy.
+    ///
+    /// Agent follow-up tasks (see the `agents` tool) use the same path, so they
+    /// share its run guard, stop handling and consecutive-turn limit. They
+    /// start a turn even when background-result auto-resume is disabled.
     pub(super) async fn wake_for_subagent_results(self: Arc<Self>, session_id: String) {
-        if !self.agent_settings.read().await.subagent_auto_resume {
+        let has_followup = self
+            .storage
+            .has_pending_agent_followup(&session_id)
+            .unwrap_or(false);
+        if !has_followup && !self.agent_settings.read().await.subagent_auto_resume {
             return;
         }
         if self
@@ -190,11 +198,15 @@ impl AgentRuntime {
 
         // Double-check there is still something to deliver (another consumer
         // may have merged it between notification and now).
+        let has_followup = self
+            .storage
+            .has_pending_agent_followup(&session_id)
+            .unwrap_or(false);
         match self
             .storage
             .list_unnotified_completed_for_parent(&session_id)
         {
-            Ok(tasks) if tasks.is_empty() => return,
+            Ok(tasks) if tasks.is_empty() && !has_followup => return,
             Ok(_) => {}
             Err(_) => return,
         }

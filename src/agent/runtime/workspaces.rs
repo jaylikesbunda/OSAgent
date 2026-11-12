@@ -56,7 +56,17 @@ impl AgentRuntime {
             .get_session(session_id)
             .await?
             .ok_or_else(|| OSAgentError::Session("Session not found".to_string()))?;
+        if session.is_global_coordinator() {
+            return Err(OSAgentError::Session(
+                "Global chat has no workspace".to_string(),
+            ));
+        }
         let cfg = self.config.read().await;
+        if session.metadata["global_coordinator_child"] == true {
+            return Self::resolve_workspace_for_session(&session, &cfg).ok_or_else(|| {
+                OSAgentError::Session("This agent's workspace no longer exists".into())
+            });
+        }
         Ok(Self::resolve_workspace_for_session(&session, &cfg)
             .unwrap_or_else(|| cfg.get_active_workspace()))
     }
@@ -89,6 +99,11 @@ impl AgentRuntime {
             .get_session(session_id)
             .await?
             .ok_or_else(|| OSAgentError::Session("Session not found".to_string()))?;
+        if session.is_global_coordinator() {
+            return Err(OSAgentError::Session(
+                "Global chat cannot be bound to a workspace".to_string(),
+            ));
+        }
 
         info!(
             "set_session_workspace: Session loaded, current metadata: {:?}",
@@ -102,6 +117,13 @@ impl AgentRuntime {
             .metadata
             .get("workspace_id")
             .and_then(|value| value.as_str());
+        if session.metadata["global_coordinator_child"] == true
+            && current_workspace != Some(workspace_id)
+        {
+            return Err(OSAgentError::Session(
+                "A delegated agent keeps its original workspace.".into(),
+            ));
+        }
         if !session.messages.is_empty() && current_workspace != Some(workspace_id) {
             return Err(OSAgentError::Session(
                 "This chat already has messages, so its workspace is locked. Start a new chat to use a different workspace.".to_string(),

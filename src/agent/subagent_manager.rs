@@ -45,6 +45,60 @@ fn truncate_tool_output(tool_name: &str, output: &str) -> String {
 /// (status, result text, tool count)
 pub type SubagentOutcome = (String, String, i32);
 
+/// Runs an `agents` tool call for a subagent session (source session, tool
+/// call id, arguments). Installed by the runtime, which owns routing,
+/// permissions and run state.
+pub type AgentToolHandler = Arc<
+    dyn Fn(
+            Session,
+            String,
+            serde_json::Value,
+        )
+            -> futures::future::BoxFuture<'static, Result<crate::tools::registry::ToolResult>>
+        + Send
+        + Sync,
+>;
+
+/// First names handed to subagents so a tree of them reads like a team.
+const AGENT_NAMES: &[&str] = &[
+    "Dave", "Josh", "Bob", "Dylan", "Priya", "Mia", "Kai", "Sam", "Nina", "Omar", "Lena", "Theo",
+    "Zara", "Leo", "Ivy", "Max", "Ruby", "Felix", "Ava", "Jules", "Rosa", "Milo", "Tess", "Hugo",
+];
+
+/// A name not already used by a sibling; numbered once the list runs out.
+fn pick_agent_name(taken: &[String], seed: u128) -> String {
+    let start = (seed % AGENT_NAMES.len() as u128) as usize;
+    for offset in 0..AGENT_NAMES.len() {
+        let name = AGENT_NAMES[(start + offset) % AGENT_NAMES.len()];
+        if !taken.iter().any(|t| t == name) {
+            return name.to_string();
+        }
+    }
+    let base = AGENT_NAMES[start];
+    (2..)
+        .map(|n| format!("{} {}", base, n))
+        .find(|name| !taken.contains(name))
+        .unwrap_or_else(|| base.to_string())
+}
+
+/// Standing instructions for a subagent about the agent tree.
+fn subagent_communication_prompt(session: &Session, parent_session_id: &str) -> String {
+    let who = match (
+        session.metadata["agent_name"].as_str(),
+        session.metadata["agent_job"].as_str(),
+    ) {
+        (Some(name), Some(job)) => format!(
+            "You are {}, a subagent working on: {} (id {}).",
+            name, job, session.id
+        ),
+        _ => format!("You are subagent {}.", session.id),
+    };
+    format!(
+        "# Agent communication\n{} Your parent is {}. Siblings can message each other directly with send: when you have a finding a sibling needs, send it to that sibling yourself instead of routing it through your parent. There is no way to wait for a message. Never poll, nag, or repeat a request; if you lack an input, do what you can and finish, saying what is missing.",
+        who, parent_session_id
+    )
+}
+
 pub struct SubagentManager {
     storage: Arc<SqliteStorage>,
     event_bus: Arc<EventBus>,
@@ -64,6 +118,10 @@ pub struct SubagentManager {
     /// parent can be woken for a continuation turn without waiting for the
     /// user's next message. Kept in a OnceLock to avoid a constructor cycle.
     wake_callback: std::sync::OnceLock<Arc<dyn Fn(String) + Send + Sync>>,
+    agent_tool_handler: std::sync::OnceLock<AgentToolHandler>,
+    /// Test hook: a provider used by every subagent run instead of the
+    /// shared one.
+    provider_override: std::sync::OnceLock<Arc<dyn Provider>>,
 }
 
 struct SubagentHandle {
@@ -136,6 +194,8 @@ impl SubagentManager {
             shared_provider: None,
             workspace_root,
             wake_callback: std::sync::OnceLock::new(),
+            agent_tool_handler: std::sync::OnceLock::new(),
+            provider_override: std::sync::OnceLock::new(),
         }
     }
 
@@ -176,6 +236,16 @@ impl SubagentManager {
     /// terminal state (see [`SubagentManager::wake_callback`]).
     pub fn set_wake_callback(&self, callback: Arc<dyn Fn(String) + Send + Sync>) {
         let _ = self.wake_callback.set(callback);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn override_provider_for_tests(&self, provider: Arc<dyn Provider>) {
+        let _ = self.provider_override.set(provider);
+    }
+
+    /// Register the runtime's handler for subagent `agents` tool calls.
+    pub fn set_agent_tool_handler(&self, handler: AgentToolHandler) {
+        let _ = self.agent_tool_handler.set(handler);
     }
 
     /// Seconds a foreground `subagent` call waits before detaching.
@@ -238,6 +308,7 @@ impl SubagentManager {
             "todowrite",
             "todoread",
             "tool_search",
+            "agents",
         ];
 
         let general_tools: HashSet<String> = all_tools.iter().map(|s| s.to_string()).collect();
@@ -259,6 +330,7 @@ impl SubagentManager {
             "skill_action",
             "lsp",
             "tool_search",
+            "agents",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -275,6 +347,7 @@ impl SubagentManager {
             "reflect",
             "lsp",
             "tool_search",
+            "agents",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -348,6 +421,28 @@ impl SubagentManager {
         background: bool,
         model_override: Option<String>,
     ) -> Result<String> {
+        self.spawn_subagent_in_workspace(
+            parent_session_id,
+            description,
+            prompt,
+            agent_type,
+            background,
+            model_override,
+            None,
+        )
+        .await
+    }
+
+    pub async fn spawn_subagent_in_workspace(
+        &self,
+        parent_session_id: String,
+        description: String,
+        prompt: String,
+        agent_type: String,
+        background: bool,
+        model_override: Option<String>,
+        target_workspace_id: Option<String>,
+    ) -> Result<String> {
         self.check_depth_limit(&parent_session_id).await?;
 
         let parent_session = self
@@ -360,12 +455,23 @@ impl SubagentManager {
 
         let parent_workspace = {
             let cfg = self.config.read().await.clone();
-            parent_session
-                .metadata
-                .get("workspace_id")
-                .and_then(|value| value.as_str())
-                .and_then(|workspace_id| cfg.get_workspace(workspace_id))
-                .unwrap_or_else(|| cfg.get_active_workspace())
+            if parent_session.is_global_coordinator() {
+                let id = target_workspace_id.as_deref().filter(|id| !id.trim().is_empty()).ok_or_else(||
+                    crate::error::OSAgentError::ToolExecution("Global chat delegation requires target_workspace_id. Choose a configured workspace before starting this agent.".into()))?;
+                cfg.get_workspace(id).ok_or_else(|| {
+                    crate::error::OSAgentError::ToolExecution(format!(
+                        "Workspace '{}' not found",
+                        id
+                    ))
+                })?
+            } else {
+                parent_session
+                    .metadata
+                    .get("workspace_id")
+                    .and_then(|value| value.as_str())
+                    .and_then(|workspace_id| cfg.get_workspace(workspace_id))
+                    .unwrap_or_else(|| cfg.get_active_workspace())
+            }
         };
 
         let mut subagent_session = self.storage.create_subagent_session(
@@ -375,18 +481,49 @@ impl SubagentManager {
             agent_type.clone(),
         )?;
 
-        let display_name = format!(
-            "{} Agent",
-            agent_type.chars().next().unwrap_or('g').to_uppercase()
-        );
+        // Every agent gets a first name (unique among its siblings) and its
+        // job, e.g. "Dylan · Repo inspector", so messages, listings and the
+        // sidebar say who is talking and what they are on.
+        let job = {
+            let task = description.split_whitespace().collect::<Vec<_>>().join(" ");
+            if task.is_empty() {
+                let mut chars = agent_type.chars();
+                match chars.next() {
+                    Some(first) => format!("{}{} work", first.to_uppercase(), chars.as_str()),
+                    None => "General work".to_string(),
+                }
+            } else if task.chars().count() > 48 {
+                format!("{}…", task.chars().take(47).collect::<String>())
+            } else {
+                task
+            }
+        };
+        let taken = self
+            .storage
+            .get_child_sessions(&parent_session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.id != subagent_session.id)
+            .filter_map(|s| s.metadata["agent_name"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        let agent_name = pick_agent_name(&taken, Uuid::new_v4().as_u128());
+        subagent_session.metadata["agent_name"] = serde_json::json!(agent_name);
+        subagent_session.metadata["agent_job"] = serde_json::json!(job);
+        let display_name = format!("{} · {}", agent_name, job);
         subagent_session.metadata["name"] = serde_json::json!(display_name);
         subagent_session.metadata["workspace_id"] = serde_json::json!(parent_workspace.id.clone());
+        if parent_session.is_global_coordinator() {
+            subagent_session.metadata["global_coordinator_child"] = serde_json::json!(true);
+        }
+        // Inherit the parent's chain of agent hand-offs (see `agents`).
+        subagent_session.metadata["agent_chain"] =
+            serde_json::json!(crate::agent::mailbox::session_chain(&parent_session));
         if let Some(model) = model_override.as_deref() {
             // Persisted so a resume keeps running on the model the user asked
             // for, even though the request itself is long gone.
             subagent_session.metadata["model_override"] = serde_json::json!(model);
         }
-        let _ = self.storage.update_session(&subagent_session);
+        self.storage.update_session(&subagent_session)?;
 
         let task = SubagentTask {
             id: Uuid::new_v4().to_string(),
@@ -474,14 +611,27 @@ impl SubagentManager {
             ));
         }
 
+        // A resumed run continues the parent's chain of hand-offs; a
+        // follow-up raises it further when its message is delivered.
+        if let Ok(Some(parent)) = self.storage.get_session(&parent_session_id) {
+            let mut child = subagent_session.clone();
+            child.metadata["agent_chain"] =
+                serde_json::json!(crate::agent::mailbox::session_chain(&parent));
+            self.storage.update_session(&child)?;
+        }
+
         let parent_workspace = {
             let cfg = self.config.read().await.clone();
-            subagent_session
+            let workspace = subagent_session
                 .metadata
                 .get("workspace_id")
                 .and_then(|value| value.as_str())
-                .and_then(|workspace_id| cfg.get_workspace(workspace_id))
-                .unwrap_or_else(|| cfg.get_active_workspace())
+                .and_then(|workspace_id| cfg.get_workspace(workspace_id));
+            if subagent_session.metadata["global_coordinator_child"] == true {
+                workspace.ok_or_else(|| crate::error::OSAgentError::ToolExecution("This agent's workspace no longer exists; cannot resume it in another workspace.".into()))?
+            } else {
+                workspace.unwrap_or_else(|| cfg.get_active_workspace())
+            }
         };
 
         let task = SubagentTask {
@@ -572,7 +722,11 @@ impl SubagentManager {
         let task_id_for_return = task.id.clone();
         let parent_session_id_for_async = parent_session_id.clone();
         let active_subagents = self.active_subagents.clone();
-        let shared_provider = self.shared_provider.clone();
+        let shared_provider = self
+            .provider_override
+            .get()
+            .cloned()
+            .or_else(|| self.shared_provider.clone());
         let workspace_root = self.workspace_root.clone();
         let parent_workspace_for_async = parent_workspace.clone();
         let model_override_for_async = model_override.clone();
@@ -592,6 +746,7 @@ impl SubagentManager {
         let background_for_notify = background;
         let description_for_notify = description.clone();
         let wake_callback = self.wake_callback.get().cloned();
+        let agent_tool_handler = self.agent_tool_handler.get().cloned();
 
         let handle = tokio::spawn(async move {
             struct CleanupGuard {
@@ -687,6 +842,7 @@ impl SubagentManager {
                     fresh_session,
                     resumed_run,
                     model_override_for_async.clone(),
+                    agent_tool_handler.clone(),
                     &mut cancel_rx,
                 )
                 .await;
@@ -857,6 +1013,7 @@ impl SubagentManager {
         fresh_session: bool,
         resumed_run: bool,
         model_override: Option<String>,
+        agent_tool_handler: Option<AgentToolHandler>,
         cancel_rx: &mut mpsc::Receiver<()>,
     ) -> Result<(String, String, i32)> {
         let mut cfg = config.read().await.clone();
@@ -911,7 +1068,13 @@ impl SubagentManager {
         let allowed_tools: Vec<String> = Self::get_allowed_tools_for_agent_type(&agent_type)
             .into_iter()
             .filter(|tool| tool_registry.has_tool(tool))
+            .filter(|tool| tool != "agents" || agent_tool_handler.is_some())
             .collect();
+        if allowed_tools.iter().any(|tool| tool == "agents") {
+            tool_registry
+                .native_catalog()
+                .activate(&session_id, &["agents".to_string()]);
+        }
         // Subagents use default identity and priorities (no custom sections)
         let prompt_mode = if agent_type == "explore" {
             PromptMode::Explore
@@ -988,6 +1151,15 @@ impl SubagentManager {
                 if let Some(manifest) = mcp_manifest {
                     session.messages.push(Message::system(manifest));
                 }
+                if agent_tool_handler.is_some() {
+                    let prompt = subagent_communication_prompt(&session, &parent_session_id);
+                    session.messages.push(Message::system(prompt));
+                }
+            }
+            // Messages that arrived while this agent was idle come before
+            // the run's prompt (a follow-up run's prompt refers to them).
+            if let Err(error) = crate::agent::mailbox::deliver_pending(&storage, &mut session) {
+                warn!("Agent mail delivery failed for {}: {}", session_id, error);
             }
             // A resumed run (task-level retry) already has the original task
             // and all prior work in context; nudge it to continue instead of
@@ -1035,6 +1207,7 @@ impl SubagentManager {
                 tool_registry.clone(),
                 provider.clone(),
                 allowed_tools.clone(),
+                agent_tool_handler.clone(),
                 cancel_rx,
             )
             .await;
@@ -1058,6 +1231,15 @@ impl SubagentManager {
                         timestamp: SystemTime::now(),
                     });
 
+                    if completed
+                        && storage
+                            .has_pending_agent_followup(&session_id)
+                            .unwrap_or(false)
+                    {
+                        // A follow-up arrived after the last sampling
+                        // boundary: handle it before finishing.
+                        continue;
+                    }
                     if completed {
                         // A stop with no real final message is not a finished
                         // task: the model went silent instead of summarizing.
@@ -1256,11 +1438,16 @@ impl SubagentManager {
         tool_registry: Arc<ToolRegistry>,
         provider: Arc<dyn Provider>,
         allowed_tools: Vec<String>,
+        agent_tool_handler: Option<AgentToolHandler>,
         cancel_rx: &mut mpsc::Receiver<()>,
     ) -> Result<(bool, i32)> {
         let mut session = storage
             .get_session(&session_id)?
             .ok_or_else(|| crate::error::OSAgentError::Session("Session not found".to_string()))?;
+        // Sampling boundary: deliver messages from other agents.
+        if let Err(error) = crate::agent::mailbox::deliver_pending(&storage, &mut session) {
+            warn!("Agent mail delivery failed for {}: {}", session_id, error);
+        }
 
         let api_messages: Vec<Message> = session.messages.clone();
 
@@ -1389,9 +1576,16 @@ impl SubagentManager {
                 // session-scoped machinery (tool_search activation, MCP
                 // auto-activation, todos) finds its session.
                 tool_args["session_id"] = serde_json::json!(session_id.clone());
-                let result = tool_registry
-                    .execute_result(&tool_call.name, tool_args)
-                    .await;
+                let result = match (&agent_tool_handler, tool_call.name.as_str()) {
+                    (Some(handler), "agents") => {
+                        handler(session.clone(), tool_call.id.clone(), tool_args).await
+                    }
+                    _ => {
+                        tool_registry
+                            .execute_result(&tool_call.name, tool_args)
+                            .await
+                    }
+                };
                 let duration_ms = start.elapsed().as_millis() as u64;
 
                 match result {
@@ -1964,6 +2158,18 @@ impl SubagentManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_names_are_unique_among_siblings() {
+        let taken: Vec<String> = AGENT_NAMES.iter().map(|n| n.to_string()).collect();
+        assert_eq!(pick_agent_name(&taken[..3], 0), AGENT_NAMES[3]);
+        assert_eq!(pick_agent_name(&[], 1), AGENT_NAMES[1]);
+        let overflow = pick_agent_name(&taken, 0);
+        assert_eq!(overflow, format!("{} 2", AGENT_NAMES[0]));
+        let mut more = taken.clone();
+        more.push(overflow);
+        assert_eq!(pick_agent_name(&more, 0), format!("{} 3", AGENT_NAMES[0]));
+    }
 
     #[test]
     fn task_retry_backoff_is_exponential_and_capped() {

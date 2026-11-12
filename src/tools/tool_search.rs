@@ -48,6 +48,14 @@ impl ToolSearchTool {
     /// for a tool it can never call sends it down a dead end, and on a
     /// public channel that loop looks like the bot dying.
     fn profile_for_session(&self, session_id: &str) -> ToolProfile {
+        if self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.get_session(session_id).ok().flatten())
+            .is_some_and(|session| session.is_global_coordinator())
+        {
+            return ToolProfile::Global;
+        }
         let is_community = self
             .storage
             .as_ref()

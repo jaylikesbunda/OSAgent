@@ -3,6 +3,11 @@ window.OSA = window.OSA || {};
 OSA.updateWorkspaceChip = function(workspaceId, workspacePath) {
     const label = document.getElementById('context-trigger-label');
     const wsLabel = document.getElementById('ctx-ws-active-label');
+    if (OSA.getCurrentSession?.()?.metadata?.mode === 'global_coordinator') {
+        if (label) { label.textContent = 'Global chat'; label.title = 'No workspace'; label.classList.remove('perm-ro', 'perm-rw'); }
+        if (wsLabel) { wsLabel.textContent = 'No workspace'; wsLabel.classList.remove('perm-ro', 'perm-rw'); }
+        return;
+    }
     const ws = OSA.getWorkspaceState();
     const workspace = ws.workspaces.find(w => w.id === (workspaceId || 'default'));
     const effectivePath = workspacePath || OSA.primaryWorkspacePath(workspace);
@@ -191,6 +196,10 @@ OSA.WORKSPACE_LOCKED_MESSAGE = 'This chat already has messages, so its workspace
 OSA.renderWorkspaceMenu = function() {
     const list = document.getElementById('workspace-menu-list');
     if (!list) return;
+    if (OSA.getCurrentSession()?.metadata?.mode === 'global_coordinator') {
+        list.innerHTML = '<div class="menu-empty-text">Global chat has no workspace. Choose a workspace when delegating project work.</div>';
+        return;
+    }
     const ws = OSA.getWorkspaceState();
     const locked = OSA.sessionWorkspaceLocked();
     const lockNote = locked
@@ -234,6 +243,7 @@ OSA.renderWorkspaceMenu = function() {
 
 OSA.selectWorkspaceFromMenu = async function(workspaceId) {
     const currentSession = OSA.getCurrentSession();
+    if (currentSession?.metadata?.mode === 'global_coordinator') return;
     if (currentSession?.id && OSA.isAgentProcessing()) {
         OSA.setWorkspaceInlineStatus('Stop or wait for the current turn before switching workspace.', true);
         OSA.closeWorkspaceMenu();
@@ -625,6 +635,11 @@ OSA.loadWorkspaces = async function() {
 
 OSA.loadSessionWorkspace = async function() {
     const currentSession = OSA.getCurrentSession();
+    if (currentSession?.metadata?.mode === 'global_coordinator') {
+        OSA.updateWorkspaceChip();
+        OSA.renderWorkspaceMenu();
+        return;
+    }
     if (!currentSession?.id) {
         const ws = OSA.getWorkspaceState();
         const active = ws.workspaces.find(w => w.id === ws.activeWorkspace);

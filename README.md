@@ -24,6 +24,7 @@ An AI agent that lives on your machine, not in the cloud. Point it at a folder a
 - **Models** — 200+ providers and 7,300+ models (OpenRouter, OpenAI, Anthropic, Google, Ollama, Bedrock, Azure, …), plus OAuth login for OpenAI, Anthropic, Google, GitHub Copilot, Qwen, and Chutes.
 - **Interfaces** — embedded web UI · Discord bot with per-channel sessions · voice (Whisper STT + Piper TTS).
 - **Tools** — 40+ built-ins: file edit/patch, bash + Python/Node execution, grep/glob/code search, LSP, web fetch/search/news, calendar, weather, persistent memory, todos/goals/plans, background subagents, GitHub (PRs, issues, CI, CodeRabbit-style PR reviews).
+- **Global chat** — one persistent conversation across workspaces that can delegate project work to background agents. Open it from the sidebar; [learn more](docs/global-coordinator.md).
 - **Automation** — cron jobs, reminders, recurring tasks, daily briefings, automatic GitHub PR reviews on new commits.
 - **Extendable** — visual workflow editor · installable `.oskill` skill bundles · MCP servers · sandboxed tool scripts.
 

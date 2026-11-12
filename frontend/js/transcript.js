@@ -166,16 +166,31 @@ OSA.tmodelCompactionItem = function(key, message, messageIndex) {
     };
 };
 
+// Messages delivered by another agent (see the `agents` tool) carry their
+// sender in metadata; show who wrote them instead of "You".
+OSA.agentMessageInfo = function(message) {
+    const meta = message && message.metadata;
+    if (!meta || meta.kind !== 'agent_message') return null;
+    const type = meta.agent_message_type === 'followup' ? 'Follow-up' : 'Message';
+    const relation = meta.relation ? ' (' + meta.relation + ')' : '';
+    return {
+        label: type + ' from ' + (meta.source_label || 'another agent') + relation,
+        body: typeof meta.body === 'string' ? meta.body : (message.content || ''),
+    };
+};
+
 OSA.tmodelMessageItem = function(key, message, messageIndex, opts = {}) {
     const tokens = message.tokens || null;
     const cachedRead = tokens && Number.isFinite(tokens.cached_read) ? tokens.cached_read : null;
     const cachedWrite = tokens && Number.isFinite(tokens.cached_write) ? tokens.cached_write : null;
     const inputTokens = tokens && Number.isFinite(tokens.input) ? tokens.input : 0;
+    const agentMessage = OSA.agentMessageInfo(message);
     return {
         kind: 'message',
         key,
         role: message.role || 'user',
-        content: message.content || '',
+        content: agentMessage ? agentMessage.body : (message.content || ''),
+        agentFrom: agentMessage ? agentMessage.label : '',
         thinking: message.thinking || '',
         timestamp: message.timestamp || '',
         toolCalls: message.tool_calls || null,
@@ -1941,7 +1956,7 @@ OSA.patchMessageUnit = function(wrapper, unit) {
     }
 
     const wasStreaming = msgEl.classList.contains('streaming');
-    const nextClass = 'message ' + item.role + (item.streaming ? ' streaming' : '');
+    const nextClass = 'message ' + item.role + (item.agentFrom ? ' agent-message' : '') + (item.streaming ? ' streaming' : '');
     if (msgEl.className !== nextClass) msgEl.className = nextClass;
 
     if (item.messageIndex !== null) msgEl.dataset.messageIndex = String(item.messageIndex);
@@ -1962,7 +1977,7 @@ OSA.patchMessageUnit = function(wrapper, unit) {
         roleEl.className = 'message-role';
         msgEl.prepend(roleEl);
     }
-    const roleText = item.role === 'user' ? 'You' : 'OSA';
+    const roleText = item.agentFrom || (item.role === 'user' ? 'You' : 'OSA');
     if (roleEl.textContent !== roleText) roleEl.textContent = roleText;
 
     const contentEl = OSA.ensureMessageContentEl(msgEl);

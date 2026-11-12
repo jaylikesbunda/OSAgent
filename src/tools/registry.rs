@@ -10,10 +10,10 @@ use crate::mcp::{McpHandle, McpManager, MCP_TOOL_PREFIX};
 use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
-    bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory, diagram, files,
-    github, lsp, memory, native_catalog::NativeToolCatalog, news, notes, patch, persona, plan,
-    process, question, scheduler, search, sessions, skill, skill_authoring, subagent,
-    system_status, task, todo, tool_script, tool_search, weather, web, worktree,
+    agents, bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory,
+    diagram, files, github, lsp, memory, native_catalog::NativeToolCatalog, news, notes, patch,
+    persona, plan, process, question, scheduler, search, sessions, skill, skill_authoring,
+    subagent, system_status, task, todo, tool_script, tool_search, weather, web, worktree,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -82,6 +82,8 @@ pub enum ToolProfile {
     Custom,
     /// Public Discord support: public web reads only, with no host capabilities.
     Community,
+    /// Workspace-free coordinator; project tools run in delegated sessions.
+    Global,
 }
 
 impl ToolProfile {
@@ -96,6 +98,24 @@ impl ToolProfile {
     }
 
     pub(crate) fn allows(self, tool_name: &str) -> bool {
+        if self == Self::Global {
+            return !matches!(
+                tool_name,
+                "public_web_fetch"
+                    | "batch"
+                    | "tool_script"
+                    | "coordinator"
+                    | "apply_patch"
+                    | "code_python"
+                    | "code_node"
+                    | "code_bash"
+                    | "codesearch"
+                    | "lsp"
+                    | "worktree_create"
+                    | "worktree_list"
+                    | "worktree_remove"
+            );
+        }
         // Discovery and the tools it yields travel together. A profile
         // that can call `tool_search` but not the tools it activates
         // sends the agent down a dead end: it searches, is told the tool
@@ -157,6 +177,7 @@ impl ToolProfile {
                 "web_fetch" | "web_search" | "question" | "skill" | "skill_list" | "persona"
             ),
             Self::Community => matches!(tool_name, "web_search" | "public_web_fetch"),
+            Self::Global => unreachable!("handled above"),
         }
     }
 }
@@ -611,6 +632,9 @@ impl ToolRegistry {
         let sessions_tool: Arc<dyn Tool> = Arc::new(sessions::SessionsTool::new(storage.clone()));
         tools.insert("sessions".to_string(), sessions_tool.clone());
         native_catalog.register(sessions_tool);
+        let agents_tool: Arc<dyn Tool> = Arc::new(agents::AgentsTool);
+        tools.insert("agents".to_string(), agents_tool.clone());
+        native_catalog.register(agents_tool);
         // Deferred: diagrams are a presentation capability, not something
         // every turn needs. Advertised in the deferred manifest so "draw the
         // auth flow" reaches `tool_search` and lands here.
@@ -795,6 +819,7 @@ impl ToolRegistry {
             "news" => Some(Arc::new(news::NewsTool::new(config.clone()))),
             "system_status" => Some(Arc::new(system_status::SystemStatusTool::new(config))),
             "sessions" => Some(Arc::new(sessions::SessionsTool::new(storage.clone()))),
+            "agents" => Some(Arc::new(agents::AgentsTool)),
             "draw_diagram" => Some(Arc::new(diagram::DrawDiagramTool)),
             "lsp" => Some(Arc::new(lsp::LspTool::new(config))),
             "plan_exit" => Some(Arc::new(plan::PlanExitTool::new())),
@@ -841,7 +866,6 @@ impl ToolRegistry {
                 | "weather"
                 | "news"
                 | "system_status"
-                | "sessions"
                 | "draw_diagram"
                 | "lsp"
                 | "skill"
@@ -1548,5 +1572,25 @@ mod tests {
     fn community_profile_cannot_access_the_host() {
         let names = selected_names(ToolProfile::Community);
         assert_eq!(names, vec!["web_search", "public_web_fetch"]);
+    }
+
+    #[test]
+    fn global_profile_allows_direct_and_integration_tools_but_blocks_unscoped_bridges() {
+        for tool in [
+            "subagent",
+            "tool_search",
+            "web_search",
+            "sessions",
+            "record_memory",
+            "bash",
+            "read_file",
+            "write_file",
+            "mcp__example__run",
+        ] {
+            assert!(ToolProfile::Global.allows(tool), "{tool}");
+        }
+        for tool in ["batch", "tool_script", "coordinator"] {
+            assert!(!ToolProfile::Global.allows(tool), "{tool}");
+        }
     }
 }

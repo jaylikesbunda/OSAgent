@@ -566,6 +566,23 @@ impl SqliteStorage {
                     attachments_json TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS agent_mail (
+                    id TEXT PRIMARY KEY,
+                    recipient_session_id TEXT NOT NULL,
+                    sender_session_id TEXT NOT NULL,
+                    sender_label TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    chain INTEGER NOT NULL DEFAULT 0,
+                    dedupe_key TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    delivered_at INTEGER,
+                    FOREIGN KEY (recipient_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_mail_dedupe ON agent_mail(recipient_session_id, dedupe_key);
+                CREATE INDEX IF NOT EXISTS idx_agent_mail_pending ON agent_mail(recipient_session_id, delivered_at, created_at);
+
                 CREATE INDEX IF NOT EXISTS idx_todo_session ON todo_items(session_id, position);
                 CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_id, position);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_queued_messages_client ON queued_messages(session_id, client_message_id);
@@ -921,6 +938,34 @@ impl SqliteStorage {
             }
             Ok(())
         })
+    }
+
+    /// Opens the durable global coordinator identity, creating it once.
+    pub fn get_or_create_global_session(&self, model: String, provider: String) -> Result<Session> {
+        const ID: &str = "global-coordinator";
+        let mut session = Session::new(model, provider, Some("Global coordinator".into()));
+        session.id = ID.into();
+        session.metadata["mode"] = serde_json::json!("global_coordinator");
+        let metadata = serde_json::to_vec(&session.metadata)
+            .map_err(|e| OSAgentError::Parse(e.to_string()))?;
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, model, provider, messages, metadata, parent_id, agent_type, task_status, context_state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, NULL)",
+                params![session.id, session.created_at.timestamp(), session.updated_at.timestamp(), session.model, session.provider, b"[]".as_slice(), metadata, session.agent_type, session.task_status],
+            ).map_err(OSAgentError::Storage)?;
+            Ok(())
+        })?;
+        let existing = self.get_session(ID)?.ok_or_else(|| {
+            OSAgentError::Session("Global coordinator session disappeared".into())
+        })?;
+        if existing.metadata.get("mode").and_then(|v| v.as_str()) != Some("global_coordinator")
+            || existing.parent_id.is_some()
+        {
+            return Err(OSAgentError::Session(
+                "Reserved global coordinator session ID is already in use".into(),
+            ));
+        }
+        Ok(existing)
     }
 
     pub fn create_session(
@@ -1758,6 +1803,156 @@ impl SqliteStorage {
             conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
                 .map_err(OSAgentError::Storage)?;
             Ok(())
+        })
+    }
+
+    fn agent_mail_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMail> {
+        Ok(AgentMail {
+            id: row.get(0)?,
+            recipient_session_id: row.get(1)?,
+            sender_session_id: row.get(2)?,
+            sender_label: row.get(3)?,
+            relation: row.get(4)?,
+            kind: row.get(5)?,
+            content: row.get(6)?,
+            chain: row.get::<_, i64>(7)?.max(0) as u32,
+            created_at: chrono::DateTime::from_timestamp_millis(row.get::<_, i64>(8)?)
+                .unwrap_or_else(Utc::now),
+            delivered_at: row
+                .get::<_, Option<i64>>(9)?
+                .and_then(chrono::DateTime::from_timestamp_millis),
+        })
+    }
+
+    /// Store a message for another agent. `dedupe_key` makes a replayed tool
+    /// call idempotent; the bool is false when the message already existed.
+    pub fn enqueue_agent_mail(
+        &self,
+        mail: &AgentMail,
+        dedupe_key: &str,
+    ) -> Result<(AgentMail, bool)> {
+        self.with_conn(|conn| {
+            let inserted = conn
+                .execute(
+                    "INSERT OR IGNORE INTO agent_mail (id, recipient_session_id, sender_session_id, sender_label, relation, kind, content, chain, dedupe_key, created_at, delivered_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                    params![
+                        mail.id,
+                        mail.recipient_session_id,
+                        mail.sender_session_id,
+                        mail.sender_label,
+                        mail.relation,
+                        mail.kind,
+                        mail.content,
+                        mail.chain as i64,
+                        dedupe_key,
+                        mail.created_at.timestamp_millis(),
+                    ],
+                )
+                .map_err(OSAgentError::Storage)?;
+            let stored = conn
+                .query_row(
+                    "SELECT id, recipient_session_id, sender_session_id, sender_label, relation, kind, content, chain, created_at, delivered_at
+                     FROM agent_mail WHERE recipient_session_id = ?1 AND dedupe_key = ?2",
+                    params![mail.recipient_session_id, dedupe_key],
+                    Self::agent_mail_from_row,
+                )
+                .map_err(OSAgentError::Storage)?;
+            Ok((stored, inserted > 0))
+        })
+    }
+
+    /// The message a given tool call already stored, if any (replay check).
+    pub fn find_agent_mail_by_key(
+        &self,
+        recipient_session_id: &str,
+        dedupe_key: &str,
+    ) -> Result<Option<AgentMail>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, recipient_session_id, sender_session_id, sender_label, relation, kind, content, chain, created_at, delivered_at
+                 FROM agent_mail WHERE recipient_session_id = ?1 AND dedupe_key = ?2",
+                params![recipient_session_id, dedupe_key],
+                Self::agent_mail_from_row,
+            )
+            .optional()
+            .map_err(OSAgentError::Storage)
+        })
+    }
+
+    /// Most recent messages from one sender to one recipient, newest first,
+    /// delivered or not.
+    pub fn recent_agent_mail_between(
+        &self,
+        sender_session_id: &str,
+        recipient_session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AgentMail>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, recipient_session_id, sender_session_id, sender_label, relation, kind, content, chain, created_at, delivered_at
+                     FROM agent_mail WHERE sender_session_id = ?1 AND recipient_session_id = ?2
+                     ORDER BY created_at DESC, rowid DESC LIMIT ?3",
+                )
+                .map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map(
+                    params![sender_session_id, recipient_session_id, limit as i64],
+                    Self::agent_mail_from_row,
+                )
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(rows)
+        })
+    }
+
+    /// Undelivered messages for a recipient, oldest first.
+    pub fn pending_agent_mail(&self, recipient_session_id: &str) -> Result<Vec<AgentMail>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id, recipient_session_id, sender_session_id, sender_label, relation, kind, content, chain, created_at, delivered_at
+                     FROM agent_mail WHERE recipient_session_id = ?1 AND delivered_at IS NULL
+                     ORDER BY created_at, rowid",
+                )
+                .map_err(OSAgentError::Storage)?;
+            let rows = stmt
+                .query_map(params![recipient_session_id], Self::agent_mail_from_row)
+                .map_err(OSAgentError::Storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(OSAgentError::Storage)?;
+            Ok(rows)
+        })
+    }
+
+    pub fn has_pending_agent_followup(&self, recipient_session_id: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_mail WHERE recipient_session_id = ?1 AND delivered_at IS NULL AND kind = 'followup')",
+                params![recipient_session_id],
+                |row| row.get(0),
+            )
+            .map_err(OSAgentError::Storage)
+        })
+    }
+
+    pub fn mark_agent_mail_delivered(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(OSAgentError::Storage)?;
+            let now = Utc::now().timestamp_millis();
+            for id in ids {
+                tx.execute(
+                    "UPDATE agent_mail SET delivered_at = ?1 WHERE id = ?2 AND delivered_at IS NULL",
+                    params![now, id],
+                )
+                .map_err(OSAgentError::Storage)?;
+            }
+            tx.commit().map_err(OSAgentError::Storage)
         })
     }
 
@@ -4156,6 +4351,47 @@ mod pool_tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn global_coordinator_is_singleton_and_preserves_existing_state() {
+        let (storage, path) = temp_storage();
+        let first = storage
+            .get_or_create_global_session("model-a".into(), "provider-a".into())
+            .unwrap();
+        assert_eq!(first.metadata["mode"], "global_coordinator");
+        assert!(first.metadata.get("workspace_id").is_none());
+        storage
+            .set_session_metadata_value(&first.id, "remembered", serde_json::json!(true))
+            .unwrap();
+        let reopened = storage
+            .get_or_create_global_session("model-b".into(), "provider-b".into())
+            .unwrap();
+        assert_eq!(reopened.id, first.id);
+        assert_eq!(reopened.model, "model-a");
+        assert_eq!(reopened.metadata["remembered"], true);
+        drop(storage);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_global_chat_opens_create_one_session() {
+        let (storage, path) = temp_storage();
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let db = storage.clone();
+            threads.push(std::thread::spawn(move || {
+                db.get_or_create_global_session("m".into(), "p".into())
+                    .unwrap()
+                    .id
+            }));
+        }
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), "global-coordinator");
+        }
+        assert_eq!(storage.get_session_count().unwrap(), 1);
+        drop(storage);
+        cleanup(&path);
     }
 
     /// A write through one pooled connection must be visible to every other.

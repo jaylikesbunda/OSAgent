@@ -19,6 +19,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn is_global_coordinator(&self) -> bool {
+        self.metadata.get("mode").and_then(|v| v.as_str()) == Some("global_coordinator")
+    }
+
     pub fn new(model: String, provider: String, name: Option<String>) -> Self {
         let metadata = if let Some(n) = name {
             serde_json::json!({ "name": n })
@@ -100,6 +104,30 @@ impl QueuedMessageStatus {
             _ => Self::Pending,
         }
     }
+}
+
+/// A durable, attributed message between agents (primary chats and their
+/// subagents). Rows stay pending until the recipient's own run appends them
+/// to its conversation at a sampling boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMail {
+    pub id: String,
+    pub recipient_session_id: String,
+    pub sender_session_id: String,
+    pub sender_label: String,
+    /// Sender's relation as seen by the recipient: parent, child, sibling,
+    /// ancestor, descendant, relative or chat (another conversation tree).
+    pub relation: String,
+    /// `message` (delivered, never starts a turn) or `followup` (starts a
+    /// turn when the recipient is idle).
+    pub kind: String,
+    pub content: String,
+    /// Agent-initiated turns that led to this message since a person last
+    /// spoke in the sending chain; bounds autonomous back-and-forth.
+    pub chain: u32,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub delivered_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

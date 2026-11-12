@@ -118,6 +118,11 @@ impl ExternalDirectoryManager {
             }
         }
 
+        self.evaluate_external(path)
+    }
+
+    /// Evaluate without granting implicit access to any workspace root.
+    pub fn evaluate_external(&self, path: &str) -> PermissionAction {
         for (matcher, action) in &self.whitelist_matchers {
             if matcher.is_match(path) {
                 return action.clone();

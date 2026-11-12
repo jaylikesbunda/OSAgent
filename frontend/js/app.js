@@ -860,6 +860,19 @@ OSA.scheduleSessionsReload = function() {
 };
 
 // Creates a chat in the given workspace, or in the active one when none is given.
+OSA.openGlobalSession = async function() {
+    try {
+        const res = await OSA.fetchWithAuth('/api/global-session', { method: 'POST' });
+        const session = await res.json();
+        if (!res.ok || !session.id) throw new Error(session.error || 'Could not open global chat');
+        await OSA.loadSessions();
+        await OSA.selectSession(session.id);
+        if (window.innerWidth <= 900 && typeof OSA.closeSidebar === 'function') OSA.closeSidebar();
+    } catch (error) {
+        OSA.showErrorCard?.(error.message);
+    }
+};
+
 OSA.createSession = async function(requestedWorkspaceId) {
     const ws = OSA.getWorkspaceState();
     const workspaceId = (typeof requestedWorkspaceId === 'string' && requestedWorkspaceId)
@@ -2467,7 +2480,12 @@ OSA.workspaceDisplayName = function(workspaceId) {
 
 OSA.renderWorkspaceGroups = function(rootSessions, renderBlock, containsActive) {
     const byWorkspace = new Map();
+    const globalSessions = [];
     for (const session of rootSessions) {
+        if (session?.metadata?.mode === 'global_coordinator') {
+            globalSessions.push(session);
+            continue;
+        }
         const id = OSA.sessionWorkspaceId(session);
         if (!byWorkspace.has(id)) byWorkspace.set(id, []);
         byWorkspace.get(id).push(session);
@@ -2491,7 +2509,8 @@ OSA.renderWorkspaceGroups = function(rootSessions, renderBlock, containsActive) 
         }
         return (b.id === activeWorkspace) - (a.id === activeWorkspace) || b.latest - a.latest;
     });
-    return groups.map(group => OSA.workspaceGroupHtml(group, renderBlock, containsActive)).join('');
+    const global = globalSessions.map(session => `<div class="session-root-block" data-root-id="${OSA.escapeAttr(session.id)}">${renderBlock(session)}</div>`).join('');
+    return global + groups.map(group => OSA.workspaceGroupHtml(group, renderBlock, containsActive)).join('');
 };
 
 // ── Reordering workspace sections ───────────────────────────

@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod bash;
 pub mod batch;
 pub mod browser;

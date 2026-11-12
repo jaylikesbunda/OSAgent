@@ -434,3 +434,24 @@ test('one-pass tool insertion matches the scan-and-splice placement exactly', ()
             `fallback placement mismatch on trial ${trial}`);
     }
 });
+
+test('messages from other agents show their sender and payload, not the raw frame', () => {
+    resetModel();
+    const message = {
+        role: 'user',
+        content: '<agent_message type="FOLLOWUP_TASK" from="Explore agent">\nCheck auth\n</agent_message>',
+        metadata: {
+            kind: 'agent_message',
+            agent_message_type: 'followup',
+            source_label: 'Explore agent',
+            relation: 'child',
+            body: 'Check auth',
+        },
+    };
+    const item = OSA.tmodelMessageItem('agent-mail', message, 3);
+    assert.equal(item.content, 'Check auth');
+    assert.equal(item.agentFrom, 'Follow-up from Explore agent (child)');
+    const plain = OSA.tmodelMessageItem('plain', { role: 'user', content: 'hi', metadata: {} }, 4);
+    assert.equal(plain.agentFrom, '');
+    assert.equal(plain.content, 'hi');
+});

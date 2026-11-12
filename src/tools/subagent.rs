@@ -128,6 +128,10 @@ impl Tool for SubagentTool {
                     "type": "boolean",
                     "description": "Launch asynchronously and return immediately. You will be notified automatically when it completes. Do not sleep, poll for progress, or duplicate the task's work. When the completion arrives, verify the result is complete; if the subagent stopped without a final summary, resume it (action=resume) and tell it to finish."
                 },
+                "target_workspace_id": {
+                    "type": "string",
+                    "description": "Required when starting an agent from global chat: the ID of the configured workspace for this task. Resume uses the original workspace."
+                },
                 "task_id": {
                     "type": "string",
                     "description": "Subagent session ID (preferred) or task-row ID from a prior <task> result; status and resume accept either"
@@ -163,6 +167,14 @@ impl Tool for SubagentTool {
                     task_id
                 )));
             };
+            if args["session_id"]
+                .as_str()
+                .is_some_and(|id| id != task.parent_session_id)
+            {
+                return Ok(ToolResult::failure(
+                    "Subagent task not found for this session.",
+                ));
+            }
             let progress = manager.subagent_progress(&task.session_id);
             let state = if is_running {
                 "running"
@@ -271,13 +283,14 @@ impl Tool for SubagentTool {
                 .await?
         } else {
             manager
-                .spawn_subagent(
+                .spawn_subagent_in_workspace(
                     session_id.to_string(),
                     description.to_string(),
                     prompt.to_string(),
                     subagent_type.to_string(),
                     background,
                     model_override,
+                    args["target_workspace_id"].as_str().map(str::to_string),
                 )
                 .await?
         };

@@ -444,14 +444,22 @@ impl AgentRuntime {
         tool_call_id: &str,
         args: &serde_json::Value,
         workspace: &WorkspaceConfig,
+        global_scope: bool,
     ) -> Result<(Vec<String>, Option<String>)> {
         let workspace_root =
             PathBuf::from(shellexpand::tilde(&workspace.resolved_path()).to_string());
-        let Some(path) = Self::requested_absolute_path(tool_name, args, Some(&workspace_root))
-        else {
+        let Some(path) = Self::requested_absolute_path(
+            tool_name,
+            args,
+            if global_scope {
+                None
+            } else {
+                Some(&workspace_root)
+            },
+        ) else {
             return Ok((Vec::new(), None));
         };
-        if Self::path_is_inside_workspace(Path::new(&path), workspace) {
+        if !global_scope && Self::path_is_inside_workspace(Path::new(&path), workspace) {
             return Ok((Vec::new(), None));
         }
         let execution_root = Self::external_execution_root(tool_name, &path);
@@ -471,9 +479,12 @@ impl AgentRuntime {
         }
 
         // Explicit Deny rules still deny...
-        let evaluated = self
-            .external_manager
-            .evaluate(&path, &workspace.resolved_path());
+        let evaluated = if global_scope {
+            self.external_manager.evaluate_external(&path)
+        } else {
+            self.external_manager
+                .evaluate(&path, &workspace.resolved_path())
+        };
         if matches!(evaluated, PermissionAction::Deny) {
             return Err(OSAgentError::ToolExecution(format!(
                 "Access to external path '{}' is denied by policy",

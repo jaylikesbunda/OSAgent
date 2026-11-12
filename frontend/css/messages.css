@@ -688,6 +688,15 @@
     background: var(--accent);
 }
 
+/* Delivered by another agent, not typed by the user. */
+.message.user.agent-message .message-role {
+    color: var(--text-secondary);
+}
+
+.message.user.agent-message .message-role::before {
+    background: var(--text-secondary);
+}
+
 .message.assistant .message-content {
     color: var(--text-primary);
 }
