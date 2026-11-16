@@ -20,7 +20,7 @@ impl Tool for AgentsTool {
     }
 
     fn description(&self) -> &str {
-        "Communicate with other agents. list: agents in this conversation tree and their state. send: deliver a message; a running agent sees it before its next model request, an idle one on its next turn. Never starts a turn. followup: give an agent a new task; starts a turn if it is idle. start_chat (Global chat only): open a new regular chat in a workspace and give it a task; it appears in the sidebar and starts working. A subagent's final answer reaches its parent automatically. Agents cannot wait for replies: never poll or repeat a message."
+        "Communicate with other agents. list: agents in this conversation tree and their state. send: deliver a message; a running agent sees it before its next model request, an idle one on its next turn. Never starts a turn. followup: give an agent a new task; starts a turn if it is idle. start_chat (Global chat only): open a new regular chat in a workspace and give it a task; it appears in the sidebar, starts working, and its answer comes back to you. A subagent's final answer reaches its parent automatically. Agents cannot wait for replies: never poll or repeat a message."
     }
 
     fn when_to_use(&self) -> &str {
@@ -59,8 +59,7 @@ impl Tool for AgentsTool {
                 },
                 "message": {"type": "string", "description": "Self-contained text for the recipient (for start_chat, the new chat's task)."},
                 "workspace_id": {"type": "string", "description": "start_chat: configured workspace for the new chat; defaults to the active workspace."},
-                "title": {"type": "string", "description": "start_chat: short sidebar title."},
-                "report_back": {"type": "boolean", "description": "start_chat: ask the new chat to send its result back (default true)."}
+                "title": {"type": "string", "description": "start_chat: short sidebar title."}
             },
             "required": ["action"]
         })

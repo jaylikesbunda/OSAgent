@@ -21,6 +21,7 @@ pub mod memory;
 pub mod native_catalog;
 pub mod news;
 pub mod notes;
+pub mod notify;
 pub mod output;
 pub mod patch;
 pub mod persona;

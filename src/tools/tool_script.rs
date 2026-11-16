@@ -49,6 +49,7 @@ const BRIDGE_BLOCKED_TOOLS: &[&str] = &[
     "schedule",
     "sessions",
     "agents",
+    "notify",
 ];
 
 /// Ceiling on bridge calls from one script. A runaway loop should fail

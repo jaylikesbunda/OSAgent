@@ -171,7 +171,8 @@ OSA.tmodelCompactionItem = function(key, message, messageIndex) {
 OSA.agentMessageInfo = function(message) {
     const meta = message && message.metadata;
     if (!meta || meta.kind !== 'agent_message') return null;
-    const type = meta.agent_message_type === 'followup' ? 'Follow-up' : 'Message';
+    const type = meta.agent_message_type === 'followup' ? 'Follow-up'
+        : meta.agent_message_type === 'reply' ? 'Reply' : 'Message';
     const relation = meta.relation ? ' (' + meta.relation + ')' : '';
     return {
         label: type + ' from ' + (meta.source_label || 'another agent') + relation,

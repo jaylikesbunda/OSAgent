@@ -497,6 +497,8 @@ OSA.loadSettings = async function() {
         document.getElementById('setting-discord-allowed-channels').value = (discord.allowed_channels || []).join('\n');
         document.getElementById('setting-discord-allow-dms').checked = discord.allow_dms === true;
         document.getElementById('setting-discord-trusted-users').value = (discord.trusted_users || []).join('\n');
+        const notifyUser = document.getElementById('setting-discord-notify-user');
+        if (notifyUser) notifyUser.value = discord.notify_user || '';
         document.getElementById('setting-discord-trusted-roles').value = (discord.trusted_roles || []).join('\n');
         document.getElementById('setting-discord-trusted-guilds').value = (discord.trusted_guilds || []).join('\n');
         document.getElementById('setting-discord-trusted-channels').value = (discord.trusted_channels || []).join('\n');
@@ -722,6 +724,7 @@ OSA.saveSettings = async function() {
         allowed_channels: allowedDiscordChannels,
         allow_dms: document.getElementById('setting-discord-allow-dms').checked,
         trusted_users: trustedDiscordUsers,
+        notify_user: document.getElementById('setting-discord-notify-user')?.value.trim() || null,
         trusted_roles: trustedDiscordRoles,
         trusted_guilds: trustedDiscordGuilds,
         trusted_channels: trustedDiscordChannels,

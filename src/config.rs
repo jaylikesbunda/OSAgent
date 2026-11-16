@@ -528,6 +528,11 @@ pub struct DiscordConfig {
     pub moderation_enabled: bool,
     #[serde(with = "snowflake::optional")]
     pub last_channel_id: Option<u64>,
+    /// Discord user the `notify` tool DMs (the owner). Empty falls back to
+    /// the first trusted user, then the first allowed user. Nobody else can
+    /// be messaged this way.
+    #[serde(with = "snowflake::optional")]
+    pub notify_user: Option<u64>,
     // ── Music / voice playback ──────────────────────────────────────────
     /// Enable YouTube/HTTP audio playback in voice channels. Requires
     /// building with `--features discord-voice` (`yt-dlp` auto-downloads)
@@ -578,6 +583,7 @@ impl Default for DiscordConfig {
             trusted_channels: Vec::new(),
             moderation_enabled: false,
             last_channel_id: None,
+            notify_user: None,
             music_enabled: false,
             music_max_queue: default_music_max_queue(),
             music_max_duration_secs: 0,
@@ -2878,6 +2884,7 @@ last_channel_id = 1478327393205882900
             trusted_channels: vec![],
             moderation_enabled: false,
             last_channel_id: None,
+            notify_user: None,
             music_enabled: false,
             music_max_queue: 50,
             music_max_duration_secs: 0,

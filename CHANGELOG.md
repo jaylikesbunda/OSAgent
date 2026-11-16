@@ -2,8 +2,18 @@ v0.8.1 changes (unreleased):
 
 TL;DR:
 * **38% smaller tool schema**: denser built-in tool descriptions cut the always-loaded tool block from 8,608 to 5,357 tokens per request
+* **Global chat**: one persistent conversation across workspaces that delegates project work, starts new chats and reports their results back
+* **Agents talk to each other**: chats, Global chat and subagents send attributed messages and follow-up tasks to parents, children and siblings
+
+Added:
+* Global chat in the sidebar: no workspace of its own, file and shell tools with absolute paths, and workspace-bound subagents for project work
+* `agents` tool: `list`, `send` (never starts a turn), `followup` (starts an idle agent) and `start_chat` (Global chat opens a new chat for a task). Messages are stored durably, reach running agents before their next model request, and survive stops and restarts
+* A chat's answer to another chat's task comes back automatically as a reply, so Global chat reports results unprompted
+* Subagents get first names and jobs, such as "Dylan · Repo inspector"
+* `notify` tool: "ping me on Discord" DMs you through the Discord bot. It only reaches the Notify User ID set in Settings → Discord
 
 Changed:
+* `sessions` is read-only again; messaging moved to `agents`. Repeated or piled-up agent messages are refused, and follow-up chains are capped by `subagent_auto_resume_max_turns`
 * First-run setup now lives in the web UI instead of the launcher. A three-step wizard (provider and key or sign-in, model, workspace) opens automatically until a provider and model are configured; the launcher boots straight into the native web UI, its tray/relaunch paths open the same place, and "Run setup wizard" in Settings reopens it
 * Rewrote every built-in tool description as one dense paragraph with the constraints inline and no worked examples, and stopped rendering examples into the tool schema. About 3,250 fewer tokens of context on every request - 0.3% of a 1M window, roughly 10% of a 32k one
 

@@ -11,8 +11,8 @@ use crate::skills::SkillLoader;
 use crate::tools::file_cache::FileReadCache;
 use crate::tools::{
     agents, bash, batch, browser, calendar, code, codesearch, coordinator, decision_memory,
-    diagram, files, github, lsp, memory, native_catalog::NativeToolCatalog, news, notes, patch,
-    persona, plan, process, question, scheduler, search, sessions, skill, skill_authoring,
+    diagram, files, github, lsp, memory, native_catalog::NativeToolCatalog, news, notes, notify,
+    patch, persona, plan, process, question, scheduler, search, sessions, skill, skill_authoring,
     subagent, system_status, task, todo, tool_script, tool_search, weather, web, worktree,
 };
 use async_trait::async_trait;
@@ -635,6 +635,9 @@ impl ToolRegistry {
         let agents_tool: Arc<dyn Tool> = Arc::new(agents::AgentsTool);
         tools.insert("agents".to_string(), agents_tool.clone());
         native_catalog.register(agents_tool);
+        let notify_tool: Arc<dyn Tool> = Arc::new(notify::NotifyTool);
+        tools.insert("notify".to_string(), notify_tool.clone());
+        native_catalog.register(notify_tool);
         // Deferred: diagrams are a presentation capability, not something
         // every turn needs. Advertised in the deferred manifest so "draw the
         // auth flow" reaches `tool_search` and lands here.
@@ -820,6 +823,7 @@ impl ToolRegistry {
             "system_status" => Some(Arc::new(system_status::SystemStatusTool::new(config))),
             "sessions" => Some(Arc::new(sessions::SessionsTool::new(storage.clone()))),
             "agents" => Some(Arc::new(agents::AgentsTool)),
+            "notify" => Some(Arc::new(notify::NotifyTool)),
             "draw_diagram" => Some(Arc::new(diagram::DrawDiagramTool)),
             "lsp" => Some(Arc::new(lsp::LspTool::new(config))),
             "plan_exit" => Some(Arc::new(plan::PlanExitTool::new())),

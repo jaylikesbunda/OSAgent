@@ -213,15 +213,6 @@ impl AgentRuntime {
             self.update_session_title(&chat.id, title).await?;
         }
 
-        let report_back = args["report_back"].as_bool().unwrap_or(true);
-        let content = if report_back {
-            format!(
-                "{}\n\nWhen you finish, send a short result to Global chat with the agents tool (action send, target global).",
-                body
-            )
-        } else {
-            body.to_string()
-        };
         let mail = AgentMail {
             id: Uuid::new_v4().to_string(),
             recipient_session_id: chat.id.clone(),
@@ -229,7 +220,7 @@ impl AgentRuntime {
             sender_label: agent_label(source),
             relation: "chat".into(),
             kind: KIND_FOLLOWUP.into(),
-            content,
+            content: body.to_string(),
             chain,
             created_at: Utc::now(),
             delivered_at: None,
@@ -243,16 +234,87 @@ impl AgentRuntime {
             .unwrap_or("default")
             .to_string();
         Ok(ToolResult::new(format!(
-            "Started chat \"{}\" ({}) in workspace {}. It is working on the task now and appears in the sidebar.{}",
+            "Started chat \"{}\" ({}) in workspace {}. It is working on the task now and appears in the sidebar. Its answer comes back here automatically and starts your next turn; do not wait or poll for it.",
             agent_label(&chat),
             chat.id,
             workspace_id,
-            if report_back {
-                " It will send its result back here; do not wait or poll for it."
-            } else {
-                ""
-            }
         )))
+    }
+
+    /// End of a chat's turn: answer every chat that handed it a follow-up
+    /// task during the turn, like a subagent's final answer reaching its
+    /// parent. The reply wakes an idle asker; a reply is never answered
+    /// automatically, and the hand-off chain limit still applies.
+    pub(super) async fn report_back_to_chats(&self, session_id: &str, answer: &str) {
+        let Ok(Some(mut session)) = self.storage.get_session(session_id) else {
+            return;
+        };
+        let Some(askers) = session.metadata["report_back_to"].as_array().cloned() else {
+            return;
+        };
+        if let Some(obj) = session.metadata.as_object_mut() {
+            obj.remove("report_back_to");
+        }
+        if let Err(error) = self.storage.update_session(&session) {
+            warn!(
+                "Could not clear report-back list for {}: {}",
+                session_id, error
+            );
+            return;
+        }
+        let cap = self
+            .agent_settings
+            .read()
+            .await
+            .subagent_auto_resume_max_turns
+            .max(1) as u32;
+        let mut body = answer.trim().to_string();
+        if body.is_empty() {
+            body = "(The chat finished without a written answer.)".into();
+        }
+        if body.chars().count() > mailbox::MAX_MESSAGE_CHARS {
+            body = body
+                .chars()
+                .take(mailbox::MAX_MESSAGE_CHARS - 1)
+                .collect::<String>()
+                + "…";
+        }
+        for asker in askers {
+            let Some(asker_id) = asker["session_id"].as_str() else {
+                continue;
+            };
+            let Ok(Some(target)) = self.storage.get_session(asker_id) else {
+                continue;
+            };
+            let chain = asker["chain"].as_u64().unwrap_or(0) as u32 + 1;
+            // Past the limit the answer is still delivered, just without
+            // starting another turn.
+            let kind = if chain > cap {
+                KIND_MESSAGE
+            } else {
+                mailbox::KIND_REPLY
+            };
+            let mail = AgentMail {
+                id: Uuid::new_v4().to_string(),
+                recipient_session_id: target.id.clone(),
+                sender_session_id: session.id.clone(),
+                sender_label: agent_label(&session),
+                relation: "chat".into(),
+                kind: kind.into(),
+                content: body.clone(),
+                chain,
+                created_at: Utc::now(),
+                delivered_at: None,
+            };
+            let key = format!("reply:{}:{}", session.id, mail.id);
+            match self.storage.enqueue_agent_mail(&mail, &key) {
+                Ok(_) => {
+                    let ancestry = self.ancestry(&target).unwrap_or_default();
+                    self.trigger_agent_mail(&target, &ancestry, kind).await;
+                }
+                Err(error) => warn!("Could not report back to {}: {}", target.id, error),
+            }
+        }
     }
 
     fn list_agent_tree(&self, source: &Session) -> Result<ToolResult> {
@@ -550,7 +612,7 @@ impl AgentRuntime {
             .last()
             .is_some_and(|root| self.stopped_sessions.contains_key(&root.id));
         if self.agent_is_running(target) {
-            if kind == KIND_FOLLOWUP && target.parent_id.is_none() {
+            if mailbox::starts_turn(kind) && target.parent_id.is_none() {
                 // Ensure a turn follows if the run ends before its next
                 // model request picks the follow-up up.
                 self.pending_wakes.insert(target.id.clone(), ());
@@ -1168,14 +1230,33 @@ mod tests {
         assert_eq!(task.len(), 1);
         assert_eq!(task[0].metadata["agent_message_type"], "followup");
         assert_eq!(task[0].metadata["relation"], "chat");
-        assert!(task[0].content.contains("target global"));
+        assert!(chat.metadata.get("report_back_to").is_none());
 
-        // The new chat can report back to Global chat.
-        let args = json!({"action": "send", "target": "global", "message": "Sunny, 26C"});
-        call(&agent, &chat, "back", args).await.unwrap();
-        let back = agent.storage.pending_agent_mail(&global.id).unwrap();
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].sender_session_id, chat_id);
+        // Its answer comes back on its own and starts a Global chat turn,
+        // which reports it. Global's answer is not sent back again.
+        until("global reports the answer", || {
+            !agent.is_session_busy(&global.id)
+                && session(&agent, &global.id)
+                    .messages
+                    .last()
+                    .is_some_and(|m| {
+                        m.role == "assistant" && m.content.contains("DONE seen=[Check the weather")
+                    })
+        })
+        .await;
+        let g = session(&agent, &global.id);
+        let replies = agent_messages(&g);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].metadata["agent_message_type"], "reply");
+        assert_eq!(replies[0].metadata["source_session_id"], chat_id);
+        assert!(g.metadata.get("report_back_to").is_none());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(agent
+            .storage
+            .pending_agent_mail(&chat_id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(agent_messages(&session(&agent, &chat_id)).len(), 1);
     }
 
     #[tokio::test]

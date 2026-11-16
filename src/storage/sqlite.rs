@@ -1930,7 +1930,7 @@ impl SqliteStorage {
     pub fn has_pending_agent_followup(&self, recipient_session_id: &str) -> Result<bool> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agent_mail WHERE recipient_session_id = ?1 AND delivered_at IS NULL AND kind = 'followup')",
+                "SELECT EXISTS(SELECT 1 FROM agent_mail WHERE recipient_session_id = ?1 AND delivered_at IS NULL AND kind IN ('followup', 'reply'))",
                 params![recipient_session_id],
                 |row| row.get(0),
             )

@@ -56,6 +56,102 @@ static GITHUB_TRACKER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static DISCORD_BOT_STATE: std::sync::OnceLock<tokio::sync::Mutex<DiscordBotState>> =
     std::sync::OnceLock::new();
 
+/// The running bot's HTTP client and the one user it may DM on the agent's
+/// behalf (see [`notify_owner`]). Cleared when the bot stops.
+static OWNER_DM: std::sync::OnceLock<std::sync::RwLock<OwnerDm>> = std::sync::OnceLock::new();
+
+#[derive(Default)]
+struct OwnerDm {
+    http: Option<Arc<serenity::http::Http>>,
+    owner: Option<u64>,
+}
+
+fn owner_dm() -> &'static std::sync::RwLock<OwnerDm> {
+    OWNER_DM.get_or_init(|| std::sync::RwLock::new(OwnerDm::default()))
+}
+
+/// The user agent notifications go to: the configured notify user, else the
+/// only trusted user, else the only allowed user. With several candidates and
+/// no notify user there is no recipient: guessing could DM the wrong person.
+pub fn notify_recipient(config: &DiscordConfig) -> Option<u64> {
+    let only = |ids: &[u64]| match ids {
+        [id] => Some(*id),
+        _ => None,
+    };
+    config
+        .notify_user
+        .filter(|id| *id != 0)
+        .or_else(|| only(&config.trusted_users))
+        .or_else(|| {
+            config
+                .trusted_users
+                .is_empty()
+                .then(|| only(&config.allowed_users))
+                .flatten()
+        })
+}
+
+/// Split text into Discord-sized messages, on line breaks where possible.
+fn dm_chunks(text: &str, limit: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for line in text.split_inclusive('\n') {
+        let mut line = line.to_string();
+        while line.chars().count() > limit {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            chunks.push(line.chars().take(limit).collect());
+            line = line.chars().skip(limit).collect();
+        }
+        if current.chars().count() + line.chars().count() > limit {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push_str(&line);
+    }
+    if !current.trim().is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// DM the bot's owner. Only the configured owner can receive these, so a
+/// model (or text it read) cannot use this to contact anyone else.
+pub async fn notify_owner(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Notification message cannot be empty.".into());
+    }
+    let (http, owner) = {
+        let guard = owner_dm()
+            .read()
+            .map_err(|_| "Discord state unavailable".to_string())?;
+        (guard.http.clone(), guard.owner)
+    };
+    let http = http.ok_or_else(|| {
+        "The Discord bot is not connected. Enable it in Settings > Discord, or tell the user another way.".to_string()
+    })?;
+    let owner = owner.ok_or_else(|| {
+        "No Discord user to notify. Set notify_user (or a trusted user) in the Discord settings.".to_string()
+    })?;
+    let channel = serenity::model::id::UserId::new(owner)
+        .create_dm_channel(&http)
+        .await
+        .map_err(|e| format!("Could not open a DM with the owner: {}", e))?;
+    let chunks = dm_chunks(text, 1900);
+    for chunk in &chunks {
+        channel
+            .say(&http, chunk)
+            .await
+            .map_err(|e| format!("Discord DM failed: {}", e))?;
+    }
+    Ok(format!(
+        "Sent the user a Discord DM ({} message{}).",
+        chunks.len(),
+        if chunks.len() == 1 { "" } else { "s" }
+    ))
+}
+
 const MAX_TRACKED_CHANNEL_LOCKS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1266,6 +1362,9 @@ impl EventHandler for Handler {
         }
 
         info!("Discord: connected as {}", ready.user.name);
+        if let Ok(mut dm) = owner_dm().write() {
+            dm.http = Some(ctx.http.clone());
+        }
         self.register_commands(&ctx.http).await;
         self.spawn_notification_task(ctx.http.clone());
         self.spawn_github_tracking_task(ctx.http.clone());
@@ -1893,6 +1992,9 @@ pub async fn spawn_discord_bot(
     let (stop_tx, stop_rx) = oneshot::channel();
     state.running = true;
     state.stop_tx = Some(stop_tx);
+    if let Ok(mut dm) = owner_dm().write() {
+        dm.owner = notify_recipient(&discord_config);
+    }
 
     tokio::spawn(async move {
         if let Err(err) = run_discord_bot(discord_config, config_path, agent, stop_rx).await {
@@ -1902,6 +2004,9 @@ pub async fn spawn_discord_bot(
         let mut state = bot_state().lock().await;
         state.running = false;
         state.stop_tx = None;
+        if let Ok(mut dm) = owner_dm().write() {
+            *dm = OwnerDm::default();
+        }
     });
 
     Ok(())
@@ -2089,6 +2194,43 @@ mod tests {
             7,
             Some(42)
         ));
+    }
+
+    #[test]
+    fn notifications_go_only_to_an_unambiguous_owner() {
+        let mut discord = DiscordConfig::default();
+        assert_eq!(notify_recipient(&discord), None);
+        discord.allowed_users = vec![5];
+        assert_eq!(notify_recipient(&discord), Some(5));
+        // Trusted users take over from allowed users, and several of them
+        // without an explicit notify user is ambiguous.
+        discord.trusted_users = vec![7, 9];
+        assert_eq!(notify_recipient(&discord), None);
+        discord.trusted_users = vec![7];
+        assert_eq!(notify_recipient(&discord), Some(7));
+        discord.notify_user = Some(42);
+        assert_eq!(notify_recipient(&discord), Some(42));
+    }
+
+    #[test]
+    fn dm_text_is_split_into_discord_sized_messages() {
+        assert_eq!(dm_chunks("hello", 1900), vec!["hello".to_string()]);
+        let text = format!("{}\n{}", "a".repeat(1500), "b".repeat(1500));
+        let chunks = dm_chunks(&text, 1900);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 1900));
+        assert_eq!(chunks.concat(), text);
+        let long = "x".repeat(4000);
+        let chunks = dm_chunks(&long, 1900);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.concat(), long);
+    }
+
+    #[tokio::test]
+    async fn notify_explains_when_the_bot_is_offline() {
+        let err = notify_owner("Build finished").await.unwrap_err();
+        assert!(err.contains("not connected"), "{err}");
+        assert!(notify_owner("   ").await.is_err());
     }
 
     #[test]
